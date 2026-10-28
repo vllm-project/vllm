@@ -4,14 +4,43 @@ import pickle
 from copy import deepcopy
 
 import pytest
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import AutoTokenizer, TokenizersBackend
 
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
+    CachedHfTokenizer,
     ThreadSafeHFTokenizerMixin,
     get_cached_tokenizer,
     maybe_make_thread_pool,
 )
+
+
+@pytest.fixture
+def local_tokenizer_dir(tmp_path):
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    return tmp_path
+
+
+def test_cached_tokenizer_ignores_unrelated_jinja(local_tokenizer_dir):
+    template = "{{ messages[0].content }}"
+    (local_tokenizer_dir / "custom_chat.jinja").write_text(template)
+
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    assert tokenizer.chat_template is None
+
+
+def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
+    (local_tokenizer_dir / "chat_template.jinja").write_text("standard")
+    (local_tokenizer_dir / "custom_chat.jinja").write_text("fallback")
+
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    assert tokenizer.chat_template == "standard"
 
 
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])

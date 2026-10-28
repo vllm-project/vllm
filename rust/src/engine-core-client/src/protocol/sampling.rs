@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
-use crate::protocol::structured_outputs::StructuredOutputsParams;
+use crate::protocol::structured_outputs::EngineCoreStructuredOutputsParams;
 use crate::protocol::tensor::WireNdArray;
 
 fn default_top_p() -> f32 {
@@ -144,7 +145,7 @@ pub struct EngineCoreSamplingParams {
     #[serde(rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Parameters for configuring structured outputs (guided decoding).
-    pub structured_outputs: Option<StructuredOutputsParams>,
+    pub structured_outputs: Option<EngineCoreStructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
     ///
@@ -161,6 +162,11 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// The first and final outputs are always emitted immediately. Engine-core
+    /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
+    /// batches output deliveries by it.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl EngineCoreSamplingParams {
@@ -195,6 +201,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         }
     }
 }

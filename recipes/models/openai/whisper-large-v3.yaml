@@ -1,0 +1,99 @@
+meta:
+  title: "Whisper Large v3"
+  slug: "whisper-large-v3"
+  provider: "OpenAI"
+  description: "Whisper Large v3 speech recognition model, validated for Intel Xeon 6 CPU serving."
+  date_added: 2026-08-19
+  date_updated: 2026-09-12
+  tasks:
+    - multimodal
+  performance_headline: "Audio transcription validated on Intel Xeon 6"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "openai/whisper-large-v3"
+  min_vllm_version: "0.7.0"
+  architecture: dense
+  parameter_count: "1.55B"
+  active_parameters: "1.55B"
+  context_length: 448
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 4
+    description: "BF16 serving configuration validated on Intel Xeon 6"
+    supported_hardware:
+      - xeon6
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Whisper Large v3 is OpenAI's speech recognition model. vLLM exposes
+  transcription through the OpenAI-compatible audio transcription endpoint.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6/Xeon 5 CPUs
+  - vLLM >= 0.7.0
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve openai/whisper-large-v3 \
+    --tensor-parallel-size 1
+  ```
+
+  Docker (the image entrypoint is `vllm serve`):
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 openai/whisper-large-v3 \
+    --tensor-parallel-size 1
+  ```
+
+  The example uses TP=1. Adjust TP/DP for the deployment topology.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/openai/whisper-large-v3)
+  - [vLLM Whisper implementation](https://docs.vllm.ai/en/latest/api/vllm/model_executor/models/whisper/)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

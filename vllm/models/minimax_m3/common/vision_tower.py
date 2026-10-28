@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
-    vit_mrope_setup,
+    VitMropeSetup,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
@@ -352,6 +352,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_t", inv_freq_t, persistent=False)
         self.register_buffer("inv_freq_h", inv_freq_h, persistent=False)
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
+        # Pluggable so OOT platforms can substitute the setup kernel.
+        self.mrope_setup = VitMropeSetup()
 
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -456,7 +458,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
         # triton_mrope from one fused setup kernel. Kept fp32 so the kernel
         # computes the rotation in fp32, matching the reference.
-        rotary_cos, rotary_sin = vit_mrope_setup(
+        rotary_cos, rotary_sin = self.mrope_setup(
             self.inv_freq_t,
             self.inv_freq_h,
             self.inv_freq_w,

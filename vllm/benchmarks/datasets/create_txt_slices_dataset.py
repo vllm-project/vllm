@@ -12,8 +12,8 @@ Usage
 ::
 
     python -m vllm.benchmarks.datasets.create_txt_slices_dataset \\
-        --input  sonnet.txt \\
-        --output sonnet_dataset.jsonl \\
+        --input  corpus.txt \\
+        --output dataset.jsonl \\
         --tokenizer gpt2 \\
         --num-prompts 1000 \\
         --input-len 1024 \\
@@ -23,7 +23,7 @@ The resulting JSONL file can then be used with the serving benchmark::
 
     python -m vllm.benchmarks.serve \\
         --dataset-name custom \\
-        --dataset-path sonnet_dataset.jsonl \\
+        --dataset-path dataset.jsonl \\
         ...
 """
 

@@ -504,9 +504,11 @@ class MossAudioEncoder(nn.Module):
             padding=(1, 1),
         )
 
-        conv_freq = self._compute_downsampled_length(
-            torch.tensor(config.num_mel_bins)
-        ).item()
+        # Use integer arithmetic because meta tensors do not support .item().
+
+        # Three convolutions with kernel=3, stride=2, padding=1 each yield
+        # ceil(n / 2); together they yield ceil(n / 8) = (n + 7) // 8.
+        conv_freq = (config.num_mel_bins + 7) // 8
         self.stem_proj = ReplicatedLinear(
             config.downsample_hidden_size * int(conv_freq),
             config.d_model,

@@ -4,8 +4,13 @@ import os
 
 import lm_eval
 import openai
+import requests
 
 BASE_URL = "http://localhost:8192/v1"
+# Comma-separated server URLs to sleep and wake up before the eval.
+SLEEP_WAKE_URLS = [
+    url for url in os.environ.get("SLEEP_WAKE_URLS", "").split(",") if url
+]
 NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
@@ -61,9 +66,18 @@ def run_simple_prompt():
     print("-" * 50)
 
 
+def sleep_and_wake_up(urls: list[str]):
+    for url in urls:
+        requests.post(f"{url}/sleep", params={"level": 1}).raise_for_status()
+    for url in urls:
+        requests.post(f"{url}/wake_up").raise_for_status()
+
+
 def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
+    if SLEEP_WAKE_URLS:
+        sleep_and_wake_up(SLEEP_WAKE_URLS)
 
     if "gemma-4" in MODEL_NAME:
         # Gemma4 is quite sensible to having a chat template applied, so we evaluate

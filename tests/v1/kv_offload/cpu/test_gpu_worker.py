@@ -78,10 +78,16 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
         calls.append("load")
         return True
 
+    def record_expedited_load_shutdown() -> bool:
+        calls.append("expedited_load")
+        return True
+
     store_handler = MagicMock()
     load_handler = MagicMock()
+    expedited_load_handler = MagicMock()
     store_handler.shutdown.side_effect = record_store_shutdown
     load_handler.shutdown.side_effect = record_load_shutdown
+    expedited_load_handler.shutdown.side_effect = record_expedited_load_shutdown
 
     def record_region_cleanup(**_: bool) -> bool:
         calls.append("region")
@@ -91,11 +97,12 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = expedited_load_handler
     worker._mmap_region = mmap_region
 
     worker.shutdown()
 
-    assert calls == ["store", "load", "region"]
+    assert calls == ["store", "load", "expedited_load", "region"]
     store_handler.shutdown.assert_called_once_with()
     load_handler.shutdown.assert_called_once_with()
     mmap_region.cleanup.assert_called_once_with()
@@ -146,6 +153,7 @@ def test_worker_logs_handler_error_and_cleans_region(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -223,6 +231,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -343,16 +352,16 @@ def test_transfer(
     # set transfer direction
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
         dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
@@ -371,9 +380,9 @@ def test_transfer(
     # call transfer function via public API
     start_time = time.time()
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     # wait for transfer to complete
@@ -387,8 +396,11 @@ def test_transfer(
                 len(gpu_blocks)
                 * sum([x.page_size_bytes for x in handler.layer_refs_per_group[0]])
             )
-            assert finished[0].transfer_time > 0
-            assert finished[0].transfer_time < (time.time() - start_time)
+            # a successful CPU transfer always reports its duration
+            transfer_time = finished[0].transfer_time
+            assert transfer_time is not None
+            assert transfer_time > 0
+            assert transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 
@@ -546,10 +558,10 @@ def test_transfer_multi_group(
 
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         # per-group mapping: cpu sub-block -> gpu sub-block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
@@ -560,8 +572,8 @@ def test_transfer_multi_group(
         num_dst_sub_blocks = num_cpu_chunks * blocks_per_chunk
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
         # per-group mapping: gpu sub-block -> cpu sub-block
@@ -583,9 +595,9 @@ def test_transfer_multi_group(
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     end_time = time.time() + 10

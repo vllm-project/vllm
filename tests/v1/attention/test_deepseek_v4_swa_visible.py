@@ -15,6 +15,7 @@ import inspect
 
 import pytest
 import torch
+from transformers import DeepseekV4Config
 from typing_extensions import TypedDict
 
 from tests.v1.attention.utils import create_vllm_config
@@ -302,8 +303,13 @@ def combine_case(
     with_image: bool,
     replay_starts: list[int] | None = None,
     combine_fn=combine_topk_swa_indices,
+    in_range_topk: bool = False,
 ):
-    """Run combine_topk_swa_indices and return (indices, lens, expected)."""
+    """Run combine_topk_swa_indices and return (indices, lens, expected).
+
+    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    out-of-range ones.
+    """
     device = torch.device("cuda")
     num_reqs = len(seq_lens)
     replay_starts = replay_starts or [0] * num_reqs
@@ -326,7 +332,11 @@ def combine_case(
     M = N + int(gather_lens.max()) + 8
     gen = torch.Generator(device="cpu").manual_seed(0)
     topk_indices = torch.randint(
-        0, 4096, (num_tokens, max(topk, 1)), generator=gen, dtype=torch.int32
+        0,
+        N if in_range_topk else 4096,
+        (num_tokens, max(topk, 1)),
+        generator=gen,
+        dtype=torch.int32,
     ).to(device)
     topk_indices = topk_indices[:, : max(topk, 1)]
 
@@ -415,24 +425,26 @@ def test_combine_topk_swa_with_image_spans(cfg):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_v41_combine_topk_swa_stops_at_replay_start(cfg):
+@pytest.mark.parametrize("query_len", [24, 20])
+def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     """SWA bounded replay: the gathered buffer starts at replay_start, so the
     window never indexes below it."""
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
 
-    # Request 0 replays [16, 40): the windows of its first rows would
-    # otherwise reach below 16.
+    # Request 0 replays from 16: a 24-token chunk starts there, a 20-token
+    # chunk leaves only 4 context tokens above it (fewer than the window).
     indices, lens, rows, exp_lens = combine_case(
         cfg["compress_ratio"],
         cfg["topk"],
         seq_lens=[40, 12],
-        query_lens=[24, 12],
+        query_lens=[query_len, 12],
         spans=[[], []],
         with_image=False,
         replay_starts=[16, 0],
         combine_fn=combine_v41,
+        in_range_topk=True,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
@@ -517,30 +529,30 @@ def make_builder(
     window: int = WINDOW,
     max_image_tokens: int = MAX_IMG,
     max_num_batched_tokens: int = 64,
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    model_name: str = "Qwen/Qwen3-0.6B",
     builder_cls: type[
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
-    mm_prefix_clamp_sliding_window: bool = True,
+    deepseek_v4_config: bool = True,
     bounded_replay: bool = False,
 ) -> DeepseekSparseSWAMetadataBuilder:
-    overrides: dict = {"sliding_window": window}
-    if vision:
-        # Emulate the V4 vision config, whose mm_prefix_clamp_sliding_window
-        # gates the in-kernel SWA widening. V4.1 (causal image tokens) leaves
-        # it off.
-        overrides.update(
-            vision_n_layers=2,
-            vision_max_n_token=max_image_tokens,
-            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
-        )
+    vision_fields = dict(vision_n_layers=2, vision_max_n_token=max_image_tokens)
     vllm_config = create_vllm_config(
         model_name=model_name,
         max_model_len=4096,
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=8,
-        hf_config_override=overrides,
+        hf_config_override={"sliding_window": window}
+        | (vision_fields if vision and not deepseek_v4_config else {}),
     )
+    if vision and deepseek_v4_config:
+        # Only V4 configs widen the SWA window in-kernel over image spans
+        vllm_config.model_config.hf_config = DeepseekV4Config(
+            num_hidden_layers=1,
+            layer_types=["sliding_attention"],
+            sliding_window=window,
+            **vision_fields,
+        )
     spec = SlidingWindowMLASpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
@@ -675,7 +687,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
         max_image_tokens,
         query_len,
         builder_cls=DeepseekV41SparseSWAMetadataBuilder,
-        mm_prefix_clamp_sliding_window=False,
+        deepseek_v4_config=False,
     )
     assert builder.max_image_tokens == 0
     md = build_metadata(builder, [seq_len], [query_len], {0: spans})
@@ -817,3 +829,57 @@ def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     # Decode row is copied through; prefill rows follow the bounded window.
     assert bounded[0].cpu().tolist() == plain[0].cpu().tolist()
     assert bounded[1:].cpu().tolist() == rows[1:]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dspark_noncausal_draft_decode_update_matches_build():
+    """A DSpark draft graph refreshes its non-causal SWA metadata in place
+    instead of rebuilding it, so the refresh must match a fresh build."""
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
+    num_spec = 4
+    query_lens = [num_spec] * 3
+
+    def make_dspark_builder():
+        builder = make_builder(vision=False)
+        builder.is_dspark = True
+        builder.noncausal_index_width = get_dspark_swa_index_width(WINDOW, num_spec)
+        builder.decode_threshold = num_spec
+        return builder
+
+    def common_metadata(seq_lens):
+        query_start_loc, seq_lens_t, _, slot_mapping, block_table = make_batch(
+            seq_lens, query_lens, torch.device("cuda")
+        )
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.cpu(),
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t.cpu(),
+            num_reqs=len(seq_lens),
+            num_actual_tokens=int(query_start_loc[-1]),
+            max_query_len=num_spec,
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=False,
+        )
+
+    captured_seq_lens = [6, 40, 130]
+    replay_seq_lens = [130, 9, 90]
+    builder = make_dspark_builder()
+    captured = common_metadata(captured_seq_lens)
+    md = builder.build(0, captured)
+    replay = common_metadata(replay_seq_lens)
+    expected = make_dspark_builder().build(0, replay)
+
+    # A replay sees new inputs through the same device buffers.
+    captured.seq_lens.copy_(replay.seq_lens)
+    captured.block_table_tensor.copy_(replay.block_table_tensor)
+    builder.update_draft_decode_metadata(md)
+
+    assert md.decode_swa_width == builder.noncausal_index_width
+    torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
+    torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)

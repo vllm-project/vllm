@@ -37,6 +37,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 import ctypes
 import mmap
 import os
+import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
@@ -59,18 +60,29 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     SHM_PATH,
     check_shm_free_space,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v41.common.ops.query_quant import (
+    can_fuse_query_quant,
+    mxfp8_scale_bytes,
+    mxfp8_scale_offset,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+# Per-rank token slot from which the Engram DP exchange switches from peer
+# reads to all-to-all.
+ENGRAM_A2A_MIN_SLOT = 128
 
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
@@ -644,8 +656,11 @@ def _engram_lookup_kernel(
     BLOCK_R: tl.constexpr,
     GRID,
     SORTED: tl.constexpr if _SORTED_IS_CONSTEXPR else None,  # type: ignore[valid-type]
+    PACKED: tl.constexpr,
+    OUT_STRIDE: tl.constexpr,
+    PEER_ROWS: tl.constexpr = 0,
 ):
-    """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
+    """Gather FP8 rows as packed values/scales or dequantized BF16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
@@ -674,23 +689,45 @@ def _engram_lookup_kernel(
             owned &= (index >= vocab_start) & (index < vocab_end)
             local = index - vocab_start
         local = tl.where(owned, local, 0)
+        if PEER_ROWS:
+            # `weight` holds each rank's buffer: PEER_ROWS rows, then scales.
+            owner = local // PEER_ROWS
+            peer = tl.load(weight + owner, mask=owned, other=0)
+            local -= owner * PEER_ROWS
+            row_weight = peer.to(tl.pointer_type(tl.float8e4nv))
+            row_scales = (peer + PEER_ROWS * DIM).to(tl.pointer_type(tl.uint8))
+        else:
+            row_weight, row_scales = weight, scales
+        row_weight += local * DIM
+        row_scales += local * (DIM // QUANT_BLOCK)
         values = tl.load(
-            weight + local[:, None] * DIM + cols[None, :],
-            mask=owned[:, None],
-            other=0.0,
+            row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
         )
         scale = tl.load(
-            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
-            mask=owned[:, None],
-            other=0,
+            row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
         )
-        # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
-        scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-        tl.store(
-            out + dst[:, None] * DIM + cols[None, :],
-            (values.to(tl.float32) * scale).to(tl.bfloat16),
-            mask=valid[:, None],
-        )
+        if PACKED:
+            width: tl.constexpr = DIM + DIM // QUANT_BLOCK
+            dst = dst.to(tl.int64)
+            dst = dst // LOCAL_HEADS * OUT_STRIDE + dst % LOCAL_HEADS * width
+            tl.store(
+                out + dst[:, None] + cols[None, :],
+                values.to(tl.uint8, bitcast=True),
+                mask=valid[:, None],
+            )
+            tl.store(
+                out + dst[:, None] + DIM + scale_cols[None, :],
+                scale,
+                mask=valid[:, None] & (cols[None, :] % QUANT_BLOCK == 0),
+            )
+        else:
+            # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
+            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            tl.store(
+                out + dst[:, None] * DIM + cols[None, :],
+                (values.to(tl.float32) * scale).to(tl.bfloat16),
+                mask=valid[:, None],
+            )
 
 
 def engram_head_shard_rank() -> int:
@@ -878,6 +915,8 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
 
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+    if sys.platform != "linux":
+        return None
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         mapping.madvise(mmap.MADV_HUGEPAGE)
@@ -950,6 +989,30 @@ class ParallelEngramEmbedding(nn.Module):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
+        # GPU tables split rows over the DP group and every rank reads its own
+        # tokens' rows from the owning peer's HBM, so lookups need no collective.
+        peer_group = None
+        if (
+            not cpu_offload
+            and self.dp_size > 1
+            and get_tensor_model_parallel_world_size() == 1
+        ):
+            group = get_engram_dp_group()
+            assert group is not None
+            # Cross-node groups require embedding_across_dp's single NVLink domain;
+            # node-local groups without NVLink P2P keep the DP collectives.
+            peer = not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+            if not peer:
+                physical_id = current_platform.visible_device_id_to_physical_device_id(
+                    torch.accelerator.current_device_index()
+                )
+                physical_ids = [None] * group.world_size
+                torch.distributed.all_gather_object(
+                    physical_ids, physical_id, group=group.cpu_group
+                )
+                peer = current_platform.is_fully_connected(physical_ids)
+            if peer:
+                peer_group, self.dp_size = group, 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -971,6 +1034,16 @@ class ParallelEngramEmbedding(nn.Module):
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
+        # Peer tables keep the full lookup range but store one row slice.
+        self.peer_rows, row_start = 0, self.vocab_start_idx
+        if peer_group is not None:
+            self.peer_rows = triton.cdiv(self.vocab_end_idx, peer_group.world_size)
+            row_start = min(
+                peer_group.rank_in_group * self.peer_rows, self.vocab_end_idx
+            )
+            self.part_num_embeddings = min(
+                self.peer_rows, self.vocab_end_idx - row_start
+            )
         self._num_sms = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         ).multi_processor_count
@@ -982,10 +1055,10 @@ class ParallelEngramEmbedding(nn.Module):
                 param,
                 {
                     "weight_loader": self._weight_loader,
-                    "engram_vocab_start": self.vocab_start_idx,
+                    "engram_vocab_start": row_start,
                 },
             )
-        if cpu_offload:
+        if cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
@@ -1005,6 +1078,38 @@ class ParallelEngramEmbedding(nn.Module):
         return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        scale_dim = self.dim // self.block_size
+        if torch.get_default_device().type == "meta" or not (
+            self.cpu_offload or self.peer_rows
+        ):
+            return (
+                torch.empty(
+                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
+                ),
+                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+            )
+        if self.peer_rows:
+            import torch.distributed._symmetric_memory as symm_mem
+
+            group = get_engram_dp_group()
+            assert group is not None
+            values = self.peer_rows * self.dim
+            device = torch.device("cuda", torch.accelerator.current_device_index())
+            buffer = symm_mem.empty(
+                values + self.peer_rows * scale_dim, dtype=torch.uint8, device=device
+            )
+            handle = symm_mem.rendezvous(buffer, group.device_group)
+            self.register_buffer(
+                "peer_ptrs",
+                torch.tensor(handle.buffer_ptrs, dtype=torch.int64, device=device),
+                persistent=False,
+            )
+            self._symm_handle = handle
+            rows = self.part_num_embeddings
+            return (
+                buffer[: rows * self.dim].view(torch.float8_e4m3fn).view(rows, -1),
+                buffer[values : values + rows * scale_dim].view(rows, scale_dim),
+            )
         if self.dp_shared_memory:
             group = get_engram_dp_group()
             assert group is not None
@@ -1014,15 +1119,8 @@ class ParallelEngramEmbedding(nn.Module):
             self._shared_memory = storage
             self._weight_loader = storage.load_weight
             return storage.weight, storage.weight_scale_inv
-        scale_dim = self.dim // self.block_size
-        if not self.cpu_offload:
-            return (
-                torch.empty(
-                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
-                ),
-                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
-            )
-        if self.use_thp:
+        # pin_memory rounds up to a power of two. ROCm pins huge pages either way.
+        if self.use_thp or current_platform.is_rocm():
             weight_bytes = self.part_num_embeddings * self.dim
             packed = _allocate_huge_page_storage(
                 weight_bytes + weight_bytes // self.block_size
@@ -1082,7 +1180,7 @@ class ParallelEngramEmbedding(nn.Module):
     def lookup(
         self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
     ) -> None:
-        """Look up local heads of [T, heads] into [T, local_heads, dim] bf16.
+        """Look up local heads into BF16, or packed FP8 bytes followed by scales.
 
         `background` limits the grid to leave SMs for concurrent work.
         """
@@ -1113,7 +1211,7 @@ class ParallelEngramEmbedding(nn.Module):
         tiles = triton.cdiv(rows, 16)
         grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
         _engram_lookup_kernel[(grid,)](
-            weight,
+            self.peer_ptrs if self.peer_rows else weight,
             scales,
             indices,
             dst,
@@ -1131,6 +1229,9 @@ class ParallelEngramEmbedding(nn.Module):
             BLOCK_R=16,
             GRID=grid,
             SORTED=sort,
+            PACKED=out.dtype == torch.uint8,
+            OUT_STRIDE=out.stride(0),
+            PEER_ROWS=self.peer_rows,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -1275,7 +1376,7 @@ def _engram_select_rows(
 ) -> None:
     """Copy one token window out of a rank-major gathered buffer.
 
-    Both gathers land rank-major ([rank][token][local width]); this walks the
+    Both gathers land rank-major (`[rank][token][local width]`); this walks the
     window the rank keeps and lays its ranks out side by side as width.
     """
     if output.numel() == 0:
@@ -1311,6 +1412,178 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
     return rows
 
 
+@triton.jit(do_not_specialize=["num_tokens"])
+def _engram_unpack_fp8_kernel(
+    packed,
+    values,
+    scales,
+    num_tokens,
+    values_stride,
+    scales_stride,
+    HEADS: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    LAYERS: tl.constexpr,
+    RANK: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PEER: tl.constexpr,
+):
+    """Split `[rank][token][layer][local head]` packed rows into MXFP8 values and
+    F8_128x4 scales, one layer per grid column; `packed` holds per-rank
+    pointers if PEER. Scales past `num_tokens` zero-pad the 128-row tile.
+    """
+    row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    layer = tl.program_id(1).to(tl.int64)
+    token, head = row // HEADS, row % HEADS
+    if PEER:
+        src = tl.load(packed + head // LOCAL_HEADS)
+        src = tl.multiple_of(src, DIM // 32).to(tl.pointer_type(tl.uint8))
+        source = RANK * num_tokens + token
+    else:
+        src = packed
+        source = head // LOCAL_HEADS * num_tokens + token
+    source = (source * LAYERS + layer) * LOCAL_HEADS + head % LOCAL_HEADS
+    # Packed rows are only scale-width aligned.
+    src += tl.multiple_of(source * (DIM + DIM // 32), DIM // 32)
+    valid = token < num_tokens
+    cols = tl.arange(0, DIM)
+    data = tl.load(src[:, None] + cols[None, :], mask=valid[:, None], other=0)
+    values += layer * values_stride + row * DIM
+    tl.store(values[:, None] + cols[None, :], data, mask=valid[:, None])
+    scale_cols = tl.arange(0, DIM // 32)
+    scale = tl.load(
+        src[:, None] + DIM + scale_cols[None, :], mask=valid[:, None], other=0
+    )
+    group = head[:, None] * (DIM // 32) + scale_cols[None, :]
+    offset = mxfp8_scale_offset(token[:, None], group, HEADS * DIM // 32)
+    tl.store(scales + layer * scales_stride + offset, scale)
+
+
+class EngramBatch(nn.Module):
+    """Stage every Engram layer's WKV input as MXFP8 with one exchange.
+
+    A module so the model owns the peer exchange's pointer buffers.
+    """
+
+    def __init__(self, layers: list["Engram"], max_tokens: int) -> None:
+        super().__init__()
+        first = layers[0].layer_hash_index
+        hash_indices = [layer.layer_hash_index for layer in layers]
+        assert hash_indices == list(range(first, first + len(layers)))
+        self.layers = layers
+        table = layers[0].embed_tokens
+        device = layers[0].staged_rows.device
+        self.packed_rows = torch.empty(
+            max_tokens * table.dp_size,
+            len(layers),
+            table.part_n_hash_cols,
+            table.dim + table.dim // 32,
+            dtype=torch.uint8,
+            device=device,
+        )
+        # Same allocator as the send buffer: NCCL hangs this all-to-all when its
+        # buffers mix the cumem pool and the caching allocator.
+        self.exchanged_rows = torch.empty_like(self.packed_rows)
+        width = table.n_hash_cols * table.dim
+        self.fp8_values = torch.empty(
+            len(layers), max_tokens, width, dtype=torch.uint8, device=device
+        )
+        self.fp8_scales = torch.empty(
+            len(layers),
+            mxfp8_scale_bytes(max_tokens, width),
+            dtype=torch.uint8,
+            device=device,
+        )
+        max_peer_slot = min(max_tokens, ENGRAM_A2A_MIN_SLOT - 1)
+        self.peer_exchange = None
+        if table.cpu_offload:
+            from vllm.models.deepseek_v41.nvidia.ops.engram_peer import (
+                EngramPeerExchange,
+            )
+
+            self.peer_exchange = EngramPeerExchange.create(layers, max_peer_slot)
+        for layer in layers:
+            # Owned by the model; keep it out of each layer's submodules.
+            object.__setattr__(layer, "_batch", self)
+            # The layers read this batch's staging instead of their BF16 rows.
+            layer.staged_rows = layer.staged_rows.new_empty(
+                (0, *layer.staged_rows.shape[1:])
+            )
+
+    @classmethod
+    def create(cls, layers: list["Engram"], max_tokens: int) -> "EngramBatch | None":
+        """Batch DP-sharded tables whose WKV takes FlashInfer MXFP8 input."""
+        if not layers:
+            return None
+        table = layers[0].embed_tokens
+        if (
+            table.dp_size == 1
+            or table.tp_size > 1
+            or table.dim % 128
+            or get_current_vllm_config().lora_config is not None
+            or not can_fuse_query_quant([layer.wkv for layer in layers])
+        ):
+            return None
+        return cls(layers, max_tokens)
+
+    def prepare_embeddings(self, hashes: torch.Tensor) -> None:
+        """Stage every layer's WKV input before the decoder layers.
+
+        DP-sharded tables decide on the group's slot, so every rank agrees.
+        """
+        slot = engram_gathered_num_tokens()
+        peer = self.peer_exchange is not None and slot < ENGRAM_A2A_MIN_SLOT
+        self._stage(hashes if peer else gather_engram_hashes(hashes), slot, peer)
+
+    @eager_break_during_capture
+    def _stage(self, hashes: torch.Tensor, slot: int, peer: bool) -> None:
+        if slot == 0:
+            return
+        if peer:
+            assert self.peer_exchange is not None
+            rows = self.peer_exchange.exchange(hashes, slot)
+            rank = self.peer_exchange.dp_rank
+        else:
+            rows, rank = self.packed_rows[: hashes.shape[0]], 0
+            for index, layer in enumerate(self.layers):
+                layer.embed_tokens.lookup(
+                    hashes[:, layer.layer_hash_index], rows[:, index]
+                )
+            group = get_engram_dp_group()
+            assert group is not None
+            sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
+            torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
+        table = self.layers[0].embed_tokens
+        heads = table.n_hash_cols
+        grid = (triton.cdiv(slot, 128) * 128 * heads // 16, len(self.layers))
+        _engram_unpack_fp8_kernel[grid](
+            rows,
+            self.fp8_values,
+            self.fp8_scales,
+            slot,
+            self.fp8_values.stride(0),
+            self.fp8_scales.stride(0),
+            HEADS=heads,
+            LOCAL_HEADS=table.part_n_hash_cols,
+            LAYERS=len(self.layers),
+            RANK=rank,
+            DIM=table.dim,
+            BLOCK=16,
+            PEER=peer,
+        )
+
+    def wkv_input(self, layer: "Engram", num_tokens: int) -> QuantizedActivation:
+        index = layer.layer_hash_index - self.layers[0].layer_hash_index
+        values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
+        return QuantizedActivation(
+            values,
+            self.fp8_scales[index, : mxfp8_scale_bytes(num_tokens, values.shape[1])],
+            torch.bfloat16,
+            values.shape,
+            kMxfp8Dynamic,
+        )
+
+
 class Engram(nn.Module):
     """Writes an n-gram lookup into the residual stream, gated by how well it
     matches that stream.
@@ -1323,6 +1596,7 @@ class Engram(nn.Module):
 
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
+    _batch: EngramBatch | None = None
 
     def __init__(
         self,
@@ -1482,7 +1756,10 @@ class Engram(nn.Module):
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        if self._batch is not None:
+            kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
+        else:
+            kv = self.wkv(self.embed(hash_ids).flatten(-2))
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:

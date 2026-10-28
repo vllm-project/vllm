@@ -6,17 +6,20 @@ import random
 import pytest
 import torch
 
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
     FullAttentionManager,
-    KpoolTailManager,
     MambaManager,
     RSWAManager,
     SlidingWindowManager,
@@ -25,11 +28,11 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
+from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
 
@@ -238,6 +241,71 @@ def test_mamba_checkpoint_admission_matches_allocation(
     assert admission_estimate == allocation_estimate == allocated
 
 
+@pytest.mark.parametrize("num_speculative_blocks", [1, 2, 3])
+@pytest.mark.parametrize("first_chunk_blocks", [2, 4])
+@pytest.mark.parametrize("retention_interval", [0, None])
+def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
+    num_speculative_blocks, first_chunk_blocks, retention_interval
+):
+    """A checkpoint step must not leave a never-written speculative block
+    cached."""
+    block_size = 128
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=128)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    # MTP/EAGLE moves the checkpoint one block below the last full block.
+    manager.drop_eagle_checkpoint_block = True
+    init_none_hash(sha256)
+    prompt_tokens = 6 * block_size + 50
+    request = Request(
+        request_id="r",
+        prompt_token_ids=list(range(prompt_tokens)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+
+    def step(start, end):
+        estimate = manager.get_num_blocks_to_allocate("r", end, [], start, start, end)
+        free_before = pool.get_num_free_blocks()
+        manager.allocate_new_blocks("r", end, end)
+        assert free_before - pool.get_num_free_blocks() == estimate
+        manager.cache_blocks(
+            request,
+            end,
+            retention_interval=retention_interval,
+            replay_boundaries=[5 * block_size],
+        )
+        request.num_computed_tokens = end
+
+    step(0, first_chunk_blocks * block_size)
+    speculative_blocks = manager.req_to_blocks["r"][-num_speculative_blocks:]
+    manager.new_step_starts()
+    step(first_chunk_blocks * block_size, prompt_tokens)
+
+    checkpoint_position, checkpoint_idx = manager._checkpoints["r"]
+    checkpoint_block = manager.req_to_blocks["r"][checkpoint_idx]
+    assert all(
+        b.block_hash is None or b is checkpoint_block for b in speculative_blocks
+    )
+    block_hash = request.block_hashes[checkpoint_position // block_size - 1]
+    assert pool.get_cached_block(block_hash, [0]) == [checkpoint_block]
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
@@ -329,22 +397,21 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
 
     manager.cache_blocks(request_id, 1024, replay_boundaries=(0,))
     manager.remove_skipped_blocks(request_id, 1024)
-    assert manager.get_num_common_prefix_blocks(request_id) == 0
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
 
 
 @pytest.mark.parametrize("record_for_zeroing", [True, False])
 def test_external_kpool_tail_zeroing(record_for_zeroing):
-    """A transferred ring at index zero skips zeroing even with a local hit."""
-    spec = KpoolTailSpec(
+    """The kpool tail ring is never zeroed, transferred or not: a pool only
+    reads ring slots its own request wrote."""
+    spec = CircularBufferSpec(
         block_size=4,
         num_kv_heads=2,
         head_size=8,
         dtype=torch.bfloat16,
-        sliding_window=4,
     )
-    manager = KpoolTailManager(
+    manager = CircularBufferManager(
         spec,
         block_pool=BlockPool(10, enable_caching=True, hash_block_size=4),
         enable_caching=True,
@@ -358,9 +425,7 @@ def test_external_kpool_tail_zeroing(record_for_zeroing):
     )
     blocks = manager.req_to_blocks["request"]
     assert len(blocks) == 1
-    assert manager.take_new_block_ids() == (
-        [blocks[0].block_id] if record_for_zeroing else []
-    )
+    assert manager.take_new_block_ids() == []
     assert manager.allocate_new_blocks("request", 20, 20) == []
     assert manager.take_new_block_ids() == []
 
@@ -947,3 +1012,35 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+def test_pop_blocks_for_free_trims_null_head():
+    block_size = 2
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, block_pool)
+    null = block_pool.null_block
+    real = block_pool.get_new_blocks(2)
+    manager.req_to_blocks["swa"] = [null] * 3 + real
+    manager.req_to_blocks["dense"] = dense = block_pool.get_new_blocks(2)
+
+    assert manager.pop_blocks_for_free("swa") == real
+    assert manager.pop_blocks_for_free("dense") is dense  # no null head, no copy
+    assert "swa" not in manager.req_to_blocks
+    assert all(b.ref_cnt == 1 for b in real + dense)
+
+    # The null block is never pooled, so touch / free_blocks leave it alone.
+    null_ref_cnt = null.ref_cnt
+    num_free_blocks = block_pool.get_num_free_blocks()
+    block_pool.touch([null])
+    block_pool.free_blocks([null])
+    assert null.ref_cnt == null_ref_cnt
+    assert block_pool.get_num_free_blocks() == num_free_blocks

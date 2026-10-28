@@ -1,0 +1,294 @@
+meta:
+  title: "Mistral-Medium-3.5"
+  slug: "mistral-medium-3.5"
+  provider: "Mistral AI"
+  description: "Mistral Medium 3.5 (128B) dense vision-language model with native FP8 weights and 256K context"
+  date_added: 2026-04-30
+  date_updated: 2026-05-26
+  tasks:
+    - multimodal
+  related_recipes:
+    - mistralai/Mistral-Large-3-675B-Instruct-2512
+    - mistralai/Ministral-3-8B-Reasoning-2512
+  hardware:
+    mi300x: verified
+
+model:
+  model_id: "mistralai/Mistral-Medium-3.5-128B"
+  min_vllm_version: "0.18.0"
+  architecture: dense
+  parameter_count: "128B"
+  active_parameters: "128B"
+  context_length: 262144
+  base_args:
+    - "--tokenizer_mode"
+    - "mistral"
+    - "--config_format"
+    - "mistral"
+    - "--load_format"
+    - "mistral"
+  base_env: {}
+
+dependencies:
+  - note: "Mistral tokenizer / chat-template runtime — Mistral 3.5 needs >= 1.11.1 (auto-installed by vLLM nightly, pin if you hit an older cached wheel)"
+    command: 'uv pip install -U "mistral_common>=1.11.1"'
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  reasoning:
+    description: "Mistral reasoning parser extracts [THINK]...[/THINK] into message.reasoning (emitted when reasoning_effort='high')"
+    args:
+      - "--reasoning-parser"
+      - "mistral"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  spec_decoding:
+    description: "EAGLE speculative decoding via mistralai/Mistral-Medium-3.5-128B-EAGLE draft head"
+    args:
+      - "--speculative-config"
+      - '{"model":"mistralai/Mistral-Medium-3.5-128B-EAGLE","num_speculative_tokens":3,"method":"eagle","max_model_len":"65536"}'
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 154
+    description: "Native FP8 weights (vision tower / projector / lm_head kept in BF16); recommended on 8xH200, 8xMI300X, or 4xB200"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Mistral-Medium-3.5 is a 128B dense vision-language model from Mistral AI. The
+  weights ship pre-quantized to FP8 (E4M3) with the vision tower, multimodal
+  projector, and `lm_head` retained in BF16. Image input is supported up to
+  1540x1540 (Pixtral-style encoder, patch size 14). Context length is 256K
+  via YaRN scaling (factor 64x over the 4K base).
+
+  Reasoning is opt-in per request via `reasoning_effort: "high"` — when set,
+  the model emits `[THINK]...[/THINK]` blocks that the Mistral reasoning
+  parser surfaces as `message.reasoning`. Tool calling uses the
+  `[AVAILABLE_TOOLS]` / `[TOOL_CALLS]` chat-template tokens.
+
+  ## Prerequisites
+
+  - Hardware: 8xH200 (recommended), 4xB200 or 2-8xMI300X; single B200 / MI300X also fits the
+    weights (~134 GB raw) but leaves little room for the 256K KV cache - see below.
+  - vLLM **nightly** (Mistral 3.5 architecture support has not yet shipped in a
+    stable release).
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto \
+    --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  This pulls in `mistral_common >= 1.11.1` and `transformers >= 5.4.0` automatically.
+
+  ## Launch command
+
+  8xH200 (or 8xB200):
+
+  ```bash
+  vllm serve mistralai/Mistral-Medium-3.5-128B \
+    --tensor-parallel-size 8 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral \
+    --reasoning-parser mistral
+  ```
+
+  Useful flags:
+
+  - `--max-model-len`: default 262144; lower it (e.g. 65536) to free VRAM for
+    larger batch sizes on tighter GPU pools.
+  - `--language-model-only`: skip the vision encoder entirely for text-only
+    workloads.
+  - `--mm-encoder-tp-mode data`: run the small vision encoder data-parallel
+    instead of tensor-parallel — avoids the all-reduce overhead.
+  - `--limit-mm-per-prompt.image N`: cap images per request.
+
+  ## EAGLE speculative decoding
+
+  Mistral ships a dedicated EAGLE draft head at
+  [`mistralai/Mistral-Medium-3.5-128B-EAGLE`](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B-EAGLE).
+  It is **not** included in the default config — toggle the `spec_decoding` feature.
+
+  Mistral's recommended serve command (from the EAGLE model card):
+
+  ```bash
+  vllm serve mistralai/Mistral-Medium-3.5-128B --tensor-parallel-size 8 \
+    --tool-call-parser mistral --enable-auto-tool-choice --reasoning-parser mistral \
+    --max-num-batched-tokens 16384 --max-num-seqs 128 --gpu-memory-utilization 0.8 \
+    --speculative-config '{"model":"mistralai/Mistral-Medium-3.5-128B-EAGLE","num_speculative_tokens":3,"method":"eagle","max_model_len":"65536"}'
+  ```
+
+  The draft model is a 2-layer Mistral-style head trained on the 128B target;
+  it shares the tokenizer and runs at TP=8 alongside the target.
+
+  ## Client usage
+
+  Reasoning + tool calling against the OpenAI-compatible endpoint:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="mistralai/Mistral-Medium-3.5-128B",
+      messages=[{"role": "user", "content": "Plan a 3-day Paris trip."}],
+      extra_body={"reasoning_effort": "high"},
+      temperature=0.7, max_tokens=4096,
+  )
+  msg = resp.choices[0].message
+  print("reasoning:", msg.reasoning)
+  print("answer:", msg.content)
+  ```
+
+  Image input (vision):
+
+  ```python
+  resp = client.chat.completions.create(
+      model="mistralai/Mistral-Medium-3.5-128B",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://..."}},
+              {"type": "text", "text": "Describe this image."},
+          ],
+      }],
+      max_tokens=512,
+  )
+  ```
+
+  ### AMD MI300X (ROCm)
+
+  The command builder fits the model on one GPU on MI300X. This is prone to fail due to OOM. Use the following instead.
+
+  **Single GPU** - Use `--tensor-parallel-size 1` and limit context, e.g.
+  `--max-model-len 131072`. Without that limit, KV-cache allocation fails at the
+  default **262144** context even in text-only mode. You can also reduce
+  `--max-num-batched-tokens` or change `--gpu-memory-utilization` if you still hit OOM.
+  Here is a text-only example:
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e SAFETENSORS_FAST_GPU=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:nightly mistralai/Mistral-Medium-3.5-128B \
+      --tokenizer_mode mistral \
+      --config_format mistral \
+      --load_format mistral \
+      --tensor-parallel-size 1 \
+      --no-enable-prefix-caching \
+      --enable-auto-tool-choice \
+      --tool-call-parser mistral \
+      --reasoning-parser mistral \
+      --max-model-len 131072 \
+      --language-model-only
+  ```
+
+  **Text-only** - Set `--tensor-parallel-size` to the number of GPUs you wish to use:
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e SAFETENSORS_FAST_GPU=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:nightly mistralai/Mistral-Medium-3.5-128B \
+      --tokenizer_mode mistral \
+      --config_format mistral \
+      --load_format mistral \
+      --tensor-parallel-size 8 \
+      --no-enable-prefix-caching \
+      --enable-auto-tool-choice \
+      --tool-call-parser mistral \
+      --reasoning-parser mistral \
+      --language-model-only
+  ```
+  
+  For `lm_eval` against a text-only server, pass `fix_mistral_regex=True` in
+  `--model_args` (Mistral 3.5 tokenizer quirk).
+
+  **Multimodal (text + image)** - Enable the image inputs and set the limit for images per prompt, here 1, as necessary:
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e SAFETENSORS_FAST_GPU=1 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:nightly mistralai/Mistral-Medium-3.5-128B \
+      --tokenizer_mode mistral --config_format mistral --load_format mistral \
+      --tensor-parallel-size 8 \
+      --no-enable-prefix-caching \
+      --enable-mm \
+      --limit-mm-per-prompt '{"image": 1}' \
+      --enable-auto-tool-choice --tool-call-parser mistral \
+      --reasoning-parser mistral
+  ```
+
+  ### MI300X benchmarking (text-only)
+
+  Serving benchmark: `vllm bench serve` with 100 requests, max concurrency 32,
+  1024 input + 1024 output tokens per request.
+  Accuracy: `lm_eval` GSM8k (5-shot), `local-completions` backend.
+
+  | TP | Output tok/s | Mean TTFT (ms) | Mean TPOT (ms) | GSM8k flexible | GSM8k strict |
+  |----|-------------:|---------------:|---------------:|---------------:|-------------:|
+  | 1  | 438 | 5719 | 55.2 | 0.928 | 0.876 |
+  | 2  | 530 | 5310 | 45.0 | 0.923 | 0.867 |
+  | 4  | 729 | 3317 | 33.0 | 0.928 | 0.873 |
+  | 8  | 915 | 2522 | 26.1 | 0.929 | 0.876 |
+
+  ## Troubleshooting
+
+  - **OOM at full 256K context** on H200 or MI300X: drop `--max-model-len` to
+    **131072** or **65536**, or set `--language-model-only` if you don't need vision.
+  - `reasoning_effort` rejected: only `"none"` and `"high"` are accepted by the
+    chat template — anything else raises an exception.
+
+  ## References
+
+  - [Model card](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B)

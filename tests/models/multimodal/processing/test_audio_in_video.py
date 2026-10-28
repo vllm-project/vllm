@@ -18,11 +18,21 @@ from the interleaved video placeholders – yielding a different (wrong) token
 sequence on every subsequent request for the same video.
 """
 
+import asyncio
+from typing import Any
+
 import numpy as np
 import pytest
+import torch
 
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import LruKeyReplicatedSenderCache
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 
 from ....multimodal.utils import random_audio, random_video
 from ...utils import build_model_context
@@ -138,3 +148,144 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={"use_audio_in_video": True},
         )
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+@pytest.mark.parametrize("num_videos", [1, 2])
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("has_image", [False, True])
+def test_audio_in_video_metadata_only(
+    model_id, num_videos, is_async, has_image, monkeypatch
+):
+    """Published metadata preserves interleaved placeholders without preprocessing."""
+    from vllm.model_executor.models.qwen2_5_omni_thinker import (
+        Qwen2_5OmniThinkerForConditionalGeneration,
+    )
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    model_cls = (
+        Qwen3OmniMoeThinkerForConditionalGeneration
+        if "Qwen3-Omni" in model_id
+        else Qwen2_5OmniThinkerForConditionalGeneration
+    )
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": num_videos, "video": num_videos, "image": 1},
+    )
+    mm_config = ctx.model_config.get_multimodal_config()
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = "".join(
+        model_cls.get_placeholder_str("video", i) for i in range(num_videos)
+    )
+    kwargs = {"use_audio_in_video": True}
+    uuids = {
+        modality: [f"source-{i}" for i in range(num_videos)]
+        for modality in ("video", "audio")
+    }
+    mm_data = create_mm_data(num_videos)
+    if has_image:
+        from PIL import Image
+
+        mm_data["image"] = [Image.new("RGB", (64, 64), "green")]
+        uuids["image"] = ["image-source"]
+        prompt = model_cls.get_placeholder_str("image", 0) + prompt
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        mm_uuid_items=uuids,
+        hf_processor_mm_kwargs=kwargs,
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality=modality,
+            identifier=f"{modality}-{i}",
+            mm_position=position,
+        )
+        for modality in mm_data
+        for i, (item, position) in enumerate(
+            zip(raw["mm_kwargs"][modality], raw["mm_placeholders"][modality])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_embeds",
+                    "video_embeds": published[f"video-{i}"]["metadata"],
+                    "audio_embeds": published[f"audio-{i}"]["metadata"],
+                    "uuid": f"source-{i}",
+                }
+                for i in range(num_videos)
+            ],
+        }
+    ]
+    if has_image:
+        messages[0]["content"].insert(
+            0,
+            {
+                "type": "image_embeds",
+                "image_embeds": published["image-0"]["metadata"],
+                "uuid": "image-source",
+            },
+        )
+    parse = parse_chat_messages_async if is_async else parse_chat_messages
+    parsed = parse(messages, ctx.model_config, "openai", mm_processor_kwargs=kwargs)
+    conversation, metadata, remote_uuids = asyncio.run(parsed) if is_async else parsed
+    assert conversation[0]["content"] == (
+        ([{"type": "image"}] if has_image else []) + [{"type": "video"}] * num_videos
+    )
+    assert remote_uuids == uuids
+
+    def unexpected_preprocessing(*args, **kwargs):
+        pytest.fail("Metadata-only audio/video must not call the HF processor")
+
+    monkeypatch.setattr(processor, "_call_hf_processor", unexpected_preprocessing)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(metadata),
+        mm_uuid_items=remote_uuids,
+        hf_processor_mm_kwargs=kwargs,
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_hashes"] == raw["mm_hashes"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+    for key in (
+        "video_grid_thw",
+        "second_per_grid_ts",
+        "use_audio_in_video",
+        "audio_feature_lengths",
+    ):
+        torch.testing.assert_close(
+            remote["mm_kwargs"].get_data()[key],
+            raw["mm_kwargs"].get_data()[key],
+            check_dtype=False,
+        )
+
+    model = model_cls.__new__(model_cls)
+    model.config = processor.info.get_hf_config()
+    remote_features = [
+        MultiModalFeatureSpec(
+            data=remote["mm_kwargs"][f.modality][int(f.identifier.split("-")[-1])],
+            modality=f.modality,
+            identifier=f.identifier,
+            mm_position=f.mm_position,
+        )
+        for f in features
+    ]
+    raw_positions, raw_delta = model.get_mrope_input_positions(
+        raw["prompt_token_ids"], features
+    )
+    remote_positions, remote_delta = model.get_mrope_input_positions(
+        remote["prompt_token_ids"], remote_features
+    )
+    assert raw_delta == remote_delta
+    torch.testing.assert_close(raw_positions, remote_positions)

@@ -30,7 +30,7 @@ fp8_only = pytest.mark.skipif(
 
 ENV_DEFAULTS = {
     "VLLM_ROCM_FP8_PADDING": True,
-    "VLLM_ROCM_USE_AITER_FP8BMM": True,
+    "VLLM_ROCM_USE_AITER_FP8BMM": False,
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": False,
 }
 

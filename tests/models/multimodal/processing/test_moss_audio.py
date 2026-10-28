@@ -594,6 +594,29 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
     assert set(forward_tensors.tensors) == set(tensors.tensors)
 
 
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize(("num_mel_bins", "conv_freq"), [(128, 16), (129, 17)])
+def test_moss_audio_encoder_initialization(
+    dist_init: None, device: str, num_mel_bins: int, conv_freq: int
+) -> None:
+    """Encoder construction preserves projection shapes, including on meta."""
+    config = MossAudioEncoderConfig(
+        d_model=8,
+        output_dim=8,
+        num_mel_bins=num_mel_bins,
+        encoder_layers=1,
+        encoder_attention_heads=2,
+        encoder_ffn_dim=16,
+        downsample_hidden_size=2,
+        deepstack_encoder_layer_indexes=[],
+    )
+    with torch.device(device):
+        encoder = MossAudioEncoder(config)
+
+    assert encoder.stem_proj.weight.shape == (8, 2 * conv_freq)
+    assert all(param.device.type == device for param in encoder.parameters())
+
+
 def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.device import DeviceConfig

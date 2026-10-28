@@ -3,6 +3,10 @@
 
 from dataclasses import dataclass
 
+# Sealed pages this many positions behind the block-table tail stay pinned so
+# a page written by an in-flight step is never handed out under it.
+ACTIVE_TAIL_PAGES = 2
+
 
 @dataclass(frozen=True)
 class SparseKVPageTransfer:
@@ -22,6 +26,15 @@ class SparseKVRowMirror:
     source_starts: tuple[int, ...]
     destination_start: int
     num_rows: int
+
+
+@dataclass(frozen=True)
+class SparseKVResidencyUpdate:
+    """GPU block ids of some of a request's resident pages, per resident group.
+    A null block id means the page is read from the host."""
+
+    pages: list[int]
+    block_ids: tuple[list[int], ...]
 
 
 @dataclass

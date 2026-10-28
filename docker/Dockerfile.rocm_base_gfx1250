@@ -1,16 +1,16 @@
 ARG BASE_IMAGE=ubuntu:24.04
-ARG ROCM_WHEEL_INDEX=https://rocm.devreleases.amd.com/whl-multi-arch/
-ARG ROCM_SDK_VERSION=7.14.0a20260623
-ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260623
-ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0a20260623
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0a20260623
-ARG TRITON_VERSION=3.7.1+git110cd8e2.rocm7.14.0a20260623
-ARG APEX_VERSION=1.11.0+rocm7.14.0a20260623
+ARG ROCM_WHEEL_INDEX=https://rocm.nightlies.amd.com/whl-multi-arch/
+ARG ROCM_SDK_VERSION=10.1.0a20260822
+ARG TORCH_VERSION=2.11.0+rocm10.1.0a20260822
+ARG TORCHVISION_VERSION=0.26.0+rocm10.1.0a20260822
+ARG TORCHAUDIO_VERSION=2.11.0+rocm10.1.0a20260822
+ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.1.0a20260822
+ARG APEX_VERSION=1.11.0+rocm10.1.0a20260822
 
 
 ARG FA_BRANCH="jpvillam/gfx1250_wip"
 ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
-ARG AITER_BRANCH="main"
+ARG AITER_BRANCH="f85b24b"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -119,10 +119,10 @@ ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 # which keeps the set consistent and avoids pip backtracking.
 RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
     --extra-index-url https://pypi.org/simple \
-    "torch[device-all]==${TORCH_VERSION}" \
+    "torch[device-gfx1250]==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "rocm[libraries,devel,device-all]==${ROCM_SDK_VERSION}" && \
+    "rocm[libraries,devel,device-gfx1250]==${ROCM_SDK_VERSION}" && \
     rocm-sdk init
  
 # Torch runtime deps that may not be published on the ROCm wheel index;
@@ -201,15 +201,6 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 
 ###
-### AMD SMI Build
-###
-FROM base AS build_amdsmi
-RUN cd ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi \
-    && pip wheel . --wheel-dir=dist
-RUN mkdir -p /app/install && cp ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi/dist/*.whl /app/install
-
-
-###
 ### MORI Build TODO(Build needs fixing)
 ###
 FROM base AS build_mori
@@ -253,7 +244,10 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+
+RUN git clone ${AITER_REPO} \
+    && cd aiter \
+    && git checkout --detach ${AITER_BRANCH}
 RUN cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
@@ -278,8 +272,6 @@ FROM base AS debs_wheel_release
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     if ls /install/*.whl >/dev/null 2>&1; then cp /install/*.whl /app/debs; fi
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
@@ -288,8 +280,6 @@ FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     if ls /install/*.whl >/dev/null 2>&1; then cp /install/*.whl /app/debs; fi
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \

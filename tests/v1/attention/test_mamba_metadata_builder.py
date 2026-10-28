@@ -55,4 +55,5 @@ def test_mamba_single_token_prompt_runs_as_prefill():
 
     assert metadata.num_decodes == 2
     assert metadata.num_prefills == 1
+    assert metadata.has_initial_states_p is not None
     assert metadata.has_initial_states_p.tolist() == [False]

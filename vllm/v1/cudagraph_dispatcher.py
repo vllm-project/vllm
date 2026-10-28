@@ -254,8 +254,8 @@ class CudagraphDispatcher:
                 all modes are allowed.
             invalid_modes: Set of cudagraph modes to exclude. Subtracted from
                 valid_modes to compute allowed modes. (e.g., {FULL} for
-                features like cascade attention not supported by full
-                cudagraphs). None means no modes are excluded.
+                encoder-decoder batches with encoder outputs). None means no
+                modes are excluded.
 
         """
         allowed_modes = valid_modes or CUDAGraphMode.valid_runtime_modes()

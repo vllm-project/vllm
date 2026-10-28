@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from .replicated_linear import ReplicatedLinearWithLoRA
 
 
-class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
+class BaseClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
@@ -67,6 +67,8 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         self.full_module_num_labels[index] = num_labels
         self.full_module_enabled[index] = True
 
+
+class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
     def forward(self, input_: torch.Tensor) -> torch.Tensor | list[torch.Tensor]:
         # TODO base_result maybe don't need compute truly.
         base_result = super().forward(input_)
@@ -125,3 +127,48 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+
+class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
+    def get_output_num_labels(self) -> list[int]:
+        return [
+            (self.full_module_num_labels[index] or self.output_size)
+            if index >= 0
+            else self.output_size
+            for index in self._output_lora_indices
+        ]
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        base_result = super().forward(input_)
+        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
+        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+        output[:, : self.output_size].copy_(base_result)
+        adapter_output = torch.zeros(
+            (1, output.size(0), self.padded_num_labels),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        self.punica_wrapper.add_shrink(
+            adapter_output,
+            input_.to(self.full_weight_stacked.dtype),
+            (self.full_weight_stacked,),
+            1.0,
+        )
+        indices = self.punica_wrapper.token_lora_indices
+        padding = output.size(0) - indices.size(0)
+        assert padding >= 0, (
+            "Token classification has fewer rows than LoRA token mapping"
+        )
+        if padding:
+            indices = torch.nn.functional.pad(indices, (0, padding), value=-1)
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & self.full_module_enabled[safe_indices]
+        adapter_output = adapter_output[0].to(output.dtype) + self.full_bias_stacked[
+            safe_indices
+        ].to(output.dtype)
+        return torch.where(use_full.unsqueeze(-1), adapter_output, output)
+
+    def _apply_lora_to_output(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
+        return super()._apply_lora_to_output(x.to(self.lora_a_stacked[0].dtype), output)

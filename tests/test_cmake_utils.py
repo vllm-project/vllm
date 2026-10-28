@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import shutil
 import subprocess
 import sys
@@ -80,3 +81,35 @@ endif()
     )
 
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_hipify_records_original_sources_and_headers_without_modifying_them(tmp_path):
+    project = tmp_path / "source"
+    output = tmp_path / "build" / "csrc"
+    project.mkdir()
+    source = project / "probe.cu"
+    header = project / "cuda_shared.h"
+    source.write_text('#include "cuda_shared.h"\n__global__ void probe() {}\n')
+    header.write_text("#include <cuda_runtime.h>\n")
+    original = {path.name: path.read_bytes() for path in project.iterdir()}
+    script = Path(__file__).parents[1] / "cmake" / "hipify.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "-p",
+            str(project),
+            "-o",
+            str(output),
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert {path.name: path.read_bytes() for path in project.iterdir()} == original
+    provenance = json.loads((output / "hipify-source-map.json").read_text())
+    assert provenance[str(output / "probe.hip")] == str(source)
+    assert provenance[str(output / "cuda_shared.h")] == str(header)
+    assert provenance[str(output / "hip_shared.h")] == str(header)
+    assert '#include "hip_shared.h"' in (output / "probe.hip").read_text()

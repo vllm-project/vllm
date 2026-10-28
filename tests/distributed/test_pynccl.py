@@ -474,6 +474,14 @@ def test_ncclGetUniqueId():
     assert unique_id is not None
 
 
+def test_nccl_error_includes_last_error():
+    lib = NCCLLibrary()
+    # A NULL output pointer makes NCCL return ncclInvalidArgument, whose error
+    # string is only "invalid argument". The reason is in ncclGetLastError().
+    with pytest.raises(RuntimeError, match="out argument is NULL"):
+        lib.NCCL_CHECK(lib._funcs["ncclGetUniqueId"](None))
+
+
 def test_pynccl_suspend_resume_idempotent():
     """Repeated suspend/resume (e.g. staged wake-ups) reach NCCL once each."""
     from unittest.mock import Mock

@@ -249,9 +249,9 @@ def test_repeated_image_hits_the_processor_cache():
             "BAAI/Emu3-Chat-hf",
             "<image> and more text",
             marks=pytest.mark.xfail(
-                reason="Emu3Processor prepends its BOS token only when images are "
-                "passed, so the unexpanded prompt vLLM tokenizes never "
-                "gets one. Fixed by huggingface/transformers#47924, unreleased.",
+                reason="Emu3Processor prepends the BOS token itself because the "
+                "tokenizer doesn't, so the unexpanded prompt vLLM tokenizes "
+                "never gets one.",
                 strict=False,
             ),
         ),

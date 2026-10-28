@@ -45,7 +45,7 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     BaseCohereCommandReasoningParser,
 )
 from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, check_json_nesting
 from vllm.tool_parsers.cohere_command_tool_parser import BaseCohereCommandToolParser
 
 if TYPE_CHECKING:
@@ -127,6 +127,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_dictionary: dict[str, str] = {}
     for tool in tool_schema:
         tool_name = tool["name"]
+        check_json_nesting(tool["parameters"])
         tool_parameters = dict(tool["parameters"])
         json_schema: dict[str, Any] = {
             "type": "object",
@@ -404,6 +405,7 @@ def _schema_dict_from_structured_outputs(
     if isinstance(raw, str):
         if not raw.strip():
             raise ValueError("structured_outputs.json cannot be empty.")
+        check_json_nesting(raw)
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as e:

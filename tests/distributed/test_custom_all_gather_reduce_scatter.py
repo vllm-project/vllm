@@ -54,9 +54,10 @@ def _supports_multimem():
     )
 
 
-def _supports_sm100_or_sm103():
-    capability = current_platform.get_device_capability()
-    return current_platform.is_cuda() and capability in ((10, 0), (10, 3))
+def _supports_sm100_family():
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100
+    )
 
 
 def _payload(value, device):
@@ -384,8 +385,8 @@ def _run_multimem_reduce_scatter_test(
 
 
 @pytest.mark.skipif(
-    not _supports_sm100_or_sm103(),
-    reason="The low-SM MNNVL reduce-scatter path requires SM100 or SM103.",
+    not _supports_sm100_family(),
+    reason="The low-SM MNNVL reduce-scatter path requires SM100 family.",
 )
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 def test_mnnvl_multimem_reduce_scatter(monkeypatch: pytest.MonkeyPatch, tp_size: int):

@@ -11,6 +11,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
 )
@@ -19,6 +20,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
 )
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 
 @triton.jit
@@ -104,6 +106,10 @@ def test_fit_kpool_indices_rejects_narrow_input():
         )
 
 
+def test_rocm_sparse_mla_supports_glm_packed_layout():
+    assert KVCacheLayout.BLHNC in ROCMAiterMLASparseBackend.supported_kv_cache_layouts()
+
+
 @pytest.mark.parametrize(
     (
         "kv_cache_dtype",
@@ -149,8 +155,86 @@ def test_rocm_sparse_triton_route(
     )
 
 
+@pytest.mark.parametrize(
+    ("gfx942", "fp8", "num_prefills", "num_decodes", "prefill_max_seq_len", "route"),
+    [
+        pytest.param(True, False, 1, 0, 129, "triton", id="above-topk"),
+        pytest.param(False, False, 1, 0, 129, "aiter", id="gfx950"),
+        pytest.param(True, True, 1, 0, 129, "aiter", id="fp8"),
+        pytest.param(True, False, 0, 2, 129, "aiter", id="decode-only"),
+        pytest.param(True, False, 1, 1, 129, "aiter", id="mixed"),
+        pytest.param(True, False, 1, 0, 128, "aiter", id="equal-topk"),
+        pytest.param(True, False, 1, 0, 127, "aiter", id="below-topk"),
+        pytest.param(True, False, 0, 0, 129, "aiter", id="empty"),
+        pytest.param(
+            True, False, 1, 0, None, "missing", id="required-prefill-metadata"
+        ),
+    ],
+)
+def test_rocm_long_bf16_prefill_dispatch(
+    monkeypatch, gfx942, fp8, num_prefills, num_decodes, prefill_max_seq_len, route
+):
+    """Check the new dispatch gate using CPU tensors and intercepted kernels."""
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+
+    class KernelSelected(Exception):
+        pass
+
+    def triton_kernel(**kwargs):
+        raise KernelSelected("triton")
+
+    def aiter_kernel(*args, **kwargs):
+        raise KernelSelected("aiter")
+
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", triton_kernel)
+    monkeypatch.setattr(sparse_mod.rocm_aiter_ops, "mla_decode_fwd", aiter_kernel)
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = 64
+    impl.kv_lora_rank = 512
+    impl.kv_cache_dtype = "fp8" if fp8 else "auto"
+    impl.scale = 576**-0.5
+    impl.sinks = None
+
+    dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
+    q = torch.empty(2, 64, 576, dtype=dtype)
+    kv = torch.empty(4, 1, 576, dtype=dtype)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        max_query_len=2,
+        prefill_max_seq_len=prefill_max_seq_len,
+        topk_tokens=128,
+        work_meta_data=None,
+        qo_indptr=torch.arange(3, dtype=torch.int32),
+        paged_kv_indices=torch.empty(0, dtype=torch.int32),
+        paged_kv_indptr=torch.zeros(3, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(2, dtype=torch.int32),
+    )
+    # Irrelevant routes must not inspect prefill-only metadata.
+    if (
+        not gfx942
+        or fp8
+        or num_decodes
+        or not num_prefills
+        or prefill_max_seq_len is None
+    ):
+        del metadata.prefill_max_seq_len
+        del metadata.topk_tokens
+    layer = SimpleNamespace(_q_scale=1.0, _k_scale=1.0)
+    error = AttributeError if route == "missing" else KernelSelected
+    match = "prefill_max_seq_len" if route == "missing" else f"^{route}$"
+    with pytest.raises(error, match=match):
+        impl._forward_mla(layer, q, kv, metadata)
+
+
+@pytest.mark.parametrize("gfx942", [False, True])
 @pytest.mark.parametrize("num_heads", [8, 12])
-def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads):
+def test_rocm_sparse_triton_route_preserves_padded_sinks(
+    monkeypatch, num_heads, gfx942
+):
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
     captured = {}
 
     def fake_rocm_sparse_attn_prefill(**kwargs):

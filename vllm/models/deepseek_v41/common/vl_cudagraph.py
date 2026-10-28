@@ -94,8 +94,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             grid = grid.tolist()
         return [[int(v) for v in row] for row in grid]
 
-    _encoder_cg_pad_totals: dict[int, int] = {}
-
     # -- SupportsEncoderCudaGraph protocol --
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
@@ -129,24 +127,13 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cg_pad_totals
-
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch is completed with one
-            # trailing padding sequence; declaring fewer rows than the buffer
-            # holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            if total is None:
-                raise RuntimeError(
-                    "cu_seqlens replay buffer was not registered at capture "
-                    "time; the manager must replay into the capture-time "
-                    "buffers."
-                )
+            # Zero-length padding (same as Qwen): tail slots repeat the last
+            # real offset, so FlashAttn schedules no work for padding rows.
             n = min(src.shape[0], dst.shape[0])
             dst[:n].copy_(src[:n])
-            dst[n:] = total
+            if n < dst.shape[0]:
+                dst[n:] = src[-1] if n else 0
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
@@ -268,8 +255,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             max_seqlen_override=total_patches,
             cached=False,
         )
-        # Spare cu_seqlens slots let replay append a padding sequence that
-        # covers the rows a smaller real batch does not fill.
+        # Spare cu_seqlens slots: replay pads smaller real batches with
+        # zero-length sequences (tail slots repeat the last real offset).
         real_cu = metadata.pop("cu_seqlens")
         cu_seqlens = torch.full(
             (max_batch_size + 2,), total_patches, dtype=torch.int32, device=device
@@ -277,8 +264,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         cu_seqlens[: real_cu.numel()] = real_cu
 
         merge = build_packed_merge_metadata(grids, r, device=device, dtype=dtype)
-
-        self._encoder_cg_pad_totals[cu_seqlens.data_ptr()] = total_patches
 
         return EncoderCudaGraphCaptureInputs(
             values={
@@ -303,7 +288,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             patches = patches.to(dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
-        # pad_cu_seqlens appends the padding sequence covering the tail rows.
+        # pad_cu_seqlens pads the tail with zero-length sequences.
         metadata = build_packed_vit_metadata(
             vit_grid,
             rope_dim=self.vision.rope_dim,

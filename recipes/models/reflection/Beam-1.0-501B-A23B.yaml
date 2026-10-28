@@ -1,0 +1,367 @@
+meta:
+  title: "Beam-1.0-501B-A23B"
+  slug: "beam-1.0-501b-a23b"
+  provider: "Reflection"
+  description: "Reflection's Beam — a sparse MoE language model (501B total / 23B active) with hybrid sliding-window + NoPE full attention, a 1M-token window, Harmony-format reasoning and tool calling, and an optional DFlash2 speculative drafter. Available in NVFP4, FP8 and BF16."
+  date_added: 2026-10-16
+  date_updated: 2026-10-16
+  tasks:
+    - text
+  performance_headline: "501B/23B-active MoE with hybrid sliding-window attention, 1M context, and DFlash2 speculative decoding"
+  related_recipes: []
+  # Beam's kernels (including a custom all-reduce) are CUDA-only and the
+  # only published build is the CUDA Docker image, so AMD is unsupported.
+  hardware:
+    b300: verified
+    h200: verified
+    mi300x: unsupported
+    mi325x: unsupported
+    mi350x: unsupported
+    mi355x: unsupported
+  # Open on the default variant's recommended hardware (NVFP4, TP4).
+  default_hardware: b300
+
+model:
+  model_id: "reflection/Beam-1.0-501B-A23B"
+  min_vllm_version: "0.33.0"
+  # Docker-only at launch: Beam support ships in this image before it reaches a
+  # vLLM wheel. A single-key CUDA map pins the one published build, so the
+  # CUDA toggle can't synthesize a nonexistent `-cu129` tag. Restore the pip
+  # path once a release carries the support.
+  docker_image:
+    cu130: "vllm/vllm-openai:reflection-beam"
+  install:
+    docker:
+      note: "Beam support hasn't landed in a vLLM release yet, so it ships only in this image. Use Docker until it does."
+    pip: false
+  architecture: moe
+  # 52 layers, 256 routed experts (top-8, moe_intermediate_size 2560), dense
+  # MLP in layers 0-2; release name: 501B total / 23B active.
+  parameter_count: "501B"
+  active_parameters: "23B"
+  # config.max_position_embeddings
+  context_length: 1048576
+  base_args:
+    # FP8 KV cache for NVFP4 and FP8; the BF16 variant resets it to auto.
+    - "--kv-cache-dtype"
+    - "fp8"
+  base_env:
+    # The first NVFP4 start spends about 10 minutes autotuning FlashInfer MoE
+    # kernels, close to the 600 s default engine-ready timeout.
+    VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+features:
+  reasoning:
+    description: "Beam reasoning parser — splits the Harmony `analysis` channel into `reasoning_content`. Reads the checkpoint's `response_template`."
+    args:
+      - "--reasoning-parser"
+      - "beam"
+  tool_calling:
+    description: "Beam tool-call parser with automatic tool choice — tool-call grammar derived from the checkpoint's `response_template`."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "beam"
+  spec_decoding:
+    label: "DFlash2"
+    description: "DFlash2 speculative decoding with the Beam-trained drafter (DFlash2BeamDraftModel, 5 layers, block size 16), drafting 7 tokens per step. method is dflash; DFlash2 is selected by the draft architecture. The drafter runs on FlashAttention, and adaptive verification checks only the draft tokens likely to be accepted."
+    args:
+      - "--speculative-config"
+      # num_speculative_tokens 7: the drafter supports up to block_size - 1
+      # (15), but acceptance falls off well before that. Adaptive
+      # verification is neutral at low concurrency and helps under load.
+      - '{"method":"dflash","model":"reflection/Beam-1.0-501B-A23B-DFlash2","num_speculative_tokens":7,"attention_backend":"FLASH_ATTN","enable_adaptive_verification":true}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  # NVFP4 is the default: recommended on Blackwell (TP4) and on H100, where
+  # FP8 fits but leaves little KV-cache headroom. FP8 is recommended on H200.
+  # BF16 needs one 8x B200/B300 node.
+  default:
+    model_id: "reflection/Beam-1.0-501B-A23B-NVFP4"
+    precision: nvfp4
+    # Mixed precision (ModelOpt NVFP4 on routed experts only; attention, dense
+    # MLPs, router, embeddings and lm_head stay BF16), so size from the real
+    # checkpoint: 293.6 GB × 1.2 = 352.3 → 353 GB.
+    vram_minimum_gb: 353
+    description: "ModelOpt NVFP4 on the routed experts; all other weights BF16. W4A4 on Blackwell; W4A16 through Marlin on Hopper. Recommended on Blackwell and H100."
+    # NVFP4 defaults to Blackwell-only. On Hopper vLLM runs the FP4 experts
+    # through Marlin (weights dequantized in-kernel, BF16 activations), so
+    # widen the precision constraint to every NVIDIA GPU.
+    precision_hardware:
+      brand: NVIDIA
+    supported_hardware:
+      - "arch:sm90"
+      - "arch:sm100"
+      - "arch:sm103"
+    # Blackwell runs TP4: 353 GB fits 4x B200 (720 GB) and one GB200/GB300
+    # tray, and TP8 would leave 320 intermediate rows per rank (padded).
+    # Hopper runs TP8.
+    tp:
+      blackwell: 4
+    # Blackwell auto-selects flashinfer_trtllm for the MoE, so only Hopper
+    # needs a pin.
+    hardware_overrides:
+      hopper:
+        # Auto-selection picks HUMMING on SM90; Marlin is faster.
+        extra_args:
+          - "--moe-backend"
+          - "marlin"
+  fp8:
+    model_id: "reflection/Beam-1.0-501B-A23B-FP8"
+    precision: fp8
+    # Router, embeddings and lm_head stay unquantized, so size from the real
+    # checkpoint (503.3 GB) rather than params × 1 byte: × 1.2 = 604.0 → 604 GB.
+    vram_minimum_gb: 604
+    # Per-channel FP8 (compressed-tensors FP8_DYNAMIC, no block structure), so
+    # TP8 has no block_n divisibility constraint.
+    description: "FP8 per-channel weights (compressed-tensors); router, embeddings and lm_head unquantized. Recommended on H200."
+    # Triton MoE measured fastest on B300 and H200; auto would pick CUTLASS
+    # grouped GEMM. Auto-selection already matches the measured attention
+    # (FlashInfer with TRT-LLM kernels on Blackwell, FA3 on Hopper) and FP8
+    # linear (CUTLASS) backends.
+    extra_args:
+      - "--moe-backend"
+      - "triton"
+  bf16:
+    model_id: "reflection/Beam-1.0-501B-A23B"
+    precision: bf16
+    # Real checkpoint 1002.7 GB (FP32 router weights) × 1.2 = 1203.2 → 1204 GB.
+    # Fits one 8x B300 node (2144 GB); does not fit 8x H200 (1128 GB).
+    vram_minimum_gb: 1204
+    description: "Native BF16 checkpoint (FP32 router weights and expert biases). Requires one 8x B200 or B300 node."
+    # 1204 GB only fits a single 8x B200 (1440 GB) or 8x B300 (2144 GB) node,
+    # and the recipe has no multi-node strategies, so other GPUs can't run it.
+    supported_hardware:
+      - b200
+      - b300
+    # Keep the KV cache in BF16 (overrides the model-level FP8 KV cache).
+    # Blackwell auto-selects the FlashInfer TRT-LLM MoE for BF16 experts.
+    extra_args:
+      - "--kv-cache-dtype"
+      - "auto"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+guide: |
+  ## Overview
+
+  [Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B) is Reflection's
+  sparse mixture-of-experts language model, with 501B total parameters and 23B
+  active parameters per token. Its 52 layers combine 512-token sliding-window
+  attention with NoPE full-attention layers, route each token through 8 of 256
+  experts (layers 0-2 use dense MLPs), and support a context length of
+  1,048,576 tokens.
+
+  Beam uses the Harmony message format, with an `analysis` channel for
+  reasoning and a `final` channel for the answer. Generation stops on
+  `<|return|>` at the end of an answer and on `<|call|>` at the end of a tool
+  call.
+
+  ## Variants
+
+  | Variant | Checkpoint | Weights on disk | Minimum GPU memory | Recommended hardware |
+  |---|---|---|---|---|
+  | NVFP4 (default) | [`reflection/Beam-1.0-501B-A23B-NVFP4`](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4) | 294 GB | 353 GB | 4x B200/B300 or one GB200/GB300 tray (TP4); 8x H100 (TP8, Marlin) |
+  | FP8 | [`reflection/Beam-1.0-501B-A23B-FP8`](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8) | 503 GB | 604 GB | 8x H200 (TP8) |
+  | BF16 | [`reflection/Beam-1.0-501B-A23B`](https://huggingface.co/reflection/Beam-1.0-501B-A23B) | 1,003 GB | 1,204 GB | 8x B200/B300 (TP8) |
+
+  *Minimum GPU memory* is the weights plus 20% headroom for activations,
+  CUDA graphs and a working KV cache. It is the total across all GPUs, and
+  it is the figure the variant selector above shows.
+
+  The NVFP4 checkpoint quantizes only the routed experts; attention, dense
+  MLPs, the router, embeddings and the LM head stay in BF16. On Blackwell it
+  runs W4A4; on Hopper, vLLM serves the FP4 experts through Marlin with BF16
+  activations.
+
+  ## Prerequisites
+
+  - **vLLM:** the `vllm/vllm-openai:reflection-beam` Docker image. Beam
+    support has not shipped in a vLLM release yet.
+  - **Hardware:** NVIDIA GPUs. Beam's kernels, including a custom all-reduce
+    used with expert parallelism, are CUDA-only.
+  - **Transformers:** the tokenizer uses the Transformers 5 format
+    (`TokenizersBackend`).
+
+  ### Install vLLM
+
+  ```bash
+  docker pull vllm/vllm-openai:reflection-beam
+  ```
+
+  The `vllm serve` commands below run inside this image; the command builder
+  above renders the full `docker run` line.
+
+  ## Launching the server
+
+  ### FP8 with TP8 on H200 or Blackwell
+
+  ```bash
+  vllm serve reflection/Beam-1.0-501B-A23B-FP8 \
+    --tensor-parallel-size 8 \
+    --moe-backend triton \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+  ```
+
+  This is the best-performing FP8 configuration measured on both H200 and
+  B300. Set `--moe-backend triton` explicitly; vLLM otherwise selects CUTLASS
+  for the FP8 MoE. vLLM's default attention backends, FlashAttention 3 on
+  Hopper and FlashInfer with TRT-LLM kernels on Blackwell, are already the
+  fastest measured.
+
+  ### NVFP4 with TP4 on Blackwell
+
+  ```bash
+  vllm serve reflection/Beam-1.0-501B-A23B-NVFP4 \
+    --tensor-parallel-size 4 \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+  ```
+
+  At TP4 the weights take about 73 GB per GPU, leaving room for the full
+  context window many times over; an 8-GPU node can host two replicas. The
+  first start takes about 10 minutes because FlashInfer autotunes the MoE
+  kernel. That is close to vLLM's default 600 s engine-ready timeout, so the
+  generated command sets `VLLM_ENGINE_READY_TIMEOUT_S=3600`.
+
+  ### NVFP4 with TP8 on H100
+
+  ```bash
+  vllm serve reflection/Beam-1.0-501B-A23B-NVFP4 \
+    --tensor-parallel-size 8 \
+    --moe-backend marlin \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+  ```
+
+  Set `--moe-backend marlin` explicitly; it is faster than the backend vLLM
+  selects by default on Hopper. The FP8 checkpoint also fits on 8x H100 but
+  leaves much less memory for the KV cache.
+
+  ### BF16 with TP8 on Blackwell
+
+  ```bash
+  vllm serve reflection/Beam-1.0-501B-A23B \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+  ```
+
+  ### Tuning
+
+  - **KV cache dtype:** the NVFP4 and FP8 commands use
+    `--kv-cache-dtype fp8`, which halves KV memory per token (on 8x H200 with
+    the FP8 checkpoint, about 14M to 28M tokens). The BF16 command keeps the
+    KV cache in BF16.
+  - **Parallelism:** tensor parallelism is the recommended single-node layout.
+    TEP (`--enable-expert-parallel`) and DEP (`--data-parallel-size 8
+    --enable-expert-parallel`) are also supported; DEP is better suited to
+    very large batch sizes.
+
+  ### MegaMoE with attention DP (NVFP4, Blackwell)
+
+  For prefill-heavy, high-concurrency traffic, run attention data-parallel
+  with expert parallelism on FlashInfer's CuTe DSL NVFP4 MegaMoE kernel,
+  which overlaps the expert all-to-all with the expert GEMMs. Start from the
+  NVFP4 command and replace the parallel and MoE settings:
+
+  ```bash
+  vllm serve reflection/Beam-1.0-501B-A23B-NVFP4 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --moe-backend flashinfer_moe_ep_cutedsl \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+  ```
+
+  - Only for DEP (`--data-parallel-size` with `--enable-expert-parallel`).
+    It does not support TEP or pure TP.
+  - Use `--data-parallel-size 4` on a GB200/GB300 tray or four B200/B300
+    GPUs, and `8` across a full 8-GPU node.
+  - For low-latency serving, stay on TP4 with `flashinfer_trtllm`.
+
+  ### DFlash2 speculative decoding
+
+  The DFlash2 drafter
+  ([`reflection/Beam-1.0-501B-A23B-DFlash2`](https://huggingface.co/reflection/Beam-1.0-501B-A23B-DFlash2))
+  shares the target model's embeddings and LM head:
+
+  ```bash
+  --speculative-config '{"method":"dflash","model":"reflection/Beam-1.0-501B-A23B-DFlash2","num_speculative_tokens":7,"attention_backend":"FLASH_ATTN","enable_adaptive_verification":true}'
+  ```
+
+  With `enable_adaptive_verification`, vLLM predicts how likely each draft
+  token is to be accepted and verifies only the ones worth the compute,
+  rather than all 7 every step. It makes little difference at low
+  concurrency and raises throughput under load. Remove it to verify the
+  full draft every step.
+
+  The drafter supports up to 15 speculative tokens; 7 is recommended. It
+  speeds up decoding most at low concurrency and adds about 1.7 GB per GPU,
+  which reduces KV-cache capacity. Acceptance depends on natural-language
+  input, so benchmark it with a real-text dataset rather than
+  `--dataset-name random`.
+
+  ### Output constraints
+
+  By default, the `beam` output grammar constrains every assistant turn from
+  its first token (reasoning, then an answer or a tool call). Set
+  `VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT=0` to disable it.
+
+  ## Client usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "reflection/Beam-1.0-501B-A23B-NVFP4",
+      "messages": [{"role": "user", "content": "Hello."}]
+    }'
+  ```
+
+  Set `model` to the checkpoint being served: `reflection/Beam-1.0-501B-A23B-NVFP4`,
+  `reflection/Beam-1.0-501B-A23B-FP8`, or `reflection/Beam-1.0-501B-A23B` for
+  BF16. `/v1/models` lists the served name.
+
+  ### Reasoning effort
+
+  Beam reasons at the maximum effort, `max` (512), unless the request sets
+  `reasoning_effort`:
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "reflection/Beam-1.0-501B-A23B-NVFP4",
+      "messages": [{"role": "user", "content": "What is 17 * 19?"}],
+      "reasoning_effort": "low"
+    }'
+  ```
+
+  The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves `/v1/chat/completions`
+  and `/v1/completions`, but not yet `/v1/responses` or the Anthropic-compatible
+  `/v1/messages` (both return 404). Use the default Python frontend for those
+  APIs.
+
+  ## References
+
+  - [Beam model card](https://huggingface.co/reflection/Beam-1.0-501B-A23B)
+  - [Beam FP8](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8)
+  - [Beam NVFP4](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4)
+  - [DFlash2 drafter](https://huggingface.co/reflection/Beam-1.0-501B-A23B-DFlash2)

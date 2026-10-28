@@ -7,12 +7,12 @@ import inspect
 import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.cli_args import (
+from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 

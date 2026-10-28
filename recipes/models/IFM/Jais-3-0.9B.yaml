@@ -1,0 +1,109 @@
+meta:
+  title: "Jais-3-0.9B"
+  slug: "jais-3-0.9b"
+  provider: "IFM"
+  description: "Compact dense model for mathematics, code, instruction following, and STEM tasks"
+  date_added: 2026-10-05
+  date_updated: 2026-10-05
+  tasks:
+    - text
+  performance_headline: "1.08B stored parameters including embeddings, with 131K context and native K2-Horizon parsing"
+  related_recipes:
+    - "IFM/Jais-3-3.7B"
+  hardware:
+    h200: verified
+model:
+  model_id: "IFM/Jais-3-0.9B"
+  architecture: dense
+  parameter_count: "1.08B"
+  active_parameters: "1.08B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+    - "--chat-template-content-format"
+    - "string"
+    - "--dtype"
+    - "bfloat16"
+    - "--max-model-len"
+    - "131072"
+    - "--gpu-memory-utilization"
+    - "0.85"
+  base_env: {}
+features:
+  reasoning:
+    description: "Extract Jais-3 reasoning into message.reasoning"
+    args: ["--reasoning-parser", "k2_horizon"]
+  tool_calling:
+    description: "Enable automatic tool choice with the K2-Horizon parser"
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "k2_horizon"]
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "Released BF16 checkpoint; the command starts at an 8K runtime context"
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+hardware_overrides: {}
+guide: |
+  ## Overview
+
+  Jais-3-0.9B is a compact dense model in the IFM Jais-3
+  family, with 1.08B stored parameters including embeddings and a 131,072-token
+  context window.
+
+  Jais-3 is an open-weight IFM model family built for transparent
+  foundation-model research, staged checkpoint analysis, and practical
+  deployment. The series spans compact dense models such as Jais-3-0.9B
+  for local experimentation, dense mid-size and large models for high-quality
+  research workloads, and mixture-of-expert (MoE) models for higher-capacity
+  serving.
+
+  ## Launch Commands
+
+  Jais-3-0.9B's `config.json` already enables YaRN, so the full 131,072-token context needs no RoPE override.
+
+  ```bash
+  vllm serve IFM/Jais-3-0.9B \
+    --trust-remote-code \
+    --chat-template-content-format string \
+    --dtype bfloat16 \
+    --max-model-len 131072 \
+    --gpu-memory-utilization 0.85 \
+    --reasoning-parser k2_horizon \
+    --enable-auto-tool-choice \
+    --tool-call-parser k2_horizon
+  ```
+
+  Lower `--max-model-len` (e.g. 8192) to reduce KV-cache memory.
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600
+  )
+
+  resp = client.chat.completions.create(
+      model="IFM/Jais-3-0.9B",
+      messages=[{"role": "user", "content": "لدينا عددان مجموعهما 50 وحاصل ضربهما 600. ما هما العددان؟ اشرح خطوات الحل."}],
+      temperature=1.0, top_p=0.95, max_tokens=2048,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ### Thinking modes
+
+  The model supports selectable thinking through `chat_template_kwargs`, per
+  request or server-wide via `--default-chat-template-kwargs`:
+
+  - `{"reasoning_effort": "high"}` — full thinking (default).
+  - `{"reasoning_effort": "low"}` — no thinking.
+
+  ## References
+
+  - [IFM/Jais-3-0.9B on Hugging Face](https://huggingface.co/IFM/Jais-3-0.9B)
+  - [Jais 3 Collection](https://huggingface.co/collections/IFM/jais-3)

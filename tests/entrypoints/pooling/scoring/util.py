@@ -11,12 +11,12 @@ from safetensors.torch import load_file
 from transformers import AutoModel, AutoTokenizer
 
 from tests.conftest import HfRunner
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
-from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 from vllm.transformers_utils.repo_utils import hf_api
 
 

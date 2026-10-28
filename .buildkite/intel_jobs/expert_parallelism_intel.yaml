@@ -1,8 +1,8 @@
-group: Expert Parallelism
+group: Expert Parallelism Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: EPLB Algorithm
+- label: ":intel: (BMG) EPLB Algorithm"
   key: eplb-algorithm
   timeout_in_minutes: 45
   device: intel_gpu

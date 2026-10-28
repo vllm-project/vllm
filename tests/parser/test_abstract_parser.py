@@ -13,7 +13,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.exceptions import VLLMValidationError
+from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
@@ -141,6 +142,8 @@ class TestToolChoice_Plus_ResponseFormat:
         )
         parser = self._setup_qwen_parser(tools)
         out = parser.adjust_request(request)
+        # adjust_request hands back the request type it was given.
+        assert isinstance(out, ChatCompletionRequest)
 
         # Now check that request does not have response_format anymore
         # but instead has structured_outputs set as structural tag
@@ -179,6 +182,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -200,6 +204,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -225,6 +230,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -254,6 +260,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -297,9 +304,25 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is None
         assert out.structured_outputs is not None
         grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
         assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
         assert not _is_grammar_accept_string(grammar, '{"text": "hi"}')
         mock_warn.assert_called_once()
+
+
+@pytest.mark.parametrize("field", ["json", "structural_tag"])
+def test_structured_outputs_to_format_rejects_deeply_nested_string(field):
+    """Parsers convert the constraint before request validation, and json.loads
+    raises RecursionError on a string nested this deeply."""
+    schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+    value = schema
+    if field == "structural_tag":
+        value = (
+            '{"type": "structural_tag", "format": {"type": "json_schema", '
+            f'"json_schema": {schema}}}}}'
+        )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        structured_outputs_to_format(StructuredOutputsParams(**{field: value}))

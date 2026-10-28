@@ -17,7 +17,7 @@ DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
@@ -555,9 +555,6 @@ configure_custom_rocm_stages() {
     CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${stages}}"
     ROCM_CSRC_DOCKERFILE_STAGES="${ROCM_CSRC_DOCKERFILE_STAGES:-${stages}}"
     ROCM_RUST_DOCKERFILE_STAGES="${ROCM_RUST_DOCKERFILE_STAGES:-${stages}}"
-    if [[ " ${stages} " != *" build_rocshmem "* ]]; then
-        unset ROCSHMEM_BRANCH ROCSHMEM_CACHE_KEY DEEPEP_CACHE_KEY
-    fi
 }
 
 compose_dependency_cache_key() {
@@ -865,6 +862,50 @@ should_upload_wheel_artifacts() {
 should_export_rocm_smoke() {
     [[ "${TARGET}" == "test-rocm-ci-with-wheel" \
         || "${TARGET}" == "smoke-test-rocm-ci" ]]
+}
+
+should_export_kernel_symbol_map() {
+    [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]] || return 1
+    case "${TARGET}" in
+        test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|\
+        export-wheel-rocm|csrc-rocm-ci|smoke-test-rocm-ci|kernel-symbol-map-rocm)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+export_kernel_symbol_map() {
+    should_export_kernel_symbol_map || return 0
+    echo "--- :world_map: Exporting ROCm kernel symbol map"
+    rm -rf ./kernel-symbol-map-rocm || return 1
+    docker buildx bake \
+        "${BAKE_ALLOW_ARGS[@]}" "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        kernel-symbol-map-rocm || return 1
+    upload_kernel_symbol_map_if_present
+}
+
+export_kernel_symbol_map_from_cache() {
+    should_export_kernel_symbol_map || return 0
+    # A separate shell keeps setup failures fatal inside the optional export.
+    FORCE_BUILD=1 VLLM_KERNEL_SYMBOL_MAP=1 UPLOAD_ROCM_WHEEL_ARTIFACTS=0 \
+        CI_HCL_SOURCE="${CI_HCL_PATH}" VLLM_BAKE_FILE="${VLLM_BAKE_FILE}" \
+        BUILDER_NAME="${BUILDER_NAME}" \
+        bash "${BASH_SOURCE[0]}" kernel-symbol-map-rocm \
+        || echo "ROCm kernel symbol map export from cache failed; continuing without it" >&2
+}
+
+upload_kernel_symbol_map_if_present() {
+    should_export_kernel_symbol_map || return 0
+    local map_dir="./kernel-symbol-map-rocm"
+    local map_name="kernel_symbol_map.rocm.json.gz"
+    if [[ ! -s "${map_dir}/${map_name}" ]]; then
+        echo "ROCm kernel symbol map export is missing: ${map_dir}/${map_name}" >&2
+        return 1
+    fi
+    if [[ "${BUILDKITE:-false}" == "true" ]]; then
+        (cd "${map_dir}" && buildkite-agent artifact upload "${map_name}")
+    fi
 }
 
 verify_rocm_smoke_export() {
@@ -1456,7 +1497,8 @@ maybe_skip_existing_image() {
         return 0
     fi
     if ! is_ci_base_target \
-        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke \
+            || [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; }; then
         echo "Local-output targets always run for the current build"
         return 0
     fi
@@ -1504,11 +1546,13 @@ maybe_skip_existing_image() {
 
         echo "Commit image already exists: ${IMAGE_TAG}"
         echo "Skipping build"
+        export_kernel_symbol_map_from_cache
         exit 0
     fi
 
     echo "Image already exists: ${IMAGE_TAG}"
     echo "Skipping build"
+    export_kernel_symbol_map_from_cache
     exit 0
 }
 
@@ -1724,14 +1768,11 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.nixl_commit" "${NIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_BRANCH")}"
     metadata_pair "vllm.rocm.ucx_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_REPO")"
     metadata_pair "vllm.rocm.ucx_commit" "${UCX_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_BRANCH")}"
-    metadata_pair "vllm.rocm.rocshmem_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_REPO")"
-    metadata_pair "vllm.rocm.rocshmem_commit" "${ROCSHMEM_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_BRANCH")}"
     metadata_pair "vllm.rocm.deepep_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_REPO")"
     metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
     metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
     metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
     metadata_pair "vllm.rocm.nixl_cache_key" "${NIXL_CACHE_KEY:-}"
-    metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
 }
 
@@ -1812,6 +1853,7 @@ EOF
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
         csrc-rocm-ci \
+            | kernel-symbol-map-rocm \
             | test-rocm-ci \
             | test-rocm-ci-with-wheel \
             | test-rocm-ci-with-artifacts \
@@ -2258,6 +2300,15 @@ EOF
         cat <<EOF
 }
 
+target "kernel-symbol-map-rocm" {
+  cache-from = concat(
+    get_cache_from_rocm_csrc(),
+EOF
+        write_hcl_string_list "    " "${csrc_content_cache_from[@]}"
+        cat <<EOF
+  )
+}
+
 target "test-rocm-ci" {
   cache-from = concat(
     get_cache_from_rocm(),
@@ -2314,7 +2365,7 @@ extract_dependency_pins() {
         return 0
     fi
 
-    for var in NIXL_BRANCH UCX_BRANCH ROCSHMEM_BRANCH DEEPEP_BRANCH; do
+    for var in NIXL_BRANCH UCX_BRANCH DEEPEP_BRANCH; do
         if [[ -n "${!var:-}" ]]; then
             echo "Using provided ${var}: ${!var}"
             continue
@@ -2336,17 +2387,14 @@ compute_dependency_cache_keys() {
     local dockerfile_rocm=""
     local nixl_branch=""
     local ucx_branch=""
-    local rocshmem_branch=""
     local deepep_branch=""
     local nixl_material=""
-    local rocshmem_material=""
     local deepep_material=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     nixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "NIXL_BRANCH")
     ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
-    rocshmem_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "ROCSHMEM_BRANCH")
     deepep_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "DEEPEP_BRANCH")
 
     if [[ -n "${nixl_branch}" && -n "${ucx_branch}" ]]; then
@@ -2360,22 +2408,11 @@ compute_dependency_cache_keys() {
         echo "NIXL dependency cache key: ${NIXL_CACHE_KEY}"
     fi
 
-    if [[ -n "${rocshmem_branch}" ]]; then
-        rocshmem_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_rocshmem")
-        ROCSHMEM_CACHE_KEY=$(
-            compose_dependency_cache_key \
-                "${rocshmem_branch}" \
-                "${rocshmem_material}"
-        )
-        export ROCSHMEM_CACHE_KEY
-        echo "ROCShmem dependency cache key: ${ROCSHMEM_CACHE_KEY}"
-    fi
-
-    if [[ -n "${deepep_branch}" && -n "${rocshmem_branch}" ]]; then
-        deepep_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_rocshmem build_deepep")
+    if [[ -n "${deepep_branch}" ]]; then
+        deepep_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_deepep")
         DEEPEP_CACHE_KEY=$(
             compose_dependency_cache_key \
-                "${deepep_branch}-rocshmem-${rocshmem_branch}" \
+                "${deepep_branch}" \
                 "${deepep_material}"
         )
         export DEEPEP_CACHE_KEY
@@ -2415,18 +2452,11 @@ dependency_cache_ref_for_target() {
                 printf '%s\n' "${cache_repo}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH:-}"
             fi
             ;;
-        rocshmem-rocm-ci)
-            if [[ -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
-                printf '%s\n' "${cache_repo}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}"
-            elif [[ -n "${ROCSHMEM_BRANCH:-}" ]]; then
-                printf '%s\n' "${cache_repo}:rocshmem-rocm-${ROCSHMEM_BRANCH}"
-            fi
-            ;;
         deepep-rocm-ci)
             if [[ -n "${DEEPEP_CACHE_KEY:-}" ]]; then
                 printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_CACHE_KEY}"
             elif [[ -n "${DEEPEP_BRANCH:-}" ]]; then
-                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH:-}"
+                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}"
             fi
             ;;
     esac
@@ -2444,7 +2474,6 @@ add_dependency_cache_target() {
 resolve_ci_base_dependency_targets() {
     local mode="${ROCM_DEP_CACHE_EXPORT_MODE:-missing}"
     local nixl_ref=""
-    local rocshmem_ref=""
     local deepep_ref=""
 
     [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
@@ -2452,7 +2481,7 @@ resolve_ci_base_dependency_targets() {
     case "${mode}" in
         always)
             echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
-            for target in nixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci; do
+            for target in nixl-rocm-ci deepep-rocm-ci; do
                 if [[ -n "$(dependency_cache_ref_for_target "${target}")" ]]; then
                     add_dependency_cache_target "${target}"
                 fi
@@ -2482,16 +2511,6 @@ resolve_ci_base_dependency_targets() {
         fi
     fi
 
-    if [[ "${mode}" != "always" && -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
-        rocshmem_ref=$(dependency_cache_ref_for_target "rocshmem-rocm-ci")
-        if dependency_cache_ref_exists "${rocshmem_ref}"; then
-            echo "ROCShmem dependency cache exists: ${rocshmem_ref}"
-        else
-            echo "ROCShmem dependency cache missing; will seed: ${rocshmem_ref}"
-            add_dependency_cache_target "rocshmem-rocm-ci"
-        fi
-    fi
-
     if [[ "${mode}" != "always" && -n "${DEEPEP_CACHE_KEY:-}" ]]; then
         deepep_ref=$(dependency_cache_ref_for_target "deepep-rocm-ci")
         if dependency_cache_ref_exists "${deepep_ref}"; then
@@ -2500,15 +2519,6 @@ resolve_ci_base_dependency_targets() {
             echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
             add_dependency_cache_target "deepep-rocm-ci"
         fi
-    fi
-
-    # DeepEP inherits from ROCShmem. If ROCShmem is being seeded, seed DeepEP too
-    # so the pair stays consistent for future ci_base rebuilds.
-    if printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "rocshmem-rocm-ci" \
-        && ! printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "deepep-rocm-ci" \
-        && [[ -n "${DEEPEP_BRANCH:-}" ]]; then
-        echo "ROCShmem cache is missing; also seeding DeepEP cache"
-        add_dependency_cache_target "deepep-rocm-ci"
     fi
 
     BAKE_TARGETS=("ci-base-rocm-ci")
@@ -2771,12 +2781,21 @@ main() {
         # from an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
+        rm -rf ./kernel-symbol-map-rocm
+    fi
     seed_dependency_caches_if_needed
     run_bake
     verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
+        upload_kernel_symbol_map_if_present
+    else
+        export_kernel_symbol_map \
+            || echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

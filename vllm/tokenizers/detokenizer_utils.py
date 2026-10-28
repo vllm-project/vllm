@@ -230,7 +230,13 @@ def detokenize_incrementally(
             _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     else:
         new_tokens = [""]
-    output_tokens = prev_tokens + new_tokens
+    output_token_count = len(prev_tokens) + len(new_tokens)
+    window_start = (
+        0 if is_first_iter else min(prefix_offset, read_offset, len(prev_tokens))
+    )
+    output_tokens = (
+        prev_tokens[window_start:] if window_start else prev_tokens
+    ) + new_tokens
 
     # If this is the first iteration, return all tokens.
     if is_first_iter:
@@ -241,19 +247,21 @@ def detokenize_incrementally(
     # surrounding ids.
     if tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:read_offset]
+            output_tokens[prefix_offset - window_start : read_offset - window_start]
         )
-        new_text = tokenizer.convert_tokens_to_string(output_tokens[prefix_offset:])
+        new_text = tokenizer.convert_tokens_to_string(
+            output_tokens[prefix_offset - window_start :]
+        )
     else:
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
-            output_tokens[prefix_offset:read_offset],
+            output_tokens[prefix_offset - window_start : read_offset - window_start],
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
         new_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
-            output_tokens[prefix_offset:],
+            output_tokens[prefix_offset - window_start :],
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
@@ -266,4 +274,4 @@ def detokenize_incrementally(
         return new_tokens, "", prefix_offset, read_offset
 
     new_text = new_text[len(prefix_text) :]
-    return new_tokens, new_text, read_offset, len(output_tokens)
+    return new_tokens, new_text, read_offset, output_token_count

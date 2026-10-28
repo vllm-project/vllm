@@ -154,6 +154,13 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         )
 
 
+@triton.jit
+def pack_ue8m0_x4(scale):
+    """Encode a power-of-two fp32 scale as four equal packed UE8M0 bytes, the
+    MX scales of a 128-wide row (see `mqa_logits_use_mx_scales`)."""
+    return ((scale.to(tl.int32, bitcast=True) >> 23) & 0xFF) * 0x01010101
+
+
 def pack_seq_triton(
     x: torch.Tensor,
     lengths: torch.Tensor,

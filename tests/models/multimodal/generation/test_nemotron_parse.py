@@ -13,7 +13,6 @@ from vllm.tokenizers import TokenizerLike
 
 from ....conftest import HfRunner, PromptImageInput, VllmRunner
 
-IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = (
     "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"
 )
@@ -63,6 +62,8 @@ def run_test(
     with vllm_runner(
         model,
         dtype=dtype,
+        max_model_len=1024,
+        enable_chunked_prefill=False,
         max_num_seqs=64,
         limit_mm_per_prompt={"image": 1},
         trust_remote_code=True,
@@ -104,17 +105,27 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.2"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        # v2.0's checkpoint ties lm_head to the decoder's input embeddings
+        # instead of shipping a separate lm_head.weight tensor; this
+        # exercises that path (see tie_weights() in nemotron_parse.py).
+        "nvidia/NVIDIA-Nemotron-Parse-2.0",
+    ],
+)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
+    image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
     run_test(
         hf_runner,
         vllm_runner,
         inputs=[
-            ([PROMPT] * 10, [IMAGE] * 10),
+            ([PROMPT] * 10, [image] * 10),
         ],
         model=model,
         dtype=dtype,

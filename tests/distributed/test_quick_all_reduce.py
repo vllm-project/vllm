@@ -79,6 +79,7 @@ def _make_quick_allreduce_for_test(
     quantization_min_size: int | None = None,
 ) -> QuickAllReduce:
     quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
+    quick_reduce._flydsl_int4 = None
     quick_reduce.disabled = False
     quick_reduce.qr_max_size = 16 * MB
     quick_reduce.qr_min_size = min_size_mb * MB if min_size_mb is not None else None
@@ -87,6 +88,67 @@ def _make_quick_allreduce_for_test(
     quick_reduce.use_fp16_kernels = False
     quick_reduce.world_size = 2
     return quick_reduce
+
+
+class _FakeFlyDSLInt4:
+    def __init__(self):
+        self.allreduce_calls = 0
+        self.closed = False
+
+    def allreduce(self, inp, out):
+        self.allreduce_calls += 1
+
+    def close(self):
+        self.closed = True
+
+
+def _bf16(num_elems: int) -> torch.Tensor:
+    return torch.empty(num_elems, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize(
+    "inp, quantization_min_size, expect_flydsl",
+    [
+        pytest.param(_bf16(MB), None, True, id="bf16"),
+        pytest.param(torch.empty(MB, dtype=torch.float16), None, False, id="fp16"),
+        pytest.param(_bf16(2 * MB)[::2], None, False, id="non_contiguous"),
+        # Right size, but the data pointer is 8 bytes past a 16-byte boundary.
+        pytest.param(_bf16(MB + 16)[4 : MB + 4], None, False, id="misaligned"),
+        # Below the quantization min size the FP codec runs, which FlyDSL lacks.
+        pytest.param(_bf16(MB), 4 * MB, False, id="fp_codec_below_quant_min"),
+    ],
+)
+def test_flydsl_int4_dispatch_falls_back_to_hip(
+    monkeypatch: pytest.MonkeyPatch,
+    inp: torch.Tensor,
+    quantization_min_size: int | None,
+    expect_flydsl: bool,
+):
+    quick_reduce = _make_quick_allreduce_for_test(
+        quantization_min_size=quantization_min_size
+    )
+    quick_reduce._ptr = 0
+    fake = _FakeFlyDSLInt4()
+    quick_reduce._flydsl_int4 = fake
+    hip_calls = []
+    monkeypatch.setattr(ops, "qr_all_reduce", lambda *args: hip_calls.append(args))
+
+    quick_reduce.quick_all_reduce(inp)
+
+    assert fake.allreduce_calls == int(expect_flydsl)
+    assert len(hip_calls) == int(not expect_flydsl)
+
+
+def test_close_closes_flydsl_int4():
+    quick_reduce = _make_quick_allreduce_for_test()
+    quick_reduce.disabled = True  # skip the HIP teardown
+    fake = _FakeFlyDSLInt4()
+    quick_reduce._flydsl_int4 = fake
+
+    quick_reduce.close()
+
+    assert fake.closed
+    assert quick_reduce._flydsl_int4 is None
 
 
 def test_should_quick_allreduce_uses_builtin_min_size_when_unset():
@@ -255,6 +317,9 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
 
         def __init__(self):
             self.checked_input = None
+
+        def uses_flydsl_int4(self, inp):
+            return False
 
         def should_quick_allreduce(self, inp):
             self.checked_input = inp

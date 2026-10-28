@@ -44,7 +44,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from .utils import (
@@ -380,7 +379,6 @@ class JambaForCausalLM(
     SupportsLoRA,
     SupportsPP,
     IsHybrid,
-    SupportsMambaPrefixCaching,
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".self_attn.": ".", ".A_log": ".A"},

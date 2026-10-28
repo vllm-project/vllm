@@ -280,6 +280,7 @@ fn to_chat_tools(tools: &[FixtureTool]) -> Vec<ChatTool> {
             description: tool.function.description.clone(),
             parameters: tool.function.parameters.clone(),
             strict: tool.function.strict,
+            defer_loading: None,
         })
         .collect()
 }

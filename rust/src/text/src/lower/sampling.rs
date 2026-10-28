@@ -14,6 +14,11 @@ pub enum SamplingParamsError {
         value: f32,
         expected: &'static str,
     },
+    #[error(
+        "routed_experts_prompt_start must be between 0 and the prompt length \
+         ({prompt_len}), inclusive, got {value}"
+    )]
+    RoutedExpertsPromptStartOutOfRange { value: u32, prompt_len: u32 },
 }
 
 fn validate_frequency_penalty(value: f32) -> Result<(), SamplingParamsError> {

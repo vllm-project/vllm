@@ -1,0 +1,178 @@
+meta:
+  title: "DeepSeek-OCR-2"
+  slug: "deepseek-ocr-2"
+  provider: "DeepSeek"
+  description: "Next-generation DeepSeek OCR model with improved document-to-markdown grounding and optical context compression."
+  date_added: 2026-03-28
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Improved grounding and markdown conversion over DeepSeek-OCR"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-OCR"
+
+model:
+  model_id: "deepseek-ai/DeepSeek-OCR-2"
+  min_vllm_version: "0.16.0"
+  architecture: dense
+  parameter_count: "3B"
+  active_parameters: "3B"
+  context_length: 8192
+  base_args:
+    - "--trust-remote-code"
+    - "--logits_processors"
+    - "vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor"
+    - "--no-enable-prefix-caching"
+    - "--mm-processor-cache-gb"
+    - "0"
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 7
+    description: "Full precision BF16 (~3.4B params)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-OCR-2 is a frontier OCR model exploring optical context compression for LLMs.
+  It iterates on DeepSeek-OCR with better grounding and markdown conversion, and supports
+  prompts like `<image>\n<|grounding|>Convert the document to markdown.` for richer
+  document parsing.
+
+  ## Prerequisites
+
+  - **Hardware**: Single GPU with >=8 GB VRAM is typically sufficient for BF16 inference.
+  - **vLLM**: Current stable release (tested with `uv pip install -U vllm --torch-backend auto`).
+  - **Python**: 3.10+
+
+  Install vLLM:
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Client Usage
+
+  ### Offline OCR (Python)
+
+  ```python
+  from vllm import LLM, SamplingParams
+  from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+  from PIL import Image
+
+  llm = LLM(
+      model="deepseek-ai/DeepSeek-OCR-2",
+      enable_prefix_caching=False,
+      mm_processor_cache_gb=0,
+      logits_processors=[NGramPerReqLogitsProcessor],
+  )
+
+  image_1 = Image.open("path/to/your/image_1.png").convert("RGB")
+  image_2 = Image.open("path/to/your/image_2.png").convert("RGB")
+  # prompt = "<image>\nFree OCR. "
+  prompt = "<image>\n<|grounding|>Convert the document to markdown. "
+
+  model_input = [
+      {"prompt": prompt, "multi_modal_data": {"image": image_1}},
+      {"prompt": prompt, "multi_modal_data": {"image": image_2}},
+  ]
+
+  sampling_param = SamplingParams(
+      temperature=0.0,
+      max_tokens=8192,
+      extra_args=dict(
+          ngram_size=30,
+          window_size=90,
+          whitelist_token_ids={128821, 128822},  # <td>, </td>
+      ),
+      skip_special_tokens=False,
+  )
+
+  for output in llm.generate(model_input, sampling_param):
+      print(output.outputs[0].text)
+  ```
+
+  ### Online OCR serving
+
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-OCR-2 \
+    --logits_processors vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor \
+    --no-enable-prefix-caching \
+    --mm-processor-cache-gb 0
+  ```
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [
+      {
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"}},
+              {"type": "text", "text": "Free OCR."},
+          ],
+      }
+  ]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="deepseek-ai/DeepSeek-OCR-2",
+      messages=messages,
+      max_tokens=2048,
+      temperature=0.0,
+      extra_body={
+          "skip_special_tokens": False,
+          "vllm_xargs": {
+              "ngram_size": 30,
+              "window_size": 90,
+              "whitelist_token_ids": [128821, 128822],
+          },
+      },
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(f"Generated text: {response.choices[0].message.content}")
+  ```
+
+  ## Troubleshooting / Configuration Tips
+
+  - **Use the custom logits processor** along with the model for optimal OCR and markdown
+    generation performance.
+  - Unlike multi-turn chat, OCR tasks do not typically benefit from prefix caching or image
+    reuse, so disable these features to avoid unnecessary hashing and caching overhead.
+  - DeepSeek-OCR-2 works better with plain prompts than instruction formats. See the
+    [official main prompts](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2#main-prompts).
+  - Depending on your hardware, adjust `max_num_batched_tokens` for better throughput.
+
+  ## References
+
+  - [DeepSeek-OCR-2 on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html#offline-inference)

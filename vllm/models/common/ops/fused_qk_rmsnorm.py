@@ -68,7 +68,8 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             weight_ptr = kv_weight_ptr
             row_out = kv_out_ptr + token_idx * kv_out_stride
 
-        # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
+        # RMSNorm in fp32 throughout — matches
+        # csrc/layernorm_kernels.cu's
         # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
         # keep x, rrms, and w all in fp32 and perform a single cast at store.
         block = tl.arange(0, BLOCK_SIZE)

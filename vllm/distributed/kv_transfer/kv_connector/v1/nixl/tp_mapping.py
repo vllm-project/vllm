@@ -67,11 +67,26 @@ class TPMapping:
 # ======================================================================
 
 
+def compute_head_offset(
+    tp_rank: int, tp_size: int, remote_tp_size: int, total_num_kv_heads: int
+) -> int:
+    """Return the offset in local head slices within the remote KV block."""
+    if tp_size <= remote_tp_size:
+        return 0
+    if tp_size > total_num_kv_heads:
+        remote_rank = tp_rank * remote_tp_size // tp_size
+        local_head = tp_rank * total_num_kv_heads // tp_size
+        remote_head = remote_rank * total_num_kv_heads // remote_tp_size
+        return local_head - remote_head
+    return tp_rank % (tp_size // remote_tp_size)
+
+
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
+    head_sharded_kv_heads: int | None = None,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -80,13 +95,17 @@ def compute_tp_mapping(
 
     DCP support is scoped to MLA only, with a side is either fully replicated or fully
     sharded. DCP-branch reuses the same rank set used at handshake selection.
+
+    ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
+    instead of the topology's, e.g. a GQA draft under an MLA target.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
-    total_num_kv_heads = transfer_topology.total_num_kv_heads
+    is_mla = transfer_topology.is_mla and head_sharded_kv_heads is None
+    total_num_kv_heads = head_sharded_kv_heads or transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
-    if transfer_topology.is_mla or tp_size >= remote_tp_size:
-        if transfer_topology.is_mla and remote_dcp_size > 1:
+    if is_mla or tp_size >= remote_tp_size:
+        if is_mla and remote_dcp_size > 1:
             attn_ranks = transfer_topology.dcp_source_ranks(
                 remote_tp_size, remote_dcp_size
             )
@@ -137,16 +156,11 @@ def compute_tp_mapping(
     }
 
     # --- Rank offset factor ---
-    if transfer_topology.is_mla or tp_size <= remote_tp_size:
-        # We don't index into remote for reading, no offset needed.
-        rank_offset_factor = 0
-    elif tp_size > total_num_kv_heads:
-        local_head = tp_rank * total_num_kv_heads // tp_size
-        p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
-        rank_offset_factor = local_head - p_start
-    else:
-        # D TP > P TP: we index into remote to read different heads depending on rank.
-        rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
+    rank_offset_factor = (
+        0
+        if is_mla
+        else compute_head_offset(tp_rank, tp_size, remote_tp_size, total_num_kv_heads)
+    )
 
     local_consumers = transfer_topology.dcp_consumer_count(
         remote_tp_size, remote_dcp_size

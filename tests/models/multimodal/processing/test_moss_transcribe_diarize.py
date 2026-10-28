@@ -1,9 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
+import pytest
+
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.model_executor.models.moss_transcribe_diarize import (
+    DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT,
     MossTranscribeDiarizeForConditionalGeneration,
 )
+
+
+def _question(request_prompt: str = "", hotwords: str | None = None) -> str:
+    params = SpeechToTextParams(
+        audio=np.zeros(1600, dtype=np.float32),
+        stt_config=SpeechToTextConfig(),
+        model_config=None,
+        hotwords=hotwords,
+        request_prompt=request_prompt,
+    )
+    prompt = MossTranscribeDiarizeForConditionalGeneration.get_generation_prompt(
+        params
+    )["prompt"]
+    return prompt.split("<|audio_end|>\n", 1)[1].split("<|im_end|>", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("request_prompt", "hotwords", "expected"),
+    [
+        ("", None, DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT),
+        ("", "  ", DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT),
+        (
+            "",
+            "魔搭, 达摩院",
+            DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT + "热词提示：魔搭, 达摩院",
+        ),
+        ("转录为文本。", " vLLM ", "转录为文本。热词提示：vLLM"),
+    ],
+    ids=[
+        "default",
+        "blank-hotwords",
+        "hotwords",
+        "custom-prompt-hotwords",
+    ],
+)
+def test_generation_prompt_appends_hotwords(request_prompt, hotwords, expected):
+    assert _question(request_prompt, hotwords) == expected
 
 
 def test_parse_diarized_transcript_preserves_moss_segments():

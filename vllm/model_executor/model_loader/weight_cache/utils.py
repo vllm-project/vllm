@@ -7,10 +7,17 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from vllm.config import SpeculativeConfig
+import torch
+
+from vllm.config import SpeculativeConfig, VllmConfig, replace, set_current_vllm_config
 from vllm.model_executor.models.interfaces import SupportsEagleBase
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # Speculative methods whose draft model the daemon caches in its own group.
 # Other drafts keep loading from disk in the engine.
@@ -46,3 +53,27 @@ def format_daemon_role(is_draft: bool) -> str:
 def format_socket_role_suffix(is_draft: bool) -> str:
     """Socket-name suffix keeping the draft group distinct from the target."""
     return "_draft" if is_draft else ""
+
+
+def build_warmup_runner(
+    vllm_config: VllmConfig,
+    local_rank: int,
+    *,
+    is_draft: bool,
+    model_config: "ModelConfig",
+) -> "GPUModelRunner":
+    """Create a model runner for the daemon's warmup dummy runs."""
+    if is_draft:
+        vllm_config = replace(
+            vllm_config, model_config=model_config, speculative_config=None
+        )
+    device = torch.device(current_platform.device_type, local_rank)
+    with set_current_vllm_config(vllm_config):
+        if vllm_config.use_v2_model_runner:
+            from vllm.v1.worker.gpu.model_runner import GPUModelRunner as Runner
+        else:
+            from vllm.v1.worker.gpu_model_runner import GPUModelRunner as Runner
+        runner = Runner(vllm_config, device)
+    # The two runner classes share the warmup surface; the nominal type
+    # stays V1's GPUModelRunner.
+    return cast("GPUModelRunner", runner)

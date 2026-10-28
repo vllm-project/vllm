@@ -4,6 +4,8 @@
 
 import torch
 
+from vllm.model_executor import utils as executor_utils
+
 
 def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
     assert dst.dtype == src.dtype, "Tensors must have the same dtype"
@@ -32,10 +34,5 @@ def replace_parameter(
         #   can be faster if the underlying storage is the same
         update_tensor_inplace(old, new)
     else:
-        # Fallback re-register parameter, convert to Parameter if necessary
-        # this not only ensures we don't register a tensor as a parameter, but
-        # also ensures that all parameter subclasses get re-registered as
-        # parameters for `torch.compile` compatibility
-        if not isinstance(new, torch.nn.Parameter):
-            new = torch.nn.Parameter(new, requires_grad=False)
-        mod.register_parameter(name, torch.nn.Parameter(new, requires_grad=False))
+        # Keep the registered parameter object (class and loader attributes)
+        executor_utils.replace_parameter(mod, name, new)

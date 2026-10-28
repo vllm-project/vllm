@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
+    _weights_host_resident,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -195,6 +197,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _apply_router_weight_in_gemm2(self, apply_router_weight_on_input: bool) -> bool:
+        return not apply_router_weight_on_input
+
+    def _finalize_expert_output(
+        self,
+        expert_output: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        self.moe_sum(expert_output, output, topk_ids, expert_map)
+
     def activation(
         self,
         activation: MoEActivation,
@@ -336,6 +350,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             workspace13, (num_tokens * top_k_num, cache2_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        hooked = self._uses_post_gemm2_hook(num_tokens)
+        if hooked and (apply_router_weight_on_input or self._lora_context is not None):
+            raise NotImplementedError(
+                "post_gemm2_hook needs unweighted GEMM2 rows; it supports neither "
+                "router weights on the input nor LoRA."
+            )
 
         # Under EP, drop the top-k slots routed to remote experts at alignment
         # time instead of launching `off_experts == -1` GEMM blocks that only
@@ -370,6 +390,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 block_shape=self.block_shape,
                 ignore_invalid_experts=skip_invalid,
+                weights_host_resident=_weights_host_resident(w1, w2),
             )
         )
 
@@ -544,7 +565,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                not apply_router_weight_on_input,
+                not hooked
+                and self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
                 1,
                 config,
                 compute_type=compute_type,
@@ -604,8 +626,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+        if hooked:
+            self._run_post_gemm2_hook(
+                route_major_moe_output(
+                    intermediate_cache3, topk_weights, topk_ids, expert_map
+                ),
+                output,
+            )
+        else:
+            self._finalize_expert_output(
+                intermediate_cache3, output, topk_ids, expert_map
+            )
 
     def moe_sum(
         self,

@@ -36,6 +36,7 @@ def _chunk(block_table, token_start, token_end, row_ends):
         cu_seq_lens=torch.zeros(1, dtype=torch.int32),
         token_to_seq=torch.zeros(1, dtype=torch.int32),
         total_seq_lens=1,
+        max_seqlen_k=int(ends.max()),
         token_start=token_start,
         token_end=token_end,
         num_reqs=block_table.shape[0],

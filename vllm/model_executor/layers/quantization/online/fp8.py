@@ -12,14 +12,14 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.kernels.linear import (
+    fp8_scaled_mm_is_batch_invariant,
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -37,8 +37,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.requantization import (
+    OnlineRequantizationMixin,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     create_fp8_quant_key,
@@ -116,15 +120,25 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
     return is_row_parallel or (reduces_output_dim and is_column_parallel)
 
 
-class OnlineLinearBase(LinearMethodBase):
+class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
     """Shared base for online FP8 linear methods. Loads fp16/bf16 checkpoint
     weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
+    activation_quant_key: QuantKey | None
 
     def __init__(self):
+        super().__init__()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
+        if self.requantization_source is None:
+            return layer.weight
+        weight = self.requantization_source.dequantize_weight(layer)
+        if not isinstance(weight, torch.Tensor):
+            raise TypeError("Linear requantization requires a single weight tensor.")
+        return weight
 
     def create_weights(
         self,
@@ -136,6 +150,17 @@ class OnlineLinearBase(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.create_requantization_source_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        ):
+            return
+
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -164,6 +189,12 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
+    activation_quant_key = (
+        kFp8DynamicTokenSym
+        if cutlass_fp8_supported() or current_platform.is_xpu()
+        else kFp8DynamicTensorSym
+    )
+
     def __init__(self):
         super().__init__()
 
@@ -172,11 +203,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.use_marlin = False
         self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
-        # Use per-token quantization for better perf if dynamic and cutlass
-        if cutlass_fp8_supported():
-            self.activation_quant_key = kFp8DynamicTokenSym
-        else:
-            self.activation_quant_key = kFp8DynamicTensorSym
 
     def create_weights(
         self,
@@ -198,6 +224,8 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
+        # TODO: init_fp8_linear_kernel should support activation_quant_key=None
+        assert self.activation_quant_key is not None
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
@@ -213,10 +241,11 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
             return
 
         layer.input_scale = None
-        amax = weight_amax(layer.weight).reshape(1)
+        weight = self.get_weight_for_quantization(layer)
+        amax = weight_amax(weight).reshape(1)
         amax = amax_for_tp_weight_quant(amax, _is_tp_sharded(layer))
         weight_scale = _fp8_scale(amax)
-        qweight, _ = ops.scaled_fp8_quant(layer.weight, scale=weight_scale)
+        qweight, _ = ops.scaled_fp8_quant(weight, scale=weight_scale)
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
@@ -225,6 +254,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
             self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
         self.fp8_linear.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -237,7 +267,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, use BF16 dequant
         if envs.VLLM_BATCH_INVARIANT:
-            if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+            if fp8_scaled_mm_is_batch_invariant(self.fp8_linear):
                 return self.fp8_linear.apply_weights(layer, x, bias)
 
             weight_fp8 = layer.weight.to(torch.bfloat16)
@@ -265,13 +295,11 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
     """Online blockwise FP8 linear quantization.
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
+    activation_quant_key = kFp8Dynamic128Sym
+
     def __init__(self):
         super().__init__()
         self.weight_block_size = [128, 128]
-        self.activation_quant_key = create_fp8_quant_key(
-            static=False,
-            group_shape=GroupShape(1, self.weight_block_size[0]),
-        )
         self.weight_quant_key = create_fp8_quant_key(
             static=True, group_shape=GroupShape(*self.weight_block_size)
         )
@@ -297,6 +325,8 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
         )
         layer.weight_block_size = self.weight_block_size
 
+        # TODO: init_fp8_linear_kernel should support activation_quant_key=None
+        assert self.activation_quant_key is not None
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
@@ -312,15 +342,20 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
 
         layer.input_scale = None
         block_size = self.weight_block_size
+        weight = self.get_weight_for_quantization(layer)
 
         qweight, weight_scale_inv = per_block_cast_to_fp8(
-            layer.weight, block_size=block_size, use_ue8m0=False
+            weight, block_size=block_size, use_ue8m0=False
         )
 
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
 
+        if self.requantization_source is not None and hasattr(layer, "weight_scale"):
+            del layer.weight_scale
+
         self.fp8_linear.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -395,18 +430,20 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             return
 
         layer.input_scale = None
-        amax = weight_amax(layer.weight, dim=-1, keepdim=True)
+        weight = self.get_weight_for_quantization(layer)
+        amax = weight_amax(weight, dim=-1, keepdim=True)
         amax = amax_for_tp_weight_quant(
             amax, _is_tp_sharded(layer, reduces_output_dim=False)
         )
         weight_scale = _fp8_channel_scale(amax)
-        qweight = _fp8_quant_per_channel(layer.weight, weight_scale)
+        qweight = _fp8_quant_per_channel(weight, weight_scale)
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
         expose_input_quant_key(layer, self.fp8_linear)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -419,7 +456,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         # if batch invariant mode is enabled dequant
         if (
             envs.VLLM_BATCH_INVARIANT
-            and not isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel)
+            and not fp8_scaled_mm_is_batch_invariant(self.fp8_linear)
             and not isinstance(x, QuantizedActivation)
         ):
             weight_dequant = (
@@ -565,9 +602,18 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         *,
         moe: FusedMoEConfig,
     ):
+        # A per-tensor dynamic activation scale is the max over every token in
+        # the batch, so a request's quantized expert inputs would depend on the
+        # requests it is batched with.
+        activation_key = (
+            kFp8DynamicTokenSym if envs.VLLM_BATCH_INVARIANT else kFp8DynamicTensorSym
+        )
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
         super().__init__(
             weight_block_size=None,
             moe=moe,
+            weight_key=kFp8StaticTensorSym,
+            activation_key=activation_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -575,27 +621,29 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
         moe_tp_size = self.moe.tp_size
-        w13_amax = weight_amax(layer.w13_weight.flatten(1), dim=-1)
+        w13_amax = weight_amax(w13_weight.flatten(1), dim=-1)
         w13_amax = amax_for_moe_weight_quant(w13_amax, moe_tp_size)
         w13_scale = _fp8_scale(w13_amax)
-        w2_amax = weight_amax(layer.w2_weight.flatten(1), dim=-1)
+        w2_amax = weight_amax(w2_weight.flatten(1), dim=-1)
         w2_amax = amax_for_moe_weight_quant(w2_amax, moe_tp_size)
         w2_scale = _fp8_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
             w13[expert, :, :], _ = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :], scale=w13_scale[expert]
+                w13_weight[expert, :, :], scale=w13_scale[expert]
             )
             w2[expert, :, :], _ = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :], scale=w2_scale[expert]
+                w2_weight[expert, :, :], scale=w2_scale[expert]
             )
 
         # Shuffle weights to runtime format and setup kernel.
@@ -608,6 +656,7 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -651,11 +700,12 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._zero_padding(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._zero_padding(layer, w13_weight, w2_weight)
 
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
 
         block_size = self.weight_block_size
         assert block_size is not None
@@ -664,8 +714,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         # Create block-shaped scales (computed here rather than in
         # create_weights because online quant doesn't need them until now).
         num_experts = layer.local_num_experts
-        _, w13_out, w13_in = layer.w13_weight.shape
-        _, w2_out, w2_in = layer.w2_weight.shape
+        _, w13_out, w13_in = w13_weight.shape
+        _, w2_out, w2_in = w2_weight.shape
 
         w13_scale = torch.ones(
             num_experts,
@@ -684,17 +734,21 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         for expert in range(num_experts):
             w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
-                layer.w13_weight[expert],
+                w13_weight[expert],
                 block_size=block_size,
                 use_ue8m0=False,
             )
             w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
-                layer.w2_weight[expert],
+                w2_weight[expert],
                 block_size=block_size,
                 use_ue8m0=False,
             )
 
         layer.weight_block_size = block_size
+
+        # Activation quantization is dynamic (including in re-quantization)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
@@ -703,9 +757,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             w2,
             w13_scale,
             w2_scale,
-            layer.w13_input_scale,
-            layer.w2_input_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
         )
+        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -757,32 +812,32 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
         # Scale's leading dim is taken from the fp8 weight tensor by
         # construction, so it cannot drift from the weight's expert count
         # under EP / padded MoE.
-        n_w13 = layer.w13_weight.shape[1]
+        n_w13 = w13_weight.shape[1]
         w13_scale = torch.ones(
             w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
         )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w2_amax = weight_amax(layer.w2_weight, dim=-1, keepdim=True)
+        w2_amax = weight_amax(w2_weight, dim=-1, keepdim=True)
         w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
         w2_scale = _fp8_channel_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
             w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert],
+                w13_weight[expert],
                 scale=None,
                 use_per_token_if_dynamic=True,
             )
-            w2[expert] = _fp8_quant_per_channel(
-                layer.w2_weight[expert], w2_scale[expert]
-            )
+            w2[expert] = _fp8_quant_per_channel(w2_weight[expert], w2_scale[expert])
 
         self._setup_kernel(
             layer,
@@ -793,5 +848,6 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
             w13_input_scale=None,
             w2_input_scale=None,
         )
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

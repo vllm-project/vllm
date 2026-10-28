@@ -15,6 +15,7 @@ from vllm.lora.ops.triton_ops.utils import (
     get_lora_op_configs,
     supports_pdl,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -231,6 +232,10 @@ def _lora_expand(
         torch.bfloat16,
     ]:
         CAST_TYPE = True
+        # Pipelined wgmma with a register A operand is miscompiled by
+        # ptxas < 13.3 on SM90 (triton-lang/triton#9433).
+        if current_platform.is_cuda() and current_platform.is_device_capability(90):
+            NUM_STAGES = 1
 
     # TODO (varun): This grid formulation maximizes parallelization at the
     # cost of wasteful thread block launch when only a few input tokens require

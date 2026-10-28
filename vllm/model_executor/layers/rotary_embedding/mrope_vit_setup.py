@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -91,6 +92,81 @@ def _vit_mrope_setup_kernel(
     tl.store(sin_out_ptr + 2 * plane + row, tl.sin(freq), mask=mask)
 
 
+@PluggableLayer.register("vit_mrope_setup")
+class VitMropeSetup(PluggableLayer):
+    """Builds triton_mrope's (3, N, half_rot) cos/sin t/h/w planes.
+
+    One fused kernel: positions are computed arithmetically from the grids
+    and the rotation comes from the per-axis inv_freq, so there is no
+    cos/sin cache to size or grow.
+
+    Stateless: the caller's inv_freq buffers are passed per call. OOT
+    platforms replace the whole layer via ``@VitMropeSetup.register_oot``
+    with a subclass overriding :meth:`forward` (e.g. to retune the kernel
+    tiling for their hardware).
+    """
+
+    def forward(
+        self,
+        inv_freq_t: torch.Tensor,
+        inv_freq_h: torch.Tensor,
+        inv_freq_w: torch.Tensor,
+        grid_thw: list[list[int]],
+        spatial_merge_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(3, total_N, half_rot_dim) fp32 cos/sin t/h/w planes.
+
+        Args:
+            inv_freq_t: t-axis inverse frequencies, (t_dim // 2,).
+            inv_freq_h: h-axis inverse frequencies, (h_dim // 2,).
+            inv_freq_w: w-axis inverse frequencies, (w_dim // 2,).
+            grid_thw: per-grid [t, h, w] patch counts (host metadata).
+            spatial_merge_size: spatial merge factor of the ViT.
+
+        """
+        device = inv_freq_t.device
+        cu = [0]
+        for t, h, w in grid_thw:
+            cu.append(cu[-1] + t * h * w)
+        n = cu[-1]
+        g = len(grid_thw)
+        # grid_thw is per-request host metadata, so one H2D is unavoidable;
+        # pack cu_seqlens and grids into a single pinned async copy.
+        buf = async_tensor_h2d(
+            cu + [d for grid in grid_thw for d in grid],
+            device=device,
+            dtype=torch.int32,
+        )
+        cu_seqlens = buf[: g + 1]
+        grids = buf[g + 1 :].view(g, 3)
+
+        half_t = inv_freq_t.numel()
+        half_h = inv_freq_h.numel()
+        half_w = inv_freq_w.numel()
+        half_rot = half_t + half_h + half_w
+        cos = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
+        sin = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
+        _vit_mrope_setup_kernel[(triton.cdiv(n, 32),)](
+            inv_freq_t,
+            inv_freq_h,
+            inv_freq_w,
+            cos,
+            sin,
+            cu_seqlens,
+            grids,
+            n,
+            g,
+            half_t=half_t,
+            half_h=half_h,
+            half_w=half_w,
+            spatial_merge=spatial_merge_size,
+            BLOCK_N=32,
+            BLOCK_D=triton.next_power_of_2(half_rot),
+            num_warps=8,
+        )
+        return cos, sin
+
+
 def vit_mrope_setup(
     inv_freq_t: torch.Tensor,
     inv_freq_h: torch.Tensor,
@@ -98,56 +174,7 @@ def vit_mrope_setup(
     grid_thw: list[list[int]],
     spatial_merge_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """(3, total_N, half_rot_dim) fp32 cos/sin t/h/w planes for triton_mrope.
-
-    One fused kernel: positions are computed arithmetically from the grids
-    and the rotation comes from the per-axis inv_freq, so there is no
-    cos/sin cache to size or grow.
-
-    Args:
-        inv_freq_t: t-axis inverse frequencies, (t_dim // 2,).
-        inv_freq_h: h-axis inverse frequencies, (h_dim // 2,).
-        inv_freq_w: w-axis inverse frequencies, (w_dim // 2,).
-        grid_thw: per-grid [t, h, w] patch counts (host metadata).
-        spatial_merge_size: spatial merge factor of the ViT.
-
-    """
-    device = inv_freq_t.device
-    cu = [0]
-    for t, h, w in grid_thw:
-        cu.append(cu[-1] + t * h * w)
-    n = cu[-1]
-    g = len(grid_thw)
-    # grid_thw is per-request host metadata, so one H2D is unavoidable;
-    # pack cu_seqlens and grids into a single pinned async copy.
-    buf = async_tensor_h2d(
-        cu + [d for grid in grid_thw for d in grid], device=device, dtype=torch.int32
+    """Compatibility wrapper around :class:`VitMropeSetup`."""
+    return VitMropeSetup()(
+        inv_freq_t, inv_freq_h, inv_freq_w, grid_thw, spatial_merge_size
     )
-    cu_seqlens = buf[: g + 1]
-    grids = buf[g + 1 :].view(g, 3)
-
-    half_t = inv_freq_t.numel()
-    half_h = inv_freq_h.numel()
-    half_w = inv_freq_w.numel()
-    half_rot = half_t + half_h + half_w
-    cos = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
-    sin = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
-    _vit_mrope_setup_kernel[(triton.cdiv(n, 32),)](
-        inv_freq_t,
-        inv_freq_h,
-        inv_freq_w,
-        cos,
-        sin,
-        cu_seqlens,
-        grids,
-        n,
-        g,
-        half_t=half_t,
-        half_h=half_h,
-        half_w=half_w,
-        spatial_merge=spatial_merge_size,
-        BLOCK_N=32,
-        BLOCK_D=triton.next_power_of_2(half_rot),
-        num_warps=8,
-    )
-    return cos, sin

@@ -78,6 +78,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
         },
         num_blocks=NUM_BLOCKS,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     assert n_segs == NUM_LAYERS
@@ -104,7 +105,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     zeroed no matter which group owns it."""
     from unittest.mock import MagicMock
 
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
     from vllm.v1.kv_cache_interface import (
         KVCacheGroupSpec,
         KVCacheLayout,
@@ -157,6 +158,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
         },
         num_blocks=config.num_blocks,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     # g1.big and g2.huge overlay at offset 0 -> one segment with g2's wider

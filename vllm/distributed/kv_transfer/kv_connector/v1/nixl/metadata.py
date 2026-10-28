@@ -49,8 +49,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Add remote_registration_generation to kv_transfer_params
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 15
 
 
 @dataclass
@@ -73,6 +75,8 @@ class NixlAgentMetadata:
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Page length of the PLE short-conv state (None when the model has none).
+    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Packed member -> (byte offset in its region's block, bytes per page).
@@ -233,6 +237,8 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
+    # Bumped each time the remote publishes a changed KV cache registration.
+    registration_generation: int = 0
 
 
 @dataclass
@@ -333,5 +339,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_generation=kv_transfer_params.get(
+                "remote_registration_generation", 0
+            ),
         )
         self.reqs_to_recv[request_id] = req

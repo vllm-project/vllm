@@ -55,6 +55,11 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
+    mm_encoder_output_widths: dict[str, int] = field(default_factory=dict, init=False)
+    """Per-token width of the encoder output for each modality, measured by EC
+    producers at startup. It can exceed the LM embedding width (e.g. DeepStack).
+    """
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

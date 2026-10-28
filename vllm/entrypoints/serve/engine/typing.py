@@ -4,7 +4,6 @@
 from typing import Protocol, TypeAlias
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -35,6 +34,7 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 
 
 class RendererRequest(Protocol):

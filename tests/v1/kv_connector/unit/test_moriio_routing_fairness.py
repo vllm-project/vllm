@@ -30,6 +30,7 @@ A node runs one of two modes (8 GPUs each):
 
 from collections import Counter
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -88,6 +89,8 @@ def make_decode_worker(*, world_size: int, tp_rank: int, dp_rank: int):
     w.tp_rank = tp_rank
     w.dp_rank = dp_rank
     w.use_mla = True
+    # The round-robin spreads reads over prefill NICs, so it runs over RDMA.
+    w.moriio_config = SimpleNamespace(backend="rdma")
     return w
 
 

@@ -13,7 +13,10 @@ The OpenAI batch file format consists of a series of json objects on new lines.
 Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
 
 ```{note}
-We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` endpoints (completions coming soon).
+We currently support `/v1/chat/completions`, `/v1/embeddings`, `/score`, `/rerank`,
+`/v1/audio/transcriptions`, and `/v1/audio/translations` endpoints (`/v1/completions`
+coming soon). Score and rerank match any URL ending in `/score` or `/rerank`, such as
+`/v1/score`.
 ```
 
 ## Pre-requisites
@@ -66,6 +69,13 @@ vllm run-batch \
 ### Step 3: Check your results
 
 You should now have your results at `results.jsonl`. You can check your results by running `cat results.jsonl`
+
+Responses are written in input order as the batch runs. The output file is
+truncated when the run starts; if the run fails partway, it holds the responses
+for the first lines of the input, so check the exit code before treating it as
+complete. To resume, rerun the input lines past the last one written; if the
+process was killed, drop a final line that is incomplete first. An output URL is
+uploaded only when the run succeeds.
 
 ```bash
 cat results.jsonl

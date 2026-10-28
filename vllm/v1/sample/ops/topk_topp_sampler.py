@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from subprocess import CalledProcessError
+
 import torch
 import torch.nn as nn
 
@@ -11,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -34,11 +37,34 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_mask.register_warmup()
 
 
-def _skip_aiter_sampler_on_gfx1250() -> bool:
-    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
-    from vllm.platforms.rocm import on_gfx1250
+def _aiter_temp_gumbel_sample(
+    logits: torch.Tensor, generators: dict[int, torch.Generator]
+) -> torch.Tensor:
+    """Fused temperature Gumbel-max sampling via aiter.
 
-    return on_gfx1250()
+    Logits are already temperature-scaled by the parent Sampler, so temps=1.
+    Returns int64 token ids of shape (num_tokens,).
+    """
+    from aiter import mixed_sample_outer_exponential
+
+    n, vocab = logits.shape
+    out = torch.empty(n, dtype=torch.int32, device=logits.device)
+    if not generators:
+        # Common case: shared (1, vocab) exponential noise (cheap RNG).
+        exp = (
+            torch.empty((1, vocab), dtype=torch.float32, device=logits.device)
+            .exponential_()
+            .expand(n, vocab)
+        )
+    else:
+        exp = torch.empty((n, vocab), dtype=torch.float32, device=logits.device)
+        if len(generators) != n:
+            exp.exponential_()
+        for i, g in generators.items():
+            exp[i].exponential_(generator=g)
+    temps = torch.ones(n, dtype=torch.float32, device=logits.device)
+    mixed_sample_outer_exponential(out, logits, exp, temps, eps=1e-10)
+    return out.to(torch.int64)
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
@@ -103,7 +129,9 @@ def flashinfer_sampler_supported() -> bool:
     capability = current_platform.get_device_capability()
     assert capability is not None
     unsupported_reason: str | None = None
-    if not FlashInferBackend.supports_compute_capability(capability):
+    if not has_flashinfer():
+        unsupported_reason = "FlashInfer kernels are disabled"
+    elif not FlashInferBackend.supports_compute_capability(capability):
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
@@ -246,8 +274,12 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
-            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
+            # Lazy ROCm-only import; keeps arch detection out of import time
+            # on CUDA/CPU.
+            from vllm.platforms.rocm import on_gfx1250
+
+            self.on_gfx1250 = on_gfx1250()
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
             logger.info_once(
@@ -319,11 +351,11 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Fused Gumbel-max sampling for CPU.
+        """CPU Gumbel-max sampling with per-token SplitMix64 noise.
 
-        Uses a precomputed Gumbel table + single-pass argmax over logits,
-        skipping softmax and intermediate allocations entirely.
-        Falls back to the native path when fp64 Gumbel noise is requested.
+        Independent (seed, token) streams avoid the wrapping-window bias
+        (#59786). Falls back to native sampling when fp64 Gumbel noise
+        is requested.
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
@@ -357,12 +389,14 @@ class TopKTopPSampler(nn.Module):
             return False
         try:
             import aiter.ops.sampling  # noqa: F401
-        except ImportError:
+        except Exception as err:
+            # The import may JIT-build and fail with OSError/CalledProcessError.
             self._aiter_ops_import_failed = True
             self.forward = self.forward_native
             logger.warning_once(
-                "aiter.ops.sampling is not available on ROCm. "
-                "Falling back to PyTorch-native implementation."
+                "aiter.ops.sampling is not available on ROCm (%s). "
+                "Falling back to PyTorch-native implementation.",
+                err,
             )
             return False
         self.aiter_ops = torch.ops.aiter
@@ -375,7 +409,16 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Optimized ROCm/aiter path (same structure as forward_cuda)."""
+        """Optimized ROCm/aiter path."""
+        if self.on_gfx1250:
+            if (
+                k is None
+                and p is None
+                and not self.use_fp64_gumbel
+                and self.logprobs_mode not in PROCESSED_LOGPROBS_MODES
+            ):
+                return _aiter_temp_gumbel_sample(logits, generators), None
+            return self.forward_native(logits, generators, k, p)
         if (k is None and p is None) or generators:
             if generators:
                 logger.warning_once(
@@ -390,7 +433,18 @@ class TopKTopPSampler(nn.Module):
         )
         if self.aiter_ops is None and not self._init_aiter_ops():
             return self.forward_native(logits, generators, k, p)
-        return self.aiter_sample(logits, k, p, generators), None
+        try:
+            return self.aiter_sample(logits, k, p, generators), None
+        except (ImportError, OSError, RuntimeError, CalledProcessError) as err:
+            # Some AITER wheels expose the op before its JIT extension exists.
+            self._aiter_ops_import_failed = True
+            self.forward = self.forward_native
+            logger.warning_once(
+                "AITER sampling kernel is unavailable on this ROCm system "
+                "(%s). Falling back to PyTorch-native sampling.",
+                err,
+            )
+            return self.forward_native(logits, generators, k, p)
 
     def aiter_sample(
         self,
@@ -447,24 +501,24 @@ class TopKTopPSampler(nn.Module):
         return xpu_sample(logits, k, p, self.logprobs_mode)
 
 
-# Note: this is a workaround for
-# https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-    q = torch.empty_like(probs)
-    q.exponential_()
-    return probs.div(q).argmax(dim=-1).view(-1)
-
-
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    has_topp_only_rows: bool = True,
 ) -> torch.Tensor:
+    """Apply top-k and/or top-p masking to logits.
+
+    has_topp_only_rows must be True if any row has p < 1 and
+    k >= logits.shape[-1] (no active top-k).
+    """
     if p is None and k is None:
         return logits
 
     if HAS_TRITON:
-        return apply_top_k_top_p_triton(logits, k, p)
+        return apply_top_k_top_p_triton(
+            logits, k, p, has_topp_only_rows=has_topp_only_rows
+        )
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)

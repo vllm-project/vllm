@@ -45,6 +45,18 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-nixl"
 
+## HiSparse KV Connector Metrics
+
+These metrics are exposed when the `HiSparseConnector` KV connector is
+configured. The host-pool gauges are reported by the scheduler once per engine
+step, for the host pool shared by all tensor-parallel ranks; evictable cached
+blocks count as free. With `--kv-cache-metrics`, the
+`vllm:hisparse_host_block_*_seconds` histograms sample host-pool block
+residency, like the device `vllm:kv_block_*_seconds` histograms, which cover
+only the GPU pool.
+
+--8<-- "gen:metrics-hisparse"
+
 ## Simple CPU Offload Connector Metrics
 
 These metrics are exposed when the `SimpleCPUOffloadConnector` KV connector

@@ -6,22 +6,52 @@ import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    LayerName,
     async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
-    is_quantized_kv_cache,
     set_default_torch_dtype,
+    set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    weak_ref_tensors,
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_weak_ref_tensors_does_not_keep_nested_tensors_alive() -> None:
+    # CUDA graph wrappers weak-ref model outputs such as
+    # (hidden_states, [aux_hidden_states, ...]); no tensor may stay pinned.
+    # Inductor graph partition outputs can also carry hoisted LayerNames.
+    hidden, aux = (torch.empty(1 << 20, device="cuda") for _ in range(2))
+    layer_name = LayerName("model.layers.0.self_attn.attn")
+    out = weak_ref_tensors((hidden, [aux], 3, layer_name))
+    assert isinstance(out, tuple)
+    weak_hidden, weak_list, size, name = out
+    assert isinstance(weak_list, list) and size == 3 and name is layer_name
+    assert weak_hidden.data_ptr() == hidden.data_ptr()
+    assert weak_list[0].data_ptr() == aux.data_ptr()
+    nbytes = hidden.nbytes + aux.nbytes
+    allocated = torch.accelerator.memory_allocated()
+    del hidden, aux
+    assert torch.accelerator.memory_allocated() == allocated - nbytes
+
+
+def test_weak_ref_tensors_rejects_unknown_nested_types() -> None:
+    with pytest.raises(ValueError):
+        weak_ref_tensors((1, [None]))
 
 
 def test_nvfp4_4over6_cache_dtype() -> None:
     from vllm.config.cache import CacheConfig
-    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import (
+        KVQuantMode,
+        get_kv_quant_mode,
+        is_quantized_kv_cache,
+    )
 
     cache_config = CacheConfig(cache_dtype="nvfp4_4over6")
 
@@ -217,3 +247,17 @@ def test_async_tensor_h2d_staging(device):
         async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
         torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
     )
+
+
+def test_set_random_seed_differs_per_data_parallel_index():
+    """Unseeded requests draw from the global RNGs; DP engines sharing the engine
+    seed must get distinct, reproducible streams, and index 0 keeps the seed."""
+
+    def draws(*args):
+        set_random_seed(*args)
+        return np.random.randint(2**31, size=4).tolist(), torch.rand(4).tolist()
+
+    assert draws(42, 0) == draws(42)
+    assert draws(42, 1) == draws(42, 1)
+    assert len({str(draws(42, i)) for i in range(4)}) == 4
+    assert draws(42, 1) != draws(43, 1)

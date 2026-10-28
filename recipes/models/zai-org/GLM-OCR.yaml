@@ -1,0 +1,158 @@
+meta:
+  title: "GLM-OCR"
+  slug: "glm-ocr"
+  provider: "GLM (Z-AI)"
+  description: "GLM-OCR image-to-text model with built-in MTP speculative decoding for high-throughput OCR serving"
+  date_added: 2026-01-26
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Multilingual end-to-end OCR VLM with MTP-accelerated decoding"
+  related_recipes: []
+
+model:
+  model_id: "zai-org/GLM-OCR"
+  min_vllm_version: "0.16.0"
+  architecture: dense
+  parameter_count: "0.9B"
+  active_parameters: "0.9B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "GLM-OCR requires the nightly vllm wheel"
+    command: "uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly"
+  - note: "transformers from source for GLM-OCR tokenizer support"
+    command: "uv pip install git+https://github.com/huggingface/transformers.git"
+
+features:
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding using the model's built-in MTP layers"
+    args:
+      - "--speculative-config.method"
+      - "mtp"
+      - "--speculative-config.num_speculative_tokens"
+      - "1"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Full precision BF16 — single-GPU deployment"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-OCR is a vision-language model for end-to-end OCR. It includes built-in
+  Multi-Token Prediction (MTP) layers enabling speculative decoding for higher
+  throughput generation.
+
+  ## Prerequisites
+
+  - **vLLM version:** nightly recommended (or latest stable with MTP support)
+  - **Transformers:** >= 5.0.0 (install from source for latest)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  Or nightly:
+
+  ```bash
+  uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install git+https://github.com/huggingface/transformers.git
+  ```
+
+  ## Launching the Server
+
+  ### With MTP Speculative Decoding
+
+  ```bash
+  vllm serve zai-org/GLM-OCR \
+       --speculative-config.method mtp \
+       --speculative-config.num_speculative_tokens 1
+  ```
+
+  ## Client Usage
+
+  ### OpenAI SDK
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [{
+      "role": "user",
+      "content": [
+          {"type": "image_url", "image_url": {"url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"}},
+          {"type": "text", "text": "Text Recognition:"}
+      ]
+  }]
+
+  response = client.chat.completions.create(
+      model="zai-org/GLM-OCR",
+      messages=messages,
+      max_tokens=2048,
+      temperature=0.0,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### cURL
+
+  ```bash
+  curl -s http://localhost:8000/v1/chat/completions \
+       -H "Content-Type: application/json" \
+       -d '{
+            "model": "zai-org/GLM-OCR",
+            "messages": [{
+                 "role": "user",
+                 "content": [
+                      {"type": "image_url", "image_url": {"url": "https://example.com/receipt.png"}},
+                      {"type": "text", "text": "Text Recognition:"}
+                 ]
+            }],
+            "max_tokens": 2048,
+            "temperature": 0.0
+       }'
+  ```
+
+  ## Troubleshooting
+
+  - **Greedy sampling recommended:** Use `temperature=0.0` for optimal OCR accuracy.
+  - **Transformers version:** Requires `transformers >= 5.0.0`.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-OCR)

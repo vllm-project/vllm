@@ -10,6 +10,12 @@ from unittest.mock import Mock
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
+)
+from vllm.entrypoints.generate.base.protocol import (
+    ResponseFormat as OpenAIResponseFormat,
+)
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -86,10 +92,60 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
 
     # Ensure task completes
     _, prompt = await task
-    assert prompt["prompt_token_ids"] == expected_tokens, (
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and only the
+    # token-prompt members of that union declare ``prompt_token_ids``.
+    assert prompt.get("prompt_token_ids") == expected_tokens, (
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        (
+            OpenAIResponseFormat(
+                type="json_schema",
+                json_schema=OpenAIJsonSchemaResponseFormat(
+                    name="answer", schema={"type": "object"}, strict=True
+                ),
+            ),
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                    "strict": True,
+                },
+            },
+        ),
+        (OpenAIResponseFormat(type="text"), None),
+    ],
+    ids=["json_schema", "text"],
+)
+def test_renderer_passes_response_format_to_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    response_format: OpenAIResponseFormat,
+    expected: dict[str, Any] | None,
+) -> None:
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.apply_chat_template = Mock(return_value=[1])
+    renderer = MistralRenderer(
+        MockVllmConfig(
+            MockModelConfig(skip_tokenizer_init=True),
+            parallel_config=MockParallelConfig(),
+        ),
+        tokenizer=mock_tokenizer,
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.mistral.parse_chat_messages",
+        lambda *_args, **_kwargs: ([], None, None),
+    )
+
+    renderer.render_messages([], ChatParams(response_format=response_format))
+
+    kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
+    assert kwargs.get("response_format") == expected
 
 
 def test_apply_mistral_chat_template_thinking_chunk():

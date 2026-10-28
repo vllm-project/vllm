@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
+
 import pytest
 import ray
 import torch
 import torch.distributed as dist
 
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
+from vllm.device_allocator import alloc_conf
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group, graph_capture
+from vllm.distributed.device_communicators.cuda_wrapper import find_loaded_library
+from vllm.distributed.parallel_state import (
+    GraphCaptureContext,
+    get_dp_group,
+    get_tp_group,
+    graph_capture,
+)
 from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
@@ -132,6 +141,90 @@ def test_rocm_aiter_custom_allreduce(
     test_target,
 ):
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def _num_memcpy_nodes(graph: torch.cuda.CUDAGraph) -> int:
+    hip = ctypes.CDLL(find_loaded_library("libamdhip64"))
+    handle = ctypes.c_void_p(graph.raw_cuda_graph())
+    num = ctypes.c_size_t()
+    assert hip.hipGraphGetNodes(handle, None, ctypes.byref(num)) == 0
+    nodes = (ctypes.c_void_p * num.value)()
+    assert hip.hipGraphGetNodes(handle, nodes, ctypes.byref(num)) == 0
+    node_type = ctypes.c_int()
+    count = 0
+    for node in nodes:
+        assert (
+            hip.hipGraphNodeGetType(ctypes.c_void_p(node), ctypes.byref(node_type)) == 0
+        )
+        count += node_type.value == 1  # hipGraphNodeTypeMemcpy
+    return count
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def graph_allreduce_expandable_segments(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        conf = alloc_conf.with_conf_flag(
+            alloc_conf.current_alloc_conf(), alloc_conf.EXPANDABLE_SEGMENTS, True
+        )
+        alloc_conf.set_alloc_conf(conf)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        assert get_tp_group().device_communicator.aiter_ar_comm.registers_graph_buffers
+
+        def capture_allreduce(capture_ctx) -> int:
+            shape, dtype = test_cases[-1]
+            with capture_ctx as graph_capture_context:
+                inp = torch.ones(shape, dtype=dtype, device=device)
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph(keep_graph=True)
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    out = tensor_model_parallel_all_reduce(inp)
+            graph.replay()
+            torch.testing.assert_close(out, inp * tp_size)
+            return _num_memcpy_nodes(graph)
+
+        # Without the guard, AITER stages the VMM-backed input through a copy.
+        unguarded = get_tp_group().graph_capture(
+            GraphCaptureContext(torch.cuda.Stream(device=device))
+        )
+        assert capture_allreduce(unguarded) == 1
+        assert capture_allreduce(graph_capture(device=device)) == 0
+        assert alloc_conf.expandable_segments_enabled()
+
+
+def _aiter_defers_capture_registration() -> bool:
+    if not is_aiter_found():
+        return False
+    from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce
+
+    return getattr(CustomAllreduce, "defers_capture_registration", False)
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+def test_aiter_defers_capture_registration():
+    """graph_capture() relies on this marker (ROCm/aiter#5799, AITER v0.1.26)."""
+    assert _aiter_defers_capture_registration()
+
+
+@pytest.mark.skipif(
+    not _aiter_defers_capture_registration(),
+    reason="AITER does not decide graph-buffer registration at capture time",
+)
+@multi_gpu_test(num_gpus=2)
+def test_rocm_aiter_custom_allreduce_skips_copy_with_expandable_segments(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    multi_process_parallel(monkeypatch, 2, 1, graph_allreduce_expandable_segments)
 
 
 def _get_aiter_ag_rs_comm():

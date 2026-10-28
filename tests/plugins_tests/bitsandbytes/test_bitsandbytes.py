@@ -6,9 +6,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 import pytest
-from packaging.version import Version
 from transformers import BitsAndBytesConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm_bnb_plugin import bitsandbytes_loader as bnb
 
 from vllm.platforms import current_platform
@@ -174,8 +172,7 @@ def test_load_pp_4bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+@pytest.mark.skip(
     reason="Need to add support for quantizing MoE experts with bnb in "
     "transformers v5. See https://github.com/bitsandbytes-foundation/"
     "bitsandbytes/issues/1849",

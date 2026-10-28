@@ -227,7 +227,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # five-minute lifetime and the loop above can run to the build-age deadline.
 # Build 91827 waited 6h48m and then took a 401 on all 360 callbacks from a
 # token that had expired hours earlier.
-OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
+# Posting is paced under the relay's rate limit, which takes several minutes
+# for a full nightly, so ask for a longer lifetime than the default. Fall back
+# to the default if this agent rejects --lifetime.
+OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" \
+    --lifetime 1800 2>/dev/null \
+    || buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
 if [[ -z "${OIDC_TOKEN}" ]]; then
     echo "could not mint a Buildkite OIDC token after the wait -- skipping report"
     exit 0

@@ -8,12 +8,14 @@ from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
+logger = init_logger(__name__)
 
 
 class ThreadSafeHFTokenizerMixin:

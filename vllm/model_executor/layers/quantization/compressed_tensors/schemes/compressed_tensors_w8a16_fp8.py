@@ -144,10 +144,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
             # Canonicalize to (K, N) for the kernel.
             replace_parameter(layer, "weight", layer.weight.t())
-            # Preserve the dim tags dropped by the transpose so layout-aware
-            # kernels see (K, N).
-            layer.weight.input_dim = 0
-            layer.weight.output_dim = 1
+            # The param keeps its checkpoint dims; layout-aware kernels read this.
+            layer.processed_weight_dims = (0, 1)
 
         self.linear_kernel.process_weights_after_loading(layer)
 

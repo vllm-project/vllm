@@ -12,15 +12,6 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class BlockBase(nn.Module):
-    """Block abstract module."""
-
-    def __init__(self, input_size: int, output_size: int) -> None:
-        super().__init__()
-        self.input_size = input_size
-        self.output_size = output_size
-
-
 def get_activation(name: str = "relu") -> torch.nn.Module:
     """Select an activation function by name.
 
@@ -1576,37 +1567,6 @@ def calc_length_int(
     return int(length_f)
 
 
-####  multihead attention starts here
-class AttModule(nn.Module):
-    """Attention abstraction module."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.export_mode = False
-
-    def set_export(self, mode: bool = True) -> None:
-        """Set the export mode."""
-        self.export_mode = mode
-
-    def forward(
-        self,
-        x: Tensor,
-        memory: Tensor | None = None,
-        pos_emb: Tensor | None = None,
-        att_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
-        """AttModule forward.
-
-        Args:
-            x: input tensor.
-            memory: memory tensor.
-            pos_emb: positional encoder embedding.
-            att_mask: attention mask tensor.
-
-        """
-        return x, memory, pos_emb, att_mask
-
-
 def masked_softmax(
     scores: Tensor,
     mask: Tensor | None,
@@ -1642,7 +1602,7 @@ class MultiHeadedAttention(nn.Module):
             NOTE: this will NOT be used in ONNX decoding due to a lack of
             support.  In that case, we use the original attention
             implementation, which shows no regression.
-            default: False.
+            default: True.
         n_value: int, optional
             if set to values other than -1, use a different dimension for
             value. With the default value (i.e. -1), it is backward compatible.
@@ -1666,7 +1626,7 @@ class MultiHeadedAttention(nn.Module):
         attention_inner_dim: int = -1,
         glu_type: str = "swish",
         bias_in_glu: bool = True,
-        use_pt_scaled_dot_product_attention: bool = False,
+        use_pt_scaled_dot_product_attention: bool = True,
         n_value: int = -1,
         group_size: int = 1,
     ) -> None:
@@ -1690,7 +1650,6 @@ class MultiHeadedAttention(nn.Module):
         self.linear_v = nn.Linear(n_value, attention_inner_dim // group_size)
         self.linear_out = nn.Linear(attention_inner_dim // group_size, n_value)
 
-        self.attn = torch.jit.Attribute(None, Tensor | None)
         self.dropout = nn.Dropout(p=dropout_rate)
         self.dropout_rate = dropout_rate
         self.use_pt_scaled_dot_product_attention = use_pt_scaled_dot_product_attention
@@ -1798,8 +1757,6 @@ class MultiHeadedAttention(nn.Module):
                 scores = scores + relative_attention_bias
 
             attn = masked_softmax(scores, mask)  # (batch, head, time1, time2)
-
-            self.attn = attn
 
             p_attn = self.dropout(attn)
             x = torch.matmul(p_attn.to(v.dtype), v)  # (batch, head, time1, d_k)

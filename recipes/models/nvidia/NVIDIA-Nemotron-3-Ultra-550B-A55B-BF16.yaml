@@ -1,0 +1,131 @@
+meta:
+  title: "NVIDIA Nemotron-3-Ultra-550B-A55B"
+  slug: "nemotron-3-ultra-550b-a55b"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron 3 Ultra hybrid Transformer-Mamba MoE model for long-context agentic reasoning, coding, and tool use."
+  date_added: 2026-06-04
+  date_updated: 2026-09-10
+  tasks:
+    - text
+  performance_headline: "550B total / 55B active parameters with BF16 and NVFP4 serving paths"
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  hardware:
+    b200: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
+  min_vllm_version: "0.22.0"
+  docker_image: "vllm/vllm-openai:v0.28.0"
+  architecture: moe
+  parameter_count: "550B"
+  active_parameters: "55B"
+  context_length: 262144
+  base_args:
+    - "--served-model-name"
+    - "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B"
+    - "--trust-remote-code"
+    - "--kv-cache-dtype"
+    - "fp8"
+    - "--max-num-seqs"
+    - "16"
+    - "--max-model-len"
+    - "262144"
+    - "--gpu-memory-utilization"
+    - "0.90"
+    - "--max-num-batched-tokens"
+    - "32768"
+    - "--enable-flashinfer-autotune"
+    - "--async-scheduling"
+    - "--mamba-backend"
+    - "triton"
+    - "--mamba-ssm-cache-dtype"
+    - "float32"
+  base_env:
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "1"
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Nemotron v3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "nemotron_v3"
+  spec_decoding:
+    description: "Multi-Token Prediction with 5 speculative tokens"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":5}'
+  long_context:
+    description: "Raise the context window from the default 256K to the model's full 1M tokens. Needs a large KV-cache budget — lower --max-model-len if you are memory-constrained."
+    args:
+      - "--max-model-len"
+      - "1048576"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1320
+    description: "BF16 weights"
+  fp4:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 330
+    description: "NVFP4 weights"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  NVIDIA Nemotron 3 Ultra is a 550B total / 55B active hybrid Transformer-Mamba MoE
+  model built for long-running agentic reasoning, coding, research, and tool use.
+
+  ## Launch command
+
+  ```bash
+  export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1
+
+  vllm serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+    --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --kv-cache-dtype fp8 \
+    --max-num-seqs 16 \
+    --max-model-len 262144 \
+    --gpu-memory-utilization 0.90 \
+    --max-num-batched-tokens 32768 \
+    --enable-flashinfer-autotune \
+    --async-scheduling \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+    --mamba-backend triton \
+    --mamba-ssm-cache-dtype float32 \
+    --reasoning-parser nemotron_v3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  ## References
+
+  - [BF16 model](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16)
+  - [NVFP4 model](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4)

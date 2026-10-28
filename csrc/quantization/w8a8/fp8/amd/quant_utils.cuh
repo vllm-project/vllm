@@ -5,7 +5,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_bfloat16.h>
 
-#include "../../../../attention/attention_dtypes.h"
+#include "core/vec_dtypes/vec_dtypes.h"
 #include <torch/headeronly/core/ScalarType.h>
 
 namespace vllm {

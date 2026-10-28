@@ -71,14 +71,20 @@ def create_fused_moe_router(
     the provided parameters.
 
     The selection logic follows this priority order:
-    1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
-    2. ZeroExpertRouter - if zero_expert_type is not None
-    3. GroupedTopKRouter - if use_grouped_topk is True and the grouping is not
-       degenerate (at most one group, with topk_group <= 1)
+    1. ZeroExpertRouter - if zero_expert_type is not None
+    2. CPURouter - on CPU, before scheme-specific routers
+    3. GroupedTopKRouter - if use_grouped_topk is True and the grouped routing
+       cannot fall through while preserving routing and scaling semantics
     4. CustomRoutingRouter - if custom_routing_function is not None
-    5. FusedTopKBiasRouter - if e_score_correction_bias is not None
-    6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0
+    5. FusedTopKBiasRouter - if e_score_correction_bias or hash_indices_table
+       is not None
+    6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0,
+       scoring_func is softmax, and AITER shared-expert fusion is enabled
     7. FusedTopKRouter - default fallback
+
+    When VLLM_MOE_ROUTING_SIMULATION_STRATEGY is set, the selected router
+    supplies the kernel routing method and is replaced by a
+    RoutingSimulatorRouter.
 
     Common arguments:
         top_k: Number of experts to select per token
@@ -117,14 +123,7 @@ def create_fused_moe_router(
         An instance of the appropriate FusedMoERouter subclass
 
     """
-    routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-    if routing_strategy != "":
-        return RoutingSimulatorRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-        )
-
+    router: FusedMoERouter | None = None
     if zero_expert_type is not None:
         assert num_logical_experts is not None, (
             "num_logical_experts is required when zero_expert_type is set"
@@ -132,7 +131,7 @@ def create_fused_moe_router(
         assert e_score_correction_bias is not None, (
             "e_score_correction_bias is required when zero_expert_type is set"
         )
-        return ZeroExpertRouter(
+        router = ZeroExpertRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -144,12 +143,12 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
         )
 
-    if current_platform.is_cpu():
+    elif current_platform.is_cpu():
         # CPURouter covers every routing scheme CPU MoE experts support
         # (plain softmax, grouped topk, custom routing functions, and
         # DeepSeek V4's sqrtsoftplus/hash routing) in a single class, so it
         # takes priority over the scheme-specific routers below.
-        return CPURouter(
+        router = CPURouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             use_grouped_topk=use_grouped_topk,
@@ -164,7 +163,7 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
         )
 
-    if use_grouped_topk:
+    elif use_grouped_topk:
         assert custom_routing_function is None
         if num_expert_group is None or topk_group is None:
             raise ValueError(
@@ -199,7 +198,7 @@ def create_fused_moe_router(
             and scaling_handled_downstream
             and routing_method_preserved
         ):
-            return GroupedTopKRouter(
+            router = GroupedTopKRouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -214,51 +213,63 @@ def create_fused_moe_router(
             )
         # Otherwise fall through to the non-grouped chain below.
 
-    if custom_routing_function is not None:
-        return CustomRoutingRouter(
+    if router is None:
+        if custom_routing_function is None:
+            assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
+
+        if custom_routing_function is not None:
+            router = CustomRoutingRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                custom_routing_function=custom_routing_function,
+                renormalize=renormalize,
+            )
+
+        elif e_score_correction_bias is not None or hash_indices_table is not None:
+            router = FusedTopKBiasRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                e_score_correction_bias=e_score_correction_bias,
+                renormalize=renormalize,
+                routed_scaling_factor=routed_scaling_factor,
+                scoring_func=scoring_func,
+                hash_indices_table=hash_indices_table,
+                num_fused_shared_experts=num_fused_shared_experts,
+                shared_expert_weight=shared_expert_weight,
+                bias_vl=bias_vl,
+                image_sentinel_lo=image_sentinel_lo,
+            )
+
+        elif (
+            num_fused_shared_experts > 0
+            and scoring_func == "softmax"
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        ):
+            router = AiterSharedRoutedFusedMoERouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                num_fused_shared_experts=num_fused_shared_experts,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+
+        else:
+            router = FusedTopKRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+            )
+
+    if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY != "":
+        router = RoutingSimulatorRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            kernel_routing_method_type=router.routing_method_type,
             eplb_state=eplb_state,
-            custom_routing_function=custom_routing_function,
-            renormalize=renormalize,
         )
-
-    assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
-
-    if e_score_correction_bias is not None or hash_indices_table is not None:
-        return FusedTopKBiasRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            e_score_correction_bias=e_score_correction_bias,
-            renormalize=renormalize,
-            routed_scaling_factor=routed_scaling_factor,
-            scoring_func=scoring_func,
-            hash_indices_table=hash_indices_table,
-            num_fused_shared_experts=num_fused_shared_experts,
-            shared_expert_weight=shared_expert_weight,
-            bias_vl=bias_vl,
-            image_sentinel_lo=image_sentinel_lo,
-        )
-
-    if (
-        num_fused_shared_experts > 0
-        and scoring_func == "softmax"
-        and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-    ):
-        return AiterSharedRoutedFusedMoERouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            num_fused_shared_experts=num_fused_shared_experts,
-            renormalize=renormalize,
-            scoring_func=scoring_func,
-        )
-
-    return FusedTopKRouter(
-        top_k=top_k,
-        global_num_experts=global_num_experts,
-        eplb_state=eplb_state,
-        renormalize=renormalize,
-        scoring_func=scoring_func,
-    )
+    return router

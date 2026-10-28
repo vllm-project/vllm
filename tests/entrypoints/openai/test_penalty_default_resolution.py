@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Unit tests for presence_penalty / frequency_penalty resolution from
-default_sampling_params in ChatCompletionRequest and CompletionRequest.
+default_sampling_params in ChatCompletionRequest, BatchChatCompletionRequest
+and CompletionRequest.
 
 Regression test for https://github.com/vllm-project/vllm/issues/50767:
 these two penalties defaulted to 0.0 (not None) and to_sampling_params()
@@ -12,6 +13,7 @@ discarded on the /v1/chat/completions and /v1/completions endpoints.
 """
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import (
@@ -27,6 +29,14 @@ def _chat(**kwargs):
         messages=[{"role": "user", "content": "hi"}],
         **kwargs,
     )
+
+
+def _batch(**kwargs):
+    conversation = [{"role": "user", "content": "hi"}]
+    request = BatchChatCompletionRequest(
+        model="test-model", messages=[conversation], **kwargs
+    )
+    return request.to_chat_completion_request(conversation)
 
 
 class TestChatCompletionPenaltyDefaults:
@@ -47,6 +57,22 @@ class TestChatCompletionPenaltyDefaults:
         sp = _chat().to_sampling_params(100, {})
         assert sp.presence_penalty == 0.0
         assert sp.frequency_penalty == 0.0
+
+
+class TestBatchChatCompletionPenaltyDefaults:
+    def test_defaults_applied_when_client_omits(self):
+        """Server-default penalties reach every conversation of a batch."""
+        sp = _batch().to_sampling_params(100, _DEFAULTS)
+        assert sp.presence_penalty == 1.5
+        assert sp.frequency_penalty == 0.5
+
+    def test_client_value_overrides_default(self):
+        """An explicit client penalty, even 0.0, wins over the server default."""
+        sp = _batch(presence_penalty=0.0, frequency_penalty=0.2).to_sampling_params(
+            100, _DEFAULTS
+        )
+        assert sp.presence_penalty == 0.0
+        assert sp.frequency_penalty == 0.2
 
 
 class TestCompletionPenaltyDefaults:

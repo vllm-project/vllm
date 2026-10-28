@@ -45,7 +45,7 @@ class DummyModelLoader(BaseModelLoader):
                 # Exclude nonpersistent buffers, matching state_dict().
                 for name, tensor in get_layer_tensors(layer).items():
                     if name not in layer._non_persistent_buffers_set:
-                        initialize_single_dummy_weight(tensor)
+                        initialize_single_dummy_weight(tensor, name=name)
 
     def _process_online_quant_layer(
         self,
@@ -55,8 +55,8 @@ class DummyModelLoader(BaseModelLoader):
         """Materialize, apply dummy weights, and run quantization processing."""
         materialize_layer(layer, info)
 
-        for tensor in get_layer_tensors(layer).values():
-            initialize_single_dummy_weight(tensor)
+        for name, tensor in get_layer_tensors(layer).items():
+            initialize_single_dummy_weight(tensor, name=name)
 
         for param in get_layer_tensors(layer).values():
             param.weight_loader = _get_original_loader(param)

@@ -18,7 +18,6 @@ from tests.models.language.pooling.embed_utils import (
 )
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.utils import (
@@ -27,6 +26,7 @@ from vllm.entrypoints.pooling.utils import (
     decode_pooling_output,
 )
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 

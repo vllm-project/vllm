@@ -179,7 +179,14 @@ def _make_b12x_moe_kernel(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_states.shape[1],
-        intermediate_size=w2.shape[2] * 2,
+        intermediate_size=w2.shape[2]
+        * (
+            32
+            if quant_config.weight_quant_dtype == "q8_0"
+            else 256
+            if quant_config.weight_quant_dtype in ("iq2_xs", "iq2_xxs")
+            else 2
+        ),
         in_dtype=hidden_states.dtype,
         activation=activation,
     )
@@ -1272,3 +1279,78 @@ def test_b12x_moe_cuda_graph_replay(
     assert torch.isfinite(expected).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+@pytest.mark.parametrize("codec", ["iq2_xxs", "q8_0"])
+@pytest.mark.parametrize("tokens", [1, 2, 4])
+@torch.inference_mode()
+def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
+    from b12x.testing.iq2_xs_reference import moe_reference_iq2_xs
+
+    from tests.model_executor.kernels.test_b12x_linear import _block_weights
+
+    with set_current_vllm_config(VllmConfig()):
+        torch.manual_seed(71)
+        e, h, i, topk = 4, 256, 256, 2
+        raw1, raw2 = _block_weights(e * i, h, codec), _block_weights(e * h, i, codec)
+        w1 = raw1.view(e, i, *raw1.shape[1:]).cuda()
+        w2 = raw2.view(e, h, *raw2.shape[1:]).cuda()
+        x = torch.randn(tokens, h, device="cuda", dtype=torch.bfloat16) * 0.125
+        scores = torch.randn(tokens, e, device="cuda", dtype=torch.bfloat16)
+        from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantDesc
+
+        quant = FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(),
+            _a2=FusedMoEQuantDesc(),
+            _w1=FusedMoEQuantDesc(dtype=codec),
+            _w2=FusedMoEQuantDesc(dtype=codec),
+        )
+        activation = MoEActivation.RELU2_NO_MUL
+        kernel = _make_b12x_moe_kernel(x, w1, w2, topk, activation, quant)
+        weights, ids, _ = fused_topk(x, scores, topk, renormalize=False)
+
+        def apply():
+            return kernel.apply(
+                hidden_states=x,
+                w1=w1,
+                w2=w2,
+                topk_weights=weights,
+                topk_ids=ids,
+                activation=activation,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        apply()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = apply()
+        for _ in range(2):
+            x.normal_(std=0.125)
+            scores.normal_()
+            new_weights, new_ids, _ = fused_topk(x, scores, topk, renormalize=False)
+            weights.copy_(new_weights)
+            ids.copy_(new_ids)
+            allocated = torch.accelerator.memory_allocated()
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.accelerator.memory_allocated() == allocated
+            expected = moe_reference_iq2_xs(
+                x,
+                raw1.view(e, i, *raw1.shape[1:]),
+                raw2.view(e, h, *raw2.shape[1:]),
+                ids,
+                weights,
+                activation="relu2",
+            )
+            assert torch.isfinite(output).all()
+            relative_l2 = (
+                output.float() - expected.float()
+            ).norm() / expected.float().norm()
+            cosine = torch.nn.functional.cosine_similarity(
+                output.float().flatten(), expected.float().flatten(), dim=0
+            )
+            assert cosine >= 0.999 and relative_l2 <= 0.01
+        graph.reset()

@@ -5,8 +5,10 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
         "CUDA required for Model Runner V2 logit bias tests",
         allow_module_level=True,
@@ -20,7 +22,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 VOCAB_SIZE = 128
 STOP_TOKEN = 3
 OTHER_TOKEN = 4

@@ -548,7 +548,10 @@ class TestLoadWeightsExpertBias:
 
 class TestLoadWeightsExpertMapping:
     @staticmethod
-    def _mapping(projs=("gate_proj", "down_proj", "up_proj"), **kwargs):
+    def _mapping(
+        projs: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
+        **kwargs,
+    ):
         return RoutedExperts.build_expert_params_mapping(
             *projs,
             num_experts=16,

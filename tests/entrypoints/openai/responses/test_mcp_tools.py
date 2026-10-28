@@ -100,18 +100,21 @@ class TestMCPToolServerUnit:
 
         # None (no filter) - returns all tools
         result = server.get_tool_description("test_server", allowed_tools=None)
+        assert result is not None
         assert len(result.tools) == 3
 
         # Filter to specific tools
         result = server.get_tool_description(
             "test_server", allowed_tools=["tool1", "tool3"]
         )
+        assert result is not None
         assert len(result.tools) == 2
         assert result.tools[0].name == "tool1"
         assert result.tools[1].name == "tool3"
 
         # Single tool
         result = server.get_tool_description("test_server", allowed_tools=["tool2"])
+        assert result is not None
         assert len(result.tools) == 1
         assert result.tools[0].name == "tool2"
 

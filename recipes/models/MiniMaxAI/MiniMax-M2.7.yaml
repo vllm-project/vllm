@@ -1,0 +1,252 @@
+meta:
+  title: "MiniMax-M2.7"
+  slug: "minimax-m2.7"
+  provider: "MiniMax"
+  description: "MiniMax M2.7 MoE language model (230B total / 10B active) — latest M2 release for coding, agent toolchains, and long-context reasoning with native FP8"
+  date_added: 2026-04-12
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "Latest M2 series release; verified accuracy on AIME25, GPQA-D, GSM8K; 196K context"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    dgx_station_gb300: verified
+    rtx_pro_6000_2x: verified
+
+model:
+  model_id: "MiniMaxAI/MiniMax-M2.7"
+  min_vllm_version: "0.20.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "230B"
+  active_parameters: "10B"
+  context_length: 196608
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "MiniMax M2 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "minimax_m2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "MiniMax M2 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "minimax_m2"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 276
+    description: "Native FP8 checkpoint — 4x H200/H20/H100 or 4x A100/A800 for weights, plus KV cache headroom"
+  nvfp4:
+    model_id: "nvidia/MiniMax-M2.7-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 138
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+    hardware_overrides:
+      dgx_station_gb300:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--gpu-memory-utilization"
+          - "0.92"
+          - "--load-format"
+          - "fastsafetensors"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+      rtx_pro_6000_2x:
+        extra_args:
+          - "--load-format"
+          - "fastsafetensors"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.95"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+
+strategy_overrides:
+  single_node_tp:
+    # Pure TP=8 fails on the FP8 block-quantized gate_up weights:
+    # intermediate_size / 8 = 192 is not divisible by block_n = 128.
+    # Pin TP=4 on 8-GPU nodes; for full-node utilization use
+    # single_node_tep (TP+EP) or single_node_dep (DP+EP).
+    tp: 4
+
+guide: |
+  ## Overview
+
+  [MiniMax-M2.7](https://huggingface.co/MiniMaxAI/MiniMax-M2.7) is the latest release
+  in the MiniMax M2 series. Like earlier M2 variants, it ships with 10B active
+  parameters out of 230B total, and supports a 196K context per sequence. MiniMax has
+  verified M2.7 accuracy on AIME25, GPQA-D, and GSM8K at vLLM commit
+  `0f3ce4c74b1875791d6604e006b6e905fde9f698`.
+
+  ## Prerequisites
+
+  - **OS:** Linux
+  - **Python:** 3.10 - 3.13
+  - **NVIDIA:** compute capability >= 7.0; ~220 GB for weights + 240 GB per 1M context tokens
+  - **AMD:** MI300X / MI325X / MI350X / MI355X with ROCm 7.0+
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ### Docker (dedicated M2-series image)
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:minimax27 MiniMaxAI/MiniMax-M2.7 \
+        --tensor-parallel-size 4 \
+        --tool-call-parser minimax_m2 \
+        --reasoning-parser minimax_m2 \
+        --enable-auto-tool-choice \
+        --trust-remote-code
+  ```
+
+  ## Launching the Server
+
+  ### NVIDIA — TP4 (4x H200/H20/H100 or 4x A100/A800)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2.7 \
+    --tensor-parallel-size 4 \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  Pure TP8 is not supported. For >4 GPUs use DP+EP or TP+EP:
+
+  ### DP8+EP
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2.7 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice
+  ```
+
+  ### TP4+EP (recommended for H100)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2.7 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice
+  ```
+
+  ### TP8+EP
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2.7 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice
+  ```
+
+  ### AMD ROCm — TP2
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve MiniMaxAI/MiniMax-M2.7 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model MiniMaxAI/MiniMax-M2.7 \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **MiniMax QK norm fusion:** Latest vLLM applies the fusion automatically at
+    runtime when the fused CUDA op is available; older vLLM builds used an
+    explicit `fuse_minimax_qk_norm` compile pass.
+  - **Corrupted output on stable release:** Upgrade to a nightly after commit
+    `cf3eacfe58fa9e745c2854782ada884a9f992cf7`.
+  - **Verified accuracy:** Use the pinned commit
+    `0f3ce4c74b1875791d6604e006b6e905fde9f698` if reproducing MiniMax's reported results.
+  - **DeepGEMM:** vLLM uses DeepGEMM by default; install via
+    [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/main/tools/install_deepgemm.sh)
+    if missing.
+  - **AITER first launch:** Initial AMD launch JIT-compiles optimized kernels; subsequent launches reuse cached kernels.
+
+  ## References
+
+  - [Model card](https://huggingface.co/MiniMaxAI/MiniMax-M2.7)
+  - [MiniMax](https://www.minimax.io/)
+  - [vLLM PR #43410 (automatic MiniMax QK norm fusion)](https://github.com/vllm-project/vllm/pull/43410)

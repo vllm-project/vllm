@@ -5,14 +5,17 @@ set -ex
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
 # This script uses DockerHub API to list and delete old tags with specified prefix
 # Tags starting with "nightly-dev" are always excluded from deletion
-# Usage: cleanup-nightly-builds.sh [TAG_PREFIX] [REPO]
+# Usage: cleanup-nightly-builds.sh [TAG_PREFIX] [REPO] [EXCLUDE_PREFIX]
 # Example: cleanup-nightly-builds.sh "nightly-"
 # Example: cleanup-nightly-builds.sh "cu130-nightly-"
 # Example: cleanup-nightly-builds.sh "nightly-" "vllm/vllm-openai-rocm"
+# Example: cleanup-nightly-builds.sh "nightly-" "vllm/vllm-openai-rocm" "nightly-rocm"
+#   (EXCLUDE_PREFIX skips tags owned by another variant sharing TAG_PREFIX)
 
 # Get tag prefix and repo from arguments
 TAG_PREFIX="${1:-nightly-}"
 REPO="${2:-vllm/vllm-openai}"
+EXCLUDE_PREFIX="${3:-}"
 
 echo "Cleaning up tags with prefix: $TAG_PREFIX in repository: $REPO"
 
@@ -57,7 +60,7 @@ get_all_tags() {
         
         # Get both last_updated timestamp and tag name, separated by |
         # Exclude mutable architecture tags and nightly-dev tags from cleanup
-        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | select(.name != ($prefix + "x86_64") and .name != ($prefix + "aarch64")) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" --arg exclude "$EXCLUDE_PREFIX" '.results[] | select(.name | startswith($prefix)) | select($exclude == "" or (.name | startswith($exclude) | not)) | select(.name != ($prefix + "x86_64") and .name != ($prefix + "aarch64")) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break

@@ -64,6 +64,7 @@ impl EngineCoreRequestType {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningParserKwargs {
     /// Effective kwargs visible to the chat template for this request.
+    #[serde(default)]
     pub chat_template_kwargs: HashMap<String, serde_json::Value>,
 }
 

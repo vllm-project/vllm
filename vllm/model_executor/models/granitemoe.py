@@ -61,7 +61,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from .granite import granite_layer_attn_params
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -301,7 +301,7 @@ class GraniteMoeDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class GraniteMoeModel(nn.Module):
+class GraniteMoeModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper: WeightsMapper = WeightsMapper(
         orig_to_new_suffix={
             # Legacy names to new names
@@ -353,7 +353,7 @@ class GraniteMoeModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -363,8 +363,14 @@ class GraniteMoeModel(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, None)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states = layer(positions, hidden_states)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, None
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {
@@ -372,6 +378,9 @@ class GraniteMoeModel(nn.Module):
                 }
             )
         hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -379,7 +388,7 @@ class GraniteMoeModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {

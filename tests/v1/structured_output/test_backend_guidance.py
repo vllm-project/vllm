@@ -32,6 +32,25 @@ def mistral_tokenizer():
     )
 
 
+def test_backend_guidance_rejects_grammar_matcher_cannot_build():
+    # llguidance builds a matcher for a schema with unimplemented keywords
+    # but leaves it in an error state; compilation must fail the request.
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance")
+    )
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=AutoTokenizer.from_pretrained(TOKENIZER),
+        vocab_size=50257,
+    )
+
+    with pytest.raises(ValueError, match="Grammar error: .*uniqueItems"):
+        backend.compile_grammar(
+            StructuredOutputOptions.JSON,
+            json.dumps({"type": "array", "uniqueItems": True}),
+        )
+
+
 def test_backend_guidance_rollback_terminated():
     # Test that the backend guidance successfully rollbacks from a
     # terminated state. This can happen with speculative decoding,

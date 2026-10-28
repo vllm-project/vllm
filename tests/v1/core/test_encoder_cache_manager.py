@@ -445,6 +445,31 @@ def test_duplicate_mm_hash_is_not_evicted_before_last_use():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_many_inputs_release_each_hash_at_its_last_occurrence():
+    """A request with many items, one repeated, releases every entry exactly
+    once its last cached occurrence is freed."""
+    num_items = 64
+    hashes = [f"img{i}" for i in range(num_items)] + ["img0"]
+    manager = EncoderCacheManager(cache_size=num_items)
+    req = MockRequest("r1", hashes, [1] * len(hashes))
+
+    for i in range(num_items):
+        manager.allocate(req, i)
+    assert manager.check_and_update_cache(req, num_items)
+
+    manager.free_encoder_input(req, 0)
+    assert "img0" not in manager.freeable
+    for i in range(1, num_items):
+        manager.free_encoder_input(req, i)
+        assert manager.freeable[f"img{i}"] == 1
+
+    manager.free_encoder_input(req, num_items)
+    assert manager.freeable["img0"] == 1
+    assert manager.num_freeable_slots == num_items
+    assert "r1" not in manager.request_cached_ids
+    assert "r1" not in manager.request_hash_refs
+
+
 def test_encoder_decoder_cache_manager_reset():
     manager = EncoderDecoderCacheManager(cache_size=20)
 
