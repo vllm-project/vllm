@@ -1,10 +1,173 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+import pickle
+import struct
+
+import numpy as np
+import pytest
+
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.token_buffer import (
+    TokenBuffer,
+    TokenIdsView,
+    extend_from_slice,
+    rfind_token_sequences,
+    rfind_tokens,
+)
+
+
+def _engine_core_request(prompt_token_ids) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id="r",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+@pytest.mark.parametrize("dtype", ["=u4", "<i4"])
+@pytest.mark.parametrize("num_tokens", [3, 3000])
+def test_request_decodes_prompt_ndarray(dtype, num_tokens):
+    """Both frontends send the prompt as a 32-bit int ndarray: vllm-rs as uint32,
+    the Python frontend as int32. A long one is a separate frame."""
+    ids = [(i * 7919) % 129280 for i in range(num_tokens)]
+    frames = MsgpackEncoder().encode(_engine_core_request(np.array(ids, dtype=dtype)))
+    assert len(frames) == (2 if num_tokens == 3000 else 1)
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
+    assert isinstance(decoded.prompt_token_ids, np.ndarray)
+    request = Request.from_engine_core_request(decoded, block_hasher=None)
+    assert request.prompt_token_ids == ids and request.num_prompt_tokens == num_tokens
+    assert type(request.prompt_token_ids[0]) is int
+    request.append_output_token_ids([5, 6])
+    assert request.all_token_ids[-3:] == [ids[-1], 5, 6]
+    assert request.prompt_token_ids == ids
+
+
+def test_mp_client_sends_prompt_as_int32_array():
+    """The Python frontend's engine-core client packs the prompt for the wire
+    and leaves the request it keeps for output processing unchanged."""
+    from vllm.v1.engine.core_client import _with_packed_prompt
+
+    ids = list(range(1000, 2000))
+    request = _engine_core_request(ids)
+    wire = _with_packed_prompt(request)
+    assert request.prompt_token_ids is ids
+    frames = MsgpackEncoder().encode(wire)
+    assert len(frames) == 2  # the prompt goes out of band
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
+    engine_request = Request.from_engine_core_request(decoded, block_hasher=None)
+    assert engine_request.prompt_token_ids == ids
+
+
+def test_request_token_ids_hold_no_int_references():
+    """Long prompts must not add per-token objects for the cyclic GC to walk."""
+    request = Request("r", list(range(1024)), SamplingParams(max_tokens=4), None)
+    for tokens in (request.prompt_token_ids, request._all_token_ids):
+        assert not any(isinstance(r, int) for r in gc.get_referents(tokens))
+    assert request.all_token_ids.copy() == list(range(1024))
+
+
+@pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
+def test_token_buffer_from_packed_bytes(wrap):
+    ids = [1, 70000, 129279]
+    tokens = TokenBuffer(wrap(struct.pack(f"<{len(ids)}i", *ids)))
+    assert type(tokens) is TokenBuffer and tokens == ids
+    with pytest.raises(ValueError):
+        TokenBuffer(wrap(b"\x01\x02\x03"))
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
+def test_token_buffer_pickles(protocol):
+    tokens = TokenBuffer([1, 70000, 129279])
+    restored = pickle.loads(pickle.dumps(tokens, protocol=protocol))
+    assert type(restored) is TokenBuffer and restored == [1, 70000, 129279]
+
+
+@pytest.mark.parametrize("length", [5, 3000])
+def test_rfind_tokens_buffer_matches_list(length):
+    """The numpy search of a TokenBuffer, over chunks growing back from the end,
+    finds the same index as the Python scan of a list."""
+    ids = [(i * 7) % 11 for i in range(length)]
+    tokens = TokenBuffer(ids)
+    for targets in [(3,), (3, 5), (99,), (None, 4)]:
+        for start, stop in [(0, None), (2, None), (0, length - 1), (length, None)]:
+            expected = rfind_tokens(ids, targets, start, stop)
+            assert rfind_tokens(tokens, targets, start, stop) == expected
+            hits = [i for i in range(start, stop or length) if ids[i] in targets]
+            assert expected == (hits[-1] if hits else -1)
+
+
+def test_extend_from_slice():
+    src = TokenBuffer(range(10))
+    for dst in (TokenBuffer([7]), [7]):
+        extend_from_slice(dst, src, 2, 5)
+        assert dst == [7, 2, 3, 4]
+    extend_from_slice(dst, list(range(10)), 8, 8)
+    assert dst == [7, 2, 3, 4]
+
+
+@pytest.mark.parametrize("wrap", [list, TokenBuffer])
+def test_rfind_token_sequences(wrap):
+    ids = wrap([5, 1, 2, 9, 1, 2, 3, 7, 1])
+    # The newest of the markers; the first listed wins a tie at one index.
+    assert rfind_token_sequences(ids, [(1, 2, 3), (9,)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2), (1, 2, 3)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2, 3), (1, 2)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(9,), (5, 1)]) == (3, 0)
+    # A marker running past the end, or past stop, doesn't match.
+    assert rfind_token_sequences(ids, [(1, 2)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2)], stop=5) == (1, 0)
+    assert rfind_token_sequences(ids, [(4,), (None,), ()]) == (-1, -1)
+
+
+def test_token_ids_view_searches_in_place():
+    tokens = TokenBuffer([1, 2, 3, 4])
+    view = TokenIdsView(tokens, [5, 6])
+    assert len(view) == 6 and rfind_tokens(view, (2, 6)) == 5
+    view.pop()
+    view.pop()
+    view.pop()
+    # Now tokens[:3]: the search stops before the popped 4 and the suffix.
+    assert len(view) == 3 and rfind_tokens(view, (4, 6)) == -1
+    assert rfind_tokens(view, (2,)) == 1
+    assert view._list is None  # searching didn't copy the tokens
+    assert list(view) == [1, 2, 3] and view[-1] == 3
+    view.pop()
+    assert list(view) == [1, 2] and rfind_tokens(view, (3,)) == -1
+
+
+def test_prefill_token_ids_shares_prompt_until_outputs():
+    request = Request("r", [1, 2, 3], SamplingParams(max_tokens=4), None)
+    # Same object, so NewRequestData pickles the prompt once.
+    assert request.prefill_token_ids is request.prompt_token_ids
+    request.append_output_token_ids(4)
+    assert request.prefill_token_ids is request._all_token_ids
+    assert request.prefill_token_ids == [1, 2, 3, 4]
+
+
+def test_token_buffer_pickles_out_of_band_snapshot():
+    """With protocol 5 the ids go out of band, as a snapshot that can outlive the
+    pickling (zmq sends without copying) while the buffer keeps growing."""
+    tokens = TokenBuffer(range(1000))
+    oob: list[pickle.PickleBuffer] = []
+    data = pickle.dumps(tokens, protocol=5, buffer_callback=oob.append)
+    assert len(oob) == 1 and len(data) < 200
+    held = oob[0].raw()
+    tokens.append(1000)  # Would raise BufferError if `held` were a view of tokens.
+    assert len(held) == 4000
+    restored = pickle.loads(data, buffers=[bytearray(held)])
+    assert type(restored) is TokenBuffer and restored == list(range(1000))
 
 
 def test_request_status_fmt_str():

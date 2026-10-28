@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -23,6 +24,7 @@ from vllm.v1.engine import (
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
+from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -61,7 +63,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int] | None,
+        prompt_token_ids: list[int] | np.ndarray | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
         client_index: int = 0,
@@ -131,7 +133,10 @@ class Request:
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
-        self.prompt_token_ids = prompt_token_ids
+        # Little-endian int32 bytes from vllm-rs are copied, not decoded per token.
+        self.prompt_token_ids: list[int] | None = (
+            TokenBuffer(prompt_token_ids) if prompt_token_ids is not None else None
+        )
         self.prompt_embeds = prompt_embeds
         # Per-position mask used in mixed-mode (chat completion with
         # prompt_embeds). `None` except when both `prompt_token_ids` and
@@ -141,22 +146,22 @@ class Request:
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            prompt_token_ids, prompt_embeds
+            self.prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
         if self.prompt_token_ids is None:
-            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+            self._all_token_ids: list[int] = TokenBuffer([0] * self.num_prompt_tokens)
         elif self.prompt_is_token_ids is None:
-            self._all_token_ids = self.prompt_token_ids.copy()
+            self._all_token_ids = TokenBuffer(self.prompt_token_ids)
         else:
             # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
             # special token id that may lie outside the embedding. Zero them, matching
             # the no-token-ids case above, so embedding gathers over these placeholder
             # ids stay in bounds; the actual inputs come from prompt_embeds.
-            self._all_token_ids = [
+            self._all_token_ids = TokenBuffer(
                 t if is_tok else 0
                 for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
-            ]
+            )
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
@@ -290,6 +295,19 @@ class Request:
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None
+
+    @property
+    def prefill_token_ids(self) -> list[int]:
+        """All token ids, as the prompt_token_ids object itself while they hold
+        the same tokens, so that pickling both sends them once."""
+        prompt = self.prompt_token_ids
+        if (
+            prompt is not None
+            and self.prompt_is_token_ids is None
+            and len(prompt) == len(self._all_token_ids)
+        ):
+            return prompt
+        return self._all_token_ids
 
     @property
     def num_tokens(self) -> int:

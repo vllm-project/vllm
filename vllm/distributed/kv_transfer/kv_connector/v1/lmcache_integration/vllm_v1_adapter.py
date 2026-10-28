@@ -52,7 +52,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils impo
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
 from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype, token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
@@ -1184,7 +1184,7 @@ class LMCacheConnectorV1Impl:
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
-            token_ids_tensor = torch.tensor(request.prompt_token_ids)
+            token_ids_tensor = token_ids_to_tensor(request.prompt_token_ids or [])
             apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
             token_ids = token_ids_tensor.tolist()
 

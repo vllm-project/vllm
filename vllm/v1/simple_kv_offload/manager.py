@@ -970,7 +970,7 @@ class SimpleCPUOffloadScheduler:
                             )
                         )
                         meta_by_hash[block_hash] = BlockStoreMeta(
-                            token_ids=list(request.all_token_ids[hash_start:hash_end]),
+                            token_ids=request.all_token_ids[hash_start:hash_end],
                             parent_block_hash=(
                                 None
                                 if hash_idx == 0
