@@ -99,12 +99,10 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            # MTP shares the target's KV cache layout; a separate draft model
-            # must not inherit a default it was never validated with.
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method != "mtp"
+                and spec_config.method not in ("mtp", "dspark")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
@@ -464,7 +462,58 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
+    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
+    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
+    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
+    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    from vllm.platforms import current_platform
+
+    hf_config = vllm_config.model_config.hf_text_config
+    block = getattr(hf_config, "candidate_block_size", 0)
+    topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
+    parallel = vllm_config.parallel_config
+    if (
+        block <= 0
+        or topk_blocks <= 0
+        or not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+        or parallel.decode_context_parallel_size > 1
+        or parallel.prefill_context_parallel_size > 1
+        or vllm_config.kernel_config.sparse_indexer_topk_backend
+        not in ("auto", "deep_select")
+    ):
+        return False
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        check_deep_select_layout,
+        has_deep_select,
+        pick_sparse_block_kv,
+    )
+    from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+
+    if not (has_deep_gemm_sparse_mqa() and has_deep_select()):
+        return False
+    try:
+        pick_sparse_block_kv(block)
+        check_deep_select_layout(
+            topk_blocks * block, getattr(hf_config, "index_topk", 0)
+        )
+    except ValueError:
+        return False
+    return True
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # indexer_sparse_logits=None (default): enable the sparse-logits
+        # indexer wherever it is supported; True / False are kept as given.
+        attention_config = vllm_config.attention_config
+        if attention_config.indexer_sparse_logits is None:
+            attention_config.indexer_sparse_logits = _indexer_sparse_logits_supported(
+                vllm_config
+            )
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
