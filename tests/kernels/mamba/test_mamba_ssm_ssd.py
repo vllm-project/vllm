@@ -12,9 +12,14 @@ from vllm.model_executor.layers.mamba.ops import (
     ssd_chunk_state,
     ssd_state_passing,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
+    _chunk_scan_fwd,
+    _chunk_scan_fwd_kernel,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.triton_helpers import _autotuned_configs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
 from vllm.utils.torch_utils import set_random_seed
@@ -626,24 +631,45 @@ def _pin_ssd_configs(
         monkeypatch.setattr(kernel, "configs", [config])
 
 
+@pytest.fixture(autouse=True)
+def clear_autotuned_configs():
+    """`launch_autotuned` reuses the config it picked first for a given key, so
+    a config pinned (or monkeypatched) by one test would leak into the next."""
+    _autotuned_configs.clear()
+    yield
+    _autotuned_configs.clear()
+
+
 @pytest.fixture
 def pin_ssd_configs(monkeypatch):
     _pin_ssd_configs(monkeypatch)
 
 
 def _spy_use_td(monkeypatch) -> dict[str, list[bool]]:
-    """Record the USE_TD constexpr of every launch of both kernels."""
+    """Record the USE_TD constexpr of every launch of both kernels.
+
+    Spies on `launch_autotuned`: once a config is cached it launches
+    `kernel.fn` directly, so a spy on `kernel.run` would miss those launches.
+    """
     calls: dict[str, list[bool]] = {"scan": [], "state": []}
-    for name, kernel in (
-        ("scan", ssd_chunk_scan._chunk_scan_fwd_kernel),
-        ("state", ssd_chunk_state._chunk_state_fwd_kernel),
+    for name, module, kernel in (
+        ("scan", ssd_chunk_scan, ssd_chunk_scan._chunk_scan_fwd_kernel),
+        ("state", ssd_chunk_state, ssd_chunk_state._chunk_state_fwd_kernel),
     ):
 
-        def spy(*args, _run=kernel.run, _calls=calls[name], **kwargs):
-            _calls.append(kwargs["USE_TD"])
-            return _run(*args, **kwargs)
+        def spy(
+            k,
+            *args,
+            _launch=module.launch_autotuned,
+            _kernel=kernel,
+            _calls=calls[name],
+            **kwargs,
+        ):
+            if k is _kernel:
+                _calls.append(kwargs["USE_TD"])
+            return _launch(k, *args, **kwargs)
 
-        monkeypatch.setattr(kernel, "run", spy)
+        monkeypatch.setattr(module, "launch_autotuned", spy)
     return calls
 
 
@@ -910,3 +936,46 @@ def test_ssd_td_single_example_vs_reference(
 
     assert calls["scan"] and all(v is uses_td for v in calls["scan"])
     assert calls["state"] and all(v is uses_td for v in calls["state"])
+
+
+def test_chunk_scan_fwd_every_config_matches(monkeypatch):
+    """The autotuner picks a config by speed only, so every config in the list
+    must give the same finite output. On sm90, configs that pipeline a wgmma
+    with `cb` in registers wrote NaN into whole rows (#61603)."""
+    from triton.runtime.errors import OutOfResources
+
+    set_random_seed(0)
+    nheads, headdim, ngroups, dstate, chunk_size = 64, 64, 8, 128, 128
+    cu_chunk_seqlens = torch.tensor([0, 128, 181], dtype=torch.int32, device=DEVICE)
+    seqlen, nchunks = 181, 2
+    x = torch.randn(seqlen, nheads, headdim, dtype=torch.bfloat16, device=DEVICE)
+    C = torch.randn(seqlen, ngroups, dstate, dtype=torch.bfloat16, device=DEVICE)
+    cb = torch.randn(nchunks, ngroups, chunk_size, chunk_size, device=DEVICE)
+    dt = torch.rand(nheads, nchunks, chunk_size, device=DEVICE) * 0.1
+    dA_cumsum = -torch.rand(nheads, nchunks, chunk_size, device=DEVICE).cumsum(-1)
+    states = torch.randn(nchunks, nheads, headdim, dstate, device=DEVICE) * 0.1
+    seq_idx = torch.zeros(nchunks, dtype=torch.int32, device=DEVICE)
+    D = torch.randn(nheads, headdim, device=DEVICE) * 0.1
+
+    ref = None
+    for config in list(_chunk_scan_fwd_kernel.configs):
+        monkeypatch.setattr(_chunk_scan_fwd_kernel, "configs", [config])
+        for _ in range(10):
+            out = torch.empty_like(x)
+            try:
+                _chunk_scan_fwd(
+                    cb, x, dt, dA_cumsum, C, states, cu_chunk_seqlens, out, seq_idx, D
+                )
+            except OutOfResources:
+                # The autotuner skips configs that do not fit this device.
+                break
+            assert torch.isfinite(out).all(), f"non-finite output with {config}"
+            if ref is None:
+                ref = out
+            torch.testing.assert_close(
+                out,
+                ref,
+                atol=2e-2,
+                rtol=2e-2,
+                msg=lambda m, config=config: f"{config}: {m}",
+            )
