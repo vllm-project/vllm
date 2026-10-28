@@ -239,6 +239,45 @@ def test_video_placeholders_match_encoder_rows_when_presampled(processor):
     assert len(timestamps) == grid_t
 
 
+def test_placeholder_rejects_timestamp_count_mismatch(processor):
+    """A timestamp list that is not one entry per temporal patch is refused."""
+    grid_thw = torch.tensor([4, 36, 46])
+    with pytest.raises(ValueError, match="video_grid_thw"):
+        processor.info._placeholder_from_timestamps([0, 1], grid_thw)
+
+
+def test_video_timestamps_follow_supplied_frame_indices(processor):
+    """Indices already chosen by the processor win over a fresh resample."""
+    info = processor.info
+    video_processor = info.get_video_processor()
+    temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 1) or 1)
+    fps = 8.0
+    indices = [0, 8, 80, 88]
+    metadata = {
+        "total_num_frames": 256,
+        "fps": fps,
+        "duration": 32.0,
+        "do_sample_frames": True,
+        "frames_indices": indices,
+    }
+
+    timestamps = info._get_video_second_idx_glm46v(metadata, 256)
+    resampled = info._get_video_second_idx_glm46v(
+        {k: v for k, v in metadata.items() if k != "frames_indices"},
+        256,
+    )
+
+    num_frames = len(indices)
+    num_padded = num_frames + (-num_frames % temporal_patch_size)
+    grid_t = max(num_padded // temporal_patch_size, 1)
+    last = len(indices) - 1
+    expected = [
+        int(indices[min(i * temporal_patch_size, last)] / fps) for i in range(grid_t)
+    ]
+    assert timestamps == expected
+    assert timestamps != resampled
+
+
 def test_video_shorter_than_one_sampling_interval_is_rejected(processor):
     """A clip the sampler cannot pick a single frame from is a bad request."""
     with pytest.raises(ValueError, match="selected no frames"):

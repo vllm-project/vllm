@@ -1255,7 +1255,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
         do_sample_frames = metadata["do_sample_frames"]
-        if not do_sample_frames:
+        if "frames_indices" in metadata or not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             if duration <= video_processor.max_duration:
@@ -1307,7 +1307,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
 
         do_sample_frames = metadata.get("do_sample_frames", True)
-        if not do_sample_frames:
+        if "frames_indices" in metadata or not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             DYNAMIC_FPS_THRES = {30: 3, 300: 1, 2400: 0.5}
@@ -1393,7 +1393,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
 
         do_sample_frames = metadata.get("do_sample_frames", True)
-        if not do_sample_frames:
+        if "frames_indices" in metadata or not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             target_fps = 2
@@ -1466,6 +1466,12 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             timestamp_values = timestamps.flatten().tolist()
         else:
             timestamp_values = list(timestamps)
+        grid_t = int(grid_thw[0])
+        if len(timestamp_values) != grid_t:
+            raise ValueError(
+                "Video timestamp count does not match video_grid_thw[0]: "
+                f"{len(timestamp_values)} timestamps for grid_t={grid_t}."
+            )
         timestamp_format = (
             "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
         )
@@ -1683,7 +1689,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[_to_video_metadata(metadata)]]
+                video_metadata = _to_video_metadata(metadata)
+                video_mm_data["video_metadata"] = [[video_metadata]]
 
                 video_outputs = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**video_mm_kwargs),
@@ -1693,6 +1700,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     ),
                     video_mm_kwargs,
                 )
+                sampled_indices = getattr(video_metadata, "frames_indices", None)
+                if sampled_indices is not None and isinstance(metadata, dict):
+                    metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
                 input_ids = video_outputs.pop("input_ids")
 
                 input_ids[input_ids == processor.image_token_id] = (
