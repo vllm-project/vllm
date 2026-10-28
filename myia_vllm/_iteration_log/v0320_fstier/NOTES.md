@@ -4112,3 +4112,23 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Annexes** : nbaudit **ok** 14:07:14Z (`Image/` vague 2 servie, `consecutive_failures=0`). G: OK. Commit **80,2 %** (marge 75,9 GB). Condensation : **zéro nouvel épisode disjoncteur depuis 07:43Z** (dernier événement du log).
 
 **Registre** : Q41 ouverte — VRAM sous la ligne pour le 2ᵉ cycle consécutif (mesure en ligne au registre, high-water raffermi). Q43 armée, recreate en attente de fenêtre. Rien de nouveau à arbitrer.
+
+## Cycle 16:1xZ (28/10) — 🟢 ; l'hypothèse « 1ʳᵉ sonde » est SOUTENUE une fois ; la formule d'empreinte de clé était fausse et est corrigée
+
+**Prod** : health 200 en 6,9 ms, RC=0, StartedAt inchangé (up 38 h), OOM 0, 3/3 Up. VRAM GPU 0 **22 875** (3ᵉ cycle consécutif sous 23 000 ; 22 888 / 22 902 / 22 875), GPU 1 plat 21 650. /dev/shm 25G = 39 %. Préemptions **39→40 (Δ=1)**, KV **92,2 %**, file 0/0, prefix hits **73,3 %** (647,4M/883,0M). WEDGE 2 `fail 1/2` (14:38, 16:08), zéro 2/2.
+
+**Expérience : une sonde de préchauffe AVANT la batterie.** Le motif « la 1ʳᵉ sonde paie la queue » avait tenu 2 cycles de suite (23,6 s puis 30,7 s, les suivantes à ~0,2 s). Cette fois j'ai émis **un appel de préchauffe** (0,37 s, exclu du verdict), attendu 5 s, puis lancé la batterie : **0/6 >9 s, médiane 0,27 s, max 1,96 s**, et la n°1 à **0,16 s**. **L'hypothèse « position en file / état d'ordonnanceur froid au premier appel » est soutenue une fois** — pas prouvée : il faut la reproduire à l'identique au moins deux cycles de plus, et la contre-épreuve (batterie sans préchauffe où la 1ʳᵉ est de nouveau lente) existe déjà 2×. Protocole à conserver tel quel pour les prochains cycles.
+
+**★ Le piège d'instrument du jour : la formule d'empreinte de clé notée en mémoire était FAUSSE.** Le census affiche `fp=sha256(auth_prefix)[:12]` et la mémoire affirmait `auth_prefix = sha256("Bearer "+clé)[:12]`, « vérifiée sur MEDIUM ». Calcul fait : cette formule rend `53be2310eebd`, **pas** `be312daf7c1c`. Le code tranche (`error_source_capture.py:157`) : le middleware journalise `authorization[:24] + "..."`, soit `"Bearer " + 17 premiers caractères de la clé`. Vérification : `sha256("Bearer d9164427c537056a7...")[:12]` = **`be312daf7c1c`** ✔. Conséquence pratique : les empreintes publiées restent des **identifiants stables de classe de clé**, mais elles ne sont pas recalculables depuis la valeur sans respecter cette forme — et la correction est portée en mémoire. Aucune conclusion de sécurité passée n'est invalidée (l'attribution MEDIUM tenait par la mesure du trafic, pas par la formule).
+
+**Clé inconnue `550dcf4b78d5`** : 2 requêtes sur `/v1/models` en **401** (10:42:30Z `curl/8.14.1`, 14:34:57Z `Python-urllib/3.13`), corps 0, **zéro 200**, pas de `x_forwarded_for` (donc LAN/hairpin). Distincte de la clé morte connue `1f7f6080cb65` (20×401/2 h, elle aussi stable). Ne correspond à aucune de nos trois clés sous aucune des deux formes testées ⇒ **troisième clé morte en circulation** sur la flotte, à surveiller si elle produit un 200 un jour. Pas d'alerte : la règle vise les IP avec des 200.
+
+**400 window+1 : 2/2 h** (858 Ko, 940 Ko, Bun) — **retour au niveau de 12:1xZ après le pic de 4** ; cumul ~**14 sur 18 h**. La cadence n'est donc pas monotone : un pic, puis retour. Ne pas conclure à une accélération sur un seul cycle.
+
+**Charge** : 595 req/2 h (5,0/min), **336 corps 100K-1M (56 %)**, 235 corps <1K. Statuts : 570×200, 23×401, 2×400.
+
+**★ Marge commit hôte : 84,2 %** (60,7 Go libres) — **au plus près du seuil 85 % depuis le 09/10** (79,8 → 80,2 → **84,2** sur trois cycles). Aucun travail lourd autorisé au prochain cycle si ça ne redescend pas ; à surveiller (vmmemWSL = premier consommateur, pas Code.exe).
+
+**Annexes** : nbaudit **ok** 16:05:51Z (`Image/` servie). G: OK. Condensation : **zéro nouvel épisode disjoncteur depuis 07:43Z** (5 cycles consécutifs).
+
+**Registre** : Q41 ouverte — VRAM 3ᵉ cycle sous la ligne, high-water confirmé. Q43 armée, recreate en attente.
