@@ -161,7 +161,9 @@ def test_contexted_kv_attention(
     num_tokens = sum(query_lens)
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
     query.uniform_(-1e-3, 1e-3)
-    output = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
+    # NaN, so a row the kernel leaves unwritten fails instead of passing on
+    # leftover memory.
+    output = torch.full((num_tokens, num_heads, head_size), float("nan"), dtype=dtype)
 
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
     kv.uniform_(-1e-3, 1e-3)
@@ -1129,6 +1131,9 @@ NONSTANDARD_BLOCK_SIZE_SHAPES = [
     (64, 1, 128, 544),
     (8, 4, 256, 1040),
     (8, 4, 256, 1056),
+    # gfx12, KV cache < 2 GiB: GPU memory fault with the default
+    # 4-warp / 2-stage decode launch (#62697).
+    (32, 4, 128, 528),
 ]
 
 

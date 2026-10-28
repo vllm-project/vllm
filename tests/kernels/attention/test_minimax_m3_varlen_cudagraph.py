@@ -64,8 +64,8 @@ def test_varlen_builders_pass_adaptive_gate(builder):
     assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(False), None) is None
 
 
-def test_aiter_indexer_builder_does_not_claim_varlen():
-    indexer_aiter = pytest.importorskip("vllm.models.minimax_m3.amd.indexer_aiter")
-    builder = indexer_aiter.MiniMaxM3IndexerAiterMetadataBuilder
+def test_aiter_msa_indexer_builder_does_not_claim_varlen():
+    indexer_msa = pytest.importorskip("vllm.models.minimax_m3.amd.indexer_msa")
+    builder = indexer_msa.MiniMaxM3IndexerMSAMetadataBuilder
     assert not builder.supports_varlen_decode()
     assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(True), None) is None
