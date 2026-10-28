@@ -59,6 +59,8 @@ def _moe_layers(model: torch.nn.Module) -> list[tuple[torch.nn.Module, GateLinea
     layers: dict[GateLinear, torch.nn.Module] = {}
     for module in model.modules():
         gate = getattr(module, "gate", None)
+        if not isinstance(gate, GateLinear):
+            gate = getattr(module, "router", None)
         if not isinstance(gate, GateLinear) or gate in layers:
             continue
         if _top_k(module) is not None:
@@ -121,6 +123,8 @@ class BalancedRouting:
             bias = getattr(gate, "e_score_correction_bias", None)
             if bias is None:
                 bias = getattr(module, "e_score_correction_bias", None)
+            if bias is None:
+                bias = getattr(module, "expert_bias", None)
             if isinstance(bias, torch.Tensor):
                 self._biases.append((bias, bias.detach().clone()))
                 bias.data.zero_()
