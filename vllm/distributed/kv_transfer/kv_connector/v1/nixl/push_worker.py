@@ -72,10 +72,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Writer-thread poll cadence while P-side blocks wait for a D PUSH_REG
-# match. Otherwise the writer blocks on a wake event signalled by the engine
-# main thread (start_load_kv / get_finished). Smaller -> lower latency
-# while active, slightly more CPU.
+# Writer-thread poll cadence while a PUSH_REG match is outstanding.
+# Otherwise the writer blocks on the engine wake.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
 
@@ -348,11 +346,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             finally:
                 self._nixl_io_lock.release()
 
-            # Self-poll only while P-side blocks wait for a D PUSH_REG match:
-            # that notif has no other wake source, and a long model step would
-            # otherwise hold back the WRITE. Completions need no poll; the
-            # engine keeps stepping while pushes are in flight
-            # (``has_pending_push_work``) and each step wakes the writer.
+            # Completions are drained on the engine wake. Only an unmatched
+            # PUSH_REG has no other wake source.
             if self._push_finished_blocks:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
@@ -360,7 +355,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._push_writer_wake.clear()
 
     def add_remote_agent(self, *args, **kwargs):
-        """Serialize NIXL agent setup with push data-plane operations."""
         with self._nixl_io_lock:
             return super().add_remote_agent(*args, **kwargs)
 
