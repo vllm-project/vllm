@@ -36,6 +36,15 @@ V41_ATTN_SHAPES = [
     ("wo_b", 5120, 8192 // 4),
 ]
 
+# (name, N, K) for the MiniMax-M3 dense linears at tensor_parallel=4: these
+# cover every 17 <= M <= 64 decode tile (narrow and wide N, K = 768 to 6144).
+M3_TP4_SHAPES = [
+    ("qkv", 2560, 6144),
+    ("o_proj", 6144, 2048),
+    ("shared_gate_up", 1536, 6144),
+    ("shared_down", 6144, 768),
+]
+
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     weight_bf16 = torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.05
@@ -46,8 +55,12 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     return layer
 
 
-@pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize(
+    "name,n,k,num_tokens",
+    [(*s, m) for s in V41_ATTN_SHAPES for m in (1, 2, 7, 16, 31, 32, 128, 1024)]
+    + [(*s, m) for s in M3_TP4_SHAPES for m in (16, 17, 32, 33, 48, 64, 65)],
+    ids=lambda v: str(v),
+)
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
