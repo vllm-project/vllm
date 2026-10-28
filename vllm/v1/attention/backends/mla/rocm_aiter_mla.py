@@ -215,6 +215,19 @@ def _gluon_mla_decode_supported() -> bool:
     return on_gfx950()
 
 
+def _enable_gfx1250_flydsl_ps1_decode() -> None:
+    """Route gfx1250 persistent decode to AITER's FlyDSL PS1 kernel.
+
+    gfx1250 asm MLA decode does not support persistent decode.
+    """
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        import os
+
+        os.environ.setdefault("AITER_MLA_DECODE_PS1_FLYDSL", "1")
+
+
 # Past 2 GiB, mla_gluon swaps its masked buffer_load for an unmasked
 # global_load that reads outside the cache and aborts the process. Mirrors the
 # kernel's own within_2gb bound, so the fallback engages exactly where it does.
@@ -868,6 +881,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self.paged_kv_indices = torch.zeros(
             max_num_pages, dtype=torch.int32, device=device
         )
+
+        # Enable FlyDSL persistent MLA on gfx1250
+        _enable_gfx1250_flydsl_ps1_decode()
 
         from aiter import dtypes, get_mla_metadata_info_v1
 
