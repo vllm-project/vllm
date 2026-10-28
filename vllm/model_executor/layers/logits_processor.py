@@ -93,8 +93,20 @@ class LogitsProcessor(PluggableLayer):
         # Dtype of the lm_head projection. Defaults to the model dtype; an
         # fp32 head (via `--hf-overrides '{"head_dtype": "float32"}'`) is
         # required for RL training-inference consistency.
-        model_config = get_current_vllm_config().model_config
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
+        # Batch invariance compiles the head's GEMM for every row count up to
+        # the largest step: one verification row per draft token per request.
+        self.max_logit_rows = 0
+        if envs.VLLM_BATCH_INVARIANT:
+            spec = vllm_config.speculative_config
+            num_spec = (spec.num_speculative_tokens or 0) if spec is not None else 0
+            scheduler = vllm_config.scheduler_config
+            self.max_logit_rows = min(
+                scheduler.max_num_seqs * (1 + num_spec),
+                scheduler.max_num_batched_tokens,
+            )
 
     def forward(
         self,
@@ -178,6 +190,9 @@ class LogitsProcessor(PluggableLayer):
             ):
                 from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant
 
+                batch_invariant.compile_tensor_core_rows(
+                    lm_head.weight, self.max_logit_rows
+                )
                 logits = batch_invariant.bf16_fixed_mm(flat, lm_head.weight)
             else:
                 if bi_sm100:
