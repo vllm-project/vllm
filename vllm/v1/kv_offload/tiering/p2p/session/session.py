@@ -501,7 +501,12 @@ class P2PSession:
         peer waits out the full load and abort-ack timeouts again.
         """
         expired = self._client.expired_abort_ack
-        if expired is None or self._abort_ack_fault is not None:
+        if (
+            expired is None
+            or self._abort_ack_fault is not None
+            or self._conn is None
+            or not self._conn.alive
+        ):
             return
         req_id, round_seq = expired
         self._abort_ack_fault = "abort ack timed out"
