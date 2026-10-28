@@ -109,8 +109,6 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
-    This also applies to the Rust frontend's native GLM-5.3 and GLM-5.3-Flash renderer (`--tokenizer-mode glm5_next`). The exclusion option is disabled by default.
-
 ## Constrained Decoding Behavior
 
 Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
