@@ -8,7 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, finish_direct_reload
+from .direct import begin_direct_reload, direct_reload_pending, finish_direct_reload
 from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
 
 __all__ = ["finish_reload", "start_reload"]
@@ -30,7 +30,14 @@ def finish_reload(
     model: torch.nn.Module, model_config: ModelConfig, device: torch.device
 ) -> None:
     """Complete the weight update in the mode `start_reload` began."""
-    if model.__dict__.pop(_MODE_ATTR, "layerwise") == "direct":
+    mode = model.__dict__.pop(_MODE_ATTR, "layerwise")
+    if mode == "direct":
         finish_direct_reload(model, model_config, device)
+    elif direct_reload_pending(model):
+        # a direct finish failed partway: some modules may already be
+        # processed, so neither layerwise nor a second direct finish is safe
+        raise RuntimeError(
+            "direct reload: a previous finish failed; start a new full update"
+        )
     else:
         finalize_layerwise_reload(model, model_config)

@@ -55,12 +55,22 @@ __all__ = [
     "direct_reload_enabled",
     "direct_reload_pending",
     "finish_direct_reload",
+    "keep_addresses",
     "record_checkpoint_layout",
 ]
 
 
 def direct_reload_enabled() -> bool:
     return envs.VLLM_RELOAD_MODE == "direct"
+
+
+_finishing = False  # a direct finish is rerunning post-load processing
+
+
+def keep_addresses() -> bool:
+    """Whether `replace_parameter` writes into existing storage: at a direct
+    cold start, or during a direct finish whatever the env says by then."""
+    return _finishing or direct_reload_enabled()
 
 
 def direct_reload_pending(model: torch.nn.Module) -> bool:
@@ -220,5 +230,10 @@ def finish_direct_reload(
         if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
-    process_weights_after_loading(model, model_config, device)
+    global _finishing
+    _finishing = True
+    try:
+        process_weights_after_loading(model, model_config, device)
+    finally:
+        _finishing = False
     model._direct_reload_pending = False

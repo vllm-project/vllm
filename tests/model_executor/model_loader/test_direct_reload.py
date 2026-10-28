@@ -9,7 +9,9 @@ post-load processing has the hazards found on real models:
 (c) the model's loader writes a weight without its ``weight_loader`` (MiMo);
 (d) post-load processing consumes a checkpoint tensor, which stays
     registered as a retired parameter (NVFP4 ``weight_scale_2``);
-(e) post-load processing that must never run on converted bytes (packing).
+(e) post-load processing that must never run on converted bytes (packing);
+(f) post-load processing grows a weight (padding): a reload writes it into
+    the existing storage to keep its address.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -91,6 +93,10 @@ def _pack(layer):  # (e): not idempotent, must never run on converted bytes
     replace_parameter(layer, "weight", (layer.weight * 2).t().contiguous())
 
 
+def _pad(layer):  # (f): kernel layout larger than the checkpoint's
+    replace_parameter(layer, "weight", torch.nn.functional.pad(layer.weight, (0, 4)))
+
+
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -98,6 +104,7 @@ _SHAPES = {
     "nvfp4.weight": ((4, 4), torch.bfloat16),
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
+    "pad.weight": ((4, 4), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -105,6 +112,7 @@ _PWAL = {
     "mimo": _requantize,
     "nvfp4": _consume_scale_2,
     "engram": _pack,
+    "pad": _pad,
 }
 
 
@@ -242,6 +250,7 @@ class TestReloadEqualsColdStart:
             ["mimo.weight", "mimo.weight_scale"],
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
+            ["pad.weight"],
         ],
         ids=[
             "a-parent-derived",
@@ -249,6 +258,7 @@ class TestReloadEqualsColdStart:
             "c-loader-bypass",
             "d-consumed-scale",
             "e-not-idempotent",
+            "f-grows",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
@@ -325,7 +335,7 @@ class TestRefusals:
 
 def test_retry_after_aborted_update_matches_cold_start():
     # Direct reload has no rollback: a failed update leaves the model partly
-    # updated and pending (the worker refuses to run it), and the next full
+    # updated and pending (nothing refuses to run it), and the next full
     # update repairs it.
     model = _cold_start(_checkpoint())
     assert not direct_reload_pending(model)
@@ -355,3 +365,28 @@ def test_finish_keeps_guards_of_modules_without_quant_method():
     _reload(model, _checkpoint())
     assert model.attn.kv_b._already_called_process_weights_after_loading
     assert "_already_called_process_weights_after_loading" not in vars(model.proj)
+
+
+def test_finish_retry_after_failed_direct_finish_raises(monkeypatch):
+    # a retried finish must not fall back to layerwise and report success
+    model = _cold_start(_checkpoint())
+    start_reload(model)
+    model.load_weights(_checkpoint(1.01).items())
+
+    def fail(layer):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(model.nvfp4.quant_method, "fn", fail)
+    with pytest.raises(ValueError, match="boom"):
+        finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    with pytest.raises(RuntimeError, match="previous finish failed"):
+        finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    assert direct_reload_pending(model)
+
+
+def test_replace_parameter_keeps_the_target_checkpoint_layout():
+    # post-load processing may pass another checkpoint parameter as new_tensor
+    model = _cold_start(_checkpoint())
+    layout = model.proj.weight._ckpt_layout
+    replace_parameter(model.proj, "weight", model.mimo.weight)
+    assert model.proj.weight._ckpt_layout == layout

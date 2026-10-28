@@ -74,10 +74,10 @@ def _view_in_place(
     """Under direct reload, a view of ``old_param``'s storage shaped like
     ``new_tensor`` when it fits there, so the address survives a layout change.
     None when it does not fit or ``new_tensor`` already lives in that storage."""
-    from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+    from vllm.model_executor.model_loader.reload.direct import keep_addresses
 
     if (
-        not direct_reload_enabled()
+        not keep_addresses()
         or new_tensor.device != old_param.device
         or old_param.is_meta
     ):
@@ -115,6 +115,10 @@ def replace_parameter(
     ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
     which is always taken from the existing parameter.
 
+    Under direct reload, a ``new_tensor`` larger than the parameter at cold start
+    may be written into the parameter's existing storage on a reload, so do not
+    read a local alias of the old data (``w = layer.weight.data``) after this call.
+
     This function should not be called on weights which are tied/shared
 
     Args:
@@ -141,6 +145,10 @@ def replace_parameter(
     # a loader riding along under that name has to be dropped as well.
     new_tensor_attrs.pop("weight_loader", None)
     new_tensor_attrs.pop("_weight_loader", None)
+    # A checkpoint layout belongs to the parameter it was recorded on (direct
+    # reload); another checkpoint parameter passed as new_tensor must not
+    # overwrite it.
+    new_tensor_attrs.pop("_ckpt_layout", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
