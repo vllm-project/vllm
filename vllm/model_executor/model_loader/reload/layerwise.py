@@ -80,7 +80,9 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module, *, defer_processing: bool = False
+):
     """Set up layerwise weight loading with deferred processing.
 
     Must be called after `record_metadata_for_reloading`. This function:
@@ -93,6 +95,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     2. Load all cached weights
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
+
+    With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
@@ -115,6 +119,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
+        info.defer_processing = defer_processing
 
 
 def initialize_online_processing(layer: torch.nn.Module):
@@ -194,7 +199,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if is_deferred_attention_layer(layer):
+        # Preserve placement remapping until checkpoint iteration finishes:
+        # expert reload wrappers must survive trailing redundant mappings.
+        if info.defer_processing or is_deferred_attention_layer(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device

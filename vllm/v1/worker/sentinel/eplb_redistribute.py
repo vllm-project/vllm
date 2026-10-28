@@ -193,11 +193,18 @@ def reload_experts_from_disk(
     loader = get_model_loader(vllm_config.load_config)
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
     matched: set[int] = set()
+    rename_checkpoint_weight = getattr(
+        model, "_rename_weight_for_modelopt_checkpoint", lambda name: name
+    )
 
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
+            # Honor model-specific checkpoint renaming before filtering, while
+            # passing the original name to load_weights for its normal conversion.
+            renamed = rename_checkpoint_weight(name)
             for layer_idx, prefix in zip(layer_indices, prefixes):
-                if name.startswith(prefix):
+                runtime_prefix = moe_layers[layer_idx].layer_name + "."
+                if name.startswith(prefix) or renamed.startswith(runtime_prefix):
                     matched.add(layer_idx)
                     yield name, tensor
                     break
@@ -211,7 +218,7 @@ def reload_experts_from_disk(
             raise NotImplementedError(
                 "Scale-down reload of fused GPT-OSS MXFP4 weights"
             )
-        initialize_layerwise_reload(layer)
+        initialize_layerwise_reload(layer, defer_processing=True)
         quant_method = layer.quant_method
         quant_method = (
             getattr(quant_method, "requantization_source", None) or quant_method
