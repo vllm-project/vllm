@@ -3627,6 +3627,24 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+@pytest.mark.parametrize("enable_caching", [True, False])
+def test_get_new_blocks_rejects_negative_count(enable_caching: bool):
+    pool = BlockPool(
+        num_gpu_blocks=4, enable_caching=enable_caching, hash_block_size=16
+    )
+    # Block 0 is reserved as the null block.
+    assert pool.get_num_free_blocks() == 3
+
+    with pytest.raises(ValueError, match="negative"):
+        pool.get_new_blocks(-1)
+    assert pool.get_num_free_blocks() == 3
+
+    blocks = pool.get_new_blocks(3)
+    assert [b.block_id for b in blocks] == [1, 2, 3]
+    assert all(b.ref_cnt == 1 for b in blocks)
+    assert pool.get_num_free_blocks() == 0
+
+
 def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)

@@ -723,6 +723,16 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+def test_negative_block_count():
+    blocks = [KVCacheBlock(i) for i in range(3)]
+    queue = FreeKVCacheBlockQueue(blocks)
+    with pytest.raises(ValueError, match="negative"):
+        queue.popleft_n(-1)
+    assert queue.num_free_blocks == 3
+    assert [b.block_id for b in queue.popleft_n(3)] == [0, 1, 2]
+    assert queue.num_free_blocks == 0
+
+
 @pytest.mark.parametrize("num_blocks", [1, 2, 16])
 def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
     """Draining a batch must leave the sentinels ready for reuse."""

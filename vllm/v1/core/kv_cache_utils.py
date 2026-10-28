@@ -354,6 +354,8 @@ class FreeKVCacheBlockQueue:
             A list of n free blocks.
 
         """
+        if n < 0:
+            raise ValueError(f"Cannot pop a negative number of blocks: {n}")
         if n == 0:
             return []
         assert self.num_free_blocks >= n
