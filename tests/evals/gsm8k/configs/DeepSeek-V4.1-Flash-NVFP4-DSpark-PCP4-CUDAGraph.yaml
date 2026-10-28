@@ -10,6 +10,7 @@ startup_max_wait_seconds: 1800
 # Match the real-weight TP4 DSpark baseline, including its checkpoint revision.
 server_args: >-
   --revision 3431dde3247c13b5957f682b1e3c6fcae2566079
+  --language-model-only
   --tokenizer-mode deepseek_v41
   --trust-remote-code
   --max-model-len 8192
