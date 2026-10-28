@@ -1109,6 +1109,12 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         that is otherwise reserved after profiling."""
         return
 
+    def decode_query_padded_num_heads(self, attn_metadata: T) -> int | None:
+        """Head count forward_mqa pads this step's query to by repeating each
+        head, so the caller may hand it the padded query directly; None when
+        forward_mqa needs the unpadded query."""
+        return None
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),

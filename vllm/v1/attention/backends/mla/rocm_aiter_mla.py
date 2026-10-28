@@ -2453,6 +2453,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.qk_rope_head_dim == 64
         )
 
+    def decode_query_padded_num_heads(
+        self, attn_metadata: AiterMLAMetadata
+    ) -> int | None:
+        """The asm decode's head count when this step pads the query with
+        get_mla_padded_q's head repeat. Gluon decode/verify and the DCP routes
+        read the unpadded query; non-divisor counts are tiled, not repeated."""
+        decode = attn_metadata.decode
+        if (
+            decode is None
+            or decode.use_gluon_decode
+            or decode.use_gluon_verify
+            or decode.dcp_route is not _DCPDecodeRoute.PLAIN
+            or self.dcp_world_size > 1
+        ):
+            return None
+        num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+        return None if num_heads % self._decode_num_heads else num_heads
+
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
@@ -3229,9 +3247,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert decode.paged_kv_indices is not None
         B = q.shape[0]
 
-        assert q.shape[1] == self._decode_num_heads, (
+        assert q.shape[1] in (
+            self._decode_num_heads,
+            self.decode_query_padded_num_heads(attn_metadata),
+        ), (
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
-            f"{self._decode_num_heads}, got {q.shape[1]}"
+            f"{self._decode_num_heads} or its padded count, got {q.shape[1]}"
         )
         # cprr has kernels only at native head counts, so pad q up (e.g. 96 ->
         # 128). Heads are independent in MLA; the extras are sliced off below.
