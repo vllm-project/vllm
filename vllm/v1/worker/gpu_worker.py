@@ -6,8 +6,8 @@ import copy
 import gc
 import os
 import time
-from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -109,6 +109,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
+    kv_cache_lent_for_weight_update,
     measure_kv_cache_bytes,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
@@ -253,6 +254,10 @@ class Worker(WorkerBase):
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._weight_update_is_draft = False
+        # Set by the engine while a pause has emptied the KV cache.
+        self._kv_cache_reclaimable = False
+        # Keeps the KV cache lent to the active weight update until it ends.
+        self._weight_update_kv_cache_loan = ExitStack()
 
         # Worker profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -397,6 +402,10 @@ class Worker(WorkerBase):
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:
             get_kv_transfer_group().unregister_kv_caches()
+        # Outside the allocator pool, like in sleep.
+        extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if extensible_kv_cache is not None and "kv_cache" in tags:
+            extensible_kv_cache.release_physical()
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
@@ -668,9 +677,32 @@ class Worker(WorkerBase):
             setattr(self.model_runner, config_name, new_config)
             setattr(self, config_name, new_config)
 
-    def reload_weights(self, *args, **kwargs) -> None:
-        with set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(*args, **kwargs)
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        # Kernel-format weights are copied into place, needing no room.
+        kv_cache_loan = (
+            kv_cache_lent_for_weight_update(
+                getattr(self.model_runner, "extensible_kv_cache", None),
+                self.model_runner.get_model(),
+                reclaimable=self._kv_cache_reclaimable,
+                fail_if_short=True,
+            )
+            if is_checkpoint_format
+            else nullcontext()
+        )
+        with kv_cache_loan, set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(
+                weights_iterator, weights_path, is_checkpoint_format
+            )
+
+    def set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
+        """Whether the KV cache holds nothing to keep, so that a weight update
+        may borrow its memory; see `EngineCore._set_kv_cache_reclaimable`."""
+        self._kv_cache_reclaimable = reclaimable
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -1790,6 +1822,16 @@ class Worker(WorkerBase):
             if draft_model is not None:
                 restore_quantized_lm_heads(draft_model, refresh=False)
             raise
+        # Engines may receive kernel-format weights, needing no room; so warn
+        # rather than fail when short.
+        self._weight_update_kv_cache_loan.enter_context(
+            kv_cache_lent_for_weight_update(
+                getattr(self.model_runner, "extensible_kv_cache", None),
+                draft_model or self.model_runner.get_model(),
+                reclaimable=self._kv_cache_reclaimable,
+                fail_if_short=False,
+            )
+        )
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
@@ -1832,6 +1874,7 @@ class Worker(WorkerBase):
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
         self._weight_update_active = False
+        self._weight_update_kv_cache_loan.close()
         self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
             (draft_model := self.get_draft_model()) is not None
@@ -1857,6 +1900,8 @@ class Worker(WorkerBase):
                     # session so that a new full update can start
                     self._end_weight_update(refresh=False)
                 raise
+            finally:
+                self._weight_update_kv_cache_loan.close()
             self._end_weight_update(refresh=True)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
