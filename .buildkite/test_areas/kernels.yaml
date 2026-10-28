@@ -449,6 +449,14 @@ steps:
       - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_fp8_prefill.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_fp8_quant.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
+      - vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py
+      - vllm/model_executor/layers/quantization/online/fp8.py
+      - vllm/model_executor/kernels/linear/scaled_mm/
+      - vllm/envs.py
+      - tests/kernels/attention/test_rocm_aiter_mla_prefill_fusions.py
       - vllm/v1/attention/selector.py
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
@@ -464,6 +472,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_prefill_fusions.py -k flydsl_fp8
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test

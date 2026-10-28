@@ -8,6 +8,8 @@ padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
 gfx942/gfx950 (fp16/bf16).
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import FP8PrefillContext
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
@@ -80,6 +83,22 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.fp8_context: FP8PrefillContext | None = None
+
+    @contextmanager
+    def fp8_context_forward(self) -> Iterator["FP8PrefillContext"]:
+        from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
+            FP8PrefillContext,
+        )
+
+        if self.fp8_context is not None:
+            raise RuntimeError("Nested FP8 prefill forward scopes are unsupported.")
+        self.fp8_context = FP8PrefillContext()
+        try:
+            yield self.fp8_context
+        finally:
+            # Prefill metadata/backends can be shared across layers and forwards.
+            self.fp8_context = None
 
     def run_prefill_new_tokens(
         self,
@@ -93,6 +112,8 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         assert output_scale is None, (
             "AiterFlashAttnPrefillBackend does not support fused quantized output."
         )
+        if self.fp8_context is not None:
+            self.fp8_context.prepare(q, k, v)
         result = self.flash_attn_varlen_func(
             q=q,
             k=k,

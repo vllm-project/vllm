@@ -12,7 +12,7 @@ import torch
 
 from vllm import envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -37,6 +37,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
     max_decode_query_len,
+)
+from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+    AiterFlashAttnPrefillBackend,
 )
 from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
@@ -63,6 +66,7 @@ from vllm.v1.worker.workspace import (
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import ProjectionWeight
 
 logger = init_logger(__name__)
 
@@ -1042,7 +1046,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn.
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
+        self._fp8_prefill_enabled = (
+            (
+                not envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN
+                or vllm_config.model_config.runner_type == "draft"
+            )
+            and _fp8_mla_prefill_supported()
+        ) and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
@@ -2342,6 +2352,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
         self._sm_count = current_platform.num_compute_units()
+        self._flydsl_fp8_projection: ProjectionWeight | None = None
+        self._use_flydsl_fp8_prefill = (
+            envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN
+            and get_current_vllm_config().model_config.runner_type != "draft"
+        )
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -2359,7 +2374,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # KV cache is FP8. Head counts that are not a multiple of 16 are
         # replicate-padded up to one (see _mla_fp8_prefill_attn).
 
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
+        self._fp8_prefill_enabled = (
+            not self._use_flydsl_fp8_prefill and _fp8_mla_prefill_supported()
+        ) and (
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
@@ -2382,6 +2399,56 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.qk_nope_head_dim == 128
             and self.qk_rope_head_dim == 64
         )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        super().process_weights_after_loading(act_dtype)
+        self._flydsl_fp8_projection = None
+        if not self._use_flydsl_fp8_prefill:
+            return
+
+        from vllm.platforms.rocm import on_gfx950
+        from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
+            projection_weight,
+        )
+
+        if (
+            not on_gfx950()
+            or self.dcp_world_size <= 1
+            or envs.VLLM_BATCH_INVARIANT
+            or not _supports_fused_dcp_prefill_config(
+                self.kv_cache_dtype,
+                act_dtype,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+        ):
+            raise ValueError(
+                "VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN requires gfx950, "
+                "DCP > 1, BF16 activations, FP8 E4M3 cache, and MLA dimensions "
+                "512/128/64/128; batch invariance is unsupported."
+            )
+
+        from inspect import signature
+
+        from aiter.ops.flydsl import flydsl_flash_attn_fp8_supported
+        from aiter.ops.flydsl.gather_kv_b_proj import gather_kv_b_proj_flydsl
+
+        params = projection_weight(self.kv_b_proj, self.num_heads)
+        if not flydsl_flash_attn_fp8_supported(
+            params.weight.device,
+            self.num_heads,
+            self.num_heads,
+            192,
+            128,
+        ):
+            raise ValueError("AITER FlyDSL FP8 FMHA does not support this layer.")
+        if not {"k_out_scale", "v_out_scale", "weight_preshuffle"}.issubset(
+            signature(gather_kv_b_proj_flydsl).parameters
+        ):
+            raise ValueError("AITER must provide direct FP8 projection output.")
+        self._flydsl_fp8_projection = params
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2543,6 +2610,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         attn_metadata = cast(AiterMLAMetadata, attn_metadata)
         assert attn_metadata.prefill is not None
         prefill = attn_metadata.prefill
+        if envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN:
+            backend = prefill.prefill_backend
+            if (
+                isinstance(backend, AiterFlashAttnPrefillBackend)
+                and backend.fp8_context is not None
+            ):
+                from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
+                    compute_context,
+                )
+
+                return compute_context(
+                    self,
+                    q,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    k_scale,
+                    backend.fp8_context,
+                )
         weight = getattr(self.kv_b_proj, "weight", None)
         eligible = (
             _supports_fused_dcp_prefill_config(
@@ -2803,6 +2888,47 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         produces ``AiterMLAMetadata`` instances at runtime, so we narrow
         with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
+        if self._flydsl_fp8_projection is not None:
+            assert isinstance(attn_metadata, AiterMLAMetadata)
+            assert attn_metadata.prefill is not None
+            prefill = attn_metadata.prefill
+            backend = prefill.prefill_backend
+            chunked = prefill.chunked_context
+            from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
+                use_fp8_context,
+            )
+
+            if (
+                isinstance(backend, AiterFlashAttnPrefillBackend)
+                and chunked is not None
+                and chunked.dcp_manager is not None
+                and attn_metadata.dcp_context_row_indices is not None
+                and kv_c_and_k_pe_cache.is_contiguous()
+                and prefill.q_data_type == torch.bfloat16
+                and q.dtype == torch.bfloat16
+                and 0 < q.numel() < 2**31
+                # FlyDSL uses int32 flattened output indices.
+                and all(
+                    c.num_context_tokens * self.num_heads * 192 < 2**31
+                    for c in chunked.chunks
+                )
+                and any(
+                    use_fp8_context(c.max_query_len, c.max_seq_len)
+                    for c in chunked.chunks
+                )
+            ):
+                with backend.fp8_context_forward():
+                    return super().forward_mha(
+                        q,
+                        kv_c_normed,
+                        k_pe,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        k_scale,
+                        output,
+                        output_scale,
+                    )
+
         if (
             not self._fp8_prefill_enabled
             or not isinstance(attn_metadata, AiterMLAMetadata)

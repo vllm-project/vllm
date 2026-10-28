@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN: bool = False
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -1334,6 +1335,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Opt in to direct FP8 kv_b_proj output and FlyDSL cached-context FMHA.
+    # Requires gfx950, DCP > 1, FP8 E4M3 KV cache, BF16 activations,
+    # ROCM_AITER_FA prefill and native fp8_per_channel kv_b_proj weights.
+    # Causal and small-context attention remain BF16. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN", "0") == "1"
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
