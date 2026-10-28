@@ -68,6 +68,36 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def mark_padding(param: torch.Tensor, region: torch.Tensor, value: float) -> None:
+    """Record that ``region``, a view of ``param``, holds ``value`` rather than
+    checkpoint data; `fill_padding` writes it before every post-load processing.
+
+    Loaders record padding instead of writing it, so post-load processing sees
+    the same padding on every load: a reload may load into storage holding
+    stale bytes (uninitialized layerwise tensors, or post-processed bytes when
+    loading in place), and transfer engines may write checkpoint bytes without
+    running loaders at all. A region of one expert (``param[e]``) is recorded
+    for every expert.
+    """
+    offset = region.storage_offset() - param.storage_offset()
+    shape, stride = tuple(region.shape), tuple(region.stride())
+    if region.ndim < param.ndim:
+        offset %= param.stride(0)
+        shape, stride = (param.shape[0], *shape), (param.stride(0), *stride)
+    if "padding" not in param.__dict__:
+        param.padding = set()
+    param.padding.add((offset, shape, stride, value))
+
+
+def fill_padding(module: torch.nn.Module) -> None:
+    """Write the padding recorded by `mark_padding` for ``module``'s parameters,
+    in checkpoint layout, before post-load processing reads it."""
+    for param in module.parameters(recurse=False):
+        data = param.data
+        for offset, shape, stride, value in getattr(param, "padding", ()):
+            data.as_strided(shape, stride, data.storage_offset() + offset).fill_(value)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.utils import fill_padding
 
 
 def _make_fp8_tp_experts(
@@ -84,7 +85,9 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
     monkeypatch, tp_size, batched, intermediate_size
 ):
     """All ranks reconstruct the original dequantized projections, including
-    padding-only ranks. Reloading must clear stale weights and scales.
+    padding-only ranks. Reloading must clear stale weights and scales: the
+    loader records the padding and `fill_padding` (run before post-load
+    processing) writes it.
     """
     generator = torch.Generator().manual_seed(42)
     weights = {
@@ -139,6 +142,7 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
                                 expert,
                                 return_success=True,
                             )
+            fill_padding(layer)
             w = getattr(layer, f"{prefix}_weight").float()
             s = getattr(layer, f"{prefix}_weight_scale_inv")
             if name in ("w1", "w3"):
@@ -287,6 +291,7 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
                     param_name = f"{prefix}_{suffix}"
                     param = getattr(layer, param_name)
                     param.weight_loader(param, checkpoint, param_name, name, 0)
+            fill_padding(layer)
             method = layer.quant_method
             method.process_weights_after_loading(layer)
             assert method.is_monolithic

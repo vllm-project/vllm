@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.utils import fill_padding
 
 from .utils import make_dummy_moe_config
 
@@ -421,6 +422,68 @@ class TestWeightLoadingWithPaddedHiddenSize:
             expert_data_full[:original_hidden, original_intermediate:],
             torch.zeros(original_hidden, padded_intermediate - original_intermediate),
         )
+
+
+class TestPaddingFilledByPostProcessing:
+    """Loaders record padding instead of writing it; `fill_padding` writes it
+    before post-load processing, so a reload into storage holding old bytes
+    (or a transfer that skips loaders) matches a cold start."""
+
+    class _Experts(torch.nn.Module):
+        _get_hidden_dim = staticmethod(RoutedExperts._get_hidden_dim)
+        _split_padding = staticmethod(RoutedExperts._split_padding)
+        _narrow_and_mark_padding = RoutedExperts._narrow_and_mark_padding
+        _param_containing = RoutedExperts._param_containing
+        _load_w13 = RoutedExperts._load_w13
+
+        def __init__(self, experts: int, intermediate: int, hidden: int):
+            super().__init__()
+            self.moe_config = SimpleNamespace(
+                is_act_and_mul=True,
+                moe_parallel_config=SimpleNamespace(tp_size=1),
+            )
+            # Storage still holding the previous update's bytes
+            self.w13_weight = torch.nn.Parameter(
+                torch.full((experts, 2 * intermediate, hidden), 7.0),
+                requires_grad=False,
+            )
+
+    def _load_all(self, layer, loaded, pad_value=0):
+        for expert in range(layer.w13_weight.shape[0]):
+            for shard_id in ("w1", "w3"):
+                layer._load_w13(
+                    expert_data=layer.w13_weight.data[expert],
+                    shard_dim=0,
+                    shard_id=shard_id,
+                    loaded_weight=loaded,
+                    tp_rank=0,
+                    pad_value=pad_value,
+                )
+
+    def test_loader_leaves_padding_for_post_processing(self):
+        layer = self._Experts(experts=3, intermediate=4, hidden=6)
+        loaded = torch.randn(3, 5)  # intermediate 3 of 4, hidden 5 of 6
+
+        self._load_all(layer, loaded)
+        w13 = layer.w13_weight.data
+        assert torch.equal(w13[:, 3, :], torch.full((3, 6), 7.0))
+
+        fill_padding(layer)
+        for half in (slice(0, 3), slice(4, 7)):
+            assert torch.equal(w13[:, half, :5], loaded.expand(3, 3, 5))
+        assert torch.count_nonzero(w13[:, 3]) == 0
+        assert torch.count_nonzero(w13[:, 7]) == 0
+        assert torch.count_nonzero(w13[:, :, 5]) == 0
+        # One record per padded region, covering every expert
+        assert len(layer.w13_weight.padding) == 4
+
+    def test_unit_scale_padding(self):
+        layer = self._Experts(experts=2, intermediate=4, hidden=6)
+        self._load_all(layer, torch.randn(3, 6), pad_value=1)
+
+        fill_padding(layer)
+        assert torch.equal(layer.w13_weight.data[:, 3], torch.ones(2, 6))
+        assert torch.equal(layer.w13_weight.data[:, 7], torch.ones(2, 6))
 
 
 class TestUnquantizedTrtLlmPrePadding:
