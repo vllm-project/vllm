@@ -3485,6 +3485,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     IS_FNUZ_EXTRA: tl.constexpr,
     MAIN_RECORD: tl.constexpr,
     EXTRA_RECORD: tl.constexpr,
+    NATIVE_MXFP4: tl.constexpr,
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
     ADAPTIVE_SPLITS: tl.constexpr,
     ONE_WAVE_SPLITS: tl.constexpr,
@@ -3621,7 +3622,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         extra_lo = split_id * extra_chunk
         extra_hi = tl.minimum(extra_lo + extra_chunk, extra_len)
 
-        if EXTRA_RECORD == 272:
+        if EXTRA_RECORD == 272 and NATIVE_MXFP4:
             q_val, q_bits = _mxfp8_quantize_rows(
                 q_combined.to(tl.float32), BLOCK_H, NOPE_DIM + ROPE_DIM
             )
@@ -4706,6 +4707,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
         device=q.device,
     )
 
+    native_mxfp4 = (
+        extra_record == _V41_MXFP4_BYTES_PER_TOKEN
+        and num_queries >= envs.VLLM_ROCM_DSV41_MXFP4_DEQUANT_BELOW_ROWS
+    )
     if _ON_GFX950:
         _sparse_attn_decode_gfx950_partial_kernel[
             (num_queries, num_splits, heads_blocks)
@@ -4737,6 +4742,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             IS_FNUZ_EXTRA=False,
             MAIN_RECORD=main_record,
             EXTRA_RECORD=extra_record,
+            NATIVE_MXFP4=native_mxfp4,
             TRUST_EXTRA_CACHE_NAN_FREE=extra_cache_nan_free,
             ADAPTIVE_SPLITS=adaptive_splits,
             ONE_WAVE_SPLITS=one_wave_splits,
@@ -4746,7 +4752,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             NUM_STAGES=1,
             # The native MXFP4 tile's 16 PxV products pressure VGPRs: 2 warps
             # was 1.05-1.7x faster than 4 across 1-256 rows on MI355X.
-            num_warps=2 if extra_record == _V41_MXFP4_BYTES_PER_TOKEN else 4,
+            num_warps=2 if native_mxfp4 else 4,
             waves_per_eu=0,
         )
     else:

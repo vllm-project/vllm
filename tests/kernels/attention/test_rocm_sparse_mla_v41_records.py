@@ -148,15 +148,24 @@ def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.T
         (528, 272),
     ],
 )
+# The MXFP4 record has a native scaled-MFMA tile and an opt-in dequant fallback.
+@pytest.mark.parametrize("mxfp4_dequant_below_rows", [0, 1024])
 def test_compressed_record_matches_reference(
     num_tokens: int,
     num_heads: int,
     num_compressed: int,
     swa_record: int,
     compressed_record: int,
+    mxfp4_dequant_below_rows: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_sparse_attn_decode
 
+    if mxfp4_dequant_below_rows and compressed_record != 272:
+        pytest.skip("the dequant fallback only applies to the MXFP4 record")
+    monkeypatch.setenv(
+        "VLLM_ROCM_DSV41_MXFP4_DEQUANT_BELOW_ROWS", str(mxfp4_dequant_below_rows)
+    )
     set_random_seed(0)
     device = torch.device("cuda")
     block_size, num_slots = 64, 512

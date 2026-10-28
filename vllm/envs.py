@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_ROCM_DSV41_MXFP4_DEQUANT_BELOW_ROWS: int = 0
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
@@ -1098,6 +1099,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # ROCm gfx950 DeepSeek-V4.1 sparse decode with the mxfp4_ds_mla KV cache:
+    # decode batches with fewer rows than this read the MXFP4 record through
+    # the bf16 dequant tile instead of the native scaled-MFMA tile.
+    # Default 0: native at every batch size.
+    "VLLM_ROCM_DSV41_MXFP4_DEQUANT_BELOW_ROWS": lambda: int(
+        os.getenv("VLLM_ROCM_DSV41_MXFP4_DEQUANT_BELOW_ROWS", "0")
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
