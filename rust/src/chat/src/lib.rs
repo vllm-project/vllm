@@ -10,6 +10,8 @@
 //! blocks. It is closer to vLLM's internal chat-rendering flow than to a full
 //! OpenAI-compatible surface.
 
+use std::sync::Once;
+
 pub use backend::hf::HfChatBackend;
 pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
@@ -60,9 +62,13 @@ mod renderer;
 mod request;
 mod stream;
 
+use std::collections::HashMap;
+
+use tracing::warn;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
@@ -82,7 +88,14 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    reasoning_effort_map: HashMap<String, String>,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    exclude_tools_when_tool_choice_none: bool,
 }
+
+static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
@@ -95,6 +108,8 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -107,6 +122,8 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -125,6 +142,31 @@ impl ChatRequestProcessor {
     /// `None` for the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Configure server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.reasoning_effort_map = reasoning_effort_map;
+        self
+    }
+
+    /// Rewrite the typed reasoning effort; `chat_template_kwargs` is left as-is.
+    fn map_reasoning_effort(&self, request: &mut ChatRequest) {
+        if let Some(EffortValue::String(effort)) = &mut request.chat_options.reasoning_effort
+            && let Some(mapped) = self.reasoning_effort_map.get(effort.as_str())
+        {
+            *effort = mapped.clone();
+        }
+    }
+
+    /// Configure whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -179,9 +221,12 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
+        if self.exclude_tools_when_tool_choice_none {
+            request.tool_context.exclude_initial_tools_if_none();
+        }
         let renderer = self.backend.chat_renderer();
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))
@@ -214,8 +259,9 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
-    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+    pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
         self.prepare_text_request(request).await
     }
 
@@ -231,6 +277,7 @@ impl ChatRequestProcessor {
         text_processor: &TextRequestProcessor,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
 
         let mut output_processor = self.backend.new_chat_output_processor(
             &mut request,
@@ -245,11 +292,24 @@ impl ChatRequestProcessor {
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        let grammar = {
-            output_processor.initialize(prompt_token_ids)?;
-            output_processor.build_output_grammar()?
-        };
-        apply_output_grammar(&mut text_request, grammar)?;
+        output_processor.initialize(prompt_token_ids)?;
+        let grammar = output_processor.build_output_grammar()?;
+        // Output grammars are xgrammar structural tags. With another backend the
+        // request keeps its own constraint and parsing runs unconstrained.
+        match text_processor.structured_outputs_backend() {
+            StructuredOutputBackend::Xgrammar => apply_output_grammar(&mut text_request, grammar)?,
+            backend => {
+                if grammar.is_some() {
+                    OUTPUT_GRAMMAR_SKIPPED_ONCE.call_once(|| {
+                        warn!(
+                            ?backend,
+                            "output grammars need the xgrammar structured outputs backend; \
+                             tool calls and composed response formats are not constrained"
+                        );
+                    });
+                }
+            }
+        }
 
         Ok((text_request, output_processor))
     }
@@ -301,6 +361,22 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.processor.reasoning_effort_map = reasoning_effort_map;
+        self
+    }
+
+    /// Set whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.processor.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -434,7 +510,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark1x, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -445,6 +521,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark1x, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
     }
 }
