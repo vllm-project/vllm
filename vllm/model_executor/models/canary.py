@@ -214,8 +214,7 @@ class CanaryModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: CanaryConfig = vllm_config.model_config.hf_config
-        # TODO: port the FastConformer encoder to vLLM layers; for now this reuses
-        # the Transformers module as-is (like `parakeet.py`).
+        # Reuses the Transformers FastConformer encoder as-is, like `parakeet.py`.
         self.encoder = HFParakeetEncoder(config.encoder_config).to(
             vllm_config.model_config.dtype
         )
