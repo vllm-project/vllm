@@ -37,6 +37,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     import numpy as np
 
+    from vllm.config import ModelConfig
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
@@ -297,6 +298,7 @@ class RustFrontendProcessManager:
         data_parallel_size: int,
         stats_update_address: str | None = None,
         grpc_sock: Any | None = None,
+        model_config: "ModelConfig | None" = None,
     ):
         import os
         import subprocess
@@ -352,6 +354,16 @@ class RustFrontendProcessManager:
         model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
         if model_tag is not None:
             args_dict["model_tag"] = model_tag
+        if model_config is not None:
+            from vllm.model_hub import parse_model_source
+
+            if parse_model_source(model_tag or ""):
+                args_dict["model_tag"] = model_config.model
+                args_dict["served_model_name"] = args.served_model_name or [
+                    model_config.served_model_name
+                ]
+            if parse_model_source(getattr(args, "tokenizer", None) or model_tag or ""):
+                args_dict["tokenizer"] = model_config.tokenizer
 
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`

@@ -1234,6 +1234,17 @@ class SpeculativeConfig:
             self.method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
+            from vllm.model_hub import parse_model_source
+
+            if (
+                self.method in ("mtp", "dspark")
+                and self.target_model_config is not None
+                and parse_model_source(self.target_model_config.model_weights)
+            ):
+                self.revision = self.revision or self.target_model_config.revision
+                self.code_revision = (
+                    self.code_revision or self.target_model_config.code_revision
+                )
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1254,7 +1265,10 @@ class SpeculativeConfig:
                 # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for dspark")
-                self.model = self.target_model_config.model
+                self.model = (
+                    self.target_model_config.model_weights
+                    or self.target_model_config.model
+                )
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
@@ -1367,8 +1381,25 @@ class SpeculativeConfig:
                 draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
                     self.target_model_config.hf_overrides
                 )
+                from vllm.model_hub import parse_model_source, resolve_model_source
+
+                model_weights = self.model if parse_model_source(self.model) else ""
+                self.model = resolve_model_source(
+                    self.model,
+                    revision=self.revision,
+                    code_revision=self.code_revision,
+                    download_dir=(
+                        self.draft_load_config.download_dir
+                        if self.draft_load_config
+                        else None
+                    ),
+                    hf_token=self.target_model_config.hf_token,
+                    trust_remote_code=self.target_model_config.trust_remote_code,
+                )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
+                    model_weights=model_weights,
+                    hf_token=self.target_model_config.hf_token,
                     runner="draft",
                     tokenizer=(
                         self.model

@@ -7,12 +7,11 @@ import json
 import tempfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
 from filelock import FileLock
-from huggingface_hub import constants
-from huggingface_hub import snapshot_download as hf_snapshot_download
 from huggingface_hub.utils import validate_repo_id
+
+from vllm.transformers_utils.repo_utils import download_model_source
 
 
 def parse_model_source(model: str) -> tuple[str, str] | None:
@@ -30,6 +29,33 @@ def strip_model_source(model: str) -> str:
     return reference[1] if reference is not None else model
 
 
+def download_model_weights(
+    model: str,
+    allow_patterns: list[str],
+    *,
+    index_file: str,
+    use_index: bool = True,
+    subfolder: str | None = None,
+    **kwargs,
+) -> str:
+    """Download the first matching loader format, using the shard index if present."""
+    prefix = f"{subfolder}/" if subfolder else ""
+    folder = download_model_source(
+        model, allow_patterns=[prefix + index_file], **kwargs
+    )
+    index = Path(folder) / prefix / index_file
+    for pattern in allow_patterns:
+        patterns = [prefix + pattern]
+        if use_index and pattern == "*.safetensors" and index.is_file():
+            weights = json.loads(index.read_text()).get("weight_map", {})
+            if weights:
+                patterns = sorted({prefix + name for name in weights.values()})
+        folder = download_model_source(model, allow_patterns=patterns, **kwargs)
+        if any((Path(folder) / prefix).glob(pattern)):
+            break
+    return folder
+
+
 def resolve_model_source(
     model: str,
     *,
@@ -37,40 +63,41 @@ def resolve_model_source(
     code_revision: str | None = None,
     download_dir: str | None = None,
     hf_token: str | bool | None = None,
-    metadata_only: bool = False,
+    trust_remote_code: bool = False,
 ) -> str:
-    """Resolve explicit Hub references; leave all other paths unchanged."""
+    """Resolve Hub metadata; leave weight selection to the model loader."""
     reference = parse_model_source(model)
     if reference is None:
         return model
     source, repo_id = reference
-    kwargs: dict[str, Any] = {
-        "cache_dir": download_dir,
-        "local_files_only": constants.HF_HUB_OFFLINE,
-        "ignore_patterns": (
-            ["*.bin", "*.safetensors", "*.pt", "*.pth", "*.gguf"]
-            if metadata_only
-            else None
-        ),
-    }
 
     def download(repo: str, rev: str | None, code_only: bool = False) -> str:
-        options = dict(kwargs)
-        if rev is not None:
-            options["revision"] = rev
-        if code_only:
-            options["allow_patterns"] = ["*.py"]
-        try:
-            if source == "hf":
-                return hf_snapshot_download(repo, token=hf_token, **options)
-            from modelscope import snapshot_download
-
-            return snapshot_download(repo, **options)
-        except Exception as exc:
-            exc.add_note(f"Failed to resolve {source}://{repo} from {source}.")
-            raise
+        return download_model_source(
+            f"{source}://{repo}",
+            revision=rev,
+            cache_dir=download_dir,
+            token=hf_token,
+            allow_patterns=(
+                ["*.py"]
+                if code_only
+                else [
+                    "*.json",
+                    "*.py",
+                    "*.model*",
+                    "*.txt",
+                    "*.tiktoken",
+                    "*.jinja",
+                    "*.bpe",
+                    "*.vocab",
+                    "*.spm",
+                ]
+            ),
+            ignore_patterns=["original/**/*"],
+        )
 
     snapshot = Path(download(repo_id, revision))
+    if not trust_remote_code:
+        return str(snapshot)
     code_paths: dict[str, str] = {}
 
     def local_reference(value):
@@ -136,10 +163,10 @@ def resolve_model_source(
                         (staging / path.name).symlink_to(path.resolve())
                 for name, config in configs.items():
                     (staging / name).write_text(json.dumps(config))
-                for repo, path in code_paths.items():
+                for repo, code_path in code_paths.items():
                     namespace = (
                         "hub_code_" + hashlib.sha256(repo.encode()).hexdigest()[:16]
                     )
-                    (staging / namespace).symlink_to(Path(path).resolve())
+                    (staging / namespace).symlink_to(Path(code_path).resolve())
                 staging.rename(overlay)
     return str(overlay)

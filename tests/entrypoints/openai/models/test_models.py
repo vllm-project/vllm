@@ -4,9 +4,9 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
+from vllm.transformers_utils.repo_utils import hf_api
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -36,7 +36,7 @@ def server(qwen3_lora_files, request):
     ]
 
     if request.param:
-        snapshot_download(MODEL_NAME)
+        hf_api().snapshot_download(MODEL_NAME)
     env = {"HF_HUB_OFFLINE": "1"} if request.param else {}
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env) as remote_server:
         yield remote_server

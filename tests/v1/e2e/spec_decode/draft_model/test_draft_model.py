@@ -108,10 +108,10 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
 @pytest.mark.parametrize("custom_code", [False, True])
 @single_gpu_only
 def test_draft_model_mixed_hubs(vllm_runner, monkeypatch, tmp_path, custom_code):
-    from vllm.model_hub import hf_snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
     model = "Qwen/Qwen3-0.6B"
-    snapshot = hf_snapshot_download(model)
+    snapshot = hf_api().snapshot_download(model)
     target = Path(snapshot)
     code = tmp_path / "code"
     if custom_code:

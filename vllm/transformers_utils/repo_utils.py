@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
+from huggingface_hub import snapshot_download as _hf_snapshot_download
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -26,6 +27,29 @@ from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def download_model_source(model: str, **kwargs) -> str:
+    """Download from an explicit Hub, independently of ModelScope's patch."""
+    from vllm.model_hub import parse_model_source
+
+    reference = parse_model_source(model)
+    assert reference is not None
+    source, repo = reference
+    kwargs.setdefault("local_files_only", huggingface_hub.constants.HF_HUB_OFFLINE)
+    try:
+        if source == "hf":
+            return _hf_snapshot_download(
+                repo, library_name="vllm", library_version=VLLM_VERSION, **kwargs
+            )
+        from modelscope import snapshot_download
+
+        kwargs.pop("token", None)
+        return snapshot_download(repo, **kwargs)
+    except Exception as exc:
+        exc.add_note(f"Failed to resolve {model} from {source}.")
+        raise
+
 
 _hf_api: HfApi | None = None
 
@@ -141,6 +165,14 @@ def list_repo_files(
     repo_type: str | None = None,
     token: str | bool | None = None,
 ) -> list[str]:
+    from vllm.model_hub import parse_model_source
+
+    reference = parse_model_source(repo_id)
+    use_modelscope = envs.VLLM_USE_MODELSCOPE
+    if reference is not None:
+        source, repo_id = reference
+        use_modelscope = source == "modelscope"
+
     def lookup_files() -> list[str]:
         # directly list files if model is local
         if (local_path := Path(repo_id)).exists():
@@ -151,7 +183,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if envs.VLLM_USE_MODELSCOPE:
+            if use_modelscope:
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
                 return modelscope_list_repo_files(

@@ -5,6 +5,7 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -12,7 +13,6 @@ from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.scale_out.factories import init_render_state
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.model_hub import strip_model_source
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.renderers import renderer_from_config
 from vllm.renderers.chat_utils import load_chat_template
@@ -32,7 +32,9 @@ async def init_render_app_state(
     preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
-    served_model_names = args.served_model_name or [strip_model_source(args.model)]
+    served_model_names = args.served_model_name or [
+        get_served_model_name(args.model, None)
+    ]
     model_registry = OpenAIModelRegistry(
         model_config=vllm_config.model_config,
         base_model_paths=[

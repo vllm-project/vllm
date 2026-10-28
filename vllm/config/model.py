@@ -159,7 +159,7 @@ class ModelConfig:
     select a Hub independently of `VLLM_USE_MODELSCOPE`."""
     model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object
-    storage (e.g., RunAI) to preserve the original URI while `model` points to
+    storage or an explicit Hub to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -2336,7 +2336,9 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
-        return model
+        from vllm.model_hub import strip_model_source
+
+        return strip_model_source(model)
     if isinstance(served_model_name, list):
         return served_model_name[0]
     return served_model_name

@@ -360,6 +360,9 @@ unchanged. Install `modelscope` for `modelscope://`. The default served name omi
 the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
 Use existing revision and download-directory options; URI revisions, subpaths,
 and queries are not supported.
+Standard checkpoint formats (`auto`, `hf`, `safetensors`, `pt`, `npcache`,
+`mistral`, `fastsafetensors`, `instanttensor`) and `dummy` are supported.
+For specialized loaders, download the repository first and use its local path.
 Cross-repository `auto_map` code uses the same Hub as its model or tokenizer,
 with the existing `code_revision` option. Executing custom code still requires
 `trust_remote_code`.

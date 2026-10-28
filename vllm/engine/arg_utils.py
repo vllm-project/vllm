@@ -935,7 +935,7 @@ class EngineArgs:
             resolve_model_source,
             download_dir=self.download_dir,
             hf_token=self.hf_token,
-            code_revision=self.code_revision,
+            trust_remote_code=self.trust_remote_code,
         )
         model = self.model
         reference = parse_model_source(model)
@@ -943,8 +943,9 @@ class EngineArgs:
             self.model = resolve_source(
                 model,
                 revision=self.revision,
-                metadata_only=self.load_format == "dummy",
+                code_revision=self.code_revision,
             )
+            self.model_weights = model
             if not self.served_model_name:
                 self.served_model_name = [reference[1]]
             if self.tokenizer is None:
@@ -957,7 +958,9 @@ class EngineArgs:
                 self.tokenizer = resolve_source(
                     self.tokenizer,
                     revision=tokenizer_revision,
-                    metadata_only=True,
+                    code_revision=self.code_revision
+                    if self.tokenizer == model
+                    else None,
                 )
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
@@ -2161,20 +2164,16 @@ class EngineArgs:
         self.speculative_config = {
             k.replace("-", "_"): v for k, v in self.speculative_config.items()
         }
-        if draft_model := self.speculative_config.get("model"):
-            draft_load_config = self.speculative_config.get("draft_load_config") or {}
-            if isinstance(draft_load_config, LoadConfig):
-                draft_load_config = asdict(draft_load_config)
-            self.speculative_config["model"] = resolve_model_source(
-                draft_model,
-                revision=self.speculative_config.get("revision"),
-                code_revision=self.speculative_config.get("code_revision"),
-                download_dir=draft_load_config.get("download_dir") or self.download_dir,
-                hf_token=self.hf_token,
-                metadata_only=draft_load_config.get("load_format", self.load_format)
-                == "dummy",
-            )
-
+        draft = (
+            self.speculative_config.get("model") or target_model_config.model_weights
+        )
+        if draft and parse_model_source(draft):
+            draft_load = self.speculative_config.get("draft_load_config")
+            if not isinstance(draft_load, LoadConfig):
+                draft_load = LoadConfig(
+                    **(asdict(self.create_load_config()) | (draft_load or {}))
+                )
+            self.speculative_config["draft_load_config"] = draft_load
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
