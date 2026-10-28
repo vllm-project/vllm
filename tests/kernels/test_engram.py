@@ -262,8 +262,22 @@ def test_sharded_engram_loads_and_matches_tp1(tp_size, quantized, monkeypatch):
                 "scale_fmt": "ue8m0",
             }
         )
+
+    torch.manual_seed(0)
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.randn(
+        num_tokens, n_hash_cols, layout.head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    hash_ids = torch.zeros(num_tokens, n_hash_cols, dtype=torch.int32, device="cuda")
+    token_mask = torch.arange(num_tokens, device="cuda") % 3 != 1
+
     monkeypatch.setattr(RocmEngram, "_create_embedding", lambda *args: None)
     monkeypatch.setattr(RocmEngram, "_init_staging", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "embed", lambda self, hash_ids: rows)
 
     def set_rank(size, rank):
         tp = SimpleNamespace(world_size=size, rank_in_group=rank)
@@ -285,20 +299,7 @@ def test_sharded_engram_loads_and_matches_tp1(tp_size, quantized, monkeypatch):
         engram.wkv.quant_method.process_weights_after_loading(engram.wkv)
         engram.q_weight.data.copy_(q_weight)
         engram.k_weight.data.copy_(k_weight)
-        engram.embed = lambda hash_ids: rows
         return engram, checkpoint
-
-    torch.manual_seed(0)
-    hidden_states = torch.randn(
-        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device="cuda"
-    )
-    rows = torch.randn(
-        num_tokens, n_hash_cols, layout.head_dim, dtype=torch.bfloat16, device="cuda"
-    )
-    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
-    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
-    hash_ids = torch.zeros(num_tokens, n_hash_cols, dtype=torch.int32, device="cuda")
-    token_mask = torch.arange(num_tokens, device="cuda") % 3 != 1
 
     reference, checkpoint = build(1, 0)
     assert reference.kv_shards == 1
