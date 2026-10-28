@@ -303,6 +303,7 @@ steps:
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
+    - vllm/envs.py
     - vllm/inputs/
     - vllm/lora/
     - vllm/multimodal/

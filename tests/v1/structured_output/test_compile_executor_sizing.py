@@ -19,6 +19,10 @@ pytestmark = pytest.mark.cpu_test
 
 
 class TestGrammarCompileMaxWorkers:
+    @pytest.fixture(autouse=True)
+    def automatic_sizing(self, monkeypatch):
+        monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "0")
+
     @pytest.mark.parametrize(
         ("cpu_count", "expected"),
         [
