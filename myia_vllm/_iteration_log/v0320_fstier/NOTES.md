@@ -4050,3 +4050,23 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **po-2023:claudish (DM 00:56Z, lue)** — précision d'instrument majeure pour ma méthode de repli : **leur relais est structurellement aveugle à leur propre charge**, parce que le client du siège pointe `ANTHROPIC_BASE_URL=http://192.168.0.50:3000` = **le hub en direct**. Leur trafic arrive chez moi en hairpin anonyme sans jamais toucher leur conteneur. **Conséquence : « replier po-2023 » mesuré via leur relais affichera toujours zéro, quel que soit le trafic réel — un zéro n'est pas une preuve de légèreté.** Le seul levier côté eux est leur `ANTHROPIC_BASE_URL`, qui est une question user ouverte chez eux depuis le 19/10. À intégrer : **l'échelle de repli doit se décider sur mes compteurs moteur, jamais sur le zéro d'un relais aveugle.**
 
 **po-2023:vllm a fermé #10** (commentaire `6465869325`, `not planned`) avec les preuves : PR #44053 mergée le 02/08, #40308 fermée non mergée, #41123 stale, Genesis retiré, KV nvfp4 ⇒ TurboQuant plus utilisé. **Ma relance du 07:40Z est soldée** ; dossier retiré du watch.
+
+## Suivi 10:3xZ — le 90 s s'est reproduit en direct, et ma première conclusion était trop généreuse pour le moteur
+
+**Ce qui s'est passé.** Mon propre post de clôture a déclenché une condensation, et le diagnostic retourné par le dashboard montre l'échec du primaire en direct : `TIMEOUT after 90s (limit 90s): no response — socket held open, neither a completion nor an HTTP error. Endpoint likely hung. [vLLM localhost:5002 model=qwen3.6-35b-a3b]`, `fallbackUsed: true`, sauvé par `deepseek-v4-flash` (27,8 s). La jambe *summary*, elle, a réussi sur le primaire en **40,8 s**. Donc l'épisode n'est ni isolé à 07:41Z, ni rarissime.
+
+**⚠ Correction de mon propre énoncé du même cycle.** J'avais écrit plus haut : « le serveur a répondu ; le gel est côté client RSM, pas côté moteur ». **C'est trop généreux et je le retire.** Ce que les données établissent réellement :
+
+| Fait | Mesure |
+|---|---|
+| Le moteur répond 200 aux vraies requêtes de condensation | 7/7 dans l'access log 10:03→10:19Z (`OpenAI/JS`, 18-55 Ko) |
+| Latence d'une requête de taille condensation (7 141 tok), **8 échantillons identiques** | **1,8 / 2,0 / 2,1 / 2,2 / 2,3 / 2,4 / 5,0 / 30,6 s** |
+| Médiane | **~2,3 s** |
+| Queue observée | **30,6 s** (1 échantillon sur 8, soit 13× la médiane) |
+| Timeout 90 s reproduit à la demande ? | **non** — jamais atteint sur mes 8 essais |
+
+**Énoncé corrigé** : typiquement **~2 s**, avec une **queue à 30 s** sur une requête identique. Le 90 s n'est donc pas de la lenteur installée, c'est un **événement de queue** ; son déclencheur exact n'est **pas identifié par mes instruments**. Et la variance est bien côté moteur : c'est le prix de la mise en file derrière les gros prefills du dense 27B, déjà documenté. **Ne pas dire « c'est le client » ; dire « le moteur répond, avec une queue de latence dont je ne connais pas le déclencheur ».**
+
+**Le vrai défaut est mon instrument, et il est réparable.** Le middleware `error_source_capture` journalise `auth_prefix, body_bytes, body_head, body_tail, body_truncated_bytes, client, host, model, path, referer, status, ts, user_agent, x_claudish_*, x_forwarded_for, x_forwarded_host, x_real_ip` — **aucun champ de durée**. Mon census peut donc dire *qui*, *quoi*, *quel statut*, **jamais *combien de temps***. C'est précisément pourquoi la question du 90 s traîne depuis des jours et pourquoi j'ai dû la trancher par sondes synthétiques au lieu de lire le log. **Action à porter** : ajouter `e2e_s` (et `ttft_s` si disponible) au middleware — après quoi « quelle est la latence p95 par classe d'appelant » devient une requête de lecture, plus une campagne de sondes. À ouvrir en issue la prochaine fois que je touche au middleware (fichier `myia_vllm/middleware/logging_middleware.py`, non monté en prod aujourd'hui : `error_source_capture` est l'actif, à vérifier avant de promettre).
+
+**Ce que ça ne change pas** : le 🟢 du cycle. Mes 6 sondes petits callers sont restées à 0,14-1,63 s ; le 🟠 exige la gêne des **petits** appelants, et elle n'est pas mesurée. Ce qui est mesuré, c'est qu'un **gros** appelant synchrone (la condensation, 7-13 k tokens) peut dépasser son budget de 90 s — et que le disjoncteur le paie en cloud. C'est un coût réel, mais ce n'est pas la même jambe.
