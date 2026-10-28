@@ -93,20 +93,23 @@ class AttentionConfig:
     indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
-    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend."""
+    indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
+    formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
+    backend."""
 
-    indexer_sparse_logits: bool = False
+    indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
-    the whole context and masking them. Requires `indexer_kv_dtype="mxfp4"`,
-    an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
-    (the top-k runs on the kernels' bf16 logits). The sparse path costs
-    O(candidate blocks) per query regardless of context length, so it pays off
-    for long contexts (roughly 32K tokens and beyond) and is slower below.
+    the whole context and masking them. Requires an SM100-class GPU (FP8 or
+    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
+    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
+    parallelism. The sparse path costs O(candidate blocks) per query regardless
+    of context length. None (default) enables it wherever these requirements
+    hold; True forces it (and errors where they do not); False disables it.
     On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
-    for steps whose contexts are too short for the pool to pay."""
+    for steps whose contexts are too short for the pool to pay; it is not
+    enabled by default there."""
 
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split
@@ -117,7 +120,10 @@ class AttentionConfig:
     indexer context-parallel at decode. Each rank reads 1/TP of the index
     cache, scores every index head on it, and per-head top-k candidates are
     exchanged and merged, so the selected blocks match the default path.
-    Requires a bf16 index cache (`indexer_kv_dtype` "auto" or "bf16")."""
+    `indexer_kv_dtype` picks the kernels that do it: a bf16 index cache ("auto"
+    or "bf16") runs the Triton CP indexer, an fp8 e4m3 one the AITER MSA CP
+    indexer on gfx950. This shards indexer *work* and not the KV cache, so it
+    is not `decode_context_parallel_size` and requires that to be 1."""
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
@@ -175,13 +181,19 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
-        # Checked here rather than at indexer selection: an fp8 index cache is
-        # served by the AITER indexer, which never reaches it. This also
-        # excludes the fused decode path, which needs fp8.
-        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in ("auto", "bf16"):
+        # Checked here rather than at indexer selection, which the two CP
+        # backends reach separately: bf16 goes to the Triton indexer and fp8
+        # to the AITER MSA one, so neither ever sees the other's dtype and
+        # neither can speak for the dtypes that have no CP indexer at all.
+        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in (
+            "auto",
+            "bf16",
+            "fp8",
+            "fp8_e4m3",
+        ):
             raise ValueError(
-                "minimax_m3_indexer_cp requires a bf16 index cache "
-                "(indexer_kv_dtype 'auto' or 'bf16'), got "
+                "minimax_m3_indexer_cp requires a bf16 or fp8 e4m3 index cache "
+                "(indexer_kv_dtype 'auto', 'bf16', 'fp8' or 'fp8_e4m3'), got "
                 f"{self.indexer_kv_dtype!r}"
             )
 
