@@ -10,6 +10,7 @@
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_llm::RequestTimestamps;
 use vllm_text::DecodedLogprobs;
 
@@ -58,21 +59,22 @@ struct StructuredEventState {
     open_tool_call: Option<OpenToolCall>,
     /// Next OpenAI-compatible tool-call ordinal.
     next_tool_call_index: usize,
-    /// Whether more than one tool call may be surfaced northbound.
-    parallel_tool_calls: bool,
+    /// Maximum number of tool calls surfaced northbound, or `None` for no
+    /// limit. Later parsed calls are suppressed.
+    max_tool_calls: Option<usize>,
     /// Whether the current tool-call parse is being suppressed.
     suppressing_tool_call: bool,
 }
 
 impl StructuredEventState {
     /// Create one fresh assembly state for a new streamed response.
-    fn new(parallel_tool_calls: bool) -> Self {
+    fn new(max_tool_calls: Option<usize>) -> Self {
         Self {
             message: AssistantMessage::default(),
             open_text_block: None,
             open_tool_call: None,
             next_tool_call_index: 0,
-            parallel_tool_calls,
+            max_tool_calls,
             suppressing_tool_call: false,
         }
     }
@@ -110,7 +112,7 @@ impl StructuredEventState {
 
         let index = self.next_tool_call_index;
         self.next_tool_call_index += 1;
-        if !self.parallel_tool_calls && index >= 1 {
+        if self.max_tool_calls.is_some_and(|max| index >= max) {
             self.suppressing_tool_call = true;
             return Ok(events);
         }
@@ -151,6 +153,7 @@ impl StructuredEventState {
         &mut self,
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,
+        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
         finish_reason: FinishReason,
         kv_transfer_params: Option<Box<serde_json::Value>>,
         ec_transfer_params: Option<Box<serde_json::Value>>,
@@ -162,6 +165,7 @@ impl StructuredEventState {
             message: self.message.clone(),
             usage,
             timestamps,
+            spec_decode_metrics,
             finish_reason,
             kv_transfer_params,
             ec_transfer_params,
@@ -267,12 +271,12 @@ impl StructuredEventState {
 #[try_stream]
 pub(crate) async fn structured_chat_event_stream(
     stream: impl AssistantEventStream,
-    parallel_tool_calls: bool,
+    max_tool_calls: Option<usize>,
     mut y: TryYielder<ChatEvent, Error>,
 ) -> Result<()> {
     pin_mut!(stream);
 
-    let mut state = StructuredEventState::new(parallel_tool_calls);
+    let mut state = StructuredEventState::new(max_tool_calls);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -316,6 +320,7 @@ pub(crate) async fn structured_chat_event_stream(
             AssistantEvent::Done {
                 usage,
                 timestamps,
+                spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
@@ -323,6 +328,7 @@ pub(crate) async fn structured_chat_event_stream(
                 for next in state.finish(
                     usage,
                     timestamps,
+                    spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
@@ -359,16 +365,17 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, true)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -415,16 +422,17 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, true)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -469,16 +477,17 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, true)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -523,16 +532,17 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, true)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -560,7 +570,7 @@ mod tests {
             delta: "{}".to_string(),
         })]);
 
-        let err = structured_chat_event_stream(events, true)
+        let err = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -592,16 +602,17 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, false)
+        let events = structured_chat_event_stream(events, Some(1))
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -642,18 +653,19 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 4,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 3,
                 },
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events, true)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()

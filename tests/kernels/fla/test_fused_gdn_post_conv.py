@@ -11,8 +11,12 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
+)
+from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
+    fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
@@ -268,6 +272,7 @@ def test_fused_post_conv_l0():
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("impl", ["cuda", "triton"])
 @torch.inference_mode()
 def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     head_ratio: int,
@@ -276,11 +281,17 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     state_dtype: torch.dtype,
     norm_dtype: torch.dtype,
     output_gate_activation: str,
+    impl: str,
 ) -> None:
-    if torch.cuda.get_device_capability() < (8, 0):
+    if current_platform.is_cuda() and not current_platform.has_device_capability(80):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
-    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+    if impl == "cuda" and not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
         pytest.skip("fused GDN decode MTP op is not built")
+    fused_mtp_decode = (
+        ops.fused_gdn_decode_post_conv_mtp
+        if impl == "cuda"
+        else fused_gdn_decode_post_conv_mtp_triton
+    )
 
     torch.manual_seed(0)
     device = "cuda"
@@ -332,6 +343,10 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     if query_lengths[-1] == 0:
         state_indices[-1].zero_()
 
+    output_rtol = 5e-4
+    if impl == "cuda" and state_dtype == torch.float32 and norm_dtype == torch.bfloat16:
+        output_rtol = 1e-3
+
     for step, accepted_tokens in enumerate((1, min(2, state_width), state_width)):
         num_accepted_tokens.fill_(accepted_tokens)
         if query_lengths[-1] == 0:
@@ -361,7 +376,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
             norm_before_gate=True,
             activation=output_gate_activation,
         )
-        actual = ops.fused_gdn_decode_post_conv_mtp(
+        actual = fused_mtp_decode(
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -381,7 +396,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
 
         output_error = (actual.float() - expected.float()).norm()
         output_relative_l2 = output_error / expected.float().norm().clamp_min(1e-20)
-        assert output_relative_l2 < 5e-4, (
+        assert output_relative_l2 < output_rtol, (
             f"MTP output relative L2 mismatch at step {step}: "
             f"{output_relative_l2.item():.6g}"
         )

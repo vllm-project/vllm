@@ -155,11 +155,15 @@ steps:
     - vllm/v1/
     - tests/compile/passes
   commands:
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  - >-
+    pytest -s -v
+    compile/passes
+    --ignore compile/passes/distributed
   mirror:
     amd:
       label: ':amd: (MI300) PyTorch Compilation Passes'
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 80
       working_dir: /vllm-workspace/tests
@@ -170,7 +174,10 @@ steps:
       - tests/compile/passes
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v compile/passes --ignore compile/passes/distributed
+      - >-
+        pytest -s -v
+        compile/passes
+        --ignore compile/passes/distributed
 
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
