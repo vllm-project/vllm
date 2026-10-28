@@ -725,6 +725,57 @@ def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
         Base._create_attention_instances(model)
 
 
+@pytest.mark.parametrize(
+    ("unindexed", "existing", "expected"),
+    [
+        pytest.param(
+            ["model.transformer.layer.0.attention"],
+            {},
+            {0: "model.transformer.layer.0.attention"},
+            id="single-candidate-registers",
+        ),
+        pytest.param(
+            ["model.transformer.layer.0.attention", "model.transformer.layer.0.cross"],
+            {},
+            {},
+            id="ambiguous-candidates-stay-unregistered",
+        ),
+        pytest.param(
+            ["model.transformer.layer.0.attention"],
+            {0: "model.transformer.layer.0.indexed"},
+            {0: "model.transformer.layer.0.indexed"},
+            id="indexed-registration-is-preserved",
+        ),
+        pytest.param(
+            ["model.transformer.layer.10.attention"],
+            {},
+            {10: "model.transformer.layer.10.attention"},
+            id="layer-1-does-not-match-layer-10",
+        ),
+        pytest.param(
+            ["model.encoder.attention"],
+            {},
+            {},
+            id="path-outside-the-layers-is-ignored",
+        ),
+    ],
+)
+def test_unindexed_attention_registration(
+    unindexed: list[str], existing: dict[int, str], expected: dict[int, str]
+):
+    """An attention module without `layer_idx` is assigned to the layer it sits in,
+    but only when that is unambiguous and no indexed module already serves it."""
+    fuser = object()
+    model = SimpleNamespace(
+        _layer_names={i: f"transformer.layer.{i}" for i in range(11)},
+        attention_fusers={i: (prefix, fuser) for i, prefix in existing.items()},
+    )
+
+    Base._register_unindexed_attention(model, [(p, fuser) for p in unindexed])
+
+    assert {i: p for i, (p, _) in model.attention_fusers.items()} == expected
+
+
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
 def test_attention_scale_is_the_declared_one(model_type: str):
     """The scale comes off the module, not from the `head_size**-0.5` default.

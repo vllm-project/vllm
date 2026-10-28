@@ -505,6 +505,8 @@ class Base(
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
 
+        unindexed_attention: list[tuple[str, AttentionFuser]] = []
+
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
             self.fusers.setdefault(prefix, []).append(fuser)
@@ -521,6 +523,8 @@ class Base(
                         "layer cannot serve."
                     )
                 self.attention_fusers[index] = (prefix, fuser)
+            elif isinstance(fuser, AttentionFuser):
+                unindexed_attention.append((prefix, fuser))
 
             orig_to_new_stacked.update(fuser.orig_to_new_stacked(prefix))
 
@@ -588,8 +592,32 @@ class Base(
                     log_replacement(qual_name, child_module, new_module)
 
         _recursive_replace(self.model, prefix="model")
+        self._register_unindexed_attention(unindexed_attention)
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
+
+    def _register_unindexed_attention(
+        self, unindexed: list[tuple[str, AttentionFuser]]
+    ):
+        """Assign attention modules without a `layer_idx` to the layer they sit in.
+
+        Some models (e.g. DistilBERT) do not store `layer_idx` on their attention
+        module. A layer is only filled this way if no module with a `layer_idx`
+        already serves it and exactly one unindexed module sits in it, so
+        models that declare `layer_idx` are never affected.
+        """
+        candidates: dict[int, list[tuple[str, AttentionFuser]]] = {}
+        for prefix, fuser in unindexed:
+            name = prefix.removeprefix("model.")
+            layer = next(
+                (i for i, n in self._layer_names.items() if name.startswith(f"{n}.")),
+                None,
+            )
+            if layer is not None:
+                candidates.setdefault(layer, []).append((prefix, fuser))
+        for layer, found in candidates.items():
+            if layer not in self.attention_fusers and len(found) == 1:
+                self.attention_fusers[layer] = found[0]
 
     def _create_attention_instances(self, prefix: str = ""):
         """Create `Attention` instances to inform KV cache allocation."""
