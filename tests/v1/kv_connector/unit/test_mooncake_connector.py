@@ -1114,6 +1114,97 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_not_processed
 
 
+def _held_prefix_params(request, num_tokens: int, **overrides):
+    params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": True,
+        "transfer_id": "send-id",
+        "pull_transfer_id": "hold-id",
+        "remote_engine_id": "decode-engine",
+        "remote_bootstrap_addr": "http://decode:8999",
+        "remote_num_tokens": num_tokens,
+        "remote_prefix_hash": mooncake_connector.remote_prefix_hash(
+            request.prompt_token_ids, num_tokens
+        ),
+    }
+    params.update(overrides)
+    return params
+
+
+def test_prefill_loads_held_prefix_and_still_sends():
+    """A kv_both prefiller pulls exactly remote_num_tokens under the pull id
+    and still sends its own KV under transfer_id."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_both"
+    )
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1, block_size=block_size, num_tokens=5 * block_size
+    )
+    request.kv_transfer_params = _held_prefix_params(request, 2 * block_size + 3)
+
+    scheduler.add_request(request)
+    meta = scheduler.schedule().kv_connector_metadata
+
+    pull = meta.reqs_to_recv["decode-engine"][request.request_id]
+    assert pull.transfer_id == "hold-id"
+    assert sum(len(group) for group in pull.local_block_ids) == 3
+    assert meta.reqs_to_send[request.request_id] == ("send-id", [])
+
+
+def test_prefill_ignores_held_prefix_with_mismatched_hash():
+    """A prompt that does not start with the held tokens is computed locally;
+    the empty pull only tells the decoder to release its hold."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_both"
+    )
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1, block_size=block_size, num_tokens=5 * block_size
+    )
+    request.kv_transfer_params = _held_prefix_params(
+        request, 2 * block_size, remote_prefix_hash="0" * 32
+    )
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    pull = output.kv_connector_metadata.reqs_to_recv["decode-engine"][
+        request.request_id
+    ]
+    assert pull.local_block_ids == []
+    assert len(output.scheduled_new_reqs) == 1
+
+
+@pytest.mark.parametrize(
+    ("hold_kv", "status", "delay_free"),
+    [
+        (True, RequestStatus.FINISHED_STOPPED, True),
+        (True, RequestStatus.FINISHED_LENGTH_CAPPED, True),
+        (True, RequestStatus.FINISHED_ABORTED, False),
+        (False, RequestStatus.FINISHED_STOPPED, False),
+    ],
+)
+def test_hold_kv_decode_keeps_blocks_unless_aborted(hold_kv, status, delay_free):
+    """A hold_kv decode keeps its KV for the next turn however it stopped;
+    without hold_kv only a length-capped prefill is kept."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_both"
+    )
+    scheduler = create_scheduler(vllm_config)
+    scheduler_connector = scheduler.get_kv_connector().connector_scheduler
+    request = create_request(request_id=1, do_remote_decode=True)
+    request.kv_transfer_params.update(transfer_id="hold-id", hold_kv=hold_kv)
+    request.status = status
+
+    delayed, _ = scheduler_connector.request_finished(request, block_ids=([10, 11],))
+
+    assert delayed is delay_free
+    assert (request.request_id in scheduler_connector._reqs_need_send) is delay_free
+
+
 @contextlib.contextmanager
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
@@ -1853,6 +1944,43 @@ async def test_worker_get_finished_timeout(monkeypatch):
         assert "p-req-active" not in finished_reqs
         assert "tx-expired" not in prefill_worker.reqs_need_send
         assert "tx-active" in prefill_worker.reqs_need_send
+
+
+@pytest.mark.asyncio
+async def test_hold_timeout_sets_expiry_only_for_held_sends():
+    """hold_timeout_s shortens a hold's expiry without touching other sends."""
+    vllm_config = _make_worker_vllm_config("kv_both")
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        worker = connector.connector_worker
+        meta = MooncakeConnectorMetadata()
+        for req_id, transfer_id, params in (
+            ("held", "tx-hold", {"hold_timeout_s": 5}),
+            ("plain", "tx-plain", {}),
+        ):
+            worker.reqs_need_send[transfer_id] = SendBlockMeta(
+                p_req_id="",
+                transfer_id=transfer_id,
+                local_block_ids=[],
+                ready=asyncio.Event(),
+            )
+            meta.add_new_req(
+                req_id,
+                [[1, 2]],
+                {"transfer_id": transfer_id, **params},
+                load_remote_cache=False,
+            )
+
+        now = time.perf_counter()
+        await worker.record_send_reqs(meta)
+
+        hold_ttl = worker.reqs_need_send["tx-hold"].expire_time - now
+        plain_ttl = worker.reqs_need_send["tx-plain"].expire_time - now
+        assert 0 < hold_ttl <= 6
+        assert plain_ttl > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT - 1
+        worker.shutdown()
 
 
 @pytest.mark.parametrize(
