@@ -426,6 +426,25 @@ class MoERunner(MoERunnerInterface):
             and self._quant_method.moe_kernel.output_is_reduced()
         )
 
+    @property
+    def _fold_shared_output(self) -> bool:
+        """Whether the MoE op returns the shared + routed sum."""
+        moe_kernel = self._quant_method.moe_kernel
+        return (
+            self._shared_experts is not None
+            and moe_kernel is not None
+            and moe_kernel.supports_output_addend()
+            and self.routed_input_transform is None
+            and self.routed_output_transform is None
+            and self.routed_scaling_factor == 1.0
+            and not self.do_naive_dispatch_combine
+            and self.moe_config.pcp_size == 1
+            and not self._fused_output_is_reduced
+            and not self._quant_method.has_unpadded_output
+            and self.moe_config.hidden_dim_unpadded
+            in (None, self.moe_config.hidden_dim)
+        )
+
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
@@ -646,10 +665,16 @@ class MoERunner(MoERunnerInterface):
             assert self._shared_experts is not None
             self._shared_experts.wait()
 
-        return (
-            self._shared_experts.output if self._shared_experts is not None else None,
-            fused_out,
-        )
+        if self._shared_experts is None:
+            return None, fused_out
+
+        claimed = self._shared_experts.output_claimed
+        shared_output = self._shared_experts.output
+        if not self._shared_experts.fold_output:
+            return shared_output, fused_out
+        if not claimed:
+            fused_out = shared_output + cast(torch.Tensor, fused_out)
+        return None, fused_out
 
     def _sequence_parallel_context(self):
         """Return a context manager for sequence-parallel token
@@ -735,7 +760,12 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
-        result = self._forward_entry(
+        forward_entry = (
+            torch.ops.vllm.moe_forward
+            if self._fold_shared_output
+            else self._forward_entry
+        )
+        result = forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
@@ -860,8 +890,7 @@ class MoERunner(MoERunnerInterface):
                 )
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
-        if self.shared_experts is not None:
-            assert shared_output is not None
+        if shared_output is not None:
             return shared_output, hidden_states
         else:
             return hidden_states
@@ -897,6 +926,7 @@ class MoERunner(MoERunnerInterface):
         # before routed expert dispatch.
         shared_experts_overlapping = False
         if self._shared_experts is not None:
+            self._shared_experts.fold_output = self._fold_shared_output
             shared_experts_overlapping = self._shared_experts.maybe_forward_async(
                 shared_experts_input
             )
