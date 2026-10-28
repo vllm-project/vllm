@@ -299,8 +299,10 @@ class _ArgsRewriter:
         if isinstance(schema, dict) and self._delimited(j):
             types = self._coercion_types(schema)
             if types and _is_literal(literal):
-                # Keep value-preserving re-encodings (5e3 under integer) and
-                # unrepresentable numbers (1e999 under number) verbatim.
+                # Integral floats normalize (5.0 -> 5), matching the
+                # parse-and-redump repair.  Keep value-preserving re-encodings
+                # (5e3 under integer) and unrepresentable numbers (1e999 under
+                # number) verbatim.
                 coerced = coerce_to_schema_type(literal, types)
                 dumped = json.dumps(coerced, ensure_ascii=False)
                 if (
