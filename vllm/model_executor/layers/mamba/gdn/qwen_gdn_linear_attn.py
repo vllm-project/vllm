@@ -325,6 +325,7 @@ def fi_chunk_gated_delta_rule(
     checkpoint_every_n_tokens: int = 0,
     use_cp: Literal["auto"] | bool = "auto",
     output: torch.Tensor | None = None,
+    g_in_log_space: bool = True,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -342,15 +343,18 @@ def fi_chunk_gated_delta_rule(
     g = g.squeeze(0).contiguous()
     beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
+    # FlashInfer takes the gate as exp(g). fused_post_conv_prep can emit that
+    # directly (g_in_log_space=False), saving an elementwise pass per layer.
     fi_g = g.to(torch.float32)
+    if g_in_log_space:
+        fi_g = torch.exp(fi_g)
     fi_beta = beta.to(torch.float32)
-    if cu_seqlens is not None:
-        cu_seqlens = cu_seqlens.to(torch.int64)
+    # cu_seqlens goes through as is: FlashInfer accepts int32 and int64.
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
-        g=torch.exp(fi_g),
+        g=fi_g,
         beta=fi_beta,
         initial_state=fi_state,
         output_final_state=output_final_state,
@@ -1741,7 +1745,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_k_dim=self.head_k_dim,
                 head_v_dim=self.head_v_dim,
                 apply_l2norm=True,
-                output_g_exp=False,
+                output_g_exp=self.gdn_prefill_backend == "flashinfer",
             )
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
@@ -1941,6 +1945,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 use_qk_l2norm_in_kernel=False,
                 output=output,
+                g_in_log_space=False,
             )
 
         (state_checkpoints,) = current_workspace_manager().get_simultaneous(
@@ -1958,6 +1963,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             cu_seqlens=attn_metadata.prefill_query_start_loc,
             use_qk_l2norm_in_kernel=False,
             output=output,
+            g_in_log_space=False,
             state_checkpoints=state_checkpoints,
             checkpoint_cu_starts=plan.cu_starts,
             checkpoint_every_n_tokens=plan.every_n_tokens,
