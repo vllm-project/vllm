@@ -215,7 +215,6 @@ tests/v1/fault_tolerance/test_fault_tolerance_e2e.py  # CI jobs disabled pending
 tests/v1/kv_connector/mooncake_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/mooncake_integration/test_accuracy_rocm.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_accuracy_rocm.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_edge_cases.py  # CI jobs disabled pending locked KV connectors installation

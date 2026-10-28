@@ -28,7 +28,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
-    get_moriio_read_holder_tp_ranks,
     resolve_moriio_transfer_ack,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
@@ -41,9 +40,11 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .test_moriio_hetero_tp_write import (
     DECODE_BLOCKS,
+    MIXED_HEAD_SCENARIOS,
     MODELS,
     NUM_BLOCKS,
     PREFILL_BLOCKS,
+    SCENARIOS,
     Rank,
     _build_rank,
     _expected,
@@ -314,6 +315,24 @@ def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts):
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
+@pytest.mark.parametrize(
+    ("model", "producer_tp", "consumer_tp", "hma"),
+    [
+        scenario
+        for scenario in SCENARIOS + MIXED_HEAD_SCENARIOS
+        if scenario[1] != scenario[2]
+    ],
+)
+def test_hetero_tp_read_lands_every_shard(
+    model, producer_tp, consumer_tp, hma, layouts
+):
+    """Each decode rank reads its head and state slices from every prefill
+    rank that holds them, and releases every holder."""
+    releases = _read_all(model, producer_tp, consumer_tp, hma, layouts)
+    _assert_released(releases, producer_tp)
+
+
+@pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
 @pytest.mark.parametrize("tp", [1, 2])
 @pytest.mark.parametrize("model", list(MODELS))
 def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
@@ -321,22 +340,19 @@ def test_read_without_advertised_prefill_tp_is_homogeneous(model, tp, layouts):
     _assert_released(_read_all(model, tp, tp, True, layouts, advertised_tp=0), tp)
 
 
-@pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
-@pytest.mark.parametrize(
-    ("model", "producer_tp", "consumer_tp"),
-    [
-        *(("mla", p, d) for p, d in [(1, 2), (2, 4), (2, 1), (4, 2), (1, 4), (4, 1)]),
-        # Two KV heads are replicated once both sides have at least two ranks.
-        ("gqa_replicated", 2, 4),
-        ("gqa_replicated", 4, 2),
-    ],
-)
-def test_replicated_read_releases_every_holder(
-    model, producer_tp, consumer_tp, layouts
-):
-    """In fan-in each decode rank reads one copy and releases every holder."""
-    releases = _read_all(model, producer_tp, consumer_tp, True, layouts)
-    _assert_released(releases, producer_tp)
+def test_read_without_advertised_prefill_tp_uses_the_prewarmed_session(monkeypatch):
+    """Without the prefill TP size (0) the eager handshake opens the equal-TP
+    session the read then uses."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    producers, consumers = _ranks("gqa", 2, 2, True, LAYOUTS[0], state)
+    for consumer in consumers:
+        consumer.worker.moriio_config = SimpleNamespace(backend="xgmi")
+        prewarmed = _prewarm(consumer, _meta(["full"], 0), monkeypatch)
+        released = _make_reader(consumer, producers, "xgmi", prewarmed=prewarmed)
+        consumer.worker._read_blocks_for_req("req", _meta(["full"], 0))
+        assert consumer.worker._pop_done_transfers() == {"t"}
+        assert [p for p, _, _ in released] == [consumer.tp_rank]
 
 
 def test_flexible_mirror_spreads_reads_and_releases_every_holder(monkeypatch):
@@ -402,9 +418,7 @@ def test_aborted_read_releases_every_holder(producer_tp, consumer_tp, advertised
             remote_notify_port=NOTIFY_PORT,
             remote_tp_size=advertised_tp,
         )
-        holders = get_moriio_read_holder_tp_ranks(
-            consumer.tp_rank, consumer_tp, producer_tp
-        )
+        holders = consumer.worker._read_plan(producer_tp, None)[1]
         assert sorted(p for p, _, _ in released) == sorted(holders)
         assert consumer.sent == []
 
@@ -419,6 +433,79 @@ def test_failed_read_releases_every_holder():
     assert consumer.worker._pop_done_transfers() == set()
     assert sorted(p for p, _, _ in released) == [0, 1]
     assert consumer.worker._invalid_block_ids == set(DECODE_BLOCKS["full"])
+
+
+def test_read_refuses_peer_with_different_block_size():
+    """Hybrid MLA models get TP-dependent attention block sizes; reading blocks
+    between them would misplace tokens, so the read must refuse."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
+    for layer in layers:
+        producers[0].worker.attention_block_sizes[layer.name] *= 2
+    _make_reader(consumer, producers, "xgmi")
+    with pytest.raises(MoRIIOError, match="same --block-size"):
+        consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
+
+
+def test_sharded_read_needs_head_layouts():
+    """A peer that does not advertise head layouts (an older vLLM) cannot be
+    read by head slice."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("gqa", 2, 1, True, LAYOUTS[0], state)
+    for producer in producers:
+        producer.worker.kv_head_layouts = {}
+    _make_reader(consumer, producers, "xgmi")
+    with pytest.raises(MoRIIOError, match="Heterogeneous-TP READ"):
+        consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
+
+
+def test_equal_tp_read_keeps_the_dp_session_and_one_release():
+    """Equal TP is unchanged: one source, the DP-keyed session, one release."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    producers, consumers = _ranks("gqa", 2, 2, True, LAYOUTS[0], state)
+    keys: list[str] = []
+    for consumer in consumers:
+        released = _make_reader(consumer, producers, "xgmi")
+        built = consumer.worker._get_built_session
+
+        def record(engine_id, built=built):
+            keys.append(engine_id)
+            return built(engine_id)
+
+        consumer.worker._get_built_session = record
+        consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
+        consumer.worker._pop_done_transfers()
+        assert [p for p, _, _ in released] == [consumer.tp_rank]
+    assert keys == ["prefill:0_dp0", "prefill:0_dp0"]
+
+
+def test_background_handshake_dials_every_read_source():
+    """A heterogeneous-TP READ keys sessions per (dp, tp) source, so the lazy
+    handshake must open exactly those."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    _, (consumer,) = _ranks("gqa", 4, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    worker.mode = MoRIIOMode.READ
+    worker.is_producer = False
+    submitted = []
+
+    class Executor:
+        def submit(self, fn, *args):
+            submitted.append(args)
+            return SimpleNamespace(
+                result=lambda: True, add_done_callback=lambda callback: None
+            )
+
+    worker._handshake_initiation_executor = Executor()
+    worker._handshake_futures = {}
+    worker._handshake_lock = threading.Lock()
+    worker._background_moriio_handshake("req", "prefill", _meta(["full"], 4))
+    dialed = [(args[3], args[5]) for args in submitted if len(args) == 6]
+    assert dialed == [(f"prefill_dp0_tp{p}", p) for p in range(4)]
 
 
 def _mixed_layout_pair():
@@ -444,6 +531,7 @@ def test_head_read_rejects_peer_with_other_head_count():
             metadata,
             remote_tp_size=1,
             remote_engine_id="prefill",
+            source=None,
         )
 
 
@@ -465,10 +553,13 @@ def test_head_read_rejects_block_ids_outside_the_cache(local, remote, match):
             _metadata(producer),
             remote_tp_size=1,
             remote_engine_id="prefill",
+            source=None,
         )
 
 
 def test_head_read_rejects_more_local_than_remote_blocks():
+    """Equal TP between different layouts reads head by head, and refuses a
+    local block table longer than the peer's."""
     producer, consumer = _mixed_layout_pair()
     remote = PREFILL_BLOCKS["full"]
     with pytest.raises(ValueError, match="longer than remote_block_ids"):
@@ -479,20 +570,5 @@ def test_head_read_rejects_more_local_than_remote_blocks():
             _metadata(producer),
             remote_tp_size=1,
             remote_engine_id="prefill",
+            source=None,
         )
-
-
-@pytest.mark.parametrize(
-    ("local_tp_rank", "local_tp_size", "remote_tp_size", "expected"),
-    [
-        (1, 2, 2, (1,)),
-        (3, 4, 2, (1,)),
-        (1, 2, 4, (2, 3)),
-        (0, 1, 8, tuple(range(8))),
-    ],
-)
-def test_read_holder_tp_ranks(local_tp_rank, local_tp_size, remote_tp_size, expected):
-    assert (
-        get_moriio_read_holder_tp_ranks(local_tp_rank, local_tp_size, remote_tp_size)
-        == expected
-    )

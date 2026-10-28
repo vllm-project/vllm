@@ -86,8 +86,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     validate_transfer_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    MoRIIOReadTPMapping,
     MoRIIOWriteTPMapping,
+    ReadSource,
     WriteTarget,
+    compute_read_tp_mapping,
     compute_write_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -101,6 +104,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -188,19 +192,6 @@ def get_moriio_remote_tp_rank(
             f"tp_size {remote_tp_size} for heterogeneous-TP P/D"
         )
     return local_tp_rank // (local_tp_size // remote_tp_size)
-
-
-def get_moriio_read_holder_tp_ranks(
-    local_tp_rank: int, local_tp_size: int, remote_tp_size: int
-) -> tuple[int, ...]:
-    """Remote TP ranks that hold a local rank's share of a READ request.
-
-    Each of them frees its blocks only once this rank releases it.
-    """
-    first = get_moriio_remote_tp_rank(local_tp_rank, local_tp_size, remote_tp_size)
-    if remote_tp_size <= local_tp_size:
-        return (first,)
-    return tuple(range(first, first + remote_tp_size // local_tp_size))
 
 
 def validate_moriio_heterogeneous_tp_kv_heads(
@@ -2312,6 +2303,14 @@ class MoRIIOConnectorWorker:
             targets = self._write_tp_mapping(tp_size).target_tp_ranks
             if len(targets) > 1:
                 write_target_tp_ranks = targets
+        elif (
+            self.mode == MoRIIOMode.READ
+            and not self.is_producer
+            and tp_size not in (0, self.world_size)
+        ):
+            # Heterogeneous-TP READ keys its sessions per (dp, tp) source. A
+            # peer that does not advertise its TP size (0) runs equal TP.
+            write_target_tp_ranks = self._read_handshake_tp_ranks(tp_size)
 
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
 
@@ -3195,6 +3194,14 @@ class MoRIIOConnectorWorker:
                     for dp in range(remote_dp_size)
                     for tp in range(max(1, tp_size))
                 ]
+            elif tp_size not in (0, self.world_size):
+                # Heterogeneous TP: one session per prefill rank this rank reads
+                # (0: the peer did not advertise its TP size, so equal TP).
+                targets = [
+                    (self.get_engine_name_with_dp_tp(remote_engine_id, dp, tp), dp, tp)
+                    for dp in range(remote_dp_size)
+                    for tp in self._read_handshake_tp_ranks(tp_size)
+                ]
             else:
                 targets = [
                     (self.get_engine_name_with_dp(remote_engine_id, dp), dp, None)
@@ -3428,6 +3435,17 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
+    def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
+        """KV heads of a layer across all TP ranks.
+
+        Layers may differ (e.g. Gemma4 sliding vs full attention), and the
+        model-wide count is their maximum. Without a layer: the model-wide count.
+        """
+        arch = self.model_config.model_arch_config
+        if layer_name is None or arch.per_layer_overrides is None:
+            return self.model_config.get_total_num_kv_heads()
+        return arch[extract_layer_index(layer_name)].total_num_kv_heads
+
     def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
         return compute_write_tp_mapping(
@@ -3438,6 +3456,64 @@ class MoRIIOConnectorWorker:
             self.use_mla,
             self._has_mamba,
         )
+
+    def _read_tp_mapping(
+        self, remote_tp_size: int | None, layer_name: str | None = None
+    ) -> MoRIIOReadTPMapping:
+        """Prefill ranks this decode rank reads, and what it takes from each."""
+        return compute_read_tp_mapping(
+            self.tp_rank,
+            remote_tp_size or self.world_size,
+            self.world_size,
+            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
+            self.use_mla,
+            self._has_mamba,
+        )
+
+    def _read_plan(
+        self,
+        remote_tp_size: int,
+        chosen_tp: int | None,
+        layer_name: str | None = None,
+    ) -> tuple[list[tuple[int, ReadSource | None]], tuple[int, ...]]:
+        """(sources, holders) of one request's READ.
+
+        ``sources`` pairs each prefill TP rank to read with what to take from it
+        (None: the whole shard, equal TP). ``holders`` are the prefill TP ranks
+        to release, which in fan-in include ranks whose identical copy is not
+        read. ``chosen_tp`` replaces the source when every holder has the same
+        copy (the flexible mirror's round-robin pick). Sources depend on the
+        layer's KV-head count; holders do not.
+        """
+        if remote_tp_size == self.world_size:
+            eff_tp = (
+                int(chosen_tp)
+                if chosen_tp is not None
+                else self._remote_tp_rank(remote_tp_size)
+            )
+            return [(eff_tp, None)], (eff_tp,)
+        mapping = self._read_tp_mapping(remote_tp_size, layer_name)
+        sources: list[tuple[int, ReadSource | None]] = [
+            (source.tp_rank, source) for source in mapping.sources
+        ]
+        if (
+            mapping.interchangeable_holders
+            and chosen_tp is not None
+            and int(chosen_tp) in mapping.holder_tp_ranks
+        ):
+            only = mapping.sources[0]
+            sources = [(int(chosen_tp), ReadSource(int(chosen_tp), only.target))]
+        return sources, mapping.holder_tp_ranks
+
+    def _read_handshake_tp_ranks(self, remote_tp_size: int) -> tuple[int, ...]:
+        """Prefill TP ranks a heterogeneous-TP READ opens sessions to: the
+        sources of every layer."""
+        ranks = set(self._read_tp_mapping(remote_tp_size).source_tp_ranks)
+        for layer_name in self.kv_caches:
+            if not self._is_mamba_layer(layer_name):
+                mapping = self._read_tp_mapping(remote_tp_size, layer_name)
+                ranks.update(mapping.source_tp_ranks)
+        return tuple(sorted(ranks))
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
         # Raises before any write is queued for a TP pair the mapping rejects.
@@ -3573,7 +3649,7 @@ class MoRIIOConnectorWorker:
                 if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=self._layer_total_num_kv_heads(layer_name),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
         local, remote, sizes = compute_block_transfer_offsets(
@@ -3639,64 +3715,6 @@ class MoRIIOConnectorWorker:
             return True
         return local.is_dense and HeadLayout.from_wire(remote_wire) == local
 
-    def _compute_read_attention_offsets(
-        self,
-        layer_name: str,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
-        remote_moriio_meta: MoRIIOAgentMetadata,
-        remote_tp_size: int,
-        remote_engine_id: EngineId,
-    ) -> tuple[list[int], list[int], list[int]]:
-        """(local, remote, sizes) reading this rank's whole shard of a layer.
-
-        A raw block copy only lands right when both sides lay out heads and
-        tokens the same way; otherwise every head is moved one by one.
-        """
-        if self._block_copy_matches_peer(layer_name, remote_moriio_meta):
-            return self._compute_block_transfer_offsets(
-                layer_name,
-                local_block_ids,
-                remote_block_ids,
-                remote_moriio_meta,
-                remote_tp_size=remote_tp_size,
-                remote_engine_id=remote_engine_id,
-            )
-        local_layout = self.kv_head_layouts[layer_name]
-        remote_layout = HeadLayout.from_wire(
-            remote_moriio_meta.kv_head_layouts[layer_name]
-        )
-        if remote_layout.num_heads != local_layout.num_heads:
-            raise MoRIIOError(
-                f"Layer {layer_name} holds {local_layout.num_heads} KV heads per "
-                f"rank here and {remote_layout.num_heads} on the peer"
-            )
-        validate_transfer_block_ids(
-            local_block_ids,
-            remote_block_ids,
-            self.num_blocks,
-            remote_moriio_meta.num_blocks,
-        )
-        # The prefill side is the source: compute its offsets as local and swap.
-        source_offsets, local_offsets, sizes = compute_head_slice_offsets(
-            remote_layout,
-            local_layout,
-            list(remote_block_ids[: len(local_block_ids)]),
-            list(local_block_ids),
-            0,
-            0,
-            local_layout.num_heads,
-            merge_fn=lambda src, dst, sizes: self.merge_contiguous_blocks(
-                src, dst, sizes, assume_sorted=False
-            ),
-        )
-        return self._apply_layer_mr_offsets(
-            layer_name,
-            (local_offsets, source_offsets, sizes),
-            remote_moriio_meta,
-            remote_engine_id,
-        )
-
     def _compute_head_slice_transfer_offsets(
         self,
         layer_name: str,
@@ -3756,6 +3774,129 @@ class MoRIIOConnectorWorker:
             target.remote_slice,
             target.remote_slices,
         )
+
+    def _compute_read_attention_offsets(
+        self,
+        layer_name: str,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_tp_size: int,
+        remote_engine_id: EngineId,
+        source: ReadSource | None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """(local, remote, sizes) pulling ``source``'s share of a layer.
+
+        The prefill rank is the side whose heads ``source.target`` names as
+        local, so the head-slice offsets are computed from it and swapped.
+        """
+        same_layout = self._block_copy_matches_peer(layer_name, remote_moriio_meta)
+        if source is None and not same_layout:
+            # Equal TP between different cache layouts: move every head, but
+            # head by head, so each lands where this side's layout expects it.
+            local_heads = self.kv_head_layouts[layer_name].num_heads
+            remote_heads = HeadLayout.from_wire(
+                remote_moriio_meta.kv_head_layouts[layer_name]
+            ).num_heads
+            if remote_heads != local_heads:
+                raise MoRIIOError(
+                    f"Layer {layer_name} holds {local_heads} KV heads per "
+                    f"rank here and {remote_heads} on the peer"
+                )
+            source = ReadSource(
+                -1,
+                WriteTarget(
+                    tp_rank=-1,
+                    local_head=0,
+                    remote_head=0,
+                    num_heads=local_heads,
+                    local_slice=0,
+                    local_slices=1,
+                    remote_slice=0,
+                    remote_slices=1,
+                    num_writers=1,
+                ),
+            )
+            whole_shard = False
+        else:
+            whole_shard = source is None or (
+                same_layout
+                and self._read_tp_mapping(
+                    remote_tp_size, layer_name
+                ).copies_whole_block(source)
+            )
+        if source is not None:
+            self._check_peer_block_size(layer_name, remote_moriio_meta)
+        if whole_shard:
+            return self._compute_block_transfer_offsets(
+                layer_name,
+                local_block_ids,
+                remote_block_ids,
+                remote_moriio_meta,
+                remote_tp_size=remote_tp_size,
+                remote_engine_id=remote_engine_id,
+            )
+        assert source is not None
+        remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
+        local_layout = self.kv_head_layouts.get(layer_name)
+        if remote_wire is None or local_layout is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP READ of layer {layer_name} needs a KV head "
+                "layout on both sides; the cache layout of this layer cannot "
+                "be sliced by head, or the peer runs an older vLLM"
+            )
+        validate_transfer_block_ids(
+            local_block_ids,
+            remote_block_ids,
+            self.num_blocks,
+            remote_moriio_meta.num_blocks,
+        )
+        source_offsets, local_offsets, sizes = compute_head_slice_offsets(
+            HeadLayout.from_wire(remote_wire),
+            local_layout,
+            list(remote_block_ids[: len(local_block_ids)]),
+            list(local_block_ids),
+            source.target.local_head,
+            source.target.remote_head,
+            source.target.num_heads,
+            merge_fn=lambda src, dst, sizes: self.merge_contiguous_blocks(
+                src, dst, sizes, assume_sorted=False
+            ),
+        )
+        return self._apply_layer_mr_offsets(
+            layer_name,
+            (local_offsets, source_offsets, sizes),
+            remote_moriio_meta,
+            remote_engine_id,
+        )
+
+    def _compute_mamba_slice_read_offsets(
+        self,
+        layer_name: str,
+        local_slots: list[int],
+        remote_slots: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        source: ReadSource,
+    ) -> tuple[list[int], list[int], list[int], int]:
+        """(local, remote, sizes, n_conv) pulling ``source``'s state slice."""
+        remote_wire = remote_moriio_meta.mamba_state_layouts.get(layer_name)
+        if remote_wire is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP READ of mamba layer {layer_name} needs the "
+                "peer's state layout; the peer runs an older vLLM"
+            )
+        target = source.target
+        source_offsets, local_offsets, sizes, n_conv = compute_mamba_slice_offsets(
+            MambaStateLayout.from_wire(remote_wire),
+            self.mamba_state_layouts[layer_name],
+            remote_slots,
+            local_slots,
+            target.local_slice,
+            target.local_slices,
+            target.remote_slice,
+            target.remote_slices,
+        )
+        return local_offsets, source_offsets, sizes, n_conv
 
     def _region_session_indices(self, layer_name: str) -> list[int]:
         """Flat session indices for a layer's registered regions.
@@ -3841,19 +3982,27 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         request_id: str,
         deadline: float,
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        source: ReadSource | None,
     ) -> list:
         """Post one KDA layer's conv and ssm reads; return their statuses.
 
         The layer owns two registered regions, so the offset list is split at
         the conv/ssm boundary and each half goes to its own session. A half
-        with nothing to move is skipped rather than posted empty.
+        with nothing to move is skipped rather than posted empty. With a
+        ``source`` (heterogeneous TP) only its slice of the state is read.
         """
-        local, remote, sizes, n_conv = self._compute_mamba_transfer_offsets(
-            layer_name,
-            local_slots,
-            remote_slots,
-            remote_tp_size=remote_tp_size,
-        )
+        if source is None:
+            local, remote, sizes, n_conv = self._compute_mamba_transfer_offsets(
+                layer_name,
+                local_slots,
+                remote_slots,
+                remote_tp_size=remote_tp_size,
+            )
+        else:
+            local, remote, sizes, n_conv = self._compute_mamba_slice_read_offsets(
+                layer_name, local_slots, remote_slots, remote_moriio_meta, source
+            )
         statuses: list = []
         for sess_idx, sl in (
             (region_sessions[0], slice(0, n_conv)),
@@ -3955,25 +4104,14 @@ class MoRIIOConnectorWorker:
         # memory registration; per-rank num_blocks differ, so high block ids can
         # overrun the wrong rank's region.
         #
-        # eff_tp = the remote TP rank this read targets. The flexible mirror
-        # reads from a round-robin-chosen prefill TP rank and keys the session
-        # per (dp, tp); other configs use the fixed local-rank mapping (eff_tp ==
-        # _remote_tp_rank), byte-identical to before. This key MUST match the one
-        # the eager handshake stored the session under.
-        eff_tp = (
-            int(chosen_tp)
-            if chosen_tp is not None
-            else self._remote_tp_rank(remote_tp_size)
-        )
-        # Every prefill rank holding this rank's share frees its blocks only
-        # once released, including the ones whose identical copy is not read.
-        holders = (
-            (eff_tp,)
-            if remote_tp_size == self.world_size
-            else get_moriio_read_holder_tp_ranks(
-                self.tp_rank, self.world_size, remote_tp_size
-            )
-        )
+        # Each source is a prefill TP rank to read and what to take from it.
+        # Equal TP reads the whole shard of the rank chosen_tp names (the fixed
+        # local-rank mapping, or the flexible mirror's round-robin pick).
+        # Heterogeneous TP reads the head and state slices this rank needs from
+        # every prefill rank that holds them, and releases every rank that holds
+        # this request for it. Sessions are keyed per (dp, tp) when the read
+        # targets a chosen rank; the keys MUST match the eager handshake's.
+        sources, holders = self._read_plan(int(remote_tp_size), chosen_tp)
         notify_ports = tuple(
             str(
                 remote_notify_port
@@ -4002,19 +4140,26 @@ class MoRIIOConnectorWorker:
                 )
             local_attn = list(local_block_ids[0])
             remote_attn = list(remote_block_ids[0])
-            self._mamba_tp_ratio(remote_tp_size)
         else:
             local_attn = remote_attn = []
 
-        if flexible:
-            remote_dp_engine_id = self.get_engine_name_with_dp_tp(
-                dst_engine_id, int(remote_dp_rank), eff_tp
-            )
-        else:
-            remote_dp_engine_id = self.get_engine_name_with_dp(
-                dst_engine_id, int(remote_dp_rank)
-            )
-        sessions, remote_moriio_meta = self._get_built_session(remote_dp_engine_id)
+        per_tp_sessions = flexible or int(remote_tp_size) != self.world_size
+        built: dict[int, tuple[list, MoRIIOAgentMetadata, str]] = {}
+
+        def reads(layer_sources):
+            # (source, sessions, peer metadata, engine id) per source rank.
+            for tp_rank, source in layer_sources:
+                if tp_rank not in built:
+                    if per_tp_sessions:
+                        engine_id = self.get_engine_name_with_dp_tp(
+                            dst_engine_id, int(remote_dp_rank), tp_rank
+                        )
+                    else:
+                        engine_id = self.get_engine_name_with_dp(
+                            dst_engine_id, int(remote_dp_rank)
+                        )
+                    built[tp_rank] = (*self._get_built_session(engine_id), engine_id)
+                yield (source, *built[tp_rank])
 
         # SQ-full backpressure deadline, shared across this request's layers.
         _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
@@ -4044,16 +4189,21 @@ class MoRIIOConnectorWorker:
                         "the mamba KV-cache group is absent from the transfer "
                         "block-id tuple"
                     )
-                statuses = self._post_mamba_reads(
-                    layer_name,
-                    sessions,
-                    region_sessions,
-                    local_mamba,
-                    remote_mamba,
-                    remote_tp_size,
-                    request_id,
-                    _sq_deadline,
-                )
+                for source, sessions, remote_moriio_meta, _ in reads(sources):
+                    statuses.extend(
+                        self._post_mamba_reads(
+                            layer_name,
+                            sessions,
+                            region_sessions,
+                            local_mamba,
+                            remote_mamba,
+                            remote_tp_size,
+                            request_id,
+                            _sq_deadline,
+                            remote_moriio_meta=remote_moriio_meta,
+                            source=source,
+                        )
+                    )
             else:
                 if self._has_mamba:
                     local_layer_blocks = local_attn
@@ -4062,25 +4212,35 @@ class MoRIIOConnectorWorker:
                     group_idx = self.layer_to_group[layer_name]
                     local_layer_blocks = local_block_ids[group_idx]
                     remote_layer_blocks = remote_block_ids[group_idx]
-                offs = self._compute_read_attention_offsets(
-                    layer_name,
-                    local_layer_blocks,
-                    remote_layer_blocks,
-                    remote_moriio_meta,
-                    remote_tp_size,
-                    remote_dp_engine_id,
-                )
-                statuses.append(
-                    self._post_read_with_backoff(
-                        sessions[region_sessions[0]],
-                        offs[2],
-                        offs[0],
-                        offs[1],
-                        request_id,
+                layer_sources = self._read_plan(
+                    int(remote_tp_size), chosen_tp, layer_name
+                )[0]
+                for source, sessions, remote_moriio_meta, remote_dp_engine_id in reads(
+                    layer_sources
+                ):
+                    if source is not None and source.target.num_heads == 0:
+                        # Another prefill rank holds the same heads and is read.
+                        continue
+                    offs = self._compute_read_attention_offsets(
                         layer_name,
-                        _sq_deadline,
+                        local_layer_blocks,
+                        remote_layer_blocks,
+                        remote_moriio_meta,
+                        int(remote_tp_size),
+                        remote_dp_engine_id,
+                        source,
                     )
-                )
+                    statuses.append(
+                        self._post_read_with_backoff(
+                            sessions[region_sessions[0]],
+                            offs[2],
+                            offs[0],
+                            offs[1],
+                            request_id,
+                            layer_name,
+                            _sq_deadline,
+                        )
+                    )
             with self.moriio_wrapper.lock:
                 self._recving_transfers[request_id][layer_name] = statuses
                 self._recving_transfers_start.setdefault(request_id, time.monotonic())

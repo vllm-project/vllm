@@ -58,7 +58,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -360,10 +360,13 @@ READ_CASES = [
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, read_mode=True),
     Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, read_mode=True),
 ]
-# READ mode between different TP sizes: MLA latents are replicated, so decode
-# TP2 reads its copy from prefill TP1 and decode TP1 reads one copy from
-# prefill TP2, releasing both.
+# READ mode, decode TP2 pulling from prefill TP1 (each decode rank reads its
+# heads and state slice) and decode TP1 pulling from prefill TP2. A fan-in read
+# of split heads or recurrent state needs a session to the second prefill GPU,
+# which MoRI's xGMI backend cannot open from a decode rank that sees one GPU;
+# those cases only run over RDMA (MORIIO_DUMMY_E2E_BACKEND=rdma).
 HETEROGENEOUS_TP_READ_CASES = [
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, decode_tp=2, read_mode=True),
     Case(
         "deepseek_v3",
         "ROCM_AITER_MLA",
@@ -374,6 +377,12 @@ HETEROGENEOUS_TP_READ_CASES = [
         read_mode=True,
     ),
     Case(
+        "gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, decode_tp=2, read_mode=True
+    ),
+    Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, decode_tp=2, read_mode=True),
+    # MLA fan-in reads the replicated latent from one prefill rank and
+    # releases both.
+    Case(
         "deepseek_v3",
         "ROCM_AITER_MLA",
         _DEFAULT,
@@ -382,7 +391,22 @@ HETEROGENEOUS_TP_READ_CASES = [
         prefill_tp=2,
         read_mode=True,
     ),
+    Case(
+        "qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2, read_mode=True
+    ),
+    Case(
+        "qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2, read_mode=True
+    ),
 ]
+
+
+def _reads_every_prefill_gpu(case: Case) -> bool:
+    """A READ fan-in that must reach a prefill GPU beyond the first."""
+    return (
+        case.read_mode
+        and case.prefill_tp > case.decode_tp
+        and (ARCHS[case.arch].hybrid or case.arch != "deepseek_v3")
+    )
 
 
 def _graph_args(mode: str) -> list[str]:
@@ -552,13 +576,13 @@ def _open_port_block(size: int = _PORT_BLOCK) -> int:
 
 
 def _moriio_config(
-    role: str, http_port: int, ping_port: int, read_mode: bool = False
+    role: str, http_port: int, ping_port: int, read_mode: bool, backend: str
 ) -> dict[str, Any]:
     return {
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
         "kv_connector_extra_config": {
-            "backend": BACKEND,
+            "backend": backend,
             "read_mode": read_mode,
             "host_ip": "127.0.0.1",
             "proxy_ip": "127.0.0.1",
@@ -615,6 +639,7 @@ def _pd_pair(
     prefill_overrides: dict[str, Any],
     decode_overrides: dict[str, Any],
     case: Case,
+    backend: str = BACKEND,
 ) -> Iterator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
     prefill_devices = devices[: case.prefill_tp]
@@ -639,7 +664,7 @@ def _pd_pair(
                     port=prefill_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_producer", prefill_port, ping_port, case.read_mode
+                        "kv_producer", prefill_port, ping_port, case.read_mode, backend
                     ),
                 ),
                 pool.submit(
@@ -653,7 +678,7 @@ def _pd_pair(
                     port=decode_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_consumer", decode_port, ping_port, case.read_mode
+                        "kv_consumer", decode_port, ping_port, case.read_mode, backend
                     ),
                 ),
             ]
@@ -925,6 +950,8 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
     _, devices = _visible_devices()
     if len(devices) < case.prefill_tp + case.decode_tp:
         pytest.skip(f"needs {case.prefill_tp + case.decode_tp} GPUs")
+    if BACKEND == "xgmi" and _reads_every_prefill_gpu(case):
+        pytest.skip("MoRI xGMI cannot open a session to a GPU decode does not see")
     arch = ARCHS[case.arch]
     overrides = _arch_overrides(arch)
     with _pd_pair(arch, overrides, overrides, case) as (proxy_url, prefill, decode):
@@ -944,6 +971,52 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
         len(top) >= TOP_K and all(math.isfinite(v) for v in top.values())
         for top in tops
     ), f"decode returned non-finite log-probs: {tops}"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [c for c in HETEROGENEOUS_TP_READ_CASES if c.prefill_tp > c.decode_tp],
+    ids=lambda c: c.id,
+)
+def test_heterogeneous_tp_read_matches_write(case: Case):
+    """READ fan-in reproduces WRITE fan-in exactly at the same TP sizes.
+
+    Both pairs run the same weights at the same TP sizes, so decode sums in the
+    same order and the first-token log-probs must match exactly. WRITE runs over
+    xGMI, which handles fan-in on one node; READ runs over the backend under
+    test, so with ``MORIIO_DUMMY_E2E_BACKEND=rdma`` this checks that every head
+    and state slice pulled over RDMA lands right, which the
+    completes-and-uses-the-KV check above cannot see.
+    """
+    _, devices = _visible_devices()
+    if len(devices) < case.prefill_tp + case.decode_tp:
+        pytest.skip(f"needs {case.prefill_tp + case.decode_tp} GPUs")
+    if BACKEND == "xgmi" and _reads_every_prefill_gpu(case):
+        pytest.skip("MoRI xGMI cannot open a session to a GPU decode does not see")
+    arch = ARCHS[case.arch]
+    overrides = _arch_overrides(arch)
+    write_case = replace(case, read_mode=False)
+    with _pd_pair(arch, overrides, overrides, write_case, backend="xgmi") as (
+        proxy_url,
+        _,
+        decode,
+    ):
+        prompts = _prompts(_prompt_lengths(arch, decode))
+        ref = Reference(
+            prompts,
+            [_first_step(proxy_url, arch.model, p) for p in prompts],
+            arch.hybrid,
+            read_mode=True,
+        )
+    distances, hits = _pd_distances(arch, overrides, overrides, case, ref)
+
+    assert hits == ref.expected_external_hits, (
+        f"decode reported {hits} external prefix-cache hits, expected "
+        f"{ref.expected_external_hits}; it did not use all the transferred KV"
+    )
+    lengths = [len(p) for p in prompts]
+    bad = {n: d for n, d in zip(lengths, distances) if not d <= TOLERANCE}
+    assert not bad, f"READ first-token log-probs differ from WRITE: {bad}"
 
 
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))
