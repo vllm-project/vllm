@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Literal
 
 import torch
@@ -72,7 +71,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -913,15 +911,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def forward(
         self,

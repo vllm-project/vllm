@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from math import lcm
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -425,15 +426,16 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
-        # TODO: Support models with multiple Mamba specs that require different
-        # prefill checkpoint alignments instead of selecting the first one.
-        self.mamba_prefill_checkpoint_alignment = next(
-            (
-                group.kv_cache_spec.prefill_checkpoint_alignment
-                for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.kv_cache_spec, MambaSpec)
-            ),
-            None,
+        mamba_checkpoint_alignments = [
+            group.kv_cache_spec.prefill_checkpoint_alignment
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        ]
+        # A checkpoint offset must lie on every Mamba group's alignment.
+        self.mamba_prefill_checkpoint_alignment = (
+            lcm(*filter(None, mamba_checkpoint_alignments))
+            if mamba_checkpoint_alignments and None not in mamba_checkpoint_alignments
+            else None
         )
         self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
             not isinstance(group.kv_cache_spec, MambaSpec)

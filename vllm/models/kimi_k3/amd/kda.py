@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -68,7 +66,6 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -95,24 +92,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_prefill_checkpoint_alignment(self) -> int | None:
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
             self.use_prefill_checkpoint
             and self.kda_prefill_backend == "fused"
             and self.use_safe_gate
         )
-        if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
-            logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(can_checkpoint),
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
-            ),
-        )
+        return KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
 
     def __init__(
         self,
@@ -280,6 +267,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             if isinstance(additional_config, dict)
             else True
         )
+        if (
+            self.get_prefill_checkpoint_alignment() is not None
+            and vllm_config.cache_config.mamba_cache_mode == "align"
+        ):
+            logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
         self._checkpoint_exporter = KimiK3ROCmKDAPrefillCheckpointExporter(
             state_len=self.conv_size - 1
         )

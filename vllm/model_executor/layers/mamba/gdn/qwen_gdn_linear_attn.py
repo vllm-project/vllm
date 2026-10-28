@@ -6,7 +6,6 @@ import functools
 import itertools
 import os
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Literal
 
 import torch
@@ -84,7 +83,6 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -736,32 +734,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
-            return spec
-        # FlashInfer emits states at one stride for the whole batch, the gcd of
-        # the offsets; keeping every offset on the prefix-cache grid keeps that
-        # stride a multiple of the grid, which bounds the states emitted.
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=1,
-            prefill_checkpoint_alignment=get_mamba_prefill_checkpoint_grid(vllm_config),
-        )
-
     @functools.cached_property
     def _exports_checkpoints(self) -> bool:
         # Known only once every layer is built: a Mamba layer that cannot
-        # checkpoint (e.g. Qwen4Exp's PLE short conv) keeps the scheduler
-        # splitting the prefill instead.
-        return (
-            self._checkpoint_alignment is not None
-            and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
-        )
+        # checkpoint keeps the scheduler splitting the prefill instead.
+        return get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
 
     @functools.cached_property
     def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
-        # Offsets on the grid emit at most one state per grid step of a batch.
+        # FlashInfer emits states at the gcd of a batch's offsets. Offsets are
+        # prefix-cache boundaries on every layer's alignment, i.e. on the grid,
+        # so a batch emits at most one state per grid step.
         # Read lazily: the block size is final only after the model is built.
         return (
             (
@@ -1839,6 +1822,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                     self._checkpoint_buffer_spec
                 )
+                assert plan.num_checkpoints <= state_checkpoints.shape[0]
                 state_checkpoints = state_checkpoints[: plan.num_checkpoints]
                 (
                     core_attn_out_non_spec,

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from dataclasses import replace
-
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -49,7 +47,6 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -198,15 +195,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
         self,

@@ -64,8 +64,11 @@ class MambaBase(AttentionLayerBase):
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
-        inside a prefill, if any; in align mode, the platform makes Mamba blocks
-        multiples of it.
+        inside a prefill, or None if it cannot.
+
+        Only read in align mode, where the platform makes Mamba blocks multiples
+        of it. Unless every Mamba layer declares one, the scheduler splits the
+        prefill instead.
         """
         return None
 
@@ -73,6 +76,13 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        # The scheduler takes internal checkpoints only when every Mamba layer
+        # can export them.
+        checkpoint_alignment = (
+            self.get_prefill_checkpoint_alignment()
+            if get_mamba_prefill_checkpoint_alignment(vllm_config) is not None
+            else None
+        )
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
@@ -88,6 +98,8 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.cache_config.use_replayssm
                 else vllm_config.num_speculative_tokens
             ),
+            num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
+            prefill_checkpoint_alignment=checkpoint_alignment,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
@@ -117,8 +129,8 @@ def get_mamba_prefill_checkpoint_grid(vllm_config: VllmConfig) -> int:
     """Token grid every Mamba layer keeps its prefill checkpoint offsets on.
 
     Prefix-cache boundaries, made multiples of the layers' checkpoint alignment
-    (the platform already keeps blocks on it). The scheduler checks offsets
-    against one alignment, so every Mamba spec must use this one.
+    (the platform already keeps blocks on it), since the scheduler checks
+    offsets against the LCM of every Mamba spec's alignment.
     """
     alignment = get_mamba_prefill_checkpoint_alignment(vllm_config)
     assert alignment is not None

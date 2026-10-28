@@ -35,6 +35,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         get_state_dtype=lambda: (torch.float32,),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
+        get_prefill_checkpoint_alignment=lambda: None,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -43,6 +44,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
             mamba_cache_mode="none",
             use_replayssm=use_replayssm,
         ),
+        compilation_config=SimpleNamespace(static_forward_context={}),
         num_speculative_tokens=3,
     )
 
