@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the decode top-k row->token mapping (no GPU required).
+"""Tests for the decode top-k row->token mapping.
 
 On non-uniform decode batches (``requires_padding`` -- mixed plain-decode and
 spec-verify requests, or variable MTP verify lens; taken on Hopper where the
@@ -20,6 +20,7 @@ kernel is documented to replicate.
 
 from types import ModuleType
 
+import pytest
 import torch
 
 # Bootstrap the glm5next package before importing kpool_compress directly: its
@@ -155,8 +156,8 @@ def test_helper_padded_layout_per_row():
 
 def expand_tail_region(dec_seq):
     """Run the production pure-torch expand + append pair (the fused kernel
-    replicates it exactly on the identity path) and return the tail columns
-    [TOPK_TOKENS, TOPK_TOKENS + KPOOL - 1)."""
+    replicates it exactly on the identity path) and return each row's
+    KPOOL - 1 tail columns, which follow its selected pools."""
     rows = dec_seq.shape[0]
     pool_ids = torch.arange(SELECT_K, dtype=torch.int64).expand(rows, SELECT_K)
     valid = torch.ones_like(pool_ids, dtype=torch.bool)
@@ -164,7 +165,8 @@ def expand_tail_region(dec_seq):
     seq_lens = dec_seq.to(torch.int32)
     pool_lens = (seq_lens // KPOOL).to(torch.int32)
     out = append_tail_to_topk(expanded, seq_lens, pool_lens, KPOOL)
-    return out[:, TOPK_TOKENS:]
+    history_lens = (pool_lens * KPOOL).clamp(max=TOPK_TOKENS).tolist()
+    return torch.stack([row[h : h + KPOOL - 1] for row, h in zip(out, history_lens)])
 
 
 def test_tail_expansion_legacy_vs_fixed():
@@ -193,3 +195,28 @@ def test_tail_expansion_legacy_vs_fixed():
     assert legacy_tail[10, :2].tolist() == [556, 557]
 
     assert not torch.equal(legacy_tail, fixed_tail)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+def test_pooled_rows_keep_valid_prefix():
+    """Attention backends read only the first valid-count entries of a top-k
+    row (FlashAttention MLA sparse uses them as a page table). FULL CUDA graphs
+    take the pooled decode path even when every pool fits, so a short row must
+    not leave -1 gaps between its pools and its tail."""
+    rows = [
+        # (seq_len, selected pools, expected token indices)
+        (3, [], [0, 1, 2]),
+        (10, [0, 1], list(range(10))),
+        (16, [0, 1, 2, 3], list(range(16))),
+        (23, [4, 0, 2, 3], [16, 17, 18, 19, 0, 1, 2, 3, *range(8, 16), 20, 21, 22]),
+    ]
+    pool_ids = torch.tensor(
+        [pools + [-1] * (SELECT_K - len(pools)) for _, pools, _ in rows],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    seq_lens = torch.tensor([r[0] for r in rows], dtype=torch.int32, device="cuda")
+    out = indexer_mod.kpool_ops.expand_pools_and_append_tail(pool_ids, seq_lens, KPOOL)
+    width = TOPK_TOKENS + KPOOL - 1
+    expected = [tokens + [-1] * (width - len(tokens)) for _, _, tokens in rows]
+    assert out.tolist() == expected

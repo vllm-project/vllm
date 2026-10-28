@@ -754,7 +754,7 @@ def append_tail_to_topk(
     tail_count = seq_len - tail_start  # in [0, pool_size)
 
     cols = torch.arange(out_cols, device=topk_result.device)[None, :]
-    history_len = n_cols
+    history_len = tail_start.clamp(max=n_cols)[:, None]
     is_history = cols < history_len
     tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count[:, None])
@@ -808,17 +808,19 @@ def _expand_pools_and_append_tail_kernel(
     pool_len = seq_len // POOL_SIZE
     tail_start = pool_len * POOL_SIZE
     tail_count = seq_len - tail_start  # in [0, POOL_SIZE)
+    # The tail follows the selected pools: valid entries must form a prefix.
+    history_len = tl.minimum(tail_start, topk)
 
-    # History region [0, topk): expand selected pool g = cols // POOL_SIZE.
-    is_history = cols < topk
+    # History region: expand selected pool g = cols // POOL_SIZE.
+    is_history = cols < history_len
     g = cols // POOL_SIZE
     o = cols % POOL_SIZE
     pid = tl.load(pool_ids_ptr + row * pid_s0 + g, mask=mask & is_history, other=-1)
     hist_val = (pid * POOL_SIZE + o).to(tl.int32)
     hist_out = tl.where(pid >= 0, hist_val, -1)
 
-    # Tail region [topk, out_cols): the request's trailing incomplete pool.
-    tail_off = cols - topk
+    # Tail region: the request's trailing incomplete pool.
+    tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count)
     tail_val = (tail_start + tail_off).to(tl.int32)
     tail_out = tl.where(is_tail, tail_val, -1)
