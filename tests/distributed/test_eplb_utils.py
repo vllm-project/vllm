@@ -9,7 +9,9 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_state as eplb_state_module
+from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
@@ -209,6 +211,115 @@ def _make_eplb_state() -> EplbState:
     parallel_config.enable_elastic_ep = False
     parallel_config.num_ubatches = 1
     return EplbState(parallel_config, torch.device("cpu"))
+
+
+class _EplbTestModel:
+    def __init__(self, num_experts: int, num_redundant: int):
+        self.num_routed_experts = num_experts
+        self.num_logical_experts = num_experts
+        self.num_redundant_experts = num_redundant
+        self.num_physical_experts = num_experts + num_redundant
+        self.num_local_physical_experts = self.num_physical_experts // 2
+        self.num_expert_groups = num_experts
+        self.num_moe_layers = 1
+        self.num_shared_experts = 0
+        self.moe_layers = ()
+        self.expert_weights = [[torch.zeros(self.num_local_physical_experts, 1)]]
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        pass
+
+
+class _EplbTestModelConfig:
+    def __init__(self, name: str):
+        self.model = name
+
+    def compute_hash(self) -> str:
+        return self.model
+
+
+class _TopologyEncodingPolicy:
+    @classmethod
+    def rebalance_experts(
+        cls,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        mapping = (torch.arange(num_replicas, dtype=torch.long) + 1).remainder(
+            num_groups
+        )
+        return mapping.unsqueeze(0).expand(weight.shape[0], -1).clone()
+
+
+class _EplbTestGroup:
+    def __init__(self):
+        self.device_group = self
+
+    def rank(self) -> int:
+        return 1
+
+    def size(self) -> int:
+        return 2
+
+
+def test_rearrange_handles_heterogeneous_model_topologies_sync(monkeypatch):
+    """Sync rearrangement uses each model's physical expert and group counts."""
+    monkeypatch.setattr(
+        parallel_config_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(
+            window_size=4,
+            step_interval=8,
+            use_async=False,
+            communicator="torch_gloo",
+        ),
+    )
+    state = EplbState(parallel_config, torch.device("cpu"))
+    group = _EplbTestGroup()
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_eplb_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_node_count", lambda: 1)
+    monkeypatch.setattr(eplb_state_module, "all_reduce", lambda tensor, group: None)
+    monkeypatch.setattr(
+        eplb_state_module, "create_eplb_communicator", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        eplb_state_module,
+        "rearrange_expert_weights_inplace",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
+    models = (
+        (_EplbTestModel(num_experts=4, num_redundant=2), "target"),
+        (_EplbTestModel(num_experts=6, num_redundant=2), "draft"),
+    )
+    for model, name in models:
+        state.add_model(model, _EplbTestModelConfig(name))
+    state.policy = _TopologyEncodingPolicy
+
+    state.rearrange()
+
+    assert torch.equal(
+        state.model_states["target"].physical_to_logical_map,
+        torch.tensor([[1, 2, 3, 0, 1, 2]]),
+    )
+    assert torch.equal(
+        state.model_states["draft"].physical_to_logical_map,
+        torch.tensor([[1, 2, 3, 4, 5, 0, 1, 2]]),
+    )
 
 
 def test_allreduce_list_handles_matching_shapes(dist_init):
