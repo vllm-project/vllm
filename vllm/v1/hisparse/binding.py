@@ -210,7 +210,7 @@ def bind_hisparse_kv_caches(
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
         residency = torch.zeros(
-            (max_num_reqs, len(resident_groups), max_num_pages),
+            (len(resident_groups), max_num_reqs, max_num_pages),
             dtype=torch.int32,
             device=block_tables.input_block_tables[resident_groups[0][0]].device,
         )
@@ -228,7 +228,7 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency[:, resident_source_index],
+                block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency
