@@ -33,7 +33,7 @@ from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 
-from .. import LOW_BATCH_MAX_ROWS, uses_checked_flashinfer
+from .. import LOW_BATCH_MAX_ROWS
 
 BACKEND = "cutedsl_low_latency"
 
@@ -134,12 +134,10 @@ def run_zeros(linear: nn.Module, rows: int) -> torch.Tensor:
 @contextmanager
 def pinned_tactics() -> Iterator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
-    tuner's tactic list is a FlashInfer internal: off the checked version,
-    every tactic is tuned."""
-    if not (
-        current_platform.is_device_capability(103)
-        and uses_checked_flashinfer("pinning the MXFP8 GEMM tactics")
-    ):
+    tuner's tactic list is a FlashInfer internal: when it has no
+    ``autotune_tactics`` or does not list a pinned tactic, every tactic is
+    tuned."""
+    if not current_platform.is_device_capability(103):
         yield
         return
     module = importlib.import_module(

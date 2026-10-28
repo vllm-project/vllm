@@ -142,7 +142,7 @@ class TestOrientFusedWeight:
 
 
 class TestNarrowExpertDataForPadding:
-    """Unit tests for _narrow_expert_data_for_padding."""
+    """Unit tests for _split_padding."""
 
     def test_no_narrowing_when_shapes_match(self):
         expert_data = torch.zeros(1024, 1024)
