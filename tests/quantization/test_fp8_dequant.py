@@ -26,13 +26,15 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.utils import get_live_param
+from vllm.model_executor.utils import get_live_param, weights_already_processed
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
-_OUT = [256, 192]  # q_a / kv_a-like shards; the last one ends in a partial block
+# q_a / kv_a-like shards: the first spans several dequantization chunks, the
+# last ends in a partial block
+_OUT = [1280, 192]
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +183,18 @@ def test_tensor_parallel_slices():
     torch.testing.assert_close(model.o.weight, expected, rtol=0, atol=0)
 
 
+def test_pre_processed_weights_are_kept():
+    # the weight cache hands over plain parameters holding runtime bytes
+    runtime = _expected(_checkpoint(11))
+    model = _Model()
+    for name, weight in runtime.items():
+        layer = getattr(model, name)
+        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
+    with weights_already_processed():
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    _assert_runtime(model, runtime)
+
+
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 
@@ -226,7 +240,7 @@ def test_direct_reload_keeps_weights_left_out(monkeypatch):
 
 
 @requires_gpu
-@pytest.mark.parametrize("bf16_shard", [None, 0])
+@pytest.mark.parametrize("bf16_shard", [None, 0, 1])
 def test_layerwise_reload_equals_cold_start(bf16_shard):
     model = _cold_start(_checkpoint(9))
     ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}

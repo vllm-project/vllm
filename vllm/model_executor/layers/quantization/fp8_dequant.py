@@ -36,7 +36,11 @@ from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ModelWeightParameter,
 )
-from vllm.model_executor.utils import retire_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    retire_parameter,
+    set_weight_attrs,
+)
 from vllm.utils.math_utils import cdiv
 
 # Rows dequantized at once; bounds the float32 temporaries of a large weight.
@@ -79,11 +83,10 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         return param
 
     def fp8_view(self) -> torch.Tensor:
-        """The weight's storage in the checkpoint's FP8 layout."""
-        data = self.data
-        if data.dtype == torch.float8_e4m3fn:
-            return data
-        return _fp8_view_of(data, *data.shape)
+        """The weight's storage in the checkpoint's FP8 layout. Derived from
+        the runtime layout, never from ``data``'s strides: a copy of ``data``
+        may have lost them (moving to the meta device makes it contiguous)."""
+        return _fp8_view_of(self.runtime_view(), *self.data.shape)
 
     def runtime_view(self) -> torch.Tensor:
         """The weight's storage as the contiguous runtime-dtype weight."""
@@ -211,7 +214,9 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         layer.register_parameter("weight_scale_inv", scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight.dequantize(layer.weight_scale_inv, self.weight_block_size)
+        # pre-processed weights (weight cache) are runtime BF16 already
+        if not is_weights_pre_processed():
+            layer.weight.dequantize(layer.weight_scale_inv, self.weight_block_size)
         retire_parameter(layer, "weight_scale_inv")
         super().process_weights_after_loading(layer)
 
