@@ -1,4 +1,4 @@
-lmcache >= 0.3.9
+lmcache >= 0.5.6
 # CuPy 14.1.0 imports pytest from cupy.testing._random, which breaks runtime
 # images. 14.1.1 fixes the root cause, so only 14.1.0 is excluded.
 cupy-cuda13x != 14.1.0

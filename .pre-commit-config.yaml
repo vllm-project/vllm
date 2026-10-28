@@ -28,7 +28,7 @@ repos:
   rev: v0.21.0
   hooks:
   - id: markdownlint-cli2
-    language_version: lts
+    language_version: 24.22.1 # Node 26 (current lts) needs libatomic, which the CI runners lack
     args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
@@ -74,6 +74,7 @@ repos:
         --no-emit-package, cupy-cuda12x,
         # nvidia packages (unsuffixed / unified naming)
         --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cccl,
         --no-emit-package, nvidia-cuda-cupti,
         --no-emit-package, nvidia-cuda-nvrtc,
         --no-emit-package, nvidia-cuda-runtime,
@@ -288,6 +289,12 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-trust-remote-code
+    name: Check for hardcoded trust_remote_code=True
+    entry: python tools/pre_commit/check_trust_remote_code.py
+    language: python
+    types: [python]
+    files: ^vllm/
   # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
   # skips with a warning when cargo is not installed.
   - id: rust-cargo-autoinherit

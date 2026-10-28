@@ -94,7 +94,7 @@ denial of service:
 | Environment Variable | Default | Description |
 | --- | --- | --- |
 | `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
-| `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads. Enforced while streaming. |
+| `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads and retried attempts. Enforced while streaming. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
 | `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `715827880` (~683 MiB) | Maximum aggregate decoded image, video-frame, and audio bytes in one request. Images are charged at four bytes per pixel before decoding; audio is limited before decoding; video files are charged after frame extraction. |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
@@ -207,6 +207,9 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/checkpoint/prepare` - Prepare for a process checkpoint (stops serving, needs `--enable-sleep-mode`)
+- `/checkpoint/restore` - Restore after a process checkpoint (needs `--enable-sleep-mode`)
+- `/checkpoint/status` - Check if the server is prepared for a checkpoint (needs `--enable-sleep-mode`)
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
