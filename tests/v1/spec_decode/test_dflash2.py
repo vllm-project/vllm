@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -399,7 +402,7 @@ def test_selector_asks_for_fp32_proposal_logits():
     assert fill == float("-inf")
 
 
-def _mock_draft_configs(monkeypatch, hf_config):
+def _mock_draft_configs(monkeypatch, hf_config, dtype=torch.float32):
     """The current and draft vLLM configs for building a draft model on CPU."""
     mock_current_vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -429,7 +432,7 @@ def _mock_draft_configs(monkeypatch, hf_config):
             mode=0,  # CompilationMode.NONE is 0
         ),
         model_config=SimpleNamespace(
-            dtype=torch.float32,
+            dtype=dtype,
             is_mm_prefix_lm=False,
             rswa_window=None,
             head_dtype=None,
@@ -465,9 +468,10 @@ def _mock_draft_configs(monkeypatch, hf_config):
             enable_adaptive_verification=False,
         ),
         model_config=SimpleNamespace(
-            dtype=torch.float32,
+            dtype=dtype,
             is_mm_prefix_lm=False,
             get_total_num_hidden_layers=lambda: 2,
+            get_vocab_size=lambda: hf_config.vocab_size,
         ),
         load_config=SimpleNamespace(
             quantization=None,
@@ -621,6 +625,45 @@ def test_beam_dflash2_loads_every_checkpoint_tensor(monkeypatch):
     assert model.get_draft_attn_causal() == [False, False]
 
 
+@pytest.mark.skip_global_cleanup
+def test_dflash_fc_runs_fp32_target_hidden_states_in_draft_dtype(monkeypatch):
+    """A target with an FP32 residual stream (e.g. Muse Spark) hands FP32 aux
+    hidden states to a bf16 drafter."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+
+    hidden = 64
+    hf_config = SimpleNamespace(
+        vocab_size=100,
+        hidden_size=hidden,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        intermediate_size=128,
+        hidden_act="silu",
+        dflash_config={"mask_token_id": 99, "target_layer_ids": [0, 1]},
+    )
+    current_config, vllm_config = _mock_draft_configs(
+        monkeypatch, hf_config, dtype=torch.bfloat16
+    )
+    with set_current_vllm_config(current_config):
+        model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
+    fc = model.model.fc
+    torch.manual_seed(0)
+    torch.nn.init.normal_(fc.weight)
+    fc.quant_method.process_weights_after_loading(fc)
+    aux_hidden_states = torch.randn(3, 2 * hidden, dtype=torch.float32)
+
+    combined = model.combine_hidden_states(aux_hidden_states)
+
+    assert combined.dtype == torch.bfloat16
+    torch.testing.assert_close(combined, fc(aux_hidden_states.to(torch.bfloat16)))
+
+
 def test_conv_projections_use_draft_quant_config(monkeypatch):
     from torch import nn
 
@@ -757,3 +800,57 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+def test_score_edges_keeps_out_of_vocabulary_anchors_in_range():
+    """A request in chunked prefill anchors on its next prompt token, which can
+    lie past the draft vocabulary (a multimodal placeholder)."""
+    generator = torch.Generator().manual_seed(0)
+    vocab_size, rank, top_k = 8, 4, 3
+    predecessor_table = torch.randn(vocab_size, rank, generator=generator)
+    successor_table = torch.randn(vocab_size, rank, generator=generator)
+    candidate_ids = torch.randint(0, vocab_size, (2, 5, top_k), generator=generator)
+    unary_logits = torch.randn(2, 5, top_k, generator=generator)
+    hidden = torch.randn(2, 5, rank, generator=generator)
+
+    def score(anchor_token_ids: list[int]) -> torch.Tensor:
+        return _score_edges(
+            predecessor_table,
+            successor_table,
+            candidate_ids,
+            unary_logits,
+            hidden,
+            torch.tensor(anchor_token_ids),
+            top_k,
+        )
+
+    torch.testing.assert_close(score([vocab_size, 2]), score([vocab_size - 1, 2]))
+
+
+_EMBEDDING = "vllm.model_executor.layers.vocab_parallel_embedding"
+
+
+def test_top_k_tokens_stay_in_the_processor_vocabulary(default_vllm_config):
+    """A DFlash2 drafter takes candidates from the target's head, which can have
+    rows past the draft vocabulary (a padded multimodal vocabulary). The
+    candidates index the draft's codebooks, so top-k must not return those rows.
+    """
+    head_rows, vocab_size, hidden_size = 140, 128, 16
+    # One vocabulary shard, so the reductions need no process group.
+    with (
+        mock.patch(f"{_EMBEDDING}.get_tensor_model_parallel_rank", return_value=0),
+        mock.patch(
+            f"{_EMBEDDING}.get_tensor_model_parallel_world_size", return_value=1
+        ),
+    ):
+        head = ParallelLMHead(head_rows, hidden_size)
+    with torch.no_grad():
+        head.weight.zero_()
+        head.weight[vocab_size:head_rows] = 1.0
+    head.quant_method.process_weights_after_loading(head)
+    hidden_states = torch.ones(4, hidden_size, dtype=head.weight.dtype)
+    processor = LogitsProcessor(vocab_size)
+
+    _, ids = processor.get_top_k_tokens(head, hidden_states, 4)
+    assert (ids < vocab_size).all()
+    assert (processor.get_top_tokens(head, hidden_states) < vocab_size).all()
