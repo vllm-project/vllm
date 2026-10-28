@@ -30,6 +30,7 @@ from .models import (
     llama3_8b_fp8,
     llama4_scout_fp4,
     llama4_scout_fp8,
+    qwen3_8_27b_mixed_fp4,
     qwen3_a3b_fp8,
 )
 
@@ -102,7 +103,7 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -131,6 +132,13 @@ def test_tp1_fp8_fusions(
         # On ROCm norm_rope_fusion is only supported without
         # enabling AITER.
         matches_check.remove("norm_rope_fusion")
+
+    if current_platform.is_xpu():
+        # XPU defaults to the weight-only W8A16 FP8 path, which leaves no
+        # activation quant op for rms+quant fusion; opt into W8A8 instead.
+        model_kwargs["linear_backend"] = "xpu"
+        # Attention + quant fusion is not supported on XPU.
+        matches = matches._replace(attn_quant_fusion=0)
 
     run_e2e_fusion_test(
         model_name,
@@ -179,7 +187,7 @@ def test_tp1_fp4_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -201,4 +209,47 @@ def test_tp1_fp4_fusions(
         attn_backend,
         compilation_config,
         matches_check,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_name, matches_fn, model_kwargs, hf_overrides", [qwen3_8_27b_mixed_fp4]
+)
+@pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
+@pytest.mark.parametrize("n_layers", [4])
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+def test_tp1_fp4_mixed_precision_act_fusion(
+    model_name: str,
+    matches_fn: Callable[[int], Matches],
+    model_kwargs: dict,
+    hf_overrides: Callable[[int], dict],
+    attn_backend: AttentionBackendCase,
+    n_layers: int,
+    inductor_graph_partition: bool,
+    run_e2e_fusion_test,
+):
+    """Act+quant fusion matches on a MIXED_PRECISION NVFP4 checkpoint."""
+    model_kwargs["hf_overrides"] = hf_overrides(n_layers)
+    model_kwargs["load_format"] = "dummy"
+    model_kwargs["max_model_len"] = 1024
+    model_kwargs["enable_flashinfer_autotune"] = False
+
+    compilation_config = dict(
+        use_inductor_graph_partition=inductor_graph_partition,
+        pass_config=PassConfig(
+            fuse_norm_quant=False,
+            fuse_act_quant=True,
+            fuse_attn_quant=False,
+            enable_qk_norm_rope_fusion=False,
+        ),
+    )
+
+    run_e2e_fusion_test(
+        model_name,
+        matches_fn(n_layers),
+        model_kwargs,
+        attn_backend,
+        compilation_config,
+        ["act_quant_fusion"],
     )

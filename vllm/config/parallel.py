@@ -4,17 +4,18 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, overload
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
+from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -55,6 +56,7 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "passthrough",
 ]
 
 
@@ -103,6 +105,17 @@ class EPLBConfig:
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
     """
+
+    enable_migration_batching: bool = False
+    """Schedule expert migrations in batches where each rank communicates with
+    at most one peer. This reduces per-rank network contention at the cost of
+    additional sequential communication steps. This option only applies to
+    async EPLB and is disabled by default."""
+
+    @property
+    def migration_batching_enabled(self) -> bool:
+        """Whether contention-aware batching is active for this configuration."""
+        return self.use_async and self.enable_migration_batching
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -169,6 +182,11 @@ class ParallelConfig:
     --data-parallel-start-rank."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
+    enable_hc_sp: bool = False
+    """Enable sequence parallelism for HyperConnection (HC) computation.
+    Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
+    Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
@@ -210,7 +228,10 @@ class ParallelConfig:
     - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "passthrough": No all2all at all: the MoE backend dispatches and combines
+      itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
+      such MoE backends; not selectable from the CLI."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -219,6 +240,15 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+
+    enable_shm_tensor_arena: bool = False
+    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    engine→worker broadcast through a zero-copy shared-memory arena instead of
+    sending a copy to every reader. **Experimental**: may be reconciled with
+    vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
+    most beneficial for multimodal serving with large images and tensor
+    parallelism. Active only when all queue readers are node-local; reserves
+    slots in ``/dev/shm``."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -276,14 +306,14 @@ class ParallelConfig:
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
-    calls."""
+    calls. It may also define `init_worker_extension(self)`, called after
+    device and distributed initialization but before model loading, and
+    `destroy_worker_extension(self)`, called (best-effort) before the worker
+    shuts down."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -296,15 +326,31 @@ class ParallelConfig:
     nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    numa_bind: bool = False
+    numa_bind: bool | None = None
     """Enable NUMA binding for GPU worker subprocesses.
 
-    By default, workers are pinned to their GPU's NUMA-local CPUs and
-    memory; on PCT-capable Xeons they also auto-bind to the SKU's
-    PCT priority cores.
+    Workers are pinned to their GPU's NUMA-local CPUs; on PCT-capable
+    Xeons they also auto-bind to the SKU's PCT priority cores.
+
+    If None (default), vLLM binds only when the environment supports it
+    (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
+    a default NUMA memory policy, and the `spawn` start method with an
+    mp/uni executor and mp DP, including PCP).
+    Ray, external launchers and device-ID remapping are excluded
+    from automatic binding. Automatic mode prefers GPU-local memory but
+    permits allocations on other nodes. Unsupported environments start
+    unbound. With `True`, strict memory binding may override an existing
+    policy, and a missing `numactl` or undetectable GPU-to-NUMA topology is
+    a startup error; `False` disables binding.
     """
+    _numa_bind_auto: bool = Field(default=False, repr=False)
+    """Internal launch decision: use soft memory preference in spawned children."""
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not automatic soft memory preference. It cannot be combined
+    with `numa_bind=False`.
 
     Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
     for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
@@ -314,6 +360,10 @@ class ParallelConfig:
     """
     numa_bind_cpus: list[str] | None = None
     """Optional CPU lists to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not CPU-only binding or automatic soft memory preference.
+    It cannot be combined with `numa_bind=False`.
 
     Specify one CPU list per visible GPU, for example
     `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
@@ -523,12 +573,12 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
-        if not self.numa_bind and (
-            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
-        ):
-            raise ValueError(
-                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
-            )
+        if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
+            if self.numa_bind is False:
+                raise ValueError(
+                    "NUMA binding lists cannot be combined with numa_bind=False."
+                )
+            self.numa_bind = True
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
@@ -599,6 +649,19 @@ class ParallelConfig:
         return self.world_size * self.data_parallel_size
 
     @property
+    def pcp_shard_decode_requests(self) -> bool:
+        """Whether PCP can shard decode requests across its ranks.
+
+        PCP-only execution replicates the KV cache, so each decode request can
+        have a single PCP owner. DCP shards the KV cache and therefore requires
+        every decode request to run on every participating DCP rank.
+        """
+        return (
+            self.prefill_context_parallel_size > 1
+            and self.decode_context_parallel_size == 1
+        )
+
+    @property
     def use_ubatching(self) -> bool:
         return self.enable_dbo or self.ubatch_size > 1
 
@@ -612,6 +675,11 @@ class ParallelConfig:
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
+
+    @property
+    def cpu_distributed_timeout(self) -> timedelta | None:
+        seconds = self.cpu_distributed_timeout_seconds
+        return timedelta(seconds=seconds) if seconds is not None else None
 
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
@@ -694,6 +762,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    timeout=self.cpu_distributed_timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -725,6 +794,7 @@ class ParallelConfig:
                 "deepep_low_latency",
                 "deepep_v2",
                 "flashinfer_nvlink_one_sided",
+                "passthrough",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -789,6 +859,22 @@ class ParallelConfig:
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
 
+    def get_local_gpu_index(
+        self, local_rank: int, dp_local_rank: int | None = None
+    ) -> int:
+        """Map a worker's local rank to its host-local logical GPU index."""
+        if (
+            self.distributed_executor_backend not in ("ray", "external_launcher")
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        ):
+            if dp_local_rank is None:
+                dp_local_rank = self.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.data_parallel_index
+            return local_rank + dp_local_rank * self.world_size
+        return local_rank
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
@@ -800,9 +886,8 @@ class ParallelConfig:
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
-    @staticmethod
     def sync_dp_state(
-        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+        self, dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
     ) -> tuple[bool, bool]:
         """Combined all-reduce for DP state synchronization.
 
@@ -822,7 +907,7 @@ class ParallelConfig:
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
@@ -869,12 +954,12 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",
             "distributed_executor_backend",
             "worker_cls",
-            "sd_worker_cls",
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
@@ -884,6 +969,7 @@ class ParallelConfig:
             # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
+            "_numa_bind_auto",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",
@@ -914,11 +1000,11 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb:
                 raise NotImplementedError(
-                    "Elastic EP is not compatible with data_parallel_external_lb "
-                    "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
-                    "server and core client to coordinate scale up/down."
+                    "Elastic EP is not compatible with data_parallel_hybrid_lb. "
+                    "Elastic EP supports a single API server/core client path "
+                    "or data_parallel_external_lb, but not hybrid load balancing."
                 )
             if self.eplb_config.use_async:
                 from vllm.distributed.nixl_utils import is_nixl_available
@@ -1079,10 +1165,6 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
-
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
-            self.disable_custom_all_reduce = True
 
         if (
             self.distributed_executor_backend is not None
