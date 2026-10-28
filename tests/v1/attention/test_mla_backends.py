@@ -2085,7 +2085,8 @@ def _run_backend_correctness(
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        # AITER FA prefill on ROCm is less accurate in bf16 than flash attention.
+        "auto": 2e-2 if current_platform.is_rocm() else 1e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
