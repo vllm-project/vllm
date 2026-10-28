@@ -1446,12 +1446,12 @@ zipp==3.23.0
 # cuda-pathfinder
 # cuda-toolkit
 # nvidia-cublas
+# nvidia-cuda-cccl
 # nvidia-cuda-cupti
 # nvidia-cuda-nvrtc
 # nvidia-cuda-runtime
 # nvidia-cufft
 # nvidia-cufile
-# nvidia-curand
 # nvidia-cusolver
 # nvidia-cusparse
 # nvidia-nvjitlink
