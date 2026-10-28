@@ -7,6 +7,7 @@ class Counter:
     def __init__(self, start: int = 0) -> None:
         super().__init__()
 
+        self.start = start
         self.counter = start
 
     def __next__(self) -> int:
@@ -15,7 +16,7 @@ class Counter:
         return i
 
     def reset(self) -> None:
-        self.counter = 0
+        self.counter = self.start
 
 
 class AtomicCounter:
