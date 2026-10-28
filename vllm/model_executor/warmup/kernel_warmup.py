@@ -253,6 +253,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         minimax_m3_msa_warmup(worker)
+    elif current_platform.is_rocm():
+        from vllm.model_executor.warmup.minimax_m3_rocm_warmup import (
+            minimax_m3_rocm_nvfp4_warmup,
+        )
+
+        minimax_m3_rocm_nvfp4_warmup(worker)
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
