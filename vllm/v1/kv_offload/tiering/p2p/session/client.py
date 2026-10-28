@@ -30,9 +30,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_LOAD_TIMEOUT_S = 30.0
-_ABORT_ACK_TIMEOUT_S = 10.0
-_LOOKUP_TIMEOUT_S = 30.0
+# Load timeout for a symmetric-P2P fetch (the id ran the lookup phase).
+# The probe already confirmed the peer holds every block, so a fetch that
+# has not landed by now is stuck; fail fast and recompute locally.
+_P2P_LOAD_TIMEOUT_S = 10.0
+# Load timeout for a PD fetch. The prefiller may still be computing the
+# blocks when the fetch arrives, so allow for a full prefill.
+_PD_LOAD_TIMEOUT_S = 30.0
+_ABORT_ACK_TIMEOUT_S = 5.0
+_LOOKUP_TIMEOUT_S = 8.0
 
 
 @dataclass
@@ -45,6 +51,8 @@ class _InboundLoadState:
 
     job_id: int  # opaque ID assigned by the manager to this load request
     submitted_at: float
+    # _P2P_LOAD_TIMEOUT_S or _PD_LOAD_TIMEOUT_S, fixed at submit time.
+    timeout_s: float
     aborted_at: float | None = None
 
 
@@ -223,6 +231,7 @@ class ClientRole:
         st.loads[round_seq] = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
+            timeout_s=_P2P_LOAD_TIMEOUT_S if st.probed else _PD_LOAD_TIMEOUT_S,
         )
         self._active_loads.add(kv_request_id)
         st.peer_lookup_open = False
@@ -481,7 +490,8 @@ class ClientRole:
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
 
-        Loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
+        Loads past their load timeout (``_P2P_LOAD_TIMEOUT_S`` or
+        ``_PD_LOAD_TIMEOUT_S``) get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed and recorded in
         ``expired_abort_ack``.
@@ -493,7 +503,7 @@ class ClientRole:
             assert st.loads
             for round_seq, load in st.loads.items():
                 if load.aborted_at is None:
-                    if now - load.submitted_at >= _LOAD_TIMEOUT_S:
+                    if now - load.submitted_at >= load.timeout_s:
                         load.aborted_at = now
                         logger.warning(
                             "P2PSession %s: %s round=%s timed out, sending abort",

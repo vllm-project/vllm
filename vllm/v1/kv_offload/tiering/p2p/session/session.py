@@ -678,7 +678,7 @@ class P2PSession:
             self._mark_dead(f"peer registration failed: {exc}")
             return
         if self._conn is not None and self._conn.alive:
-            self._conn.send(
+            self._do_send(
                 {
                     TYPE_KEY: ConnectAckMsg.TYPE,
                     ConnectAckMsg.PEER_ID: self._local_id,

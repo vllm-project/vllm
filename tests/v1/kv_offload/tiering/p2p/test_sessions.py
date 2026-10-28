@@ -36,8 +36,9 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
-    _LOAD_TIMEOUT_S,
     _LOOKUP_TIMEOUT_S,
+    _P2P_LOAD_TIMEOUT_S,
+    _PD_LOAD_TIMEOUT_S,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
@@ -492,6 +493,19 @@ class TestConnectHandshake:
         assert not conn.alive
         assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
 
+    def test_failed_ack_send_marks_connection_dead(self):
+        """A ConnectAckMsg send that raises marks the connection dead."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        transport.complete_registrations()
+        conn.fail_send = True
+        session.poll()
+
+        assert not conn.alive
+
     def test_duplicate_connect_during_registration_is_rejected(self):
         """A second ConnectMsg mid-registration is a protocol violation."""
         transport = FakeDataTransport(defer_registration=True)
@@ -782,6 +796,32 @@ class TestClientFlows:
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
 
+    def test_load_timeout_depends_on_mode(self):
+        """A symmetric-P2P fetch (probed first) aborts after the short P2P
+        load timeout; a PD fetch (no probe) still gets the full PD one."""
+        assert _P2P_LOAD_TIMEOUT_S < _PD_LOAD_TIMEOUT_S
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-p2p", b"k")
+        session._client.on_lookup_resp("req-p2p", [b"k"], [True])
+        session.request_blocks(
+            job_id=1, kv_request_id="req-p2p", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-pd", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        assert _client_load(session, "req-p2p").timeout_s == _P2P_LOAD_TIMEOUT_S
+        assert _client_load(session, "req-pd").timeout_s == _PD_LOAD_TIMEOUT_S
+
+        # Past the P2P timeout but short of the PD one: only P2P aborts.
+        backdated = time.monotonic() - _P2P_LOAD_TIMEOUT_S - 1.0
+        _client_load(session, "req-p2p").submitted_at = backdated
+        _client_load(session, "req-pd").submitted_at = backdated
+        session.poll()
+        assert _client_load(session, "req-p2p").aborted_at is not None
+        assert _client_load(session, "req-pd").aborted_at is None
+
     def test_load_abort_ack_timeout_surfaces_failure(self):
         """After load timeout sends AbortFetch, if no AbortAck arrives within
         _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
@@ -795,7 +835,7 @@ class TestClientFlows:
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
         _client_load(session, "req-7").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
         assert loads == []
@@ -860,7 +900,7 @@ class TestClientFlows:
             job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         _client_load(session, "req-8").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
         # First poll: AbortFetch goes out.
         session.poll()
