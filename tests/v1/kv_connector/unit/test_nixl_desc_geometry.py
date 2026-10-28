@@ -781,6 +781,8 @@ def _make_remote_meta(
     remote_kernel_block_size,
     remote_num_logical,
     remote_ssm_sizes,
+    region_members=None,
+    region_group_ids=None,
 ):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
@@ -792,21 +794,24 @@ def _make_remote_meta(
     kernel_page = (
         worker.block_len_per_layer[0] * remote_kernel_block_size // worker.block_size
     )
+    region_members = region_members or worker.region_members
+    num_regions = len(region_members)
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
         device_id=0,
-        kv_caches_base_addr=[0x10_000_000, 0x20_000_000],
+        kv_caches_base_addr=[0x10_000_000 * (i + 1) for i in range(num_regions)],
         num_blocks=remote_num_logical * remote_ppl,
-        block_lens=[kernel_page, kernel_page],
+        block_lens=[kernel_page] * num_regions,
         # Non-interleaved remote: consecutive blocks abut, so stride == page length.
-        block_strides=[kernel_page, kernel_page],
+        block_strides=[kernel_page] * num_regions,
         kv_cache_layout=worker.kv_cache_layout,
         block_size=remote_kernel_block_size,
         ssm_sizes=remote_ssm_sizes,
         attn_backend_name=worker.backend_name,
         physical_blocks_per_logical_kv_block=remote_ppl,
-        region_members=worker.region_members,
+        region_members=region_members,
+        region_group_ids=region_group_ids,
     )
 
 
@@ -912,6 +917,106 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     # rank 1 carries only its SSM shard.
     assert len(worker.nixl_wrapper.xfers) == 2
     assert total > 0
+
+
+@pytest.mark.cpu_test
+def test_mla_hybrid_peer_with_other_region_order_pairs_by_layer():
+    """P may group a hybrid model's layers into regions differently from D.
+    Here P lists D's two regions in the opposite order, so region i is not
+    region i: every MLA page and SSM sub-region must still be read from the P
+    region holding the same layers, at the paired block."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = _make_mla_hybrid_worker(
+        local_block_size=16, kernel_block_size=16, num_logical_blocks=8
+    )
+    remote_members = worker.region_members[::-1]
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=16,
+        remote_kernel_block_size=16,
+        remote_num_logical=8,
+        remote_ssm_sizes=worker._mamba_ssm_size,
+        region_members=remote_members,
+        region_group_ids=worker.region_group_ids[::-1],
+    )
+    _register_remote_agents(worker, meta_r, 1)
+
+    local_ids = ([2], [5], [7])
+    remote_block_of = {2: 1, 5: 4, 7: 6}
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=local_ids,
+        kv_transfer_params={
+            "remote_block_ids": [[remote_block_of[b] for b in g] for g in local_ids],
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-req",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+    meta = metadata.reqs_to_recv["req"]
+    meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
+        meta.local_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
+    worker._recving_metadata["req"] = meta
+    worker._read_blocks_for_req("req", meta)
+
+    page = worker._test_unified_page
+
+    def locate(addr, bases):
+        for region, base in enumerate(bases):
+            if 0 <= addr - base < 8 * page:
+                return region, *divmod(addr - base, page)
+        raise AssertionError(f"{addr:#x} is in no region")
+
+    nixl = worker.nixl_wrapper
+    ((_, local_handle, local_desc_ids, remote_handle, remote_desc_ids),) = nixl.xfers
+    local_bases = [t.data_ptr() for t in worker._test_tensors]
+    assert len(local_desc_ids) == len(remote_desc_ids) > 0
+    for local_id, remote_id in zip(local_desc_ids, remote_desc_ids):
+        local_addr, local_len, _ = (int(x) for x in nixl.dlists[local_handle][local_id])
+        remote_addr, remote_len, _ = (
+            int(x) for x in nixl.dlists[remote_handle][remote_id]
+        )
+        local_region, local_block, local_off = locate(local_addr, local_bases)
+        remote_region, remote_block, remote_off = locate(
+            remote_addr, meta_r.kv_caches_base_addr
+        )
+        assert remote_members[remote_region] == worker.region_members[local_region]
+        assert remote_block == remote_block_of[local_block]
+        assert (remote_off, remote_len) == (local_off, local_len)
+
+
+@pytest.mark.cpu_test
+def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
+    """A hybrid layer in another cache group on P would be read at the wrong
+    group's blocks, and region-mapped reads cannot serve SSM state, so the
+    handshake refuses the peer before any transfer."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=16,
+        kernel_block_size=16,
+        num_logical_blocks=4,
+        kda_only_tensor=True,
+    )
+    # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in group 2.
+    remote_groups = list(worker.region_group_ids)
+    remote_groups[remote_groups.index(1)] = 2
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=16,
+        remote_kernel_block_size=16,
+        remote_num_logical=4,
+        remote_ssm_sizes=worker._mamba_ssm_size,
+        region_group_ids=remote_groups,
+    )
+
+    with pytest.raises(NotImplementedError, match="cache groups"):
+        _register_remote_agents(worker, meta_r, 1)
 
 
 def _resolve(

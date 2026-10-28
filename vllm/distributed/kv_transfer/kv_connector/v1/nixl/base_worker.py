@@ -148,6 +148,10 @@ class _RegionPairs:
     partner: list[int]
     # Whether every paired layer is in the same cache group on both sides.
     groups_match: bool = True
+    # Hybrid SSM models: the peer's regions holding SSM state, in the order its
+    # SSM descriptors are built, and its PLE region. None means the local ones.
+    remote_ssm_regions: list[int] | None = None
+    remote_ple_region: int | None = None
 
     @classmethod
     def by_index(
@@ -187,13 +191,18 @@ class NixlBaseConnectorWorker:
         physical_blocks_per_logical: int,
         region_num_blocks: list[int] | None = None,
         pairs: tuple[Sequence[int], Sequence[int]] | None = None,
+        ssm_regions: Sequence[int] | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
         ``pairs`` is ``(regions, keys)``: region ``regions[k]`` is read at
         ``block_ids[keys[k]]``, a cache group's blocks (a region's, for
         region-mapped transfers). Without it, every region is read at the one
-        cache group's blocks.
+        cache group's blocks, or, for hybrid SSM models, at the blocks of each
+        group holding a layer in it.
+
+        ``ssm_regions`` lists this side's SSM regions in the order its SSM
+        descriptors are built; it defaults to the local ones.
         """
         num_ssm_regions = 0
         if self._has_mamba:
@@ -248,63 +257,84 @@ class NixlBaseConnectorWorker:
         # logical_blocks entries per region (no kernel splitting, and never
         # ratio-expanded since state blocks are indivisible).
         logical_blocks = dst_num_blocks // physical_blocks_per_logical
+        if ssm_regions is None:
+            ssm_regions = self._ssm_region_indices or range(
+                len(self.block_len_per_layer)
+            )
+        ssm_slot = {region: slot for slot, region in enumerate(ssm_regions)}
+        # NOTE (NickLucche) SSM and Attention block regions can be exchanged
+        # arbitrarily by manager. Therefore, descs are laid out as:
+        #   [descs_fa (all regions) | descs_ssm (all SSM regions) | desc_ple].
+        # num_fa_descs offset must be computed per-engine since P and D can
+        # have different num_blocks (and thus different FA desc counts).
+        num_ssm_descs = len(ssm_regions) * ssm_regions_per_layer
+        if pairs is None:
+            pairs = self._local_hybrid_pairs(len(block_ids), ssm_regions)
+        pair_regions = np.asarray(pairs[0], dtype=np.int64)
+        pair_keys = np.asarray(pairs[1], dtype=np.int64)
+        sub_descs = np.arange(ssm_regions_per_layer, dtype=np.int64)
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
-            group_arr = np.asarray(group, dtype=np.int32)
+            blocks = np.asarray(group, dtype=np.int64)
+            group_regions = pair_regions[pair_keys == i]
+            if not blocks.size or not group_regions.size:
+                continue
             spec_type = self._group_spec_types[i]
+            if _is_attention_spec(spec_type):
+                desc_ids = region_offsets[group_regions][:, None] + blocks[None, :]
+            elif _is_ssm_spec(spec_type):
+                if i == self._ple_group_index:
+                    ssm_desc_ids = np.array([num_ssm_descs], dtype=np.int64)
+                else:
+                    # Each SSM region owns ssm_regions_per_layer consecutive
+                    # descs, in ssm_regions order.
+                    slots = np.array([ssm_slot[r] for r in group_regions.tolist()])
+                    ssm_desc_ids = (
+                        slots[:, None] * ssm_regions_per_layer + sub_descs
+                    ).ravel()
+                desc_ids = (
+                    ssm_desc_ids[:, None] * logical_blocks
+                    + blocks[None, :]
+                    + num_fa_descs
+                )
+            else:
+                raise ValueError(
+                    f"Unknown spec type {self._group_spec_types[i]} at index {i}"
+                )
+            all_descs.append(desc_ids.ravel())
+
+        if not all_descs:
+            return np.array([], dtype=np.int32)
+        # NIXL takes int32 ids without a conversion copy.
+        return np.concatenate(all_descs).astype(np.int32)
+
+    def _local_hybrid_pairs(
+        self, num_groups: int, ssm_regions: Sequence[int]
+    ) -> tuple[list[int], list[int]]:
+        """``(regions, groups)`` reading every local region at the blocks of
+        each group holding a layer in it, in region order."""
+        regions: list[int] = []
+        groups: list[int] = []
+        for i in range(num_groups):
             # Hybrid regions are keyed by base address, so some hold only
             # another group's layers (e.g. KDA-only or scratch-only tensors).
             # Reading them for this group would only re-read aliased bytes.
             group_regions = (
                 self._group_region_indices[i] if self._group_region_indices else None
             )
-            if _is_attention_spec(spec_type):
-                fa_region_ids = (
-                    np.arange(self.num_regions, dtype=np.int32)
-                    if group_regions is None
-                    else np.asarray(group_regions, dtype=np.int32)
-                )[:, None]
-                all_descs.append(
-                    (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
-                )
-            elif _is_ssm_spec(spec_type):
-                # NOTE (NickLucche) SSM and Attention block regions can
-                # be exchanged arbitrarily by manager.  Therefore, descs
-                # are laid out as:
-                #   [descs_fa (all regions) | descs_ssm (all regions)].
-                # num_fa_descs offset must be computed per-engine since
-                # P and D can have different num_blocks (and thus
-                # different FA desc counts).
-                if i == self._ple_group_index:
-                    ssm_region_ids = np.arange(
-                        num_ssm_regions, num_ssm_regions + 1, dtype=np.int32
-                    )
-                elif group_regions is None:
-                    ssm_region_ids = np.arange(num_ssm_regions, dtype=np.int32)
-                else:
-                    # Each SSM layer owns ssm_regions_per_layer consecutive
-                    # descs, in _ssm_region_indices order.
-                    ssm_slots = np.flatnonzero(
-                        np.isin(self._ssm_region_indices, group_regions)
-                    ).astype(np.int32)
-                    ssm_region_ids = (
-                        ssm_slots[:, None] * ssm_regions_per_layer
-                        + np.arange(ssm_regions_per_layer, dtype=np.int32)
-                    ).ravel()
-                ssm_region_ids = ssm_region_ids[:, None]
-                all_descs.append(
-                    (
-                        ssm_region_ids * logical_blocks
-                        + group_arr[None, :]
-                        + num_fa_descs
-                    ).ravel()
-                )
-            else:
-                raise ValueError(
-                    f"Unknown spec type {self._group_spec_types[i]} at index {i}"
-                )
-
-        return np.concatenate(all_descs)
+            if i == self._ple_group_index:
+                group_regions = [-1]
+            elif _is_ssm_spec(self._group_spec_types[i]):
+                group_regions = [
+                    r
+                    for r in ssm_regions
+                    if group_regions is None or r in group_regions
+                ]
+            elif group_regions is None:
+                group_regions = list(range(self.num_regions))
+            regions.extend(group_regions)
+            groups.extend([i] * len(group_regions))
+        return regions, groups
 
     def _build_local_splits_from_plan(
         self,
@@ -622,29 +652,40 @@ class NixlBaseConnectorWorker:
             groups_match=groups_match,
         )
         if self._has_mamba:
-            self._check_mamba_pairs(pairs, remote_groups, engine_id)
+            self._pair_ssm_regions(pairs, engine_id)
         return pairs
 
-    def _check_mamba_pairs(
-        self,
-        pairs: _RegionPairs,
-        remote_groups: list[int] | None,
-        engine_id: EngineId,
-    ) -> None:
-        """Mamba descriptors index the peer's regions by local region index
-        (``_ssm_region_indices``, ``_group_region_indices``), so its regions
-        must pair one to one, in order, and belong to the same cache groups.
+    def _pair_ssm_regions(self, pairs: _RegionPairs, engine_id: EngineId) -> None:
+        """Find the peer's SSM and PLE regions through the pairs.
+
+        SSM descriptors are built per region holding SSM state. The peer's SSM
+        regions are listed in the order of the local SSM regions they pair
+        with, so identical layouts keep identical descriptor lists.
         """
-        identity = list(range(self.num_regions))
-        if (
-            pairs.remote_regions != identity
-            or pairs.remote != pairs.local
-            or (remote_groups is not None and remote_groups != self.region_group_ids)
-        ):
+        if not pairs.groups_match:
+            # Region-mapped reads, the only fallback, support pure MLA alone.
             raise NotImplementedError(
-                f"Engine {engine_id} lays out its Mamba/SSM hybrid KV regions or "
-                "cache groups differently; use the same KV cache layout on P and D."
+                f"Engine {engine_id} puts Mamba/SSM hybrid KV layers in other "
+                "cache groups than this worker; use the same KV cache plan on P "
+                "and D."
             )
+        local_ssm = self._ssm_region_indices or range(len(self.block_len_per_layer))
+        ssm_slot = {region: slot for slot, region in enumerate(local_ssm)}
+        ssm_pairs: list[tuple[int, int]] = []
+        ple_regions: set[int] = set()
+        for remote, local, group in zip(pairs.remote, pairs.local, pairs.group):
+            if group == self._ple_group_index:
+                ple_regions.add(remote)
+            elif _is_ssm_spec(self._group_spec_types[group]):
+                ssm_pairs.append((ssm_slot[local], remote))
+        if len(ple_regions) > 1:
+            raise NotImplementedError(
+                f"Engine {engine_id} holds its PLE state in several KV regions."
+            )
+        pairs.remote_ssm_regions = list(
+            dict.fromkeys(remote for _, remote in sorted(ssm_pairs))
+        )
+        pairs.remote_ple_region = next(iter(ple_regions), None)
 
     @staticmethod
     def _select_remote_regions(
@@ -939,8 +980,7 @@ class NixlBaseConnectorWorker:
                     "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                     "for PP + HMA."
                 )
-            # Mamba/SSM hybrids need regions that pair one to one, which a PP
-            # stage's cannot.
+            # Mamba/SSM hybrid PP stages are not validated yet.
             if self._has_mamba:
                 raise NotImplementedError(
                     "NixlPushConnector does not support pipeline_parallel_size > 1 "
@@ -2096,10 +2136,12 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
+        pairs: _RegionPairs | None = None,
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. Returns Nx5 uint64 strided descs."""
+        the P rank. The remote SSM and PLE regions come from ``pairs``, or are
+        the local ones without it. Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
@@ -2123,9 +2165,13 @@ class NixlBaseConnectorWorker:
         strided_descs: list[tuple[int, int, int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        region_indices = self._ssm_region_indices or range(
+        region_indices: Sequence[int] = self._ssm_region_indices or range(
             len(nixl_agent_meta.kv_caches_base_addr)
         )
+        ple_region = self._ple_region_index
+        if pairs is not None and pairs.remote_ssm_regions is not None:
+            region_indices = pairs.remote_ssm_regions
+            ple_region = pairs.remote_ple_region
         for i in region_indices:
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
@@ -2141,7 +2187,8 @@ class NixlBaseConnectorWorker:
                 (ssm_addr, ssm_read_size, device_id, block_stride, num_blocks)
             )
 
-        if (region_index := self._ple_region_index) is not None:
+        if self._ple_region_index is not None:
+            assert ple_region is not None, "Remote holds no PLE region"
             local_block_len = (
                 self._ple_page_len() * self._physical_blocks_per_logical_kv_block
             )
@@ -2156,10 +2203,9 @@ class NixlBaseConnectorWorker:
                     f"local={local_block_len}, remote={remote_block_len}."
                 )
             remote_block_stride = (
-                nixl_agent_meta.block_strides[region_index]
-                * remote_physical_per_logical
+                nixl_agent_meta.block_strides[ple_region] * remote_physical_per_logical
             )
-            addr = nixl_agent_meta.kv_caches_base_addr[region_index]
+            addr = nixl_agent_meta.kv_caches_base_addr[ple_region]
             strided_descs.append(
                 (addr, remote_block_len, device_id, remote_block_stride, num_blocks)
             )
@@ -2689,7 +2735,9 @@ class NixlBaseConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
+            mamba = self._build_mamba_remote(
+                nixl_agent_meta, tp_ratio, transfer_info, pairs
+            )
             blocks_data = np.concatenate([blocks_data, mamba])
 
         remote_mem_types = set(self.dst_region_mem_types[engine_id])
@@ -2911,13 +2959,13 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == [
+            local_lens = [self.block_len_per_layer[r] for r in local_regions]
+            assert local_lens == [
                 block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
                 f"between P and D (block_size_ratio={block_size_ratio}): "
-                f"local={self.block_len_per_layer}, "
-                f"remote={nixl_agent_meta.block_lens}."
+                f"local={local_lens}, remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
             assert len(local_regions) == len(nixl_agent_meta.block_lens), (
@@ -2984,11 +3032,6 @@ class NixlBaseConnectorWorker:
         )
         if nixl_agent_meta.region_group_ids is not None:
             assert len(nixl_agent_meta.region_group_ids) == num_remote_regions
-        if self._has_mamba and nixl_agent_meta.region_names is not None:
-            # Mamba regions pair one to one (see _check_mamba_pairs).
-            assert nixl_agent_meta.region_names == [
-                self.region_names[r] for r in local_regions
-            ], "NIXL transfer regions must name the same model caches in the same order"
         if nixl_agent_meta.region_mem_types is not None:
             assert len(nixl_agent_meta.region_mem_types) == num_remote_regions
 

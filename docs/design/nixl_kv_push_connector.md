@@ -212,8 +212,11 @@ pairs (remote, local, group) on P: (2, 0, 0)  ->  D's region 2 only
 
 Region capacities stay per region on both sides, so P and D need not
 allocate the same number of blocks. Physical allocations are still
-registered once, even when multiple layers share them. Mamba layouts,
-whose layers span several sub-regions alike on both sides, pair by index.
+registered once, even when multiple layers share them. Mamba/SSM hybrids
+pair the same way: each SSM region's conv and SSM-state descriptors are
+built from the peer region its layers pair with, so P and D may group the
+same layers into regions differently. A layer in different cache groups on
+P and D is refused at the handshake for these models.
 
 Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
 pages of every layer for one block in a single row. A PP stage holds only its

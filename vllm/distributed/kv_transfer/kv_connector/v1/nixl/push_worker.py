@@ -716,6 +716,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
             region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
             pairs=(pairs.remote, pairs.group),
+            ssm_regions=pairs.remote_ssm_regions,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
