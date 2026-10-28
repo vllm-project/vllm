@@ -151,6 +151,7 @@ def generate(
     case: ModelCase,
     socket_dir: str | None,
     fallback: bool,
+    num_logprobs: int | None = None,
 ):
     extra_config = (
         {} if socket_dir is None else {"socket_dir": socket_dir, "fallback": fallback}
@@ -164,7 +165,15 @@ def generate(
         max_num_seqs=1,
         **case.llm_kwargs,
     ) as llm:
-        sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=16,
+            ignore_eos=True,
+            logprobs=num_logprobs,
+            prompt_logprobs=num_logprobs,
+        )
+        if num_logprobs is not None:
+            return llm.generate_w_logprobs(case.prompts, sampling_params)
         return llm.generate(case.prompts, sampling_params, images=case.images)
 
 
@@ -424,6 +433,243 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
     assert restart_outputs == baseline_outputs
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Marlin requires CUDA")
+@pytest.mark.parametrize(
+    "model,revision",
+    [
+        ("Qwen/Qwen2.5-0.5B-Instruct-AWQ", "db09cd27ead7fee40cdee309693cf83601b9c899"),
+        (
+            "Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4",
+            "c34a4a91629f09f73a285f32dbd26106b033c654",
+        ),
+    ],
+    ids=["awq", "gptq"],
+)
+@create_new_process_for_each_test()
+def test_ipc_cache_marlin(model, revision, vllm_runner, tmp_path, monkeypatch):
+    """Repacked AWQ/GPTQ weights preserve predictions across engine restarts."""
+    from tests.models.utils import check_logprobs_close
+
+    # AWQ batch-invariant mode selects a different, unpacked implementation.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    case = ModelCase(
+        model=model,
+        prompts=["Hello, my name is", "The capital of France is"],
+        llm_kwargs=dict(
+            revision=revision,
+            dtype="float16",
+            max_model_len=256,
+            gpu_memory_utilization=0.1,
+            enforce_eager=True,
+            attention_config={"backend": "TRITON_ATTN"},
+            kernel_config={"linear_backend": "marlin"},
+        ),
+        daemon_args=[
+            "--revision",
+            revision,
+            "--dtype",
+            "float16",
+            "--max-model-len",
+            "256",
+            "--kernel-config",
+            '{"linear_backend":"marlin"}',
+            "--attention-config",
+            '{"backend":"TRITON_ATTN"}',
+        ],
+    )
+    baseline = generate(vllm_runner, case, None, True, num_logprobs=5)
+    with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty:
+        cold = generate(vllm_runner, case, empty, True, num_logprobs=5)
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+        log_file=str(tmp_path / "marlin-daemon.log"),
+    ) as daemon:
+        daemon.wait_until_ready()
+        warm = generate(vllm_runner, case, daemon.socket_dir, False, num_logprobs=5)
+        restart = generate(vllm_runner, case, daemon.socket_dir, False, num_logprobs=5)
+    for name, outputs in [("fallback", cold), ("IPC", warm), ("restart", restart)]:
+        assert all(len(output[0]) == 16 for output in baseline + outputs)
+        check_logprobs_close(
+            outputs_0_lst=baseline,
+            outputs_1_lst=outputs,
+            name_0="ordinary loading",
+            name_1=name,
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Marlin requires CUDA")
+@pytest.mark.parametrize(
+    "algorithm,bits,group_size,dtype_name",
+    [
+        ("awq", 4, 128, "float16"),
+        ("gptq", 4, 128, "float16"),
+        ("gptq", 8, -1, "bfloat16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "output_sizes", [[128, 128], [104, 104]], ids=["aligned", "padded"]
+)
+def test_marlin_preprocessed_shared_weights(
+    algorithm,
+    bits,
+    group_size,
+    dtype_name,
+    output_sizes,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+):
+    """Two attachments preserve repacked weights, scales, zero points and bias."""
+    import torch
+
+    from vllm.config import (
+        KernelConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+        MarlinLinearKernel,
+    )
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQConfig,
+        AutoAWQMarlinLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.auto_gptq import (
+        AutoGPTQConfig,
+        AutoGPTQLinearMethod,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import replace_parameter, weights_already_processed
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    dtype = getattr(torch, dtype_name)
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype=dtype_name),
+        kernel_config=KernelConfig(linear_backend="marlin"),
+    )
+    quant_config = (
+        AutoAWQConfig(bits, group_size, True, False)
+        if algorithm == "awq"
+        else AutoGPTQConfig(bits, group_size, False, True, False, {}, {})
+    )
+    with set_current_vllm_config(config), torch.device("cuda"), torch.inference_mode():
+        source = MergedColumnParallelLinear(
+            256,
+            output_sizes,
+            bias=True,
+            params_dtype=dtype,
+            quant_config=quant_config,
+        )
+        assert isinstance(
+            source.quant_method, (AutoAWQMarlinLinearMethod, AutoGPTQLinearMethod)
+        )
+        assert isinstance(source.quant_method.kernel, MarlinLinearKernel)
+        torch.manual_seed(0)
+        source.qweight.random_(0, 2**31 - 1)
+        source.qzeros.fill_(0x77777777)
+        source.scales.uniform_(0.01, 0.03)
+        source.bias.uniform_(-0.1, 0.1)
+        process_weights_after_loading(source, config.model_config, torch.device("cuda"))
+        inputs = torch.randn(3, 256, dtype=dtype)
+        expected, _ = source(inputs)
+        shared = dict(source.named_parameters())
+        snapshots = {name: param.detach().clone() for name, param in shared.items()}
+        for _ in range(2):
+            with torch.device("meta"):
+                attached = MergedColumnParallelLinear(
+                    256,
+                    output_sizes,
+                    bias=True,
+                    params_dtype=dtype,
+                    quant_config=quant_config,
+                )
+            for name, param in shared.items():
+                replace_parameter(attached, name, param)
+            with weights_already_processed():
+                process_weights_after_loading(
+                    attached, config.model_config, torch.device("cuda")
+                )
+            actual, _ = attached(inputs)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert actual.shape == (3, sum(output_sizes))
+            for name, param in attached.named_parameters():
+                assert param.data_ptr() == shared[name].data_ptr()
+                torch.testing.assert_close(param, snapshots[name], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Marlin requires CUDA")
+@pytest.mark.parametrize(
+    "algorithm,backend,input_dtype",
+    [("awq", "triton", None), ("gptq", "triton", None), ("gptq", "marlin", "int8")],
+)
+def test_marlin_preprocessed_rejects_other_kernels_and_a8(
+    algorithm,
+    backend,
+    input_dtype,
+    dist_init,
+    monkeypatch,
+):
+    import torch
+
+    from vllm.config import (
+        KernelConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQConfig,
+        AutoAWQMarlinLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.auto_gptq import (
+        AutoGPTQConfig,
+        AutoGPTQLinearMethod,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import weights_already_processed
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    if input_dtype is None:
+        monkeypatch.delenv("VLLM_MARLIN_INPUT_DTYPE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", input_dtype)
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16"),
+        kernel_config=KernelConfig(linear_backend=backend),
+    )
+    quant_config = (
+        AutoAWQConfig(4, 128, True, False)
+        if algorithm == "awq"
+        else AutoGPTQConfig(4, 128, False, True, False, {}, {})
+    )
+    with set_current_vllm_config(config), torch.device("meta"):
+        layer = MergedColumnParallelLinear(
+            256,
+            [128, 128],
+            bias=False,
+            params_dtype=torch.float16,
+            quant_config=quant_config,
+        )
+        assert isinstance(
+            layer.quant_method, (AutoAWQMarlinLinearMethod, AutoGPTQLinearMethod)
+        )
+        assert type(layer.quant_method.kernel).__name__ == (
+            "MarlinLinearKernel" if backend == "marlin" else "TritonW4A16LinearKernel"
+        )
+        with (
+            weights_already_processed(),
+            pytest.raises(RuntimeError, match="does not support pre-processed weights"),
+        ):
+            process_weights_after_loading(
+                layer, config.model_config, torch.device("cuda")
+            )
 
 
 def _parallel(**kw):

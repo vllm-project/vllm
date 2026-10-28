@@ -80,3 +80,10 @@ AWQ models are also supported directly through the LLM entrypoint:
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
+
+## Weight cache daemon
+
+For repeated engine starts, AWQ INT4 linear layers can reuse processed GPU
+weights with Marlin and FP16/BF16 activations. See
+[AWQ and GPTQ with Marlin](../preload.md#awq-and-gptq-with-marlin) for daemon and
+engine commands, defaults, supported paths and exclusions.

@@ -798,3 +798,19 @@ steps:
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (L4) Marlin Preload"
+  key: preload-marlin
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/quantization/auto_awq.py
+  - vllm/model_executor/layers/quantization/auto_gptq.py
+  - vllm/model_executor/layers/quantization/utils/marlin_utils.py
+  - vllm/model_executor/kernels/linear/mixed_precision/
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k 'ipc_cache_marlin or marlin_preprocessed'
