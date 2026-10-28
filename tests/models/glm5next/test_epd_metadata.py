@@ -106,6 +106,21 @@ def test_glm_dict_embeds_must_match_grid_and_hidden_size():
     )
     image_items = metadata_only.parse_mm_data({"image": {"image_grid_thw": grid}})
     assert len(image_items["image"]) == 1
+    two_grids = torch.tensor([[1, 4, 4], [1, 4, 4]])
+    eight_rows = torch.zeros(8, 16)
+    two_images = parser.parse_mm_data(
+        {"image": {"image_embeds": eight_rows, "image_grid_thw": two_grids}}
+    )["image"]
+    assert len(two_images) == 2
+    with pytest.raises(ValueError, match="row count"):
+        parser.parse_mm_data(
+            {
+                "image": {
+                    "image_embeds": torch.zeros(64, 16),
+                    "image_grid_thw": two_grids,
+                }
+            }
+        )
     video_items = metadata_only.parse_mm_data(
         {
             "video": {

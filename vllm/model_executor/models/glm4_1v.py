@@ -998,7 +998,8 @@ class Glm4vMultiModalDataParser(MultiModalDataParser):
                 f"grid_thw must have shape (N, 3), got {tuple(grid_thw.shape)}"
             )
         merge = self._spatial_merge_size**2
-        return int(grid.prod().item()) // merge
+        # Sum per item. grid.prod() would multiply the items together.
+        return int((grid.prod(dim=-1) // merge).sum().item())
 
     def _check_supplied_embeds(
         self,
