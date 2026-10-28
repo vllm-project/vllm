@@ -3,20 +3,30 @@
 """Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
-activations are MXFP8-quantized per token. Uses the CDNA4 hardware microscaling
-matrix cores. ``dot_scaled`` tiles K by 128; a weight whose K is not a multiple
-of that is dequantized to BF16 once at load and served by a plain linear
-instead, since ``can_implement`` does not filter on K.
+activations are MXFP8-quantized per token, or arrive pre-quantized as a
+``QuantizedActivation`` with row-major (not swizzled) E8M0 scales. Uses the
+CDNA4 hardware microscaling matrix cores. ``dot_scaled`` tiles K by 128; a
+weight whose K is not a multiple of that is dequantized to BF16 once at load
+and served by a plain linear instead, since ``can_implement`` does not filter
+on K.
 """
 
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -87,10 +97,20 @@ def _mxfp8_dot_scaled_linear(
     w: torch.Tensor,  # [N, K] fp8 e4m3
     w_scale: torch.Tensor,  # [N, K//32] uint8 (E8M0)
 ) -> torch.Tensor:
-    M, K = x.shape
-    N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
-    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
+    return _mxfp8_dot_scaled_gemm(x_q, x_scale, w, w_scale, x.dtype)
+
+
+def _mxfp8_dot_scaled_gemm(
+    x_q: torch.Tensor,  # [M, K] fp8 e4m3
+    x_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0), row-major
+    w: torch.Tensor,  # [N, K] fp8 e4m3
+    w_scale: torch.Tensor,  # [N, K//32] uint8 (E8M0)
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    M, K = x_q.shape
+    N = w.shape[0]
+    out = torch.empty((M, N), dtype=out_dtype, device=x_q.device)
     BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _select_cfg(M, N, K)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
@@ -275,10 +295,24 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
 
+    def input_quant_key(self) -> QuantKey:
+        # Row-major [M, K // 32] E8M0 scales, unlike FlashInfer's swizzled ones
+        # under the same key: producers must also check the kernel type.
+        return kMxfp8Dynamic
+
+    @staticmethod
+    def supports_quantized_input(layer: torch.nn.Module) -> bool:
+        """Whether ``apply_weights`` reads a ``QuantizedActivation`` for
+        ``layer`` as is (fp8 weights), rather than dequantizing it back."""
+        return layer.weight.element_size() == 1 and (
+            layer.weight_scale.shape[0] != layer.weight.shape[0]
+            or layer.weight.shape[1] % _DOT_SCALED_K_ALIGN == 0
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
@@ -286,23 +320,39 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
                 f"Expected {MXFP8_SCALE_DTYPE} weight_scale, got "
                 f"{layer.weight_scale.dtype}."
             )
-        out_shape = (*x.shape[:-1], layer.weight.shape[0])
-        x2d = x.reshape(-1, x.shape[-1])
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None and not self.supports_quantized_input(layer):
+            # BF16 weight (K % 128 != 0): serve the dequantized activation.
+            x = dequant_mxfp8_to_bf16(qa.data, qa.scale).to(qa.orig_dtype)
+            x, qa = x.reshape(qa.orig_shape), None
+        if qa is not None:
+            out_dtype, in_shape = qa.orig_dtype, qa.orig_shape
+            x_q, x_scale = qa.data.reshape(-1, in_shape[-1]), qa.scale
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype, in_shape = x.dtype, x.shape
+            x2d = x.reshape(-1, in_shape[-1])
+        out_shape = (*in_shape[:-1], layer.weight.shape[0])
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
-            x_q, x_scale = mxfp8_e4m3_quantize(x2d)
+            if qa is None:
+                x_q, x_scale = mxfp8_e4m3_quantize(x2d)
             out = rocm_mxfp8_block32_gemm(
-                x_q, x_scale, layer.weight, layer.weight_scale, x.dtype
+                x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+            )
+        elif qa is not None:
+            out = _mxfp8_dot_scaled_gemm(
+                x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
             )
         elif layer.weight.element_size() >= 2:
-            out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
+            out = torch.nn.functional.linear(x2d, layer.weight.to(out_dtype))
         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
             out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
         else:
             # process_weights_after_loading dequantizes these weights once, so
             # this runs only if it did not; dot_scaled would be invalid here.
             w_bf16 = dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale)
-            out = torch.nn.functional.linear(x2d, w_bf16).to(x.dtype)
+            out = torch.nn.functional.linear(x2d, w_bf16).to(out_dtype)
         out = out.reshape(out_shape)
         if bias is not None:
             out = out + bias
