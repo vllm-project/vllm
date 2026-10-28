@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -35,6 +35,9 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 @triton.jit
@@ -247,6 +250,13 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
             self._kept_slot_mappings: torch.Tensor | None = None
+            self._kept_gathered_slot_mappings: torch.Tensor | None = None
+            if self.pcp_size > 1:
+                self._kept_is_padding = torch.empty(
+                    self.max_num_tokens * self.pcp_size,
+                    dtype=torch.bool,
+                    device=device,
+                )
             self._kept_kv_start = torch.zeros(
                 max_local_reqs, dtype=torch.int32, device=device
             )
@@ -351,6 +361,13 @@ class DeepseekV41ModelState(DefaultModelState):
                     dtype=torch.int64,
                     device=self.device,
                 )
+                if self.pcp_size > 1:
+                    self._kept_gathered_slot_mappings = torch.empty(
+                        len(specs),
+                        self.max_num_tokens * self.pcp_size,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         if (
             self.pcp_size > 1
@@ -636,16 +653,28 @@ class DeepseekV41ModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         stream: torch.cuda.Stream | None = None,
+        pcp_manager: "PCPManager | None" = None,
     ) -> None:
+        block_table_provider = pcp_manager or block_tables
+        if pcp_manager is not None:
+            input_buffers = pcp_manager.input_buffers
+
         def prepare(desc: BatchExecutionDescriptor) -> None:
             # Capture reuses the runtime path on a dummy batch, so the graph reads
             # the buffers a real step fills.
-            num_reqs = min(desc.num_tokens, self.max_num_reqs)
+            num_reqs = min(desc.num_tokens, input_buffers.max_num_reqs)
+            input_batch = InputBatch.make_dummy(
+                num_reqs, desc.num_tokens, input_buffers
+            )
+            if pcp_manager is not None:
+                input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(
+                    input_batch
+                )
             self._prepare_replay_batch(
-                InputBatch.make_dummy(num_reqs, desc.num_tokens, input_buffers),
+                input_batch,
                 CUDAGraphMode.NONE,
-                block_tables.get_dummy_block_tables(num_reqs),
-                block_tables.get_dummy_slot_mappings(desc.num_tokens),
+                block_table_provider.get_dummy_block_tables(num_reqs),
+                block_table_provider.get_dummy_slot_mappings(desc.num_tokens),
                 attn_groups,
                 kv_cache_config,
                 self._replay_start[:num_reqs].zero_(),
@@ -687,6 +716,8 @@ class DeepseekV41ModelState(DefaultModelState):
             ]
         kept_slot_mappings = self._kept_slot_mappings[:, :num_padded]
         kept_slot_mappings[:, num_tokens:].fill_(PAD_SLOT_ID)
+        # Replay graphs capture the maximum local request count.
+        self._kept_query_start_loc[num_reqs + 1 :].fill_(num_tokens)
         _gather_replay_batch_kernel[(num_reqs,)](
             input_batch.query_start_loc,
             dropped_before,
@@ -711,13 +742,22 @@ class DeepseekV41ModelState(DefaultModelState):
         is_padding = input_batch.is_padding
         if self.pcp_size > 1:
             self._kept_positions[num_tokens:num_padded].zero_()
-            is_padding = torch.arange(num_padded, device=self.device) >= num_tokens
-            kept_slot_mappings = get_pcp_group().all_gather(
+            is_padding = self._kept_is_padding[:num_padded]
+            is_padding[:num_tokens].fill_(False)
+            is_padding[num_tokens:].fill_(True)
+            gathered_slot_mappings = get_pcp_group().all_gather(
                 kept_slot_mappings.contiguous(), dim=1
             )
+            assert self._kept_gathered_slot_mappings is not None
+            kept_slot_mappings = self._kept_gathered_slot_mappings[
+                :, : num_padded * self.pcp_size
+            ].copy_(gathered_slot_mappings)
             if not self.vllm_config.parallel_config.enable_expert_parallel:
-                is_padding = (
+                gathered_is_padding = (
                     get_pcp_group().all_gather(is_padding.to(torch.uint8), dim=0).bool()
+                )
+                is_padding = self._kept_is_padding[: num_padded * self.pcp_size].copy_(
+                    gathered_is_padding
                 )
         kept_batch = replace(
             input_batch,

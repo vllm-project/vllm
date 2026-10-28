@@ -201,7 +201,8 @@ class PCPManager:
             current_platform.is_cuda()
             and getattr(model_config.hf_text_config, "model_type", None)
             == "deepseek_v41"
-            and cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and cudagraph_mode
+            in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE)
         )
         if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
             # Dense MLA prefill sizes its DCP KV gather from each rank's own
@@ -217,7 +218,8 @@ class PCPManager:
         ):
             raise NotImplementedError(
                 "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3, or CUDA DeepSeek-V4.1 with FULL_DECODE_ONLY. "
+                "and GLM-5.2/5.3, or CUDA DeepSeek-V4.1 with FULL_DECODE_ONLY "
+                "or FULL_AND_PIECEWISE. "
                 "Set -cc.cudagraph_mode=NONE for other configurations."
             )
         if (
@@ -773,6 +775,15 @@ class PCPManager:
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding
+        if num_reqs > input_buffers.max_num_reqs // 2:
+            # DualChunkSwap has two local segments per global request. Dummy
+            # segments must still index the global-sized request state safely.
+            input_batch = replace(
+                input_batch,
+                idx_mapping=input_batch.idx_mapping // 2,
+                idx_mapping_np=input_batch.idx_mapping_np // 2,
+                expanded_idx_mapping=input_batch.expanded_idx_mapping // 2,
+            )
         input_batch = replace(
             input_batch,
             input_ids=input_buffers.input_ids[:num_tokens].copy_(input_batch.input_ids),

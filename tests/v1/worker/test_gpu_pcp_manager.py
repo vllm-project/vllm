@@ -323,6 +323,34 @@ def test_capture_uses_pcp_persistent_inputs():
         assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
 
 
+@pytest.mark.parametrize(
+    ("num_local_reqs", "expected_states"),
+    [(2, [11, 22]), (4, [11, 11, 22, 22])],
+)
+def test_capture_segments_index_global_request_state(num_local_reqs, expected_states):
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=2,
+        max_num_tokens=8,
+    )
+    dummy_batch = InputBatch.make_dummy(num_local_reqs, 8, manager.input_buffers)
+
+    input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
+
+    request_states = torch.tensor([11, 22])
+    assert request_states[input_batch.idx_mapping].tolist() == expected_states
+    assert request_states[input_batch.expanded_idx_mapping].tolist() == expected_states
+    assert (
+        request_states.numpy()[input_batch.idx_mapping_np].tolist() == expected_states
+    )
+    assert dummy_batch.idx_mapping.tolist() == list(range(num_local_reqs))
+    torch.testing.assert_close(input_batch.query_start_loc, dummy_batch.query_start_loc)
+    assert input_batch.num_reqs == num_local_reqs
+
+
 def test_block_table_rebind_updates_interleave():
     manager, block_tables = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
     final_block_tables = SimpleNamespace(**vars(block_tables))
