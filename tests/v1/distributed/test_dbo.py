@@ -17,6 +17,7 @@ from tests.models.utils import check_logprobs_close
 from tests.utils import RemoteOpenAIServer
 from vllm import SamplingParams
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.config import AttentionConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -132,7 +133,17 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
 
 @pytest.mark.nixl_ep
 @pytest.mark.asyncio
-async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
+@pytest.mark.parametrize(
+    "model_env,default_model,attention_backend",
+    [
+        ("DBO_TEST_MODEL", "deepseek-ai/DeepSeek-V2-Lite", "FLASH_ATTN_MLA"),
+        ("DBO_TEST_FA3_MODEL", "Qwen/Qwen3-30B-A3B", "FLASH_ATTN"),
+    ],
+    ids=["mla", "fa3"],
+)
+async def test_mrv2_imbalanced_decode_keeps_full_graph(
+    monkeypatch, model_env, default_model, attention_backend
+):
     """Real decode rows survive graph staging with the eager model's logprobs."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     loads = (63, 97)
@@ -163,8 +174,7 @@ async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
 
         engine = AsyncLLM.from_engine_args(
             AsyncEngineArgs(
-                model=os.getenv("DBO_TEST_MODEL", "deepseek-ai/DeepSeek-V2-Lite"),
-                trust_remote_code=True,
+                model=os.getenv(model_env, default_model),
                 dtype="bfloat16",
                 seed=0,
                 skip_tokenizer_init=True,
@@ -173,7 +183,8 @@ async def test_mrv2_imbalanced_decode_keeps_full_graph(monkeypatch):
                 enable_dbo=True,
                 all2all_backend="nixl_ep",
                 moe_backend="batched_triton",
-                attention_backend="FLASH_ATTN_MLA",
+                attention_backend=attention_backend,
+                attention_config=AttentionConfig(flash_attn_version=3),
                 enforce_eager=enforce_eager,
                 max_model_len=256,
                 max_num_seqs=128,

@@ -572,16 +572,19 @@ steps:
   key: mrv2-nixl-decode-staging
   device: h100
   num_devices: 2
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
     - vllm/v1/worker/gpu/
     - vllm/config/
+    - vllm/v1/attention/backends/flash_attn.py
+    - tests/v1/worker/test_gpu_ubatch_slicing.py
     - tests/v1/distributed/test_dbo.py
     - .buildkite/scripts/install-kv-connectors.sh
     - requirements/kv_connectors.txt
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - pytest -v -s tests/v1/worker/test_gpu_ubatch_slicing.py
     - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/v1/distributed/test_dbo.py -m nixl_ep
 
 - label: ":nvidia: (B200) [Nightly] Distributed"

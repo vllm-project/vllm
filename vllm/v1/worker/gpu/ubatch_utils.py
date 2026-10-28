@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.forward_context import (
@@ -22,7 +23,11 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    MLAAttentionSpec,
+)
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -404,13 +409,38 @@ class UBatchRunner:
         ):
             return False
         # General DBO feature exclusions are validated by VllmConfig.
-        return all(
-            group.backend.get_name() == "FLASH_ATTN_MLA"
-            and isinstance(group.kv_cache_spec, MLAAttentionSpec)
-            and group.kv_cache_spec.dtype == torch.bfloat16
-            for groups in self.attn_groups
-            for group in groups
-        )
+        for groups in self.attn_groups:
+            for group in groups:
+                spec = group.kv_cache_spec
+                name = group.backend.get_name()
+                if (
+                    name == "FLASH_ATTN_MLA"
+                    and isinstance(spec, MLAAttentionSpec)
+                    and spec.dtype == torch.bfloat16
+                ):
+                    continue
+                if (
+                    name != "FLASH_ATTN"
+                    or type(spec) is not FullAttentionSpec
+                    or spec.dtype != torch.bfloat16
+                    or spec.sliding_window
+                    or spec.attention_chunk_size
+                    or spec.non_causal
+                    or envs.VLLM_BATCH_INVARIANT
+                ):
+                    return False
+                from vllm.v1.attention.backends.flash_attn import (
+                    FlashAttentionMetadataBuilder,
+                )
+
+                if len(group.metadata_builders) != self.num_ubatches or any(
+                    not isinstance(builder, FlashAttentionMetadataBuilder)
+                    or not builder.aot_schedule
+                    or not builder.use_full_cuda_graph
+                    for builder in group.metadata_builders
+                ):
+                    return False
+        return True
 
     def prepare(
         self,
