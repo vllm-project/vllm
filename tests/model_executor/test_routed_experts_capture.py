@@ -836,25 +836,18 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     )
     model = Mock()
     kv_cache_config = Mock()
-    capture = Mock()
 
-    result = aux_output_worker.get_aux_output_connector(
-        model, config, kv_cache_config, capture
-    )
+    result = aux_output_worker.get_aux_output_connector(model, config, kv_cache_config)
 
     constructor.assert_called_once_with(
         model=model,
         kv_cache_config=kv_cache_config,
         vllm_config=config,
-        capture=capture,
     )
     assert result is connector
 
 
-@pytest.mark.parametrize("reuse_capture", [False, True], ids=["create", "reuse"])
-def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
-    monkeypatch, reuse_capture
-):
+def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     capturer = Mock()
@@ -879,22 +872,47 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
         vllm_config=config,
         model=model,
         kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
-        **({"capture": capturer} if reuse_capture else {}),
     )
 
-    if reuse_capture:
-        constructor.assert_not_called()
-        bind.assert_not_called()
-    else:
-        constructor.assert_called_once_with(
-            max_num_batched_tokens=32,
-            vllm_config=config,
-        )
-        bind.assert_called_once_with(model, capturer)
-    assert connector._capturer is capturer
+    constructor.assert_called_once_with(
+        max_num_batched_tokens=32,
+        vllm_config=config,
+    )
+    bind.assert_called_once_with(model, capturer)
     connector.begin_step(Mock())
     assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["fallback", "prepared"])
+def test_aux_output_worker_connector_reuses_prepared_capture(monkeypatch, prepared):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    capturer = Mock()
+    constructor = Mock(return_value=capturer)
+    bind = Mock()
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+    )
+    config = SimpleNamespace(
+        max_concurrent_batches=2,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+    )
+    model = torch.nn.Module()
+
+    if prepared:
+        connector_cls = aux_output_worker.AuxOutputWorkerConnector
+        assert connector_cls.prepare_capture(model, config) is capturer
+        assert connector_cls.prepare_capture(model, config) is capturer
+    connector = aux_output_worker.get_aux_output_connector(model, config, Mock())
+
+    assert connector._capturer is capturer
+    constructor.assert_called_once_with(max_num_batched_tokens=32, vllm_config=config)
+    bind.assert_called_once_with(model, capturer)
 
 
 def test_aux_output_worker_connector_default_capacity(monkeypatch):

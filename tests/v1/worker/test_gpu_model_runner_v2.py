@@ -85,7 +85,7 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
 ):
     events = []
     capturer = object()
-    model = object()
+    model = torch.nn.Module()
     vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enabled=enabled),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
@@ -110,7 +110,6 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = vllm_config
     runner.model = model
-    runner.aux_output_capture = None
     runner.supports_mm_inputs = False
     runner.is_last_pp_rank = False
     runner.max_num_tokens = 8
@@ -122,7 +121,10 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
     runner.profile_run()
 
     assert events == expected_events
-    assert runner.aux_output_capture is (capturer if enabled else None)
+    if enabled:
+        connector_cls = aux_output_worker.AuxOutputWorkerConnector
+        assert connector_cls.prepare_capture(model, vllm_config) is capturer
+        assert events == expected_events
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):

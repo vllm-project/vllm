@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+import weakref
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -42,18 +43,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-AuxOutputCapture = RoutedExpertsCapturer
-
-
-def prepare_aux_output_capture(
-    model: torch.nn.Module, vllm_config: VllmConfig
-) -> AuxOutputCapture:
-    capturer = RoutedExpertsCapturer(
-        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-        vllm_config=vllm_config,
-    )
-    bind_routed_experts_capturer(model, capturer)
-    return capturer
+_prepared_captures: weakref.WeakKeyDictionary[
+    torch.nn.Module, RoutedExpertsCapturer
+] = weakref.WeakKeyDictionary()
 
 
 @dataclass
@@ -106,12 +98,9 @@ class AuxOutputWorkerConnector:
         vllm_config: VllmConfig,
         model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
-        capture: AuxOutputCapture | None = None,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        if capture is None:
-            capture = prepare_aux_output_capture(model, vllm_config)
-        self._capturer = capture
+        self._capturer = self.prepare_capture(model, vllm_config)
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
@@ -150,6 +139,22 @@ class AuxOutputWorkerConnector:
             max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+
+    @staticmethod
+    def prepare_capture(
+        model: torch.nn.Module, vllm_config: VllmConfig
+    ) -> RoutedExpertsCapturer:
+        capturer = _prepared_captures.get(model)
+        if capturer is None:
+            capturer = RoutedExpertsCapturer(
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+                vllm_config=vllm_config,
+            )
+            bind_routed_experts_capturer(model, capturer)
+            _prepared_captures[model] = capturer
+        return capturer
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -423,14 +428,10 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module,
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-    capture: AuxOutputCapture | None = None,
+    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> AuxOutputWorkerConnector:
     return AuxOutputWorkerConnector(
         model=model,
         kv_cache_config=kv_cache_config,
         vllm_config=vllm_config,
-        capture=capture,
     )

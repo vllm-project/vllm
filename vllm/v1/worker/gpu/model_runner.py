@@ -38,10 +38,8 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed.aux_output_connector.worker import (
-    AuxOutputCapture,
     AuxOutputWorkerConnector,
     get_aux_output_connector,
-    prepare_aux_output_capture,
 )
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -367,8 +365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The AuxOutput Connector copies and stores captured auxiliary outputs.
-        self.aux_output_capture: AuxOutputCapture | None = None
+        # The AuxOutput Connector owns R3 capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
@@ -845,18 +842,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The auxiliary-output data plane needs the resolved KV capacity.
             if self.vllm_config.aux_output_config.enabled:
                 self.aux_output_connector = get_aux_output_connector(
-                    self.model,
-                    self.vllm_config,
-                    kv_cache_config,
-                    self._prepare_aux_output_capture(),
+                    self.model, self.vllm_config, kv_cache_config
                 )
-
-    def _prepare_aux_output_capture(self) -> AuxOutputCapture:
-        if self.aux_output_capture is None:
-            self.aux_output_capture = prepare_aux_output_capture(
-                self.model, self.vllm_config
-            )
-        return self.aux_output_capture
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1055,7 +1042,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
         if self.vllm_config.aux_output_config.enabled:
-            self._prepare_aux_output_capture()
+            AuxOutputWorkerConnector.prepare_capture(self.model, self.vllm_config)
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
