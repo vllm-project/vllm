@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
@@ -45,6 +45,9 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -827,6 +830,9 @@ class MolmoModel(nn.Module, SupportsQuant):
             config.hidden_size,
             quant_config=quant_config,
         )
+        self.embed_tokens.weight.weight_loader = _split_embedding_loader(
+            self.embed_tokens
+        )
 
         decoder_layer = (
             MolmoDecoderNormAfterLayer if config.norm_after else MolmoDecoderLayer
@@ -1458,29 +1464,59 @@ class MolmoForCausalLM(
         )
 
 
+def _split_embedding_loader(embed_tokens: VocabParallelEmbedding) -> Callable:
+    """Weight loader for ``embed_tokens.weight`` that also takes one half of the
+    vocabulary: ``shard_id`` ``"embedding"`` holds the first rows and
+    ``"new_embedding"`` the rows after them. Each half is written into this
+    rank's vocab shard on arrival, so the two may come in any order and in
+    different ``load_weights`` calls. Without ``shard_id`` the whole weight is
+    loaded as usual."""
+
+    def weight_loader(
+        param: torch.Tensor, loaded_weight: torch.Tensor, shard_id: str | None = None
+    ) -> None:
+        if shard_id is None:
+            embed_tokens.weight_loader(param, loaded_weight)
+            return
+        rows = loaded_weight.shape[0]
+        offset = 0 if shard_id == "embedding" else embed_tokens.org_vocab_size - rows
+        # Quantization leaves embed_tokens unquantized, so rows map 1:1.
+        idx = embed_tokens.shard_indices
+        start, end = idx.org_vocab_start_index, idx.org_vocab_end_index
+        lo, hi = max(start, offset), min(end, offset + rows)
+        if lo < hi:
+            param.data[lo - start : hi - start].copy_(
+                loaded_weight[lo - offset : hi - offset]
+            )
+        param.data[end - start :].fill_(0)  # vocab padding, as the default loader
+
+    return weight_loader
+
+
 def _load_split_embedding(
     embed_tokens: VocabParallelEmbedding,
     weights: Iterable[tuple[str, torch.Tensor]],
     loaded: set[str],
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """``wte.embedding`` holds the first rows of ``embed_tokens`` and
-    ``wte.new_embedding`` the rows after them. Each is written straight into
-    this rank's vocab shard, so the two may arrive in any order and in
-    different ``load_weights`` calls; the other weights pass through."""
+    """Send ``wte.embedding`` / ``wte.new_embedding`` through the parameter's
+    weight loader (see `_split_embedding_loader`; going through
+    ``param.weight_loader`` lets layerwise reload buffer and count them like any
+    other weight); the other weights pass through. A checkpoint with only one
+    half is rejected, except in a partial update
+    (``disable_mtp_completeness_check``), where the other half may follow in a
+    later call."""
+    seen: set[str] = set()
     for name, weight in weights:
         if "wte.embedding" in name:
-            offset = 0
+            shard_id = "embedding"
         elif "wte.new_embedding" in name:
-            offset = embed_tokens.org_vocab_size - weight.shape[0]
+            shard_id = "new_embedding"
         else:
             yield name, weight
             continue
-        # Quantization leaves embed_tokens unquantized, so rows map 1:1.
-        idx = embed_tokens.shard_indices
-        start, end = idx.org_vocab_start_index, idx.org_vocab_end_index
-        lo, hi = max(start, offset), min(end, offset + weight.shape[0])
         param = embed_tokens.weight
-        if lo < hi:
-            param.data[lo - start : hi - start].copy_(weight[lo - offset : hi - offset])
-        param.data[end - start :].fill_(0)  # vocab padding, as the default loader
+        param.weight_loader(param, weight, shard_id)
+        seen.add(shard_id)
         loaded.add("model.embed_tokens.weight")
+    if len(seen) == 1 and is_mtp_completeness_check_enabled():
+        raise ValueError("Checkpoint is missing 'wte.embedding' or 'wte.new_embedding'")

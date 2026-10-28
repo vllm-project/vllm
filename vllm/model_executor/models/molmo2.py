@@ -52,6 +52,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.molmo import (
+    _load_split_embedding,
+    _split_embedding_loader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import normalize_image
 from vllm.multimodal.inputs import (
@@ -1172,6 +1176,9 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
             self.embedding_size,
             text_config.hidden_size,
             quant_config=quant_config,
+        )
+        self.embed_tokens.weight.weight_loader = _split_embedding_loader(
+            self.embed_tokens
         )
 
         decoder_layer = (
@@ -2663,31 +2670,3 @@ class Molmo2ForConditionalGeneration(
             connector="vision_backbone.image_projector",
             tower_model="vision_backbone",
         )
-
-
-def _load_split_embedding(
-    embed_tokens: VocabParallelEmbedding,
-    weights: Iterable[tuple[str, torch.Tensor]],
-    loaded: set[str],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """``wte.embedding`` holds the first rows of ``embed_tokens`` and
-    ``wte.new_embedding`` the rows after them. Each is written straight into
-    this rank's vocab shard, so the two may arrive in any order and in
-    different ``load_weights`` calls; the other weights pass through."""
-    for name, weight in weights:
-        if "wte.embedding" in name:
-            offset = 0
-        elif "wte.new_embedding" in name:
-            offset = embed_tokens.org_vocab_size - weight.shape[0]
-        else:
-            yield name, weight
-            continue
-        # Quantization leaves embed_tokens unquantized, so rows map 1:1.
-        idx = embed_tokens.shard_indices
-        start, end = idx.org_vocab_start_index, idx.org_vocab_end_index
-        lo, hi = max(start, offset), min(end, offset + weight.shape[0])
-        param = embed_tokens.weight
-        if lo < hi:
-            param.data[lo - start : hi - start].copy_(weight[lo - offset : hi - offset])
-        param.data[end - start :].fill_(0)  # vocab padding, as the default loader
-        loaded.add("model.embed_tokens.weight")

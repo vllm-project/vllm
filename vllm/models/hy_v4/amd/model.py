@@ -444,6 +444,8 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
+        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
 
@@ -492,7 +494,7 @@ class HYV4Model(nn.Module):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                self,
+                pending_wk_fp8,
                 params_dict,
                 loaded_params,
                 pp_missing_layer_names,
