@@ -66,8 +66,7 @@ def _get_tuned_standalone_max_size(
     max_size_mb = FI_MNNVL_ALLREDUCE_MAX_SIZE_MB.get(
         (capability.to_int(), world_size, _node_count(group))
     )
-    # Tuned cutoffs are exclusive; store the largest accepted size.
-    return None if max_size_mb is None else int(max_size_mb * MiB) - 1
+    return None if max_size_mb is None else int(max_size_mb * MiB)
 
 
 def _create_workspace(
@@ -156,10 +155,12 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
 
     node_count = _node_count(group)
     if node_count == 1:
-        # TRTLLM supports single-node allreduce on Hopper and Blackwell. Do not
-        # create an MNNVL workspace when the process group is node-local.
-        backend = "trtllm"
-        allow_trtllm_fallback = False
+        # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
+        # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
+        # TRTLLM where the node lacks NVSwitch multicast and MNNVL cannot
+        # create its workspace.
+        backend = "mnnvl"
+        allow_trtllm_fallback = True
     elif current_platform.has_device_capability(100):
         # MNNVL requires Blackwell-class GPUs and is the only supported
         # FlashInfer backend for a multi-node allreduce process group.
@@ -360,14 +361,30 @@ def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
     return group_workspaces
 
 
-def checkpoint_prepare_fi_ar_workspaces(group: ProcessGroup) -> None:
+def checkpoint_prepare_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
     for workspace in _fi_ar_workspaces_for_group(group):
-        workspace.checkpoint_prepare()
+        try:
+            workspace.checkpoint_prepare()
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
+            logger.info_once(
+                "FlashInfer all-reduce workspace backed by torch symmetric memory "
+                "stays resident during suspend."
+            )
 
 
-def checkpoint_restore_fi_ar_workspaces(group: ProcessGroup) -> None:
+def checkpoint_restore_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
     for workspace in _fi_ar_workspaces_for_group(group):
-        workspace.checkpoint_restore(TorchDistBackend(group=group))
+        try:
+            workspace.checkpoint_restore(TorchDistBackend(group=group))
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
 
 
 atexit.register(destroy_fi_ar_workspace)

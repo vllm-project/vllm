@@ -16,3 +16,17 @@ sequence
 sequence
   tag `` text `</think>`
   tag `<tool_call>get_weather` glm_xml({ location: string }) `</tool_call>`
+
+# none_schema (from_token_zero)
+sequence
+  tag `` text `</think>`
+  json({ answer: string })
+
+# auto_schema_content, auto_schema_calls (from_token_zero)
+sequence
+  tag `` text `</think>`
+  or
+    triggered_tags [`<tool_call>`] excluding [`<think>`, `</think>`, `</tool_call>`, `<arg_key>`, `</arg_key>`, `<arg_value>`, `</arg_value>`] at_least_one
+      tag `<tool_call>get_weather` glm_xml({ location: string }) `</tool_call>`
+      tag `<tool_call>add` glm_xml({ y: number, x: number, items: string[] }) `</tool_call>`
+    json({ answer: string })

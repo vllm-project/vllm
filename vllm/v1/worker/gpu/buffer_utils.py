@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+import array
+from collections.abc import Collection, Sequence
 from functools import partial
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -10,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
-    async_tensor_h2d,
+    TORCH_DTYPE_TO_ARRAY_TYPECODE,
     get_accelerator_view_from_cpu_tensor,
 )
 
@@ -19,6 +21,13 @@ logger = init_logger(__name__)
 # Default round-robin depth for the UVA buffer pools. Must be >= the number of
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
+
+# Elements copied per program in `_apply_write_kernel`.
+_WRITE_BLOCK_SIZE = 1024
+
+# Staged by reference rather than copied; see StagedWriteTensor.stage_write.
+_BUFFER_TYPES = (np.ndarray, array.array)
+_Chunk: TypeAlias = "np.ndarray | array.array[Any]"
 
 
 def set_default_max_concurrency(n: int) -> None:
@@ -82,18 +91,27 @@ class UvaBufferPool:
         # Current buffer index
         self._curr = 0
 
-    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+    def _next_buf(self, n: int) -> UvaBuffer | NonUvaBuffer:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
-        n = len(x)
         if n > buf.cpu.shape[0]:
             capacity = 1 << (n - 1).bit_length()
             buf = self._buffer_cls((capacity, *buf.cpu.shape[1:]), self.dtype)
             self._uva_bufs[self._curr] = buf
+        return buf
+
+    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+        n = len(x)
+        buf = self._next_buf(n)
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
         dst[:n] = x
+        return buf.uva(n)
+
+    def copy_chunks_to_uva(self, chunks: Sequence[_Chunk], n: int) -> torch.Tensor:
+        buf = self._next_buf(n)
+        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
         return buf.uva(n)
 
     def copy_to_gpu(
@@ -140,10 +158,10 @@ class StagedWriteTensor:
     ):
         if max_concurrency is None:
             max_concurrency = _DEFAULT_MAX_CONCURRENCY
-        supported_dtypes = [torch.int32, torch.int64, torch.float32]
-        if dtype not in supported_dtypes:
+        if dtype not in TORCH_DTYPE_TO_ARRAY_TYPECODE:
             raise ValueError(
-                f"Unsupported dtype {dtype}: should be one of {supported_dtypes}"
+                f"Unsupported dtype {dtype}: should be one of "
+                f"{list(TORCH_DTYPE_TO_ARRAY_TYPECODE)}"
             )
         self.num_rows = size if isinstance(size, int) else size[0]
         self.dtype = dtype
@@ -164,34 +182,58 @@ class StagedWriteTensor:
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
-        self._staged_write_contents: list[int | float] = []
+        self._typecode = TORCH_DTYPE_TO_ARRAY_TYPECODE[dtype]
+        self._staged_write_contents: array.array[Any] = array.array(self._typecode)
         self._staged_write_cu_lens: list[int] = []
+        self._staged_write_max_len = 0
+        self._staged_write_chunks: list[_Chunk] = []
+        self._staged_write_len = 0
 
         new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
 
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
-        self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
+        self.write_contents = new_buffer(1, dtype=dtype)
 
     def stage_write(
-        self, index: int, start: int, x: Iterable[int] | Iterable[float]
+        self, index: int, start: int, x: Collection[int] | Collection[float]
     ) -> None:
+        """Stage writing `x` to row `index` from column `start`.
+
+        A 1-D numpy array or an array.array is kept by reference and copied
+        only by apply_write, so it must not be modified until then. Its values
+        are cast to this tensor's dtype, and out-of-range values wrap silently.
+        """
         assert index >= 0
         assert start >= 0
-        if not x:
+        n = len(x)
+        if not n:
             return
+        contents = self._staged_write_contents
+        if isinstance(x, list):
+            contents.fromlist(x)  # fromlist sizes the array once.
+        elif isinstance(x, _BUFFER_TYPES):
+            if contents:
+                self._staged_write_chunks.append(contents)
+                self._staged_write_contents = array.array(self._typecode)
+            self._staged_write_chunks.append(x)
+        else:
+            contents.extend(x)
+        self._staged_write_len += n
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
-        self._staged_write_contents.extend(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_cu_lens.append(self._staged_write_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, n)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
+        self._staged_write_contents.append(x)
+        self._staged_write_len += 1
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(0)
-        self._staged_write_contents.append(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_cu_lens.append(self._staged_write_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, 1)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -202,17 +244,12 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        if self.write_contents is None:
-            write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
-            )
-        else:
-            write_contents = self.write_contents.copy_to_uva(
-                self._staged_write_contents
-            )
+        write_contents = self.write_contents.copy_chunks_to_uva(
+            self._staged_chunks(), self._staged_write_len
+        )
 
         # Write diffs to the GPU buffer
-        _apply_write_kernel[(n,)](
+        _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
             self.gpu,
             self.gpu.stride(0),
             indices_uva,
@@ -220,7 +257,7 @@ class StagedWriteTensor:
             write_contents,
             cu_lens_uva,
             None,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=False,
         )
         # Clear the staged writes
@@ -229,8 +266,17 @@ class StagedWriteTensor:
     def clear_staged_writes(self) -> None:
         self._staged_write_indices.clear()
         self._staged_write_starts.clear()
-        self._staged_write_contents.clear()
+        # An array cannot be resized while a buffer view of it is still alive.
+        self._staged_write_contents = array.array(self._typecode)
         self._staged_write_cu_lens.clear()
+        self._staged_write_max_len = 0
+        self._staged_write_chunks.clear()
+        self._staged_write_len = 0
+
+    def _staged_chunks(self) -> list[_Chunk]:
+        if not self._staged_write_contents:
+            return self._staged_write_chunks
+        return [*self._staged_write_chunks, self._staged_write_contents]
 
 
 class FusedStagedWriter:
@@ -246,6 +292,7 @@ class FusedStagedWriter:
         self.indices = new_pool(max_writes)
         self.starts = new_pool(max_writes)
         self.cu_lens = new_pool(max_writes)
+        self.contents = new_pool(1)
         self.device = device
 
     def apply(
@@ -258,8 +305,10 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int | float] = []
+        contents: list[_Chunk] = []
         cu_lens: list[int] = []
+        max_len = 0
+        content_base = 0
 
         for group_id, t in enumerate(tensors):
             n = len(t._staged_write_indices)
@@ -269,9 +318,10 @@ class FusedStagedWriter:
             group_ids.extend([group_id] * n)
             indices.extend(t._staged_write_indices)
             starts.extend(t._staged_write_starts)
-            content_base = len(contents)
-            contents.extend(t._staged_write_contents)
+            contents.extend(t._staged_chunks())
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+            content_base += t._staged_write_len
+            max_len = max(max_len, t._staged_write_max_len)
 
         if not group_ids:
             return
@@ -280,21 +330,26 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
-        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+        contents_uva = self.contents.copy_chunks_to_uva(contents, content_base)
 
-        _apply_write_kernel[(len(group_ids),)](
+        _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
             output_ptrs,
             output_strides,
             indices_uva,
             starts_uva,
-            contents_gpu,
+            contents_uva,
             cu_lens_uva,
             group_ids_uva,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=True,
         )
         for t in tensors:
             t.clear_staged_writes()
+
+
+def _num_write_chunks(max_len: int) -> int:
+    # One program per _WRITE_BLOCK_SIZE-element chunk.
+    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
 
 
 @triton.jit
@@ -310,7 +365,7 @@ def _apply_write_kernel(
     MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_idx = tl.load(write_indices_ptr + pid)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
     start_idx = tl.load(write_starts_ptr + pid)
 
     cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
@@ -328,11 +383,10 @@ def _apply_write_kernel(
         row_stride = output_stride
     row_ptr += row_idx * row_stride + start_idx
 
-    for i in range(0, content_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < content_len
-        content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(row_ptr + block, content, mask=mask)
+    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < content_len
+    content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
+    tl.store(row_ptr + block, content, mask=mask)
 
 
 @triton.jit
