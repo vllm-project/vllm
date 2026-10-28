@@ -316,9 +316,12 @@ def test_sparse_autotune_respects_cache_selection(
     runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    runner.vllm_config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[])
+    runner.uniform_decode_query_len = runner.decode_query_len = 1
     worker = SimpleNamespace(
         model_runner=runner,
         vllm_config=runner.vllm_config,
+        scheduler_config=runner.scheduler_config,
         execute_model=Mock(),
         sample_tokens=Mock(),
     )
@@ -357,12 +360,16 @@ def test_sparse_autotune_respects_cache_selection(
         sparse, "_flashinfer_sparse_mla_decode_label", lambda *_: "DSv3.2"
     )
     monkeypatch.setattr(sparse, "resolve_flashinfer_autotune_v2_root", lambda: tmp_path)
-    cache_path = tmp_path / "autotune.json"
-    cache_path.write_bytes(b"cached")
-    monkeypatch.setattr(
-        sparse, "resolve_flashinfer_autotune_file", lambda _: cache_path
-    )
     monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
+
+    @contextmanager
+    def scoped(tune_context):
+        # Stand in for one sparse MLA call inside the scope.
+        with tune_context():
+            pass
+        yield
+
+    monkeypatch.setattr(sparse, "autotune_sparse_mla_only", scoped)
 
     def mixed_warmup(*args, mixed_step_context=None, **kwargs):
         context = (
@@ -386,11 +393,12 @@ def test_sparse_autotune_respects_cache_selection(
     else:
         managed.assert_not_called()
         reload.assert_not_called()
-        assert legacy.call_count == (1 if rank == 0 else 0)
-        world.broadcast_object.assert_called_once_with(
-            b"cached" if rank == 0 else None, src=0
-        )
-        tuner.load_configs.assert_called_once_with(str(cache_path))
+        assert legacy.call_count == 1  # every rank tunes its sparse calls
+        # Sparse MLA keeps its calibration in FlashInfer's own store, so no
+        # AutoTuner cache file is loaded or shared.
+        world.broadcast_object.assert_not_called()
+        tuner.load_configs.assert_not_called()
+        assert world.barrier.call_count == (1 if world_size > 1 else 0)
     assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 
