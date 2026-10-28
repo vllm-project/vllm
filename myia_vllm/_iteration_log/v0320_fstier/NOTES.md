@@ -3897,3 +3897,21 @@ Et le census prouve que ce n'est **pas** une photo inter-crons (la leçon du cyc
 **Contexte budget reçu (po-2025, 05:15Z)** : `haiku[1]` muré jusqu'au 11/11 ⇒ tout haiku au-delà du cap swift part en PAYG direct ; falaise PAYG à 22,7 % du jour ; swift = 1 080/9 520 réponses (11,3 %) ; le hub suit mon enveloppe (« genou 7+ flux, plafond ~13 sessions, levier = Q43 »). Le feu 🟠 retombé est bien enregistré chez claudish (« repli po-2024 suspendu, rien exécuté »).
 
 **Annexes** : nbaudit ok 06:05:49Z (`19451:Image/`). Condensation : fallback cloud 05:45Z (#2719) puis completed — le consommateur PAYG documenté (#713), périmètre RSM. Commit hôte **73,9 %** (marge 100,2 Go). G: OK. Sécurité : aucune IP inconnue en 200 (hairpin 1 350/1 346, `?` 702/702, web1 8, Paris 7, web2 2). Registre : **Q43 seule ouverte**.
+
+---
+
+## Q43 — GO user 28/10 07:2xZ : tier RAM 24 → 32 GiB **ARMÉ, PAS ENCORE APPLIQUÉ**
+
+**Décision** : user « Ok tu as mon Go » sur la question posée le 27/10 22:1xZ — élargir le tier RAM pour porter le plafond de sessions long-contexte de **~13 à ~20**, plutôt que de commencer à replier un siège haiku vers Minimax.
+
+**Ce qui a été fait** : `KV_OFFLOAD_GB_FSTIER=32` ajoutée à `myia_vllm/.env`. C'est la variable dédiée du profil `-fstier` (`--kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-24}`) ; **elle n'existait pas** — seul un commentaire orphelin subsistait depuis le split du 21/10 (le commentaire affirmait que le `.env` portait 32, il ne le portait plus), donc c'est **le défaut 24** qui s'appliquait. Rendu vérifié **sans redémarrage** : `docker compose config` → `--kv-offloading-size 32`, avec `0.73` / `nvfp4` / `native` inchangés.
+
+**⚠ Piège découvert en l'armant** : le GO était cadré « au prochain restart naturel, pas de recreate dédié ». Or **un `docker restart` ne suffit pas** — l'environnement est figé à la création du conteneur, donc le watchdog, `autoheal` ou un restart manuel rebooteront le moteur avec le **24** en mémoire. Seul un **recreate** (`compose up -d`) relit le `.env`. Conséquence : l'élargissement ne peut pas être « gratuit », il coûte une fenêtre. Aucun recreate lancé d'office (règle : jamais de redémarrage sans GO) — l'application attend la prochaine fenêtre.
+
+**Marges mesurées avant tout geste** : commit hôte **75,3 %** (94,9 GB libres ; +8 GiB absorbables), `/dev/shm` **24G/63G = 39 %** dont **zéro orphelin** (4 blocs `psm_*` tous postérieurs au `StartedAt` 27/10 02:15Z — le plancher tmpfs est exactement le fichier mmap 25,7 GB du tier). Cible après recreate : **~34 GB = 54 %**, sous le seuil d'alerte 45 G.
+
+**Contexte qui motive l'élargissement, mesuré à 07:2xZ** : file **5 running / 4 waiting**, préemptions **20 → 22 en ~10 min**. Tier fs à **252 G** (au cap 250 GiB près — le pruneur trim au prochain passage ; non incident, 428 G libres sur D:).
+
+**Observation VRAM (Q41)** : GPU 0 à **23 026-23 035 MiB** sur 3 échantillons — le seuil de ré-ouverture (> 23 000) est franchi de ~30 MiB. Cause identifiée **côté desktop** : GPU 1, sans desktop, reste à **21 650** ; `--query-compute-apps` liste ~10 processus Windows sur GPU 0 (3× Edge, Chrome, VS Code, 2× NVIDIA Overlay, Docker Desktop, PhoneExperienceHost…) ≈ 1,4 GiB. Marge vers le total 24 564 = **1 530 MiB**. **Q41 non ré-ouverte** : mécanisme identifié, risque de boot non démontré (le boot du 27/10 à 0.73 a réussi avec 22,25 GiB libres). Re-question seulement si GPU 1 monte aussi, ou si un boot échoue.
+
+**Retrait de la question** : nouveau `StartedAt` **et** `--kv-offloading-size 32` dans les args non-défauts du conteneur recréé.
