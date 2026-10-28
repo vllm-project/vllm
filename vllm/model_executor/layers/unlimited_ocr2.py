@@ -231,7 +231,7 @@ def dash_attention(
         additive = torch.cat((rbias, torch.zeros_like(lpos, dtype=torch.float32)), -1)
         indices = indices.clamp(0, length - 1)
         if backend != "TRITON_ATTN":
-            from vllm.v1.attention.ops.unlimited_ocr2_flash import flash_dash_attention
+            from vllm.v1.attention.ops.unlimited_ocr2 import flash_dash_attention
 
             # Both Flash APIs consume segments with a valid prefix. Shift the
             # early local window so padding is at the end rather than the front.
