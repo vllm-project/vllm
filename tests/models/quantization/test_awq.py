@@ -202,3 +202,61 @@ def test_awq_bfloat16_on_rocm(
 
     assert len(outputs) == 2
     assert all(text for _, text in outputs), "AWQ model produced empty output"
+
+
+@pytest.mark.skipif(not _on_rdna(), reason="requires the RDNA AutoAWQ routing path")
+@torch.inference_mode()
+def test_awq_legacy_fallback_on_rdna(
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling MP kernels must preserve FP16 AWQ loading and generation."""
+    disabled_kernels = ",".join(
+        [
+            "RDNA3W4A16LinearKernel",
+            "RDNAHybridW4A16LinearKernel",
+            "TritonW4A16LinearKernel",
+            "ConchLinearKernel",
+            "ExllamaLinearKernel",
+        ]
+    )
+    prompts = ["The capital of France is", "One plus one equals"]
+    outputs = []
+    for disabled in ("", disabled_kernels):
+        monkeypatch.setenv("VLLM_DISABLED_KERNELS", disabled)
+
+        def check_method(
+            model: torch.nn.Module, use_legacy: bool = bool(disabled)
+        ) -> None:
+            from vllm.model_executor.layers.quantization.auto_awq import (
+                AutoAWQLinearMethod,
+                AutoAWQMarlinLinearMethod,
+            )
+
+            expected = AutoAWQLinearMethod if use_legacy else AutoAWQMarlinLinearMethod
+            method = model.model.layers[0].self_attn.qkv_proj.quant_method
+            assert isinstance(method, expected), type(method)
+
+        with vllm_runner(
+            "Qwen/Qwen2.5-0.5B-Instruct-AWQ",
+            quantization="awq",
+            dtype="float16",
+            max_model_len=256,
+            enforce_eager=True,
+            seed=0,
+            kernel_config={"linear_backend": "auto"},
+        ) as vllm_model:
+            vllm_model.apply_model(check_method)
+            result = vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens=16, num_logprobs=5
+            )
+            assert len(result) == len(prompts)
+            assert all(token_ids for token_ids, _, _ in result)
+            outputs.append(result)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="mixed_precision_awq",
+        name_1="legacy_awq_fallback",
+    )
