@@ -444,13 +444,6 @@ class MultiprocExecutor(Executor):
         assert self.kv_output_aggregator is not None
         finished: set[str] = set()
         for notification in self.early_kv_recv.drain():
-            if isinstance(notification, str):
-                # Receive state may already be lost; fault tolerance cannot retry.
-                self.is_failed = True
-                self.shutdown()
-                raise RuntimeError(
-                    f"Early KV receive failed on a worker: {notification}"
-                )
             finished.update(
                 self.kv_output_aggregator.add_finished_recving(notification)
             )

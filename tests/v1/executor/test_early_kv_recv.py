@@ -61,23 +61,17 @@ def _wait_for_poll(sender: EarlyKVRecvSender, reader: MessageQueue) -> bool | No
     return result[0] if result else None
 
 
-@pytest.mark.parametrize("failed", [False, True])
-def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver, failed):
+def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver):
     writer, reader = rpc_queue
-    error = RuntimeError("post-processing failed") if failed else None
-    sender = _sender(
-        monkeypatch, _PendingConnector(done={"r"}, error=error), receiver.path
-    )
+    sender = _sender(monkeypatch, _PendingConnector(done={"r"}), receiver.path)
     try:
         assert _wait_for_poll(sender, reader) is True
         sender.poll()
-        received: list[set[str] | str] = []
+        received: list[set[str]] = []
         deadline = time.monotonic() + 5
         while not received and time.monotonic() < deadline:
             received.extend(receiver.drain())
-        assert received == (
-            ["RuntimeError: post-processing failed"] if failed else [{"r"}]
-        )
+        assert received == [{"r"}]
         assert receiver.drain() == []
         # Still waiting for the next RPC: poll again after the interval.
         assert _wait_for_poll(sender, reader) is True
@@ -103,18 +97,38 @@ def test_sender_stops_polling_when_idle_or_shut_down(monkeypatch, rpc_queue, rec
         sender.close()
 
 
-def _poll_with_broken_error_channel(path):
+def test_rpc_arriving_during_poll_wait_is_not_consumed(
+    monkeypatch, rpc_queue, receiver
+):
+    writer, reader = rpc_queue
+    sender = _sender(monkeypatch, _PendingConnector(), receiver.path)
+    monkeypatch.setattr(early_kv_recv, "_POLL_INTERVAL_S", 1.0)
+    monkeypatch.setattr(early_kv_recv, "_ACTIVE_WINDOW_S", 5.0)
+    monkeypatch.setattr(early_kv_recv.time, "sleep", lambda _: writer.enqueue("rpc"))
+    try:
+        sender.poll()
+        assert _wait_for_poll(sender, reader) is False
+        assert reader.dequeue(timeout=1) == "rpc"
+    finally:
+        sender.close()
+
+
+def _poll_with_failure(path, broken_channel):
     with pytest.MonkeyPatch.context() as monkeypatch:
-        sender = _sender(monkeypatch, _PendingConnector(done={"r"}), path)
-        sender.close()  # IPC can no longer deliver completion or error.
+        error = None if broken_channel else RuntimeError("post-processing failed")
+        sender = _sender(monkeypatch, _PendingConnector(done={"r"}, error=error), path)
+        if broken_channel:
+            sender.close()
         # An ordinary RPC exception can be consumed by a utility call.
         with suppress(Exception):
             sender.poll()
 
 
-def test_broken_error_channel_terminates_worker(receiver):
+@pytest.mark.parametrize("broken_channel", [False, True])
+def test_poll_failure_terminates_worker_without_engine_drain(receiver, broken_channel):
     process = multiprocessing.get_context("spawn").Process(
-        target=_poll_with_broken_error_channel, args=(receiver.path,)
+        target=_poll_with_failure,
+        args=(receiver.path, broken_channel),
     )
     process.start()
     try:

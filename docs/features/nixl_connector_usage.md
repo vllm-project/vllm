@@ -420,7 +420,9 @@ Supported: `uni`, or single-node `mp`, with synchronous or asynchronous scheduli
 TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
 All ranks must finish receiving before the request can run. Earlier scheduling is
 best effort. Transfer failures retain the configured recovery policy; unexpected
-poll or notification-channel errors terminate the engine.
+poll or notification-channel errors terminate the engine, including while paused.
+Workers sleep between polls and yield to queued RPCs; the wait can add up to one
+polling interval (0.2 ms, subject to OS scheduling) before handling a new RPC.
 
 ## Metrics Reference
 
