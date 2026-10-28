@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import string
 from collections.abc import Sequence
 
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.minimax_m3_reasoning_parser import MiniMaxM3ReasoningParser
 
@@ -199,6 +201,39 @@ def test_nonstreaming_non_leading_end_tag_is_content():
     assert content == "XXX</mm:think>YYY"
 
 
+def test_nonstreaming_non_leading_start_tag_is_content():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning("XXX<mm:think>YYY", request)
+
+    assert reasoning is None
+    assert content == "XXX<mm:think>YYY"
+
+
+def test_nonstreaming_literal_start_marker_in_json_content():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    reasoning, content = parser.extract_reasoning(payload, request)
+
+    assert reasoning is None
+    assert content == payload
+
+
+def test_nonstreaming_enabled_mode_literal_start_marker_in_reasoning():
+    parser, _ = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning(
+        "quoting <mm:think> here</mm:think>answer", request
+    )
+
+    assert reasoning == "quoting <mm:think> here"
+    assert content == "answer"
+
+
 def test_nonstreaming_enabled_mode_starts_in_reasoning():
     parser, _ = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
     request = ChatCompletionRequest(messages=[], model="test-model")
@@ -273,6 +308,20 @@ def test_streaming_non_leading_end_tag_is_content():
     assert reasoning is None
     assert content == "XXX</mm:think>YYY"
     assert end_states == [True]
+
+
+def test_streaming_non_leading_start_tag_stays_content():
+    parser, tokenizer = make_parser()
+
+    reasoning, content, end_states = run_streaming(
+        parser,
+        tokenizer,
+        ["the ", "<mm:think>", " marker leaks"],
+    )
+
+    assert reasoning is None
+    assert content == "the <mm:think> marker leaks"
+    assert end_states == [True, True, True]
 
 
 def test_streaming_enabled_mode_starts_in_reasoning():
@@ -459,3 +508,205 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
     )
+
+
+def test_token_id_helpers_literal_start_marker_is_content():
+    parser, tokenizer = make_parser()
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    output_ids = tokenizer.encode(payload, add_special_tokens=False)
+
+    assert parser.extract_content_ids(output_ids) == output_ids
+    assert parser.count_reasoning_tokens(output_ids) == 0
+
+
+def test_token_id_helpers_literal_start_marker_split_tokens():
+    tokenizer = SplitMiniMaxM3Tokenizer()
+    parser = MiniMaxM3ReasoningParser(tokenizer)
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    output_ids = tokenizer.encode(payload, add_special_tokens=False)
+
+    assert parser.extract_content_ids(output_ids) == output_ids
+    assert parser.count_reasoning_tokens(output_ids) == 0
+
+
+def test_is_reasoning_end_prompt_state_preserved():
+    # is_reasoning_end runs on the full prompt/history to initialize reasoning
+    # state (serving.py, structured_output/__init__.py, abstract_parser.py), so
+    # it must keep rightmost-marker semantics, not the leading-only rule used
+    # for generated output.
+    parser, tokenizer = make_parser()
+    closed_prompt = tokenizer.encode(
+        "<chat>user asks</chat></mm:think>", add_special_tokens=False
+    )
+    assert parser.is_reasoning_end(closed_prompt)
+
+    enabled_parser, tokenizer = make_parser(
+        chat_template_kwargs={"thinking_mode": "enabled"}
+    )
+    open_prompt = tokenizer.encode(
+        "<mm:think>past</mm:think>answer<chat>new</chat><mm:think>",
+        add_special_tokens=False,
+    )
+    assert not enabled_parser.is_reasoning_end(open_prompt)
+
+
+# Serving composition: ParserManager pairs this reasoning parser with the
+# MiniMax M3 engine tool parser in a DelegatingParser.
+
+NS = "]<]minimax[>["
+WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }
+]
+WEATHER_CALL = (
+    f'{NS}<tool_call>\n{NS}<invoke name="get_weather">'
+    f"{NS}<city>Paris{NS}</city>{NS}</invoke>\n{NS}</tool_call>"
+)
+PARIS = [("get_weather", {"city": "Paris"})]
+
+# (model output, thinking_mode, reasoning, content, tool calls)
+COMPOSED_CASES = {
+    "literal_start_marker_then_tool_call": (
+        "Wrap reasoning in <mm:think> tags.\n" + WEATHER_CALL,
+        None,
+        None,
+        "Wrap reasoning in <mm:think> tags.\n",
+        PARIS,
+    ),
+    "leading_reasoning_then_tool_call": (
+        "<mm:think>Need the tool.</mm:think>Checking.\n" + WEATHER_CALL,
+        None,
+        "Need the tool.",
+        "Checking.\n",
+        PARIS,
+    ),
+    "enabled_mode_literal_start_marker_then_tool_call": (
+        "Need the tool.</mm:think>Use <mm:think> to think.\n" + WEATHER_CALL,
+        "enabled",
+        "Need the tool.",
+        "Use <mm:think> to think.\n",
+        PARIS,
+    ),
+    "literal_start_marker_no_tool_call": (
+        "The tag <mm:think> opens a thinking block.",
+        None,
+        None,
+        "The tag <mm:think> opens a thinking block.",
+        [],
+    ),
+    "literal_marker_pair_no_tool_call": (
+        "Write <mm:think>notes</mm:think> to think.",
+        None,
+        None,
+        "Write <mm:think>notes</mm:think> to think.",
+        [],
+    ),
+    "plain_answer_no_tool_call": (
+        "It is sunny in Paris.",
+        None,
+        None,
+        "It is sunny in Paris.",
+        [],
+    ),
+}
+
+
+class MiniMaxM3ToolTokenizer(MiniMaxM3Tokenizer):
+    """Mock tokenizer that also keeps the M3 tool namespace marker whole."""
+
+    special_tokens = ("<mm:think>", "</mm:think>", NS)
+
+
+def make_composed_parser(thinking_mode: str | None):
+    tokenizer = MiniMaxM3ToolTokenizer()
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="minimax_m3",
+        reasoning_parser_name="minimax_m3",
+        enable_auto_tools=True,
+        tokenizer=tokenizer,
+    )
+    assert parser_cls is not None
+    kwargs = {"thinking_mode": thinking_mode} if thinking_mode else None
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        tools=WEATHER_TOOLS,
+        chat_template_kwargs=kwargs,
+    )
+    parser = parser_cls(tokenizer, request.tools, chat_template_kwargs=kwargs)
+    # The generation prompt ends with the start marker only in enabled mode.
+    prompt = "<chat>user asks</chat>" + (
+        "<mm:think>" if thinking_mode == "enabled" else ""
+    )
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    return parser, request, tokenizer, prompt_ids
+
+
+def tool_call_list(tool_calls) -> list[tuple[str, dict]]:
+    return [(tc.name, json.loads(tc.arguments)) for tc in tool_calls or []]
+
+
+@pytest.mark.parametrize("case", COMPOSED_CASES)
+def test_composed_parser_nonstreaming(case):
+    output, mode, expected_reasoning, expected_content, expected_tools = COMPOSED_CASES[
+        case
+    ]
+    parser, request, tokenizer, _ = make_composed_parser(mode)
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=tokenizer.encode(output, add_special_tokens=False),
+    )
+
+    assert reasoning == expected_reasoning
+    assert content == expected_content
+    assert tool_call_list(tool_calls) == expected_tools
+
+
+@pytest.mark.parametrize("by_char", [False, True], ids=["by_token", "by_char"])
+@pytest.mark.parametrize("case", COMPOSED_CASES)
+def test_composed_parser_streaming(case, by_char):
+    output, mode, expected_reasoning, expected_content, expected_tools = COMPOSED_CASES[
+        case
+    ]
+    parser, request, tokenizer, prompt_ids = make_composed_parser(mode)
+    # By token keeps every marker whole; by char splits markers across deltas.
+    chunks = list(output) if by_char else tokenizer.tokenize(output)
+
+    reasoning, content = "", ""
+    names: dict[int, str] = {}
+    arguments: dict[int, str] = {}
+    for i, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            chunk,
+            tokenizer.encode(chunk, add_special_tokens=False),
+            request,
+            prompt_token_ids=prompt_ids,
+            finished=i == len(chunks) - 1,
+        )
+        if delta is None:
+            continue
+        reasoning += delta.reasoning or ""
+        content += delta.content or ""
+        for tool_call in delta.tool_calls:
+            if tool_call.function.name:
+                names[tool_call.index] = tool_call.function.name
+            arguments[tool_call.index] = arguments.get(tool_call.index, "") + (
+                tool_call.function.arguments or ""
+            )
+
+    assert (reasoning or None) == expected_reasoning
+    assert (content or None) == expected_content
+    assert [
+        (names[i], json.loads(arguments[i])) for i in sorted(names)
+    ] == expected_tools
