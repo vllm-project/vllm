@@ -80,7 +80,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
-    resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -654,167 +653,72 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _boundary_snapshot_puts(
-        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
+    def _boundary_puts(
+        self, req_meta: ReqMeta
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for committed mamba "align" boundary-state snapshots.
+        """Build Store chunks from scheduler-resolved, pinned blocks.
 
-        Each core handoff identifies the exact checkpoint block, pinned for
-        this Store job and keyed by its boundary-end hash.
+        Attention pages may contain several chunks. Mamba entries retain the
+        exact handed-off state block under its checkpoint hash.
         """
         hash_block_size = self.coord.hash_block_size
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
-        for group_id, block_id, boundary in entries:
-            if boundary == 0 or block_id == NULL_BLOCK_ID:
+        for group_id, block_id, num_tokens in req_meta.boundary_puts or []:
+            if (
+                not self.group_participates[group_id]
+                or num_tokens == 0
+                or block_id == NULL_BLOCK_ID
+            ):
                 continue
-            hash_idx = boundary // hash_block_size - 1
+            assert num_tokens % hash_block_size == 0, (
+                f"Boundary put at {num_tokens} tokens is not a multiple of the "
+                f"hash block size {hash_block_size}"
+            )
+            hash_idx = num_tokens // hash_block_size - 1
             if hash_idx >= len(req_meta.block_hashes):
                 continue
             db = self.token_databases[group_id]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[group_id]
             put_step_rank = (self.tp_rank + group_id) % put_step
-            if (boundary // db.chunk_size - 1) % put_step != put_step_rank:
-                continue
             shard_ids = db.store_layout.local_shard_ids
-            addrs, sizes, _ = db.store_layout.prepare_values(
-                [(0, db.store_layout.block_size)] * len(shard_ids),
-                [block_id],
-                shard_ids,
-            )
-            for shard_id, addr, size in zip(shard_ids, addrs, sizes, strict=True):
-                puts.append(
-                    (
-                        db.store_layout.key_for(
-                            shard_id, req_meta.block_hashes[hash_idx]
-                        ),
-                        addr,
-                        size,
-                        db.metadata,
-                    )
-                )
-        return puts
-
-    def _sub_block_tail_puts(
-        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
-    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for the request's sub-block partial tail (its last prompt hash
-        boundary), so a later request can hit the sub-block prefix.
-
-        Covers every group's blocks from the normal save's lcm floor to the
-        boundary: the normal save floors to ``lcm_block_size``, so a
-        smaller-block group's full blocks in that gap are never persisted
-        elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Full blocks are keyed by their block-end hash and the partial
-        boundary block by the boundary sub-hash; a mamba "align" group
-        contributes only its boundary block, from the core-provided CoW block.
-        """
-        boundaries = {boundary for _, _, boundary in entries}
-        if len(boundaries) != 1:
-            raise ValueError(
-                "Sub-block partial-tail offloads for one request must share a boundary"
-            )
-        boundary = boundaries.pop()
-        hash_block_size = self.coord.hash_block_size
-        if boundary == 0 or boundary // hash_block_size - 1 >= len(
-            req_meta.block_hashes
-        ):
-            return []
-
-        mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
-        saved = self._saved_offset.get(req_meta.req_id, 0)
-        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
-        for g_idx, db in enumerate(self.token_databases):
-            if not self.group_participates[g_idx]:
-                continue
-            group_blocks = req_meta.block_ids[g_idx]
-            # Distribute across ranks by the same rule as normal chunks.
-            put_step = self.group_put_steps[g_idx]
-            put_step_rank = (self.tp_rank + g_idx) % put_step
-            # Always include the boundary block: its sub-hash key is written
-            # only here, even if normal saves already advanced past it.
-            last_chunk = cdiv(boundary, db.chunk_size) - 1
-            for chunk_idx in range(
-                min(saved // db.chunk_size, last_chunk), last_chunk + 1
-            ):
-                if chunk_idx % put_step != put_step_rank:
+            block_size = db.store_layout.block_size
+            block_start = (cdiv(num_tokens, block_size) - 1) * block_size
+            for start in range(block_start, num_tokens, db.chunk_size):
+                if start // db.chunk_size % put_step != put_step_rank:
                     continue
-                start = chunk_idx * db.chunk_size
-                valid_end = min(start + db.chunk_size, boundary)
-                local_block_index = start // db.store_layout.block_size
-                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if g_idx in mamba_offloads:
-                    if valid_end != boundary:
-                        continue
-                    block_id = mamba_offloads[g_idx]
-                    value_chunks = [(0, db.store_layout.block_size)]
-                    value_block_ids = [block_id]
-                elif g_idx in self.coord.mamba_group_ids:
-                    continue
-                elif local_block_index < len(group_blocks):
-                    block_id = group_blocks[local_block_index]
-                    value_chunks = [(start, valid_end)]
-                    value_block_ids = group_blocks
-                else:
-                    continue
-                if block_id == NULL_BLOCK_ID:
-                    logger.debug(
-                        "Skipping unavailable partial-tail source block "
-                        "(req=%s, group=%d, block=%d)",
-                        req_meta.req_id,
-                        g_idx,
-                        local_block_index,
-                    )
-                    continue
-                shard_ids = db.store_layout.local_shard_ids
-                block_addrs, block_sizes, _ = db.store_layout.prepare_values(
-                    value_chunks * len(shard_ids),
-                    value_block_ids,
+                end = min(start + db.chunk_size, num_tokens)
+                key_hash = req_meta.block_hashes[end // hash_block_size - 1]
+                addrs, sizes, _ = db.store_layout.prepare_values(
+                    [(start - block_start, end - block_start)] * len(shard_ids),
+                    [block_id],
                     shard_ids,
                 )
-                for shard_id, addr, size in zip(
-                    shard_ids, block_addrs, block_sizes, strict=True
-                ):
-                    key = db.store_layout.key_for(shard_id, key_hash)
-                    puts.append((key, addr, size, db.metadata))
+                for shard_id, addr, size in zip(shard_ids, addrs, sizes, strict=True):
+                    puts.append(
+                        (
+                            db.store_layout.key_for(shard_id, key_hash),
+                            addr,
+                            size,
+                            db.metadata,
+                        )
+                    )
         return puts
 
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
-        """Persist connector-pinned mamba "align" boundary states handed off
-        for this request, deduped against the store.
+        """Persist this job's boundary puts, deduped against the store.
 
-        This is every mamba key the connector writes — ``store_mask`` excludes
-        mamba groups from the positional normal save, aligned boundaries
-        included (see :meth:`_boundary_snapshot_puts`).
-
-        The two entry kinds are keyed and sourced differently, so they are
-        prepared separately and put in one batch:
-
-        - block-aligned for its group: a committed boundary-state snapshot,
-          the handed-off block itself;
-        - not block-aligned: the sub-block CoW partial tail, which also has to
-          cover the other groups' blocks in the normal save's lcm gap.
+        These are every mamba key the connector writes (``store_mask`` excludes
+        mamba groups from the positional normal save) plus the other groups'
+        partial-tail blocks in the normal save's lcm gap.
 
         Returns:
             True when no put is needed or every put succeeds, False otherwise.
 
         """
-        offloads = req_meta.boundary_state_offloads
-        if not offloads or not req_meta.block_hashes:
+        if not req_meta.boundary_puts or not req_meta.block_hashes:
             return True
-
-        snapshots: list[tuple[int, int, int]] = []
-        sub_block: list[tuple[int, int, int]] = []
-        for group_id, block_id, boundary in offloads:
-            entry = (group_id, block_id, boundary)
-            if boundary % self.token_databases[group_id].store_layout.block_size == 0:
-                snapshots.append(entry)
-            else:
-                sub_block.append(entry)
-
-        puts = self._boundary_snapshot_puts(req_meta, snapshots)
-        if sub_block and self.coord.enable_partial_hash_hits:
-            puts.extend(self._sub_block_tail_puts(req_meta, sub_block))
+        puts = self._boundary_puts(req_meta)
 
         if not puts:
             return True
@@ -950,9 +854,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Offload the handed-off mamba boundary states (independent of the
             # normal positional save, which may be skipped this step).
-            if req_meta.boundary_state_offloads is not None and not (
-                self._maybe_offload_boundary_states(req_meta)
-            ):
+            if not self._maybe_offload_boundary_states(req_meta):
                 return
 
             save_start = self._saved_offset.get(req_id, 0)
@@ -961,7 +863,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            replay_boundary = req_meta.num_prompt_tokens
+            replay_boundary = req_meta.prefill_end_tokens
             if (
                 self.kv_role == "kv_consumer"
                 and replay_boundary is not None
@@ -1727,39 +1629,18 @@ class MooncakeStoreWorker:
             )
             return
 
-        self._kv_cache_groups = [
-            dataclasses.replace(
-                group,
-                kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    group.kv_cache_spec,
-                    self.dcp_size,
-                ),
-            )
-            for group in kv_cache_config.prefix_cacheable_groups
-        ]
         if (
             self.save_decode_cache
             and kv_cache_config.has_mamba_layers
             and kv_cache_config.prefix_cache_retention_interval == 0
         ):
             kv_cache_config.prefix_cache_retention_interval = self.block_size
+        self.coord = MooncakeStoreCoordinator.from_kv_cache_config(
+            kv_cache_config, vllm_config, self.block_size, self.hash_block_size
+        )
+        self._kv_cache_groups = self.coord.kv_cache_groups
         self._group_tp_replication_factors = (
             self._compute_group_tp_replication_factors()
-        )
-        spec_cfg = getattr(vllm_config, "speculative_config", None)
-        use_eagle_block_drop = bool(
-            spec_cfg.use_eagle_block_drop()
-            if spec_cfg is not None
-            and callable(getattr(spec_cfg, "use_eagle_block_drop", None))
-            else False
-        )
-        self.coord = MooncakeStoreCoordinator(
-            self._kv_cache_groups,
-            scheduler_block_size=self.block_size,
-            hash_block_size=self.hash_block_size,
-            use_eagle=use_eagle_block_drop,
-            retention_interval=kv_cache_config.prefix_cache_retention_interval,
-            dcp_world_size=self.dcp_size,
         )
         self.store_tp_size, store_namespace, store_group_plans = (
             self._select_store_layout(extra_config)

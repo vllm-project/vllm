@@ -211,7 +211,7 @@ def test_mamba_cache_cg_padding(
         vllm_config.compilation_config.cudagraph_mode
     )
     if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
-        pytest.skip("CUDA/XPU graph is disabled.Please enable it to run this test. ")
+        pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
@@ -342,10 +342,13 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave headroom for the HF model that ran earlier in this process on a
+    # 32.5 GiB MIG.
     with vllm_runner(
         model,
         max_num_seqs=MAX_NUM_SEQS,
         attention_backend=ATTN_BACKEND,
+        gpu_memory_utilization=0.9,
         enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
