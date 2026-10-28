@@ -24,7 +24,7 @@ def test_store_matches_aiter():
     padded slots, and a latent that is a slice of a wider buffer."""
     pytest.importorskip("aiter")
     quant = pytest.importorskip("aiter.ops.quant")
-    from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+    from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 
     set_random_seed(0)
     num_blocks, block_size, gap = 8, 8, 5

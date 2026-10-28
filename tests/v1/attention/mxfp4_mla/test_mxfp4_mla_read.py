@@ -10,7 +10,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.ops.mxfp4_mla_read import _load_mxfp4_rows
+from vllm.v1.attention.ops.mxfp4_mla.read import _load_mxfp4_rows
 
 if current_platform.is_rocm() and torch.cuda.is_available():
     from vllm.platforms.rocm import get_cdna_version
@@ -108,7 +108,7 @@ def test_load_rows_matches_reference(hw_unpack: bool):
 def test_attention_matches_dequantized_cache(num_splits: int):
     """Attention over the packed cache equals attention over the same values
     stored as bf16, through the ragged kernel and the split-K decode kernel."""
-    from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+    from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         rocm_sparse_attn_decode_bf16,
         rocm_sparse_attn_prefill,

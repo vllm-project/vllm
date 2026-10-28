@@ -36,7 +36,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
 )
 from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
-from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,

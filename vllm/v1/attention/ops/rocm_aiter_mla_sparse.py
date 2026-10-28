@@ -20,7 +20,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.attention.ops.mxfp4_mla_read import load_mxfp4_rows
+from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
