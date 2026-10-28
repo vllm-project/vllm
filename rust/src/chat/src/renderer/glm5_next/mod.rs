@@ -21,29 +21,7 @@ pub struct Glm5NextChatRenderer {
     tokenizer: Option<Arc<writer::ControlTokenizer>>,
 }
 
-/// Chat templates shipped with GLM-5.3 and GLM-5.3-Flash, which this renderer
-/// reproduces.
-const SHIPPED_TEMPLATES: [&str; 2] = [
-    include_str!("fixtures/glm_5_3.jinja"),
-    include_str!("fixtures/glm_5_3_flash.jinja"),
-];
-
 impl Glm5NextChatRenderer {
-    /// Model types `auto` may select this renderer for. GLM-5 through GLM-5.3
-    /// share `glm_moe_dsa` with different templates, so the checkpoint's
-    /// template must also be [shipped](Self::is_shipped_template).
-    pub const AUTO_MODEL_TYPES: [&str; 2] = ["glm_moe_dsa", "glm5_next"];
-
-    /// Whether `template` is one this renderer reproduces.
-    pub fn is_shipped_template(template: Option<&str>) -> bool {
-        // Normalize as `load_chat_template` does for `.jinja` files.
-        let normalize = |template: &str| template.trim().replace("\\n", "\n");
-        template.is_some_and(|template| {
-            let template = normalize(template);
-            SHIPPED_TEMPLATES.iter().any(|shipped| normalize(shipped) == template)
-        })
-    }
-
     pub fn new(default_template_kwargs: HashMap<String, Value>) -> Self {
         Self {
             default_template_kwargs,

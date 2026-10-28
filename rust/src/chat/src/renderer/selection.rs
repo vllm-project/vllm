@@ -58,6 +58,7 @@ impl RendererSelection {
                 Self::GPT_OSS_MODEL_TYPE => Self::Harmony,
                 Self::INKLING_MODEL_TYPE => Self::Inkling,
                 Self::KIMI_K3_LITERAL => Self::KimiK3,
+                Self::GLM5_NEXT_LITERAL => Self::Glm5Next,
                 _ => Self::Hf,
             },
             selection => selection,
@@ -131,18 +132,17 @@ mod tests {
     }
 
     #[test]
-    fn glm5_next_is_not_resolved_from_model_type_alone() {
-        // `auto` also checks the checkpoint template; see `backend::hf`.
-        for model_type in ["glm5_next", "glm_moe_dsa"] {
-            assert_eq!(
-                RendererSelection::Auto.resolve(model_type),
-                RendererSelection::Hf
-            );
-            assert_eq!(
-                RendererSelection::Glm5Next.resolve(model_type),
-                RendererSelection::Glm5Next
-            );
-        }
+    fn auto_resolves_glm5_next_from_model_type_only() {
+        // GLM-5.3 shares `glm_moe_dsa` with GLM-5 through GLM-5.2, whose
+        // templates differ, so it needs an explicit `glm5_next`.
+        assert_eq!(
+            RendererSelection::Auto.resolve("glm5_next"),
+            RendererSelection::Glm5Next
+        );
+        assert_eq!(
+            RendererSelection::Auto.resolve("glm_moe_dsa"),
+            RendererSelection::Hf
+        );
     }
 
     #[test]
