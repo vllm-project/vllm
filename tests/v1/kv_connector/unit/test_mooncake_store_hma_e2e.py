@@ -101,8 +101,6 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.model_config.get_total_num_kv_heads.return_value = 8
     cfg.model_config.max_model_len = 4096
     cfg.scheduler_config.max_num_batched_tokens = 8192
-    # Without this, MagicMock's truthy use_eagle() triggers the coordinator's
-    # "use_eagle && nothing annotated → flag all groups" fallback.
     cfg.speculative_config = None
     cfg.num_hash_lookahead_tokens = 0
     return cfg
@@ -843,8 +841,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
-    resend-safe checkpoint is 8, leaving two attention blocks to save."""
+    reads the core-provided CoW target. The 12-token prompt's resend-safe
+    checkpoint is 8, leaving two attention blocks to save."""
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,

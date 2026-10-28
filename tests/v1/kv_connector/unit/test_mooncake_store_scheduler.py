@@ -1312,10 +1312,9 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
 
 
 @pytest.mark.parametrize("attention_block_size", [4, 8, 16])
-@pytest.mark.parametrize("use_eagle", [False, True])
 @pytest.mark.parametrize("num_workers", [1, 2])
 def test_finished_partial_tail_is_pre_pinned_as_store_job(
-    attention_block_size, use_eagle, num_workers
+    attention_block_size, num_workers
 ):
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler._store_group_ids = (0, 1)
@@ -1330,12 +1329,11 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
             head_size=1,
             dtype=torch.float32,
         ),
-        is_eagle_group=use_eagle,
     )
     scheduler._store_coord = MooncakeStoreCoordinator(
-        groups, 16, 4, use_eagle, enable_partial_hash_hits=True
+        groups, 16, 4, enable_partial_hash_hits=True
     )
-    prompt_tokens = 49 if use_eagle else 45
+    prompt_tokens = 45
     attention_ids = list(
         range(1, (prompt_tokens + attention_block_size - 1) // attention_block_size + 1)
     )
@@ -1366,9 +1364,9 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     # The exact source is pinned immediately, so the request can be freed
     # before the next connector metadata build.
     assert delay_free is False
-    proof_end = 48 if use_eagle else 44
+    checkpoint = 44
     expected = attention_ids[
-        32 // attention_block_size : (proof_end + attention_block_size - 1)
+        32 // attention_block_size : (checkpoint + attention_block_size - 1)
         // attention_block_size
     ]
     pool.free_blocks([pool.blocks[i] for i in owned_ids])
@@ -1400,10 +1398,10 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
     assert req_meta.boundary_puts == [
-        (0, attention_ids[idx], min((idx + 1) * attention_block_size, proof_end))
+        (0, attention_ids[idx], min((idx + 1) * attention_block_size, checkpoint))
         for idx in range(
             32 // attention_block_size,
-            (proof_end + attention_block_size - 1) // attention_block_size,
+            (checkpoint + attention_block_size - 1) // attention_block_size,
         )
     ] + [(1, 50, 44)]
     assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {50, *expected}
@@ -1419,51 +1417,12 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     assert all(pool.blocks[i].ref_cnt == 0 for i in owned_ids)
 
 
-def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
-    """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
-    only the Mamba group carries the eagle flag."""
-    groups = [
-        KVCacheGroupSpec(
-            ["attention"],
-            FullAttentionSpec(
-                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
-            ),
-        ),
-        KVCacheGroupSpec(
-            ["mamba"],
-            MambaSpec(
-                block_size=16,
-                shapes=((1,),),
-                dtypes=(torch.float32,),
-                mamba_cache_mode="align",
-            ),
-            is_eagle_group=True,
-        ),
-    ]
-    coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle=True)
-    # Core's checkpoint for a 49-token prompt: 48 minus one EAGLE hash unit.
-    req_meta = ReqMeta(
-        req_id="req-0",
-        token_len_chunk=0,
-        block_ids=([1, 2, 3, 4], [50]),
-        block_hashes=[bytes([i]) for i in range(12)],
-        num_prompt_tokens=49,
-        completed_token_len=49,
-        boundary_puts=[BoundaryPut(1, 50, 44)],
-    )
-
-    assert _partial_tail_non_mamba_puts(coord, req_meta, [16, 16]) == [
-        BoundaryPut(0, 3, 44)
-    ]
-
-
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_lookahead, mamba_tail, expected",
     [
-        # Legacy: checkpoint 72 - 4 = 68; the 8-token proof (76) is not computed.
-        (0, 68, []),
-        # Lookahead: core keeps the checkpoint at 72 and needs no proof block.
+        (0, 72, [BoundaryPut(0, 9, 72)]),
+        # One lookahead token leaves the aligned checkpoint at 72.
         (1, 72, [BoundaryPut(0, 9, 72)]),
         (5, 68, [BoundaryPut(0, 9, 68)]),
         (10, 60, [BoundaryPut(0, 7, 56), BoundaryPut(0, 8, 60)]),
@@ -1473,14 +1432,13 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
 def test_partial_tail_follows_lookahead_checkpoint(
     num_lookahead, mamba_tail, expected, publish
 ):
-    """Lookahead hashes move the prompt checkpoint and drop the proof margin."""
+    """Partial-tail saves follow the checkpoint's hash-ready boundary."""
     groups = [
         KVCacheGroupSpec(
             ["attention"],
             FullAttentionSpec(
                 block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
-            is_eagle_group=True,
         ),
         KVCacheGroupSpec(
             ["mamba"],
@@ -1493,7 +1451,7 @@ def test_partial_tail_follows_lookahead_checkpoint(
         ),
     ]
     coord = MooncakeStoreCoordinator(
-        groups, 16, 4, use_eagle=True, num_hash_lookahead_tokens=num_lookahead
+        groups, 16, 4, num_hash_lookahead_tokens=num_lookahead
     )
     req_meta = ReqMeta(
         req_id="req-0",
@@ -1523,10 +1481,10 @@ def test_partial_tail_follows_lookahead_checkpoint(
         # attention KV comes from the normal saves, so nothing is added here.
         (40, [40], False, []),
         # The prompt-completing save: blocks from the LCM floor 64 up to the
-        # checkpoint 68 plus the EAGLE proof unit, whether or not the junction
-        # hand-off is in the same save.
-        (75, [68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
-        (75, [40, 68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        # prompt checkpoint 72, whether or not the junction hand-off is
+        # in the same save.
+        (75, [72], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        (75, [40, 72], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
     ],
 )
 def test_shared_prefix_junction_handoff_adds_no_attention_tail(
@@ -1540,7 +1498,6 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
             FullAttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
-            is_eagle_group=True,
         ),
         KVCacheGroupSpec(
             ["mamba"],
@@ -1552,10 +1509,8 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
             ),
         ),
     ]
-    coord = MooncakeStoreCoordinator(
-        groups, 16, 4, use_eagle=True, enable_partial_hash_hits=True
-    )
-    # 75-token prompt: checkpoint 72 - 4 = 68.
+    coord = MooncakeStoreCoordinator(groups, 16, 4, enable_partial_hash_hits=True)
+    # 75-token prompt: the final reusable checkpoint is at 72.
     req_meta = ReqMeta(
         req_id="req-0",
         token_len_chunk=0,
