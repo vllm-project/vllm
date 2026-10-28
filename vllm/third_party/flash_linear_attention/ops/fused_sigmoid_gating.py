@@ -304,13 +304,15 @@ def fused_sigmoid_gating_delta_rule_update(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     # The deferred mode does less memory traffic per token, so it is bound by
-    # the serial token loop and gains from more, smaller programs.
+    # the serial token loop and gains from more, smaller programs. BV fixes the
+    # record layout, so it must not change between steps; num_warps may, and a
+    # single sequence is too few programs for one warp each.
     BK = triton.next_power_of_2(K)
     BV = min(triton.next_power_of_2(V), 16 if defer_spec_state else 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
-    num_warps = 1 if defer_spec_state else 4
+    num_warps = 1 if defer_spec_state and N > 1 else 4
 
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
