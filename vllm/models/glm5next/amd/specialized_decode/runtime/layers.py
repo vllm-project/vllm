@@ -102,20 +102,21 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
 
 def _bind_dsa(
     caches: Mapping[str, torch.Tensor],
-    kv_fp8: bool,
+    kv_cache_dtype: str,
     k_scales: Mapping[int, Any],
-    kv_mxfp4: bool = False,
 ) -> tuple[dict, list[str]]:
     """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512] (bf16,
-    or e4m3 bytes with ``kv_fp8``) or [blocks, tokens, 272] (``mxfp4_mla`` rows
-    with ``kv_mxfp4``), index cache [blocks, 16 n pools, 132] (16-pool tiles) and
-    kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every block with a
-    64-bit base."""
+    or e4m3 bytes for an fp8 ``kv_cache_dtype``) or [blocks, tokens, 272]
+    (``mxfp4_mla`` rows), index cache [blocks, 16 n pools, 132] (16-pool tiles)
+    and kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every block
+    with a 64-bit base."""
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
         MXFP4_ROW_BYTES,
         FlashDsaCaches,
     )
 
+    kv_fp8 = kv_cache_dtype.startswith("fp8")
+    kv_mxfp4 = kv_cache_dtype == "mxfp4_mla"
     width = MXFP4_ROW_BYTES if kv_mxfp4 else KV_LORA
     reasons, out = [], {}
     for key, kv in caches.items():
@@ -148,7 +149,7 @@ def _bind_dsa(
         k_scale = k_scales.get(int(idx)) if kv_fp8 else None
         if kv_fp8 and k_scale is None:
             reasons.append(f"layer {idx}: fp8 MLA cache without its k_scale")
-        out[int(idx)] = FlashDsaCaches(kv, ic, tail, k_scale)
+        out[int(idx)] = FlashDsaCaches(kv, ic, tail, k_scale, kv_cache_dtype)
     return out, reasons
 
 
@@ -179,9 +180,8 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
         states[int(idx)] = FlashKdaState(conv, rec)
     dsa, dsa_reasons = _bind_dsa(
         caches,
-        ctx.state.get("kv_fp8", False),
+        ctx.vllm_config.cache_config.cache_dtype,
         ctx.state.get("k_scales", {}),
-        ctx.state.get("kv_mxfp4", False),
     )
     reasons += dsa_reasons
     if not reasons:

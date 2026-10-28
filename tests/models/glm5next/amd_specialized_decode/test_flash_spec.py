@@ -41,11 +41,12 @@ def test_mxfp4_mla_cache_binds_by_dtype_and_row_width():
     pytest.importorskip("flydsl")
     mx = torch.zeros(3, 64, 272, dtype=torch.uint8)
     bf = torch.zeros(3, 64, 512, dtype=torch.bfloat16)
-    out, reasons = layers._bind_dsa(_dsa_caches(mx), False, {}, kv_mxfp4=True)
+    out, reasons = layers._bind_dsa(_dsa_caches(mx), "mxfp4_mla", {})
     assert not reasons and out[5].k_scale is None
-    _, reasons = layers._bind_dsa(_dsa_caches(bf), False, {}, kv_mxfp4=True)
+    assert out[5].kv_mxfp4 and not out[5].kv_fp8
+    _, reasons = layers._bind_dsa(_dsa_caches(bf), "mxfp4_mla", {})
     assert any("MLA cache" in r for r in reasons), reasons
-    _, reasons = layers._bind_dsa(_dsa_caches(mx), False, {})
+    _, reasons = layers._bind_dsa(_dsa_caches(mx), "auto", {})
     assert any("MLA cache" in r for r in reasons), reasons
 
 

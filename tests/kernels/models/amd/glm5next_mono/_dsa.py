@@ -193,6 +193,9 @@ class _Caches:
         # an e4m3 cache over a per-tensor scale (vLLM's _k_scale; not 1 here so
         # the test sees it applied)
         self.k_scale = None
+        self.kv_cache_dtype = (
+            "mxfp4_mla" if kv_mxfp4 else "fp8_e4m3" if kv_fp8 else "auto"
+        )
         if kv_fp8:
             self.k_scale = torch.tensor([0.5], device=device)
             self.kv = _e4m3(self.kv, self.k_scale)
@@ -243,7 +246,9 @@ class _Caches:
             FlashDsaCaches,
         )
 
-        return FlashDsaCaches(self.kv, self.idx, self.tail, self.k_scale)
+        return FlashDsaCaches(
+            self.kv, self.idx, self.tail, self.k_scale, self.kv_cache_dtype
+        )
 
     def deq(self, rows: torch.Tensor) -> torch.Tensor:
         """Cache rows as fp32 values."""
