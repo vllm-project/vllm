@@ -468,18 +468,14 @@ class DefaultModelLoader(BaseModelLoader):
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
         if parallel_config.enable_eplb:
-            # EPLB owns num_experts + num_redundant_experts physical slots
-            # per layer; redundant slots map to logical experts outside this
-            # rank's default partition, so filter by what the initial
-            # placement actually needs instead of the plain EP shard.
+            # Redundant slots replicate experts from other ranks' shards, so
+            # filter by the initial EPLB placement instead of the EP shard.
             if parallel_config.enable_elastic_ep:
-                # Elastic EP pads the physical capacity and the placement
-                # evolves at runtime; keep loading all expert weights.
+                # Padded capacity and a placement that evolves at runtime.
                 return
             num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
-            # The set is derived from the config, so only use it when the
-            # model allocated exactly that layout: under any other layout the
-            # skipped experts could be ones its slots need.
+            # The set comes from the config; skipping is only safe when the
+            # model allocated exactly that layout.
             from vllm.model_executor.models.interfaces import (
                 get_mixture_of_experts_model,
             )

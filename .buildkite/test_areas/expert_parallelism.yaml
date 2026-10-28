@@ -60,6 +60,22 @@ steps:
       - tests/distributed/test_eplb_spec_decode.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (B200) [Nightly] EP Weight Filter with EPLB"
+  key: ep-weight-filter-eplb-2xb200
+  # Needs VLLM_BATCH_INVARIANT for MLA, so no ROCm mirror.
+  optional: true
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/default_loader.py
+  - vllm/model_executor/model_loader/ep_weight_filter.py
+  - vllm/distributed/eplb
+  - tests/model_executor/model_loader/test_ep_weight_filter_eplb.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_ep_weight_filter_eplb.py
+
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (H100) [Nightly] Elastic EP Scaling"
 #   key: elastic-ep-scaling-test

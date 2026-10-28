@@ -4,14 +4,11 @@
 
 import glob
 import tempfile
-from types import SimpleNamespace
 
 import huggingface_hub.constants
 import pytest
 import torch
 
-from vllm.config import LoadConfig
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_eplb_local_expert_ids,
     compute_local_expert_ids,
@@ -21,7 +18,6 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
-from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id
@@ -239,107 +235,36 @@ class TestComputeEplbLocalExpertIds:
     def test_model_side_forces_linear_placement(self):
         # The filter always splits physical slots linearly under EPLB, which
         # relies on the model refusing round-robin placement there as well.
+        from vllm.model_executor.layers.fused_moe.config import (
+            FusedMoEParallelConfig,
+        )
         from vllm.model_executor.layers.fused_moe.expert_map_manager import (
             determine_expert_placement_strategy,
         )
 
+        moe_parallel_config = FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=8,
+            ep_size=8,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=True,
+        )
         for num_redundant in (0, 32):
             strategy = determine_expert_placement_strategy(
                 "round_robin",
-                moe_parallel_config=None,
+                moe_parallel_config,
                 num_expert_group=8,
                 num_redundant_experts=num_redundant,
                 enable_eplb=True,
             )
             assert strategy == "linear"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests for DefaultModelLoader._init_ep_weight_filter
-# ---------------------------------------------------------------------------
-
-
-class _EplbMoEModel(torch.nn.Module, MixtureOfExperts):
-    """MixtureOfExperts exposing only the expert layout the loader checks."""
-
-    def __init__(self, num_logical_experts: int, num_physical_experts: int):
-        super().__init__()
-        self.num_moe_layers = 1
-        self.num_logical_experts = num_logical_experts
-        self.num_physical_experts = num_physical_experts
-
-
-class TestInitEpWeightFilter:
-    """Expert set picked by the loader for EP=2 over 8 logical experts."""
-
-    @staticmethod
-    def _local_expert_ids(
-        monkeypatch: pytest.MonkeyPatch,
-        model: torch.nn.Module,
-        *,
-        ep_rank: int = 1,
-        enable_eplb: bool = True,
-        num_redundant: int = 2,
-        enable_elastic_ep: bool = False,
-        placement: str = "linear",
-    ) -> set[int] | None:
-        parallel_config = SimpleNamespace(
-            enable_expert_parallel=True,
-            enable_ep_weight_filter=True,
-            data_parallel_size=2,
-            tensor_parallel_size=1,
-            prefill_context_parallel_size=1,
-            enable_eplb=enable_eplb,
-            enable_elastic_ep=enable_elastic_ep,
-            eplb_config=SimpleNamespace(num_redundant_experts=num_redundant),
-            expert_placement_strategy=placement,
-        )
-        monkeypatch.setattr(
-            "vllm.config.get_current_vllm_config",
-            lambda: SimpleNamespace(parallel_config=parallel_config),
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.get_dp_group",
-            lambda: SimpleNamespace(rank_in_group=ep_rank),
-        )
-        model_config = SimpleNamespace(is_moe=True, get_num_experts=lambda: 8)
-        loader = DefaultModelLoader(LoadConfig())
-        loader._init_ep_weight_filter(model, model_config)
-        return loader.local_expert_ids
-
-    def test_eplb_loads_initial_placement(self, monkeypatch):
-        # Rank 1 owns physical slots 5-9; slots 8 and 9 replicate logical 0, 1.
-        model = _EplbMoEModel(8, 10)
-        assert self._local_expert_ids(monkeypatch, model) == {0, 1, 5, 6, 7}
-
-    def test_eplb_ignores_round_robin_request(self, monkeypatch):
-        model = _EplbMoEModel(8, 10)
-        ids = self._local_expert_ids(monkeypatch, model, placement="round_robin")
-        assert ids == {0, 1, 5, 6, 7}
-
-    def test_eplb_elastic_ep_loads_everything(self, monkeypatch):
-        model = _EplbMoEModel(8, 10)
-        ids = self._local_expert_ids(monkeypatch, model, enable_elastic_ep=True)
-        assert ids is None
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            pytest.param(torch.nn.Module(), id="not-moe"),
-            pytest.param(_EplbMoEModel(8, 8), id="no-redundant-slots"),
-            pytest.param(_EplbMoEModel(10, 12), id="other-logical-count"),
-        ],
-    )
-    def test_eplb_unexpected_layout_loads_everything(self, monkeypatch, model):
-        # The set is derived from the config; a model whose slots follow a
-        # different layout must not have any of its expert weights skipped.
-        assert self._local_expert_ids(monkeypatch, model) is None
-
-    def test_without_eplb_uses_plain_partition(self, monkeypatch):
-        ids = self._local_expert_ids(
-            monkeypatch, torch.nn.Module(), enable_eplb=False, num_redundant=0
-        )
-        assert ids == {4, 5, 6, 7}
 
 
 # ---------------------------------------------------------------------------
