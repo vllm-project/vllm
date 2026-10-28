@@ -36,6 +36,9 @@ FUSED_MHC_MAX_ROWS = 384
 MHC_OVERLAP_MAX_ROWS = 48
 # Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
 # (6 at one request).
+# TP4 is one GB300 tray; TP8 spans two trays of an NVL72 NVLink domain, with
+# each rank holding a 288-column slice of the routed experts' intermediate.
+SUPPORTED_TP_SIZES = (4, 8)
 LOW_BATCH_MAX_ROWS = 8
 # The FlashInfer (requirements/cuda.txt) whose internals the publishing wo_b
 # GEMM, the MXFP8 layer input and the pinned MXFP8 tactics were checked
@@ -82,9 +85,9 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     requirements = {
         "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
         "Model Runner V2": vllm_config.use_v2_model_runner,
-        "tensor parallel size 4 without pipeline, data, expert or context "
-        "parallelism or micro-batching": (
-            parallel.tensor_parallel_size == 4
+        "tensor parallel size 4 or 8 without pipeline, data, expert or "
+        "context parallelism or micro-batching": (
+            parallel.tensor_parallel_size in SUPPORTED_TP_SIZES
             and parallel.pipeline_parallel_size == 1
             and parallel.data_parallel_size == 1
             and not parallel.enable_expert_parallel
@@ -121,7 +124,7 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and vllm_config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
-        "DeepGEMM and NVLink multicast for the fused all-reduce + mHC": (
+        "DeepGEMM for the fused all-reduce + mHC": (
             supports_mhc_overlap(vllm_config) and supports_mhc_all_reduce(vllm_config)
         ),
     }
@@ -142,8 +145,7 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
         raise ValueError("Supported decode_backend values are auto/latency_specialized")
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
-    # The NVLink multicast check is rank-local (the custom all-reduce catches a
-    # failed setup on each rank), and ranks that disagree would hang.
+    # Ranks that disagree would issue different collectives and hang.
     dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=get_tp_group().cpu_group)
     if not supported.item():
         reason = "; ".join(missing) or "another tensor parallel rank to support it"

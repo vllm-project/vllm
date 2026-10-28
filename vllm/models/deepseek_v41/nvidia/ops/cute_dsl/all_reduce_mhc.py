@@ -33,7 +33,9 @@ import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
+import vllm.envs as envs
 from vllm.distributed import get_tp_group
+from vllm.logger import init_logger
 from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
 
 from .primitives import (
@@ -64,9 +66,14 @@ from .primitives import (
     store_global_u32x4,
     store_lamport_sentinel_u32x4,
     store_shared_cluster_f32,
+    stuc_bf16x2,
+    stuc_bf16x4,
+    stuc_bf16x8,
     to_cute,
     to_cute_dynamic,
 )
+
+logger = init_logger(__name__)
 
 LAMPORT_GENERATIONS = 3
 NEXT_STAGE = 0
@@ -126,6 +133,7 @@ class _SharedOnlyPublishDeviceKernel:
         threads: int,
         release_before_store: bool,
         enable_pdl: bool,
+        unicast: bool = False,
     ) -> None:
         if elements_per_thread not in (1, QUAD_BF16, VEC_BF16):
             raise ValueError("elements_per_thread must be 1, 4, or 8")
@@ -141,6 +149,7 @@ class _SharedOnlyPublishDeviceKernel:
         self.ctas_per_token = math.ceil(self.fragments / threads)
         self.release_before_store = release_before_store
         self.enable_pdl = enable_pdl
+        self.unicast = unicast
 
     @cute.jit
     def __call__(
@@ -242,30 +251,54 @@ class _SharedOnlyPublishDeviceKernel:
                     (Int64(stage) * self.tp + self.rank) * self.capacity_m
                     + Int64(token)
                 ) * self.hidden + Int64(fragment)
-                stmc_bf16x2(
-                    contribution_mailbox_multicast_address + mailbox_element * 2,
-                    packed_word,
-                )
+                if cutlass.const_expr(self.unicast):
+                    stuc_bf16x2(
+                        contribution_mailbox_multicast_address,
+                        mailbox_element * 2,
+                        packed_word,
+                        self.tp,
+                    )
+                else:
+                    stmc_bf16x2(
+                        contribution_mailbox_multicast_address + mailbox_element * 2,
+                        packed_word,
+                    )
         elif cutlass.const_expr(self.elements_per_thread == QUAD_BF16):
             if fragment < self.fragments:
                 mailbox_element = (
                     (Int64(stage) * self.tp + self.rank) * self.capacity_m
                     + Int64(token)
                 ) * self.hidden + Int64(fragment) * QUAD_BF16
-                stmc_bf16x4(
-                    contribution_mailbox_multicast_address + mailbox_element * 2,
-                    packed_words,
-                )
+                if cutlass.const_expr(self.unicast):
+                    stuc_bf16x4(
+                        contribution_mailbox_multicast_address,
+                        mailbox_element * 2,
+                        packed_words,
+                        self.tp,
+                    )
+                else:
+                    stmc_bf16x4(
+                        contribution_mailbox_multicast_address + mailbox_element * 2,
+                        packed_words,
+                    )
         else:
             if fragment < self.fragments:
                 mailbox_element = (
                     (Int64(stage) * self.tp + self.rank) * self.capacity_m
                     + Int64(token)
                 ) * self.hidden + Int64(fragment) * VEC_BF16
-                stmc_bf16x8(
-                    contribution_mailbox_multicast_address + mailbox_element * 2,
-                    packed_words,
-                )
+                if cutlass.const_expr(self.unicast):
+                    stuc_bf16x8(
+                        contribution_mailbox_multicast_address,
+                        mailbox_element * 2,
+                        packed_words,
+                        self.tp,
+                    )
+                else:
+                    stmc_bf16x8(
+                        contribution_mailbox_multicast_address + mailbox_element * 2,
+                        packed_words,
+                    )
 
         if cutlass.const_expr(not self.release_before_store):
             if block == 0 and tidx == 0:
@@ -294,6 +327,7 @@ class _QuadFinalizePublishDeviceKernel:
         enable_pdl: bool,
         prefetch_group: int,
         fp32_weights: bool = False,
+        unicast: bool = False,
     ) -> None:
         if hidden <= 0 or hidden % QUAD_BF16:
             raise ValueError("hidden must be a positive multiple of 4")
@@ -309,6 +343,7 @@ class _QuadFinalizePublishDeviceKernel:
         self.include_shared_expert = include_shared_expert
         self.load_shared_expert_before_pdl = load_shared_expert_before_pdl
         self.enable_pdl = enable_pdl
+        self.unicast = unicast
         self.prefetch_group = prefetch_group
         self.prefetch_groups = (top_k + prefetch_group - 1) // prefetch_group
         self.fp32_weights = fp32_weights
@@ -516,10 +551,18 @@ class _QuadFinalizePublishDeviceKernel:
             mailbox_element = (
                 (Int64(stage) * self.tp + self.rank) * self.capacity_m + Int64(token)
             ) * self.hidden + Int64(fragment) * QUAD_BF16
-            stmc_bf16x4(
-                contribution_mailbox_multicast_address + mailbox_element * 2,
-                packed,
-            )
+            if cutlass.const_expr(self.unicast):
+                stuc_bf16x4(
+                    contribution_mailbox_multicast_address,
+                    mailbox_element * 2,
+                    packed,
+                    self.tp,
+                )
+            else:
+                stmc_bf16x4(
+                    contribution_mailbox_multicast_address + mailbox_element * 2,
+                    packed,
+                )
 
         if block == 0 and tidx == 0:
             store_global_u32(
@@ -1004,6 +1047,28 @@ class AllReduceMHC:
         # a 640-fragment token in one fully used trip, and the finalize stages
         # all top_k rows at once.
         with torch.accelerator.device_index(device.index):
+            self._mailbox = symm_mem.empty(
+                (LAMPORT_GENERATIONS, tp, capacity, hidden),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self._mailbox_handle = symm_mem.rendezvous(self._mailbox, group)
+            multicast = int(self._mailbox_handle.multicast_ptr or 0)
+            # Without NVLink multicast (or when forced), the publish kernels
+            # store into every rank's mailbox through a table of their bases.
+            self.unicast = envs.VLLM_DSV41_MHC_UNICAST or not multicast
+            if self.unicast:
+                self._peer_table = torch.tensor(
+                    self._mailbox_handle.buffer_ptrs, dtype=torch.int64, device=device
+                )
+                multicast = self._peer_table.data_ptr()
+            elif multicast % 16:
+                raise RuntimeError("misaligned NVLink multicast mapping")
+            self._multicast = multicast
+            logger.info_once(
+                "DSV4.1 mHC: Lamport all-reduce publishes with %s.",
+                "unicast NVLink stores" if self.unicast else "NVLink multicast",
+            )
             self._publish = cute.compile(
                 _SharedOnlyPublishDeviceKernel(
                     hidden=hidden,
@@ -1014,6 +1079,7 @@ class AllReduceMHC:
                     threads=128,
                     release_before_store=False,
                     enable_pdl=True,
+                    unicast=self.unicast,
                 ),
                 make_fake_dynamic_compact_tensor(
                     BFloat16, alignment=16, divisibility=hidden
@@ -1038,6 +1104,7 @@ class AllReduceMHC:
                     enable_pdl=True,
                     prefetch_group=top_k,
                     fp32_weights=True,
+                    unicast=self.unicast,
                 ),
                 make_fake_dynamic_compact_tensor(
                     BFloat16, alignment=16, divisibility=hidden
@@ -1137,16 +1204,6 @@ class AllReduceMHC:
                     hidden, dtype=torch.bfloat16, device=device
                 )
 
-            self._mailbox = symm_mem.empty(
-                (LAMPORT_GENERATIONS, tp, capacity, hidden),
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            self._mailbox_handle = symm_mem.rendezvous(self._mailbox, group)
-            multicast = int(self._mailbox_handle.multicast_ptr or 0)
-            if not multicast or multicast % 16:
-                raise RuntimeError("NVLink multicast mapping is unavailable")
-            self._multicast = multicast
             # Every slot starts as the Lamport sentinel, BF16 negative zero.
             self._mailbox.view(torch.int16).fill_(-32768)
             self._stage_state = torch.zeros(2, dtype=torch.int32, device=device)

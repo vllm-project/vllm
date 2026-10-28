@@ -14,8 +14,10 @@ startup on every TP rank with the missing requirements:
 
 - GPU: GB300 (SM103).
 - Runner: Model Runner V2.
-- Parallelism: TP=4; no pipeline, data, expert or context parallelism, no
-  micro-batching.
+- Parallelism: TP=4 (one GB300 tray) or TP=8 (two trays of an NVL72 NVLink
+  domain; each rank holds a 288-column slice of the routed experts'
+  intermediate, padded to 384); no pipeline, data, expert or context
+  parallelism, no micro-batching.
 - Speculative decoding: DSpark, without adaptive verification.
 - Attention: `FLASHINFER_MLA_SPARSE_DSV41`, fp8 KV cache, MXFP4 indexer with
   sparse logits.
@@ -23,16 +25,15 @@ startup on every TP rank with the missing requirements:
   `FULL_DECODE_ONLY`).
 - No `torch.compile` of the model, no sleep mode.
 - No LoRA, KV transfer or batch invariance.
-- DeepGEMM and NVLink multicast for the fused all-reduce + mHC.
+- DeepGEMM for the fused all-reduce + mHC. Its Lamport mailbox publishes
+  over NVLink multicast when the symmetric-memory rendezvous maps one on every
+  rank, and otherwise with unicast stores into each rank's mailbox
+  (`VLLM_DSV41_MHC_UNICAST=1` forces the unicast path).
 
-This check runs once, at startup. The configuration is the same on every
-rank, but the last requirement is probed per rank: the custom all-reduce sets
-up its NVLink multicast buffers on each rank and catches a failure there, so
-one rank can be without them while the others have them. The ranks' results
-are therefore combined with a MIN all-reduce over the TP group: if any rank
-misses a requirement, every rank raises, rather than some ranks running the
-specialized decode and others the stock one, which issue different
-collectives and would hang. Which forward steps use the executor depends
+This check runs once, at startup. The ranks' results are combined with a MIN
+all-reduce over the TP group: if any rank misses a requirement, every rank
+raises, rather than some ranks running the specialized decode and others the
+stock one, which issue different collectives and would hang. Which forward steps use the executor depends
 only on the batch, which every TP rank receives identically, so that needs no
 collective.
 

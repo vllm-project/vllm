@@ -17,8 +17,10 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
   sets up to exactly tied scores);
 * one CUDA graph of all of these, replayed ``REPLAYS`` times bitwise.
 
-Needs four SM100-family GPUs with NVLink multicast and flashinfer-python
-0.7.2; about 5 minutes. For a race stress run, run this file as a module
+The fused all-reduce publishes over NVLink multicast where the mailbox gets a
+mapping and with unicast stores otherwise; the ``unicast`` case forces the
+latter. Needs four SM100-family GPUs and flashinfer-python 0.7.2; about 5
+minutes per case. For a race stress run, run this file as a module
 (``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics``)
 with ``--replays 100000``.
 """
@@ -806,7 +808,9 @@ def run(replays: int) -> str | None:
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="needs SM100"
 )
-def test_specialized_decode_numerics():
+@pytest.mark.parametrize("unicast", [False, True], ids=["multicast", "unicast"])
+def test_specialized_decode_numerics(unicast, monkeypatch):
+    monkeypatch.setenv("VLLM_DSV41_MHC_UNICAST", "1" if unicast else "0")
     if torch.accelerator.device_count() < TP:
         pytest.skip("needs four GPUs")
     from vllm.models.deepseek_v41.nvidia.specialized_decode import FLASHINFER_VERSION
