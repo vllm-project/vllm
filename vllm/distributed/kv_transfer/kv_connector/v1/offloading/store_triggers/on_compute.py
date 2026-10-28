@@ -61,11 +61,14 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],
     ) -> StoreJobsOutput:
-        output = self._build_partial_tail_store_jobs(scheduler_output, req_states)
-        store_output = self._build_store_jobs(scheduler_output, req_states)
-        output.jobs.extend(store_output.jobs)
-        output.num_allocation_failures += store_output.num_allocation_failures
-        return output
+        partial = self._build_partial_tail_store_jobs(scheduler_output, req_states)
+        chunks = self._build_chunk_store_jobs(scheduler_output, req_states)
+        return StoreJobsOutput(
+            jobs=partial.jobs + chunks.jobs,
+            num_allocation_failures=(
+                partial.num_allocation_failures + chunks.num_allocation_failures
+            ),
+        )
 
     @override
     def on_load_scheduled(
@@ -321,7 +324,7 @@ class OnComputeStoreHandler(StoreTriggerHandler):
 
         return output
 
-    def _build_store_jobs(
+    def _build_chunk_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],

@@ -330,7 +330,7 @@ def _store_jobs(
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
     return scheduler._add_store_jobs(
-        handler._build_store_jobs(scheduler_output, scheduler._req_status)
+        handler._build_chunk_store_jobs(scheduler_output, scheduler._req_status)
     )
 
 
@@ -3573,7 +3573,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_store_jobs's fence."""
+    _build_chunk_store_jobs's fence."""
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -4281,7 +4281,7 @@ def test_request_level_supply_covers_consumer_demand(
     """A REQUEST_LEVEL producer must offer every key a consumer will demand.
 
     Same relation as `test_sliding_window_demand_is_store_reachable`, but at
-    the level where the key set is really built: `_build_store_jobs` prunes
+    the level where the key set is really built: `_build_chunk_store_jobs` prunes
     chunks with a null GPU block and unreachable SWA chunks, while the demand
     comes from an independent scan.
     """
