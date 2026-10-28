@@ -264,8 +264,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
     )
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
@@ -1097,6 +1096,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+            if self.use_sequence_parallel:
+                pre_mix = sp_shard(pre_mix)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.start_layer, self.decoder_replay_start),
@@ -1141,6 +1142,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ] + late_aux
 
         if not get_pp_group().is_last_rank:
+            # PP transport expects tensors replicated across TP ranks.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "pre_mix": pre_mix}
             )
