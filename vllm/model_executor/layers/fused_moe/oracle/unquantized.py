@@ -280,6 +280,21 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     if moe_config.is_lora_enabled:
+        # The Punica path is token-major: it re-aligns `topk_ids` per adapter
+        # and needs the token->LoRA mapping for the tokens this rank owns,
+        # which only the Standard-format DP/EP prepare/finalize forwards after
+        # dispatch (NaiveDPEPPrepareAndFinalize.set_lora_context). No
+        # BatchedExperts implementation supports LoRA at all.
+        if moe_config.activation_format != mk.FusedMoEActivationFormat.Standard:
+            raise ValueError(
+                "MoE LoRA requires a Standard activation layout, but this "
+                "deployment produces "
+                f"'{moe_config.activation_format.value[0]}' "
+                "(all2all_backend="
+                f"'{moe_config.moe_parallel_config.all2all_backend}', "
+                f"moe_backend='{moe_config.moe_backend}'). Disable LoRA or "
+                "select a backend that produces the Standard layout."
+            )
         if _trtllm_bf16_lora_supported(moe_config):
             from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
                 TrtLlmBf16LoRAExperts,

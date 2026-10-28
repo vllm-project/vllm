@@ -614,6 +614,45 @@ def test_select_lora_explicit_non_triton_backend():
 
 
 @skipif_not_cuda_rocm
+@pytest.mark.parametrize(
+    ("all2all_backend", "moe_backend", "expected_format"),
+    [
+        ("deepep_low_latency", "auto", "batched_experts"),
+        ("nixl_ep", "auto", "batched_experts"),
+        ("deepep_v2", "auto", "padded_standard"),
+        ("allgather_reducescatter", "batched_triton", "batched_experts"),
+    ],
+)
+def test_lora_rejects_non_standard_activation_layout(
+    all2all_backend, moe_backend, expected_format
+):
+    """LoRA's token-major Punica path cannot consume BatchedExperts or padded
+    layouts, so backend selection must reject them with a clear error."""
+    moe_config = make_dummy_moe_config()
+    moe_config.is_lora_enabled = True
+    moe_config.moe_backend = moe_backend
+    parallel = moe_config.moe_parallel_config
+    parallel.use_ep = True
+    parallel.dp_size = 2
+    parallel.ep_size = 2
+    parallel.all2all_backend = all2all_backend
+    assert moe_config.activation_format.value[0] == expected_format
+
+    with pytest.raises(ValueError, match="requires a Standard activation layout"):
+        select_unquantized_moe_backend(moe_config=moe_config)
+
+
+def test_batched_experts_do_not_support_lora():
+    """BatchedExperts kernels operate on [E, max_tokens, K], so they cannot
+    run the token-major LoRA shrink/expand path."""
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        BatchedTritonExperts,
+    )
+
+    assert not BatchedTritonExperts.supports_lora()
+
+
+@skipif_not_cuda_rocm
 @pytest.mark.parametrize("is_lora_enabled", [False, True])
 def test_select_explicit_triton_backend(is_lora_enabled):
     """Explicit triton backend selection should return Triton."""

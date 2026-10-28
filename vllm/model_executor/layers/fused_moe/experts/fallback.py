@@ -45,8 +45,17 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         cls: type["FallbackExperts"],
     ) -> mk.FusedMoEActivationFormat:
         experts_cls, fallback_cls = cls.get_clses()
-        assert experts_cls.activation_format() == fallback_cls.activation_format()
-        return experts_cls.activation_format()
+        experts_format = experts_cls.activation_format()
+        fallback_format = fallback_cls.activation_format()
+        # Either branch may be selected at runtime, so only claim a format both
+        # can consume. PaddedStandard is a superset of Standard, not vice versa.
+        if experts_format.is_superset(fallback_format):
+            return fallback_format
+        assert fallback_format.is_superset(experts_format), (
+            f"{experts_cls.__name__} and {fallback_cls.__name__} consume "
+            "incompatible activation formats"
+        )
+        return experts_format
 
     @classmethod
     def _supports_current_device(cls) -> bool:

@@ -461,6 +461,107 @@ def _mxfp6_e2m3_quantize(
     return A, None
 
 
+@triton.jit
+def _masked_amax_scale_kernel(
+    x_ptr,
+    valid_ptr,
+    bound_ptr,
+    out_ptr,
+    num_rows,
+    num_cols,
+    stride_row,
+    stride_col,
+    scale_max,
+    eps,
+    HAS_MASK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows_valid = rows < num_rows
+    if HAS_MASK:
+        rows_valid = rows_valid & tl.load(
+            valid_ptr + rows, mask=rows_valid, other=0
+        ).to(tl.int1)
+    else:
+        # Padding always trails the valid rows, so a device-side row count is
+        # enough and saves materializing a mask.
+        rows_valid = rows_valid & (rows < tl.load(bound_ptr))
+    amax = 0.0
+    for col_start in range(0, num_cols, BLOCK_K):
+        cols = col_start + tl.arange(0, BLOCK_K)
+        mask = rows_valid[:, None] & (cols[None, :] < num_cols)
+        vals = tl.load(
+            x_ptr + rows[:, None] * stride_row + cols[None, :] * stride_col,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.max(tl.abs(vals), axis=1), axis=0))
+    tl.atomic_max(out_ptr, tl.maximum(amax / scale_max, eps))
+
+
+def masked_amax_scale(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    *,
+    row_valid: torch.Tensor | None = None,
+    num_valid: torch.Tensor | None = None,
+    eps: float = 1e-10,
+) -> torch.Tensor:
+    """Per-tensor activation quant scale that skips rows without a route.
+
+    ``PaddedStandard`` buffers carry rows that hold no route (``topk_ids == -1``)
+    and whose contents are uninitialized, so a tensor-wide absmax would be
+    poisoned by them. Those rows are dropped from the reduction instead; their
+    quantized values are never consumed by an expert GEMM.
+
+    Args:
+        x: 2D activations to reduce.
+        quant_dtype: Target quantization dtype (``torch.int8`` or a float8).
+        row_valid: Boolean flags, one per row of ``x``. Use when the valid rows
+            are not a prefix.
+        num_valid: 1-element device tensor holding the number of leading valid
+            rows. Cheaper than ``row_valid`` when padding trails the rows.
+        eps: Lower bound on the returned scale, matching the dynamic kernels.
+
+    """
+    assert x.dim() == 2, f"expected 2D activations, got {x.shape}"
+    assert (row_valid is None) != (num_valid is None), (
+        "pass exactly one of row_valid / num_valid"
+    )
+    if row_valid is not None:
+        assert row_valid.shape == (x.size(0),), (
+            f"expected {x.size(0)} row flags, got {tuple(row_valid.shape)}"
+        )
+        row_valid = row_valid.contiguous()
+    else:
+        assert num_valid is not None
+        assert num_valid.numel() == 1, f"expected 1 row count, got {num_valid}"
+    scale_max = (
+        127.0 if quant_dtype == torch.int8 else float(torch.finfo(quant_dtype).max)
+    )
+    out = torch.zeros((1,), dtype=torch.float32, device=x.device)
+    block_m, block_k = 32, 128
+    _masked_amax_scale_kernel[(triton.cdiv(x.size(0), block_m),)](
+        x,
+        # The selector that HAS_MASK discards is never dereferenced.
+        out if row_valid is None else row_valid,
+        out if num_valid is None else num_valid,
+        out,
+        x.size(0),
+        x.size(1),
+        x.stride(0),
+        x.stride(1),
+        scale_max,
+        eps,
+        HAS_MASK=row_valid is not None,
+        BLOCK_M=block_m,
+        BLOCK_K=block_k,
+    )
+    return out
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
