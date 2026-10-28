@@ -11,7 +11,12 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
-from vllm.config import VllmConfig, get_current_vllm_config
+import vllm.platforms.rocm_kv_cache_dtypes  # noqa: F401  (registers mxfp4_qsa)
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -53,7 +58,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
-    KVQuantMode,
     get_kv_quant_mode,
 )
 from vllm.v1.worker.workspace import (
@@ -62,10 +66,7 @@ from vllm.v1.worker.workspace import (
 )
 
 from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
-from . import (
-    model,
-    mxfp4_qsa_dtype,  # noqa: F401  (registers mxfp4_qsa in workers)
-)
+from . import model
 from .indexer_qsa import QSAIndexer
 from .ops.mxfp4_kv import record_bytes, store_mxfp4_qsa
 
@@ -119,7 +120,8 @@ _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "octave_k3v3",
     "octave_k3v3_compact",
 )
-# mxfp4_qsa is registered at runtime (mxfp4_qsa_dtype.py), so not a CacheDType.
+# mxfp4_qsa is registered at runtime (vllm/platforms/rocm_kv_cache_dtypes.py),
+# so it is not a CacheDType.
 _QSA_CACHE_DTYPES: tuple[str, ...] = (
     "auto",
     "bfloat16",
@@ -184,9 +186,14 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        if spec.kv_quant_mode == KVQuantMode.CUSTOM:
-            # mxfp4_qsa, the only CUSTOM dtype here: one K+V record per
-            # (token, head). The hybrid page alignment sizes the page from this.
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is not None
+            and vllm_config.cache_config.cache_dtype == "mxfp4_qsa"
+            and spec.dtype == torch.uint8
+        ):
+            # One K+V record per (token, head); the hybrid page alignment sizes
+            # the page from this. Layers kept at the model dtype keep theirs.
             return replace(spec, state_content_bytes=record_bytes(spec.head_size))
         from vllm.v1.attention.backends.rocm_octave_attn import (
             RocmOctaveAttentionBackend,

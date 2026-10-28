@@ -288,13 +288,58 @@ def test_rocm_platform_registers_the_dtype_before_config_validation(monkeypatch)
 
     assert get_kv_cache_dtype_handler("mxfp4_qsa") is not None
     assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4_qsa"] is torch.uint8
-    assert get_kv_quant_mode("mxfp4_qsa") == KVQuantMode.CUSTOM
+    # The QSA backend owns every read and write: no generic quantized-KV mode.
+    assert get_kv_quant_mode("mxfp4_qsa") == KVQuantMode.NONE
     assert CacheConfig(block_size=16, cache_dtype="mxfp4_qsa").cache_dtype == (
         "mxfp4_qsa"
     )
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["mxfp4_qsa", "auto"])
+@pytest.mark.parametrize(
+    ("cache_dtype", "layer_dtype", "bytes_per_head"),
+    [
+        ("mxfp4_qsa", "mxfp4_qsa", 272),
+        # A layer kept at the model dtype under an mxfp4_qsa config.
+        ("mxfp4_qsa", "auto", 2 * HEAD_DIM * 2),
+        ("fp8", "fp8", 2 * HEAD_DIM),
+        ("auto", "auto", 2 * HEAD_DIM * 2),
+    ],
+)
+def test_customize_spec_gives_each_dtype_its_record_size(
+    monkeypatch, cache_dtype, layer_dtype, bytes_per_head
+):
+    """Only mxfp4_qsa pages take the MXFP4 record; other dtypes keep theirs."""
+    import types
+
+    import vllm.config.vllm as vllm_config_mod
+    import vllm.models.qwen4_exp.amd.model  # noqa: F401  (qsa's import order)
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAFlashAttentionBackend
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+
+    monkeypatch.setattr(
+        vllm_config_mod,
+        "_current_vllm_config",
+        types.SimpleNamespace(
+            cache_config=types.SimpleNamespace(cache_dtype=cache_dtype)
+        ),
+    )
+    spec = FullAttentionSpec(
+        block_size=1,
+        num_kv_heads=2,
+        head_size=HEAD_DIM,
+        dtype=(
+            torch.bfloat16
+            if layer_dtype == "auto"
+            else STR_DTYPE_TO_TORCH_DTYPE[layer_dtype]
+        ),
+        kv_quant_mode=get_kv_quant_mode(layer_dtype),
+    )
+    customized = Qwen4ExpQSAFlashAttentionBackend.customize_spec(spec)
+    assert customized.page_size_bytes == 2 * bytes_per_head
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["mxfp4_qsa", "fp8", "auto"])
 def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
     """The platform sizes the hybrid block from the record the layer publishes.
 
@@ -348,6 +393,7 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
             get_head_size=lambda: HEAD_DIM,
         ),
     )
+    monkeypatch.setattr(vllm_config_mod, "_current_vllm_config", config)
 
     Platform._align_hybrid_block_size(config, backend)
 

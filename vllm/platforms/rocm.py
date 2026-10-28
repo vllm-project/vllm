@@ -1115,7 +1115,7 @@ class RocmPlatform(Platform):
         os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
         # ROCm-only custom --kv-cache-dtype values; they must be registered
         # before CacheConfig validates the dtype.
-        import vllm.models.qwen4_exp.amd.mxfp4_qsa_dtype  # noqa: F401
+        import vllm.platforms.rocm_kv_cache_dtypes  # noqa: F401
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
