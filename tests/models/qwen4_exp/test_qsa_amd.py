@@ -139,7 +139,9 @@ def _make_attn(*, use_fused: bool) -> SimpleNamespace:
     )
 
 
-def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
+def _make_indexer(
+    monkeypatch: pytest.MonkeyPatch, *, use_fused: bool, num_tokens: int = 2
+) -> QSAIndexer:
     """A QSAIndexer whose unfused path runs for real, with no projection weights.
 
     Both branches have to be reachable: a fused-path test is only meaningful if
@@ -190,7 +192,9 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
         slot_mapping=torch.arange(num_tokens),
         k_work_metadata=torch.zeros(1, 2, dtype=torch.int32),
     )
-    indexer._metadata = lambda: (raw_metadata, compressed_metadata)
+    monkeypatch.setattr(
+        indexer, "_metadata", lambda: (raw_metadata, compressed_metadata)
+    )
     indexer.test_metadata = (raw_metadata, compressed_metadata)
     return indexer
 
@@ -199,7 +203,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
 def test_qsa_fused_prepare_replaces_the_unfused_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    indexer = _make_indexer(use_fused=True)
+    indexer = _make_indexer(monkeypatch, use_fused=True)
     attn = _make_attn(use_fused=True)
     calls = []
     main_outputs = (torch.empty(0), torch.empty(0))
@@ -260,7 +264,7 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
 def test_qsa_unsupported_config_keeps_the_unfused_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    indexer = _make_indexer(use_fused=False)
+    indexer = _make_indexer(monkeypatch, use_fused=False)
     monkeypatch.setattr(
         indexer_qsa,
         "qsa_prepare",

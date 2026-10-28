@@ -144,12 +144,18 @@ def _pairs(region, n):
     return region[: n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
 
 
+class _TestFfnRunner(FfnRunner):
+    peer_bufs: list[torch.Tensor]
+
+
 def _runner(weights, s, tp=1, widths=None, **build):
     dev = torch.device("cuda")
     bufs = [torch.zeros(ffn.peer_bytes(tp), dtype=torch.uint8, device=dev)]
     bufs += [torch.zeros_like(bufs[0]) for _ in range(tp - 1)]
     peers = torch.tensor([b.data_ptr() for b in bufs], dtype=torch.int64, device=dev)
-    runner = FfnRunner(tp, 0, bufs[0].data_ptr(), peers, dev, widths or (s,), **build)
+    runner = _TestFfnRunner(
+        tp, 0, bufs[0].data_ptr(), peers, dev, widths or (s,), **build
+    )
     runner.warm(weights)
     runner.peer_bufs = bufs
     return runner
