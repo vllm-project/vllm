@@ -32,6 +32,7 @@ from vllm.forward_context import create_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
@@ -674,6 +675,39 @@ def test_merge_keeps_aux_hidden_states_per_layer():
     assert len(merged_aux) == len(aux)
     for merged, expected in zip(merged_aux, aux):
         torch.testing.assert_close(merged, expected)
+
+
+def test_pipeline_stage_microbatches_merge_to_the_full_batch():
+    """A later PP stage slices every intermediate key and merges a full batch."""
+    hidden = torch.arange(16.0).view(8, 2)
+    model_inputs = {
+        "input_ids": None,
+        "positions": torch.arange(8),
+        "inputs_embeds": None,
+        "intermediate_tensors": IntermediateTensors(
+            {"hidden_states": hidden, "residual": hidden + 100}
+        ),
+    }
+
+    def stage(positions, intermediate_tensors, **kwargs):
+        return IntermediateTensors(
+            {
+                "hidden_states": intermediate_tensors["hidden_states"]
+                + positions.unsqueeze(-1),
+                "residual": intermediate_tensors["residual"] * 2,
+            }
+        )
+
+    merged = merge_ubatch_outputs(
+        [
+            stage(**slice_model_inputs(model_inputs, token_slice))
+            for token_slice in (slice(0, 3), slice(3, 8))
+        ]
+    )
+    expected = stage(**model_inputs)
+    assert merged.tensors.keys() == expected.tensors.keys()
+    for key, value in expected.items():
+        torch.testing.assert_close(merged[key], value, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")

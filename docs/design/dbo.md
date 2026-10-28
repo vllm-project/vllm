@@ -34,12 +34,58 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+For DeepEP deployments, install DeepEP and set `--all2all-backend` to
+`deepep_low_latency` for workloads dominated by decode requests, or
+`deepep_high_throughput` for workloads dominated by prefill requests. The MRV2
+pipeline example below uses the NIXL EP backend instead.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+
+## Pipeline parallelism with Model Runner V2
+
+!!! warning "Draft implementation"
+    This support is under development. Configuration and local microbatch
+    tests do not establish four-GPU model correctness or performance.
+
+MRV2 supports stage-local DBO with NIXL EP, DP+EP, TP=1, synchronous
+scheduling, and eager execution. Set `VLLM_USE_V2_MODEL_RUNNER=1` and pass both
+`--enforce-eager` and `--no-async-scheduling`. CUDA graphs and asynchronous
+scheduling remain unsupported for this combination.
+
+Each pipeline stage agrees on the split within its own DP group. The stage
+receives a complete batch of intermediate tensors, slices all intermediate
+keys for its two DBO microbatches, and merges the outputs before sending the
+complete batch to the next stage. Sampling remains once per original batch
+on the last stage. The existing PP sampled-token queue and request-generation
+checks continue to manage the returned tokens.
+
+```mermaid
+flowchart LR
+    A[PP stage 0: complete batch] --> B[Two local DBO microbatches]
+    B --> C[Merge intermediate tensors]
+    C -->|One complete batch| D[PP stage 1: receive]
+    D --> E[Two local DBO microbatches]
+    E --> F[Merge hidden states]
+    F --> G[Sample original batch once]
+```
+
+The smallest DP2 x PP2 configuration uses four GPUs:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --trust-remote-code --dtype bfloat16 \
+    --pipeline-parallel-size 2 --tensor-parallel-size 1 \
+    --data-parallel-size 2 --data-parallel-size-local 2 \
+    --enable-expert-parallel --enable-dbo --all2all-backend nixl_ep \
+    --moe-backend batched_triton --attention-backend FLASH_ATTN_MLA \
+    --enforce-eager --no-async-scheduling
+```
+
+This enables overlap within a stage; it does not change the PP scheduling
+algorithm or imply a throughput improvement for every batch shape.
 
 ## DBO Components
 
