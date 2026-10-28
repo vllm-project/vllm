@@ -26,6 +26,7 @@ _VLLM_RENDERERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
     "deepseek_v41": ("deepseek_v4", "DeepseekV41Renderer"),
     "hf": ("hf", "HfRenderer"),
+    "unlimited_ocr2": ("unlimited_ocr2", "UnlimitedOCR2Renderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
@@ -87,4 +88,8 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
     tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
     renderer_mode, *_ = tokenizer_args_from_config(model_config, **kwargs)
 
+    if renderer_mode == "hf" and getattr(
+        model_config.hf_text_config, "unlimited_ocr2", False
+    ):
+        renderer_mode = "unlimited_ocr2"
     return RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)

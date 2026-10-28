@@ -495,3 +495,76 @@ def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(ba
             backend=backend,
         )
         torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)
+
+
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+def test_recomputed_output_remains_outside_remote_input_prefix(backend):
+    """Recomputing after preemption must match R-SWA token-by-token decode."""
+    from vllm.model_executor.layers.dash_attention import prompt_page_positions
+    from vllm.v1.attention.ops.dash_attention import paged_dash_prefill
+
+    torch.manual_seed(73)
+    device, dtype = "cuda", torch.bfloat16
+    prompt = [2] + [1] * 38 + [2] + [1] * 30 + [0] * 3
+    output = [0] * 5 + [2] + [0] * 70 + [2] + [0] * 65
+    roles = torch.tensor(prompt + output, device=device)
+    length, h, d, block_size = len(roles), 2, 128, 16
+    sp = {
+        "sparse_block_size": 32,
+        "sparse_local_block": 1,
+        "sparse_index_dim": d,
+        "sparse_attention_freq": [1],
+        "dash_topk_blocks": 12,
+        "image_token_id": 1,
+        "page_token_id": 2,
+    }
+    positions = prompt_page_positions(roles.tolist(), sp).to(device)
+    q = torch.randn(length, 4, d, device=device, dtype=dtype)
+    k = torch.randn(length, h, d, device=device, dtype=dtype)
+    v = torch.randn_like(k)
+    iq = torch.randn(length, d, device=device, dtype=dtype)
+    ik = torch.randn_like(iq)
+    cls = torch.randn(d, device=device, dtype=dtype)
+    table = torch.randperm(32, device=device, dtype=torch.int32)[None]
+    cache = torch.full(
+        (32, block_size, h + 1, 2 * d), float("nan"), device=device, dtype=dtype
+    ).permute(0, 2, 1, 3)
+    ar = torch.arange(length, device=device)
+    slots = table[0, ar // block_size] * block_size + ar % block_size
+    expected = dash_attention(
+        q,
+        k,
+        v,
+        iq,
+        ik,
+        roles,
+        cls,
+        sp,
+        0,
+        prompt_length=len(prompt),
+        backend=backend,
+    )
+    # Include a chunk crossing the prompt/output boundary and one containing
+    # only output; the prompt also ends in the middle of a summary block.
+    for start, end in [(0, 80), (80, length)]:
+        actual = paged_dash_prefill(
+            q[start:end],
+            k[start:end],
+            v[start:end],
+            iq[start:end],
+            ik[start:end],
+            roles[start:end],
+            positions[:, start:end],
+            cache,
+            table,
+            end,
+            slots[start:end],
+            cls,
+            sp,
+            0,
+            backend,
+            prefix_lens=torch.tensor([len(prompt)], device=device, dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            actual, expected[start:end], atol=0.00390625, rtol=0.01
+        )

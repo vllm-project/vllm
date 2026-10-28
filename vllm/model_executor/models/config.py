@@ -277,6 +277,12 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 "prefix cache)."
             )
 
+        UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
+
+    @staticmethod
+    def _configure_vision(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
         mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
         if mm_config is not None:
             if mm_config.mm_encoder_attn_backend is None:
@@ -354,6 +360,8 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        # Generic JIT warmup submits text-only requests, which DASH cannot use.
+        vllm_config.kernel_config.enable_jit_warmup = False
         compilation = vllm_config.compilation_config
         breakable = is_breakable_cudagraph_enabled()
         if not vllm_config.model_config.enforce_eager:
@@ -414,10 +422,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         # metadata, including R-SWA reclamation, for both compute backends.
         vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
-        mm_config = vllm_config.model_config.multimodal_config
-        assert mm_config is not None
-        if mm_config.mm_encoder_attn_backend is None:
-            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+        UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
         logger.info(
             "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",
             vllm_config.model_config.rswa_window,

@@ -96,9 +96,9 @@ def _page_count_guard_kernel(
     row = tl.program_id(0)
     slot = tl.load(Slots + row).to(tl.int64)
     page = tl.load(Params + slot * 3)
-    if page < 0:
-        return
     eos = tl.load(Params + slot * 3 + 1)
+    if (page < 0) | (page >= VOCAB_SIZE) | (eos < 0) | (eos >= VOCAB_SIZE):
+        return
     cap = tl.load(Params + slot * 3 + 2)
     prompt_len = tl.load(PromptLen + slot)
     length = tl.maximum(tl.load(Positions + row) + 1 - prompt_len, 0)
@@ -154,7 +154,11 @@ def _page_count_guard_kernel(
                 (logit_pos < VOCAB_SIZE) & (logit_pos != force),
             )
     elif markers < expected:
-        tl.store(Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE, -float("inf"))
+        tl.store(
+            Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE,
+            -float("inf"),
+            (eos >= 0) & (eos < VOCAB_SIZE),
+        )
 
 
 class PageCountGuardLogitsProcessor(LogitsProcessor):
@@ -223,22 +227,37 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
 
     @staticmethod
     def _validate_token_id(name: str, value: Any):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"`{name}` has to be a non-negative integer, got {value}.")
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 0 <= value < 2**63
+        ):
+            raise ValueError(
+                f"`{name}` has to be a non-negative int64 integer, got {value}."
+            )
 
     @classmethod
     def validate_params(cls, sampling_params: SamplingParams) -> None:
         extra_args = sampling_params.extra_args or {}
         for name in ("page_token_id", "eos_token_id"):
-            if (value := extra_args.get(name)) is not None:
+            if name in extra_args:
+                value = extra_args[name]
+                if name == "page_token_id" and value is None:
+                    continue
                 cls._validate_token_id(name, value)
-        value = extra_args.get("max_page_tokens")
-        if value is not None and (
-            not isinstance(value, int) or isinstance(value, bool)
-        ):
-            raise ValueError(f"`max_page_tokens` has to be an integer, got {value}.")
+        if "max_page_tokens" in extra_args:
+            value = extra_args["max_page_tokens"]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not -(2**63) <= value < 2**63
+            ):
+                raise ValueError(
+                    f"`max_page_tokens` has to be an int64 integer, got {value}."
+                )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        self.validate_params(sampling_params)
         self._guards.pop(req_idx, None)
         self._state.stage_write(req_idx, 0, [-1, 0, 0, -1])
         extra_args = sampling_params.extra_args or {}

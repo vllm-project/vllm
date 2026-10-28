@@ -5,6 +5,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 
 def _attention_class_names(model):
@@ -83,14 +84,15 @@ def test_unlimited_ocr2_batched_pages(
         logits_processors=[
             "vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor"
         ],
-        kernel_config={"enable_jit_warmup": False},
         compilation_config={
             "cudagraph_capture_sizes": [2, 1024, 4096] if prefill_graph else [2],
             **({"cudagraph_mode": "FULL_AND_PIECEWISE"} if prefill_graph else {}),
         },
         enable_chunked_prefill=chunked_prefill,
         enable_prefix_caching=False,
-        mm_encoder_attn_backend="TORCH_SDPA",
+        mm_encoder_attn_backend="FLASHINFER"
+        if backend == "FLASHINFER"
+        else "TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
         mm_processor_kwargs={"crop_mode": crop_mode},
     ) as runner:
@@ -108,6 +110,23 @@ def test_unlimited_ocr2_batched_pages(
         sampling = SamplingParams(
             temperature=0, max_tokens=180, skip_special_tokens=False
         )
+        # Reject malformed page layouts and guard parameters without killing
+        # the engine; the valid generation below must still succeed.
+        for bad_prompt in [
+            {"prompt": "Describe the page."},
+            {"prompt_token_ids": [100, 101]},
+            {"prompt": "<image>Parse.", "multi_modal_data": {"image": pages[:1]}},
+            {
+                "prompt": "<PAGE><image><image>Parse.",
+                "multi_modal_data": {"image": pages},
+            },
+            {
+                "prompt": "<PAGE><PAGE><image>Parse.",
+                "multi_modal_data": {"image": pages[:1]},
+            },
+        ]:
+            with pytest.raises(VLLMValidationError, match="<PAGE><image>"):
+                runner.llm.generate([bad_prompt], sampling)
         outputs = runner.llm.generate(requests, sampling)
         if crop_mode:
             # Official 16-crop preset selects a 5x3 grid for 16:9 pages.
@@ -117,6 +136,16 @@ def test_unlimited_ocr2_batched_pages(
             assert result.startswith("<PAGE>")
             for text in expected:
                 assert text in result
+
+        for extra_args in [
+            {"page_token_id": 2**63},
+            {"eos_token_id": 2**63},
+            {"max_page_tokens": 2**63},
+        ]:
+            with pytest.raises(VLLMValidationError, match="integer"):
+                runner.llm.generate(
+                    requests[:1], SamplingParams(max_tokens=1, extra_args=extra_args)
+                )
 
         # Reuse scheduler storage for a new request with a different first page.
         requests[0]["multi_modal_data"] = {"image": pages[1:]}

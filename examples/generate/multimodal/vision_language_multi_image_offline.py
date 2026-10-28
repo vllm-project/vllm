@@ -1344,7 +1344,6 @@ def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestDat
         max_model_len=32768,
         max_num_batched_tokens=4096,
         max_num_seqs=2,
-        kernel_config={"enable_jit_warmup": False},
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_encoder_attn_backend="TORCH_SDPA",
     )

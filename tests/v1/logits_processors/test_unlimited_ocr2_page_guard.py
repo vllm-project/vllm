@@ -105,6 +105,11 @@ class TestPageCountGuardCore:
         {"page_token_id": "<PAGE>"},
         {"eos_token_id": 1.5},
         {"max_page_tokens": "20000"},
+        {"page_token_id": 2**63},
+        {"eos_token_id": 2**63},
+        {"max_page_tokens": 2**63},
+        {"eos_token_id": None},
+        {"max_page_tokens": None},
     ],
 )
 def test_validate_params_rejects_bad_types(extra_args):
@@ -340,3 +345,17 @@ class TestPageCountGuardV2:
         assert not v2.add_request(1, SamplingParams(extra_args={"page_token_id": None}))
         inactive.add(1)
         check([2, 1, 0])
+
+
+@_requires_cuda
+@pytest.mark.parametrize("name", ["eos_token_id", "page_token_id"])
+def test_out_of_vocab_guard_does_not_modify_logits_or_adjacent_storage(name):
+    v2 = _make_v2_guard()
+    assert v2.add_request(0, SamplingParams(extra_args={name: VOCAB_SIZE}))
+    _commit(v2, [PAGE_ID, 100], [])
+    v2.apply_staged_writes()
+    # A sentinel row makes an out-of-range store observable without an illegal
+    # device address that would poison the CUDA context for the test process.
+    storage = torch.zeros(2, VOCAB_SIZE, device="cuda")
+    v2.apply(storage[:1], _make_v2_ctx(1, [2]))
+    assert torch.equal(storage, torch.zeros_like(storage))

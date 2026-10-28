@@ -475,6 +475,7 @@ def paged_dash_prefill(
     sp,
     layer_idx,
     backend,
+    prefix_lens=None,
 ):
     """Extend a prompt using paged history and full-prompt page coordinates."""
     n, h, dim = k.shape
@@ -531,6 +532,8 @@ def paged_dash_prefill(
     for start in range(0, n, 256):
         end = min(start + 256, n)
         prefix = torch.full_like(lens[start:end], length)
+        if prefix_lens is not None:
+            prefix = torch.minimum(prefix, prefix_lens)
         output[start:end] = _paged_dash_attention(
             q[start:end],
             iq[start:end],

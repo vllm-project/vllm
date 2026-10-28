@@ -469,4 +469,7 @@ class DASHAttention(nn.Module):
                         self.sp,
                         self.layer_idx,
                         self.dash_backend,
+                        prefix_lens=metadata.rswa_prefix_lens[request : request + 1]
+                        if metadata.rswa_prefix_lens is not None
+                        else None,
                     )

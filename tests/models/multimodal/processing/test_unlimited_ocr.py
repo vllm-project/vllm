@@ -152,3 +152,52 @@ def test_v2_gundam_matches_official_wide_page_grid():
     result = processor.apply(inputs, TimingContext(enabled=False))
     assert [p.length for p in result["mm_placeholders"]["image"]] == [1803, 1803]
     assert len(result["prompt_token_ids"]) == 3613
+
+
+def test_v2_flashinfer_vision_falls_back_without_changing_dash_backend():
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2",
+        attention_config={"backend": "FLASHINFER"},
+        mm_encoder_attn_backend="FLASHINFER",
+    ).create_engine_config()
+    assert config.model_config.multimodal_config.mm_encoder_attn_backend == (
+        AttentionBackendEnum.FLASH_ATTN
+    )
+    assert config.model_config.hf_text_config.unlimited_ocr2_attention_backend == (
+        "FLASHINFER"
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_async_rendering_rejects_bad_layout_and_preserves_image_cache():
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.exceptions import VLLMValidationError
+    from vllm.renderers import renderer_from_config
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2",
+        max_model_len=4096,
+        mm_processor_kwargs={"crop_mode": False},
+    ).create_engine_config()
+    renderer = renderer_from_config(config)
+    image = Image.new("RGB", (1024, 1024), "white")
+    try:
+        for text, images in [("Parse.", []), ("<image>Parse.", [image])]:
+            prompt = {"prompt_token_ids": renderer.tokenizer.encode(text)}
+            if images:
+                prompt["multi_modal_data"] = {"image": images}
+            with pytest.raises(VLLMValidationError, match="<PAGE><image>"):
+                await renderer.process_for_engine_async(prompt, 0)
+        prompt = {
+            "prompt_token_ids": renderer.tokenizer.encode("<PAGE><image>Parse."),
+            "multi_modal_data": {"image": [image]},
+        }
+        first = await renderer.process_for_engine_async(prompt, 0)
+        cached = await renderer.process_for_engine_async(prompt, 0)
+        assert first["prompt_token_ids"] == cached["prompt_token_ids"]
+        assert len(first["mm_placeholders"]["image"]) == 1
+    finally:
+        renderer.shutdown()
