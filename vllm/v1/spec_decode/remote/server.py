@@ -779,13 +779,16 @@ class RemoteDraftServer:
             self._start_thread(self._acceptor)
             return self._listener.endpoint
         except BaseException as error:
-            try:
-                self.stop()
-            except BaseException as cleanup_error:
-                raise error from BaseExceptionGroup(
-                    "server startup rollback failed", [cleanup_error]
-                )
+            self._rollback_start(error)
             raise
+
+    def _rollback_start(self, error: BaseException) -> None:
+        try:
+            self.stop()
+        except BaseException as cleanup_error:
+            raise error from BaseExceptionGroup(
+                "server startup rollback failed", [cleanup_error]
+            )
 
     def start(self, endpoint: str) -> str:
         """Warm up, bind, and serve in the background.
@@ -812,30 +815,34 @@ class RemoteDraftServer:
             self._adapter_failed(error)
             raise
         self._start_listener(endpoint, name="remote-draft-acceptor")
-        if not is_local_endpoint(self._listener.endpoint):
-            logger.warning(
-                "Remote draft server listens on %s, which is reachable from "
-                "other hosts; the protocol has no authentication, so bind to "
-                "a loopback address or a UNIX socket.",
+        try:
+            if not is_local_endpoint(self._listener.endpoint):
+                logger.warning(
+                    "Remote draft server listens on %s, which is reachable from "
+                    "other hosts; the protocol has no authentication, so bind to "
+                    "a loopback address or a UNIX socket.",
+                    self._listener.endpoint,
+                )
+            capabilities = self.adapter.capabilities()
+            logger.info(
+                "Remote draft server %s ready at %s: protocol %d.%d, methods %s, "
+                "draft fingerprint %r, required features %s, transports %s, "
+                "max_batch_size %d, max_model_len %d",
+                self.server_id,
                 self._listener.endpoint,
+                PROTOCOL_MAJOR,
+                PROTOCOL_MINOR,
+                sorted(self.adapter.supported_methods()),
+                self.adapter.draft_checkpoint_fingerprint(),
+                list(capabilities.required_features),
+                list(SUPPORTED_TRANSPORTS),
+                self.limits.max_batch_size,
+                self.limits.max_model_len,
             )
-        capabilities = self.adapter.capabilities()
-        logger.info(
-            "Remote draft server %s ready at %s: protocol %d.%d, methods %s, "
-            "draft fingerprint %r, required features %s, transports %s, "
-            "max_batch_size %d, max_model_len %d",
-            self.server_id,
-            self._listener.endpoint,
-            PROTOCOL_MAJOR,
-            PROTOCOL_MINOR,
-            sorted(self.adapter.supported_methods()),
-            self.adapter.draft_checkpoint_fingerprint(),
-            list(capabilities.required_features),
-            list(SUPPORTED_TRANSPORTS),
-            self.limits.max_batch_size,
-            self.limits.max_model_len,
-        )
-        return self._listener.endpoint
+            return self._listener.endpoint
+        except BaseException as error:
+            self._rollback_start(error)
+            raise
 
     def wait(self, timeout: float | None = None) -> bool:
         """Wait for stop or a fatal adapter failure; False on timeout.
