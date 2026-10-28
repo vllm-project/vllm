@@ -20,6 +20,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.mxfp4_mla import decode as mxfp4_decode
 from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -4031,6 +4032,22 @@ def rocm_sparse_decode_bf16_num_splits(
     return max(1, min(num_splits, math.ceil(sparse_len / block_k)))
 
 
+def rocm_sparse_decode_mxfp4_native_num_splits(
+    num_queries: int, num_heads: int, sparse_len: int
+) -> int:
+    """Split count for the native mxfp4_mla decode, at least 1.
+
+    It walks 128-token tiles, so no split gets less than one tile, and there is
+    no single-pass fallback: one split is still this kernel.
+    """
+    native_k = mxfp4_decode.TILE_K.value
+    heads_blocks = triton.cdiv(num_heads, _SPARSE_DECODE_BF16_BLOCK_H)
+    num_splits = _decode_gfx950_num_splits(
+        num_queries, heads_blocks, sparse_len, 0.0, native_k
+    )
+    return max(1, min(num_splits, math.ceil(sparse_len / native_k)))
+
+
 def _rocm_sparse_attn_decode_ragged_bf16_triton(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -4043,6 +4060,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     num_splits: int,
     out: torch.Tensor | None = None,
     is_mxfp4: bool = False,
+    native_mxfp4: bool = False,
 ) -> torch.Tensor:
     """Split-K decode over an bf16 ragged KV cache.
 
@@ -4061,6 +4079,8 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         num_splits: Number of KV splits per query.
         out: Optional destination with ``d`` trailing elements.
         is_mxfp4: ``kv`` holds packed ``mxfp4_mla`` rows instead of bf16.
+        native_mxfp4: read those rows on the gfx950 scaled MFMA instead of
+            unpacking them to bf16 (512-wide latent only).
 
     Returns:
         The attention output, ``out`` when provided.
@@ -4112,37 +4132,67 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         device=q.device,
     )
 
-    _sparse_attn_decode_ragged_bf16_partial_kernel[
-        (num_queries, num_splits, heads_blocks)
-    ](
-        q,
-        kv,
-        indices,
-        indptr,
-        part_m,
-        part_l,
-        part_acc,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        kv.stride(0),
-        kv.stride(1),
-        part_m.stride(0),
-        part_m.stride(1),
-        part_acc.stride(0),
-        part_acc.stride(1),
-        part_acc.stride(2),
-        num_heads,
-        head_dim,
-        kv.shape[0],
-        float(scale),
-        IS_MXFP4=is_mxfp4,
-        BLOCK_H=block_h,
-        BLOCK_D=block_d,
-        BLOCK_K=block_k,
-        NUM_SPLITS=num_splits,
-        num_warps=4,
-    )
+    if native_mxfp4:
+        assert _ON_GFX950 and is_mxfp4 and head_dim == mxfp4_decode.NATIVE_LATENT
+        assert q.stride(2) == 1, "the native mxfp4_mla decode needs contiguous q rows"
+        mxfp4_decode.mxfp4_mla_decode_partial_kernel[
+            (num_queries, num_splits, heads_blocks)
+        ](
+            q,
+            kv,
+            indices,
+            indptr,
+            part_m,
+            part_l,
+            part_acc,
+            q.stride(0),
+            q.stride(1),
+            kv.stride(0),
+            part_m.stride(0),
+            part_m.stride(1),
+            part_acc.stride(0),
+            part_acc.stride(1),
+            part_acc.stride(2),
+            num_heads,
+            kv.shape[0],
+            float(scale),
+            BLOCK_H=block_h,
+            NUM_SPLITS=num_splits,
+            num_warps=mxfp4_decode.NUM_WARPS,
+            num_stages=mxfp4_decode.NUM_STAGES,
+        )
+    else:
+        _sparse_attn_decode_ragged_bf16_partial_kernel[
+            (num_queries, num_splits, heads_blocks)
+        ](
+            q,
+            kv,
+            indices,
+            indptr,
+            part_m,
+            part_l,
+            part_acc,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            kv.stride(0),
+            kv.stride(1),
+            part_m.stride(0),
+            part_m.stride(1),
+            part_acc.stride(0),
+            part_acc.stride(1),
+            part_acc.stride(2),
+            num_heads,
+            head_dim,
+            kv.shape[0],
+            float(scale),
+            IS_MXFP4=is_mxfp4,
+            BLOCK_H=block_h,
+            BLOCK_D=block_d,
+            BLOCK_K=block_k,
+            NUM_SPLITS=num_splits,
+            num_warps=4,
+        )
 
     _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
         part_m,
@@ -4674,6 +4724,7 @@ def rocm_sparse_attn_decode_bf16(
     ragged_indptr: torch.Tensor,
     num_splits: int,
     kv_cache_dtype: str = "auto",
+    native_mxfp4: bool = False,
 ) -> None:
     """Run split-K sparse attention over decode rows using an unquantized KV cache.
 
@@ -4691,6 +4742,8 @@ def rocm_sparse_attn_decode_bf16(
         num_splits: KV splits per query, from
             :func:`rocm_sparse_decode_bf16_num_splits`.
         kv_cache_dtype: ``"mxfp4_mla"`` reads ``kv`` as packed rows.
+        native_mxfp4: decode those rows on the gfx950 scaled MFMA, with
+            ``num_splits`` from :func:`rocm_sparse_decode_mxfp4_native_num_splits`.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4725,6 +4778,7 @@ def rocm_sparse_attn_decode_bf16(
         num_splits=num_splits,
         out=out,
         is_mxfp4=kv_cache_dtype == "mxfp4_mla",
+        native_mxfp4=native_mxfp4,
     )
     if not direct:
         output.copy_(out[..., : output.shape[-1]])

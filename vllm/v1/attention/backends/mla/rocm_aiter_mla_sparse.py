@@ -36,11 +36,15 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
 )
 from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+from vllm.v1.attention.ops.mxfp4_mla.decode import (
+    NATIVE_LATENT as MXFP4_NATIVE_LATENT,
+)
 from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
+    rocm_sparse_decode_mxfp4_native_num_splits,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -862,6 +866,15 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 "mxfp4_mla stores only the latent, so it needs a rope-free (NoPE) "
                 f"model; got qk_rope_head_dim={self.qk_rope_head_dim}"
             )
+        from vllm.platforms.rocm import on_gfx950
+
+        # gfx950 decodes the packed rows on the scaled MFMA; elsewhere, and
+        # for other latent widths, they are unpacked to bf16 first.
+        self.native_mxfp4_decode: bool = (
+            kv_cache_dtype == "mxfp4_mla"
+            and on_gfx950()
+            and rank == MXFP4_NATIVE_LATENT
+        )
 
         if rocm_aiter_ops.is_triton_sparse_mla_enabled():
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
@@ -987,16 +1000,20 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             is_mxfp4 = self.kv_cache_dtype == "mxfp4_mla"
             row_width = mxfp4_row_bytes(self.kv_lora_rank) if is_mxfp4 else q.shape[-1]
             kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
-            decode_num_splits = (
-                rocm_sparse_decode_bf16_num_splits(
-                    num_tokens,
-                    q.shape[1],
-                    min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
+            decode_only = attn_metadata.num_decode_tokens == num_tokens
+            sparse_len = min(attn_metadata.max_seq_len, attn_metadata.topk_tokens)
+            native = self.native_mxfp4_decode and decode_only
+            if native:
+                decode_num_splits = rocm_sparse_decode_mxfp4_native_num_splits(
+                    num_tokens, q.shape[1], sparse_len
                 )
-                if attn_metadata.num_decode_tokens == num_tokens
-                else 1
-            )
-            if decode_num_splits > 1:
+            elif decode_only:
+                decode_num_splits = rocm_sparse_decode_bf16_num_splits(
+                    num_tokens, q.shape[1], sparse_len
+                )
+            else:
+                decode_num_splits = 1
+            if native or decode_num_splits > 1:
                 rocm_sparse_attn_decode_bf16(
                     q=q,
                     kv=kv,
@@ -1010,6 +1027,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
                     kv_cache_dtype=self.kv_cache_dtype,
+                    native_mxfp4=native,
                 )
             else:
                 rocm_sparse_attn_prefill(
