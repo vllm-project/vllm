@@ -11,6 +11,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/config/aux_output.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -19,6 +21,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/aux_output_connector/
   mirror:
     amd:
       label: ':amd: (MI300) Distributed Comm Ops'
@@ -32,11 +35,14 @@ steps:
       - vllm/distributed
       - tests/distributed
       - vllm/platforms/rocm.py
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/config/aux_output.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
+      - pytest -v -s distributed/aux_output_connector/
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer

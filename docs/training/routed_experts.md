@@ -21,7 +21,64 @@ Rejected at startup: adaptive speculative verification, PP > 1, DCP/PCP > 1, and
 
 ### How it works: aux output connector
 
-Routing is stored by the aux output connector (`vllm/distributed/aux_output_connector/`, configured via `--aux-output-config`), keyed by KV block hash and shared with prefix caching, which is why prefix caching is required. `max_bytes` is its host-memory LRU capacity (default: derived from KV cache capacity). If a prefix-cache hit needs evicted rows, the worker raises `BlockObjectStoreError`; increase `max_bytes`.
+Routing is stored by the aux output connector (`vllm/distributed/aux_output_connector/`, configured via `--aux-output-config`), keyed by KV block hash and shared with prefix caching, which is why prefix caching is required. `max_bytes` is its initial SHM arena capacity (default: derived from KV cache capacity). An explicit value must cover the startup KV coverage described below. It is not a hard runtime memory cap: the arena grows when every object is referenced, and cached objects are evicted by LRU. If a prefix-cache hit needs evicted rows, the worker raises `BlockObjectStoreError`; increase `max_bytes`.
+
+## Host-memory admission
+
+For `N` GPU KV blocks, `B` tokens/block and `R` routed-expert bytes/token, the
+default SHM arena needs `N * B * R` bytes per output worker. When
+`aux_output_config.max_bytes` is set, it must cover every KV block; an
+undersized arena is rejected instead of silently reducing replay coverage.
+
+Before creating the Store, startup queries system available RAM and the remaining
+container cgroup memory, using the smaller value. The Store uses anonymous shared
+`mmap`, so `/dev/shm` mount free space is not its capacity limit; see the
+[Linux tmpfs documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html).
+If the cgroup limit or usage is unavailable or invalid, startup uses system
+available RAM. Cgroup headroom is conservatively estimated as limit minus current
+usage, including reclaimable page cache. Low estimated headroom produces a warning
+and startup continues, since cache reclamation may allow the allocation to fit.
+The check reserves runtime headroom, accounts for staging and estimated metadata,
+and divides the remaining budget across local DP output workers. This assumes
+local DP workers share one host/cgroup memory budget; workers isolated in
+separate containers may use less, so the estimate can be conservative. It then
+rounds down to complete SHM objects and estimates a GPU KV block count that fits
+the current headroom.
+
+An explicit `aux_output_config.max_bytes` that cannot cover all KV blocks is a
+configuration error and prevents startup. Unset it to derive capacity from KV
+coverage, or increase it to the required size. An explicit value is still the
+initial arena capacity and may grow at runtime; it is not a hard memory cap.
+
+If the estimated arena, staging, metadata and reserve exceed current headroom,
+startup logs a warning with memory estimates and optional adjustments. For an
+explicit `max_bytes`, the warning first suggests unsetting or resizing it;
+reducing KV blocks alone does not shrink an explicit arena. If fewer KV blocks
+are also needed to fit the estimate, both changes are suggested together. With
+automatic sizing, the reported `--num-gpu-blocks-override N` (Python:
+`num_gpu_blocks_override=N`) is only printed when the estimate can serve at
+least one `max_model_len` request under the model's KV cache layout, including
+reserved capacity such as the BlockPool null block. It is never zero, negative,
+or the current block count. Otherwise, the warning suggests more memory, less
+staging, or a smaller `--max-model-len` instead of an infeasible block count.
+These estimates do not establish that a configuration is impossible to run.
+
+Alternatively, reduce `--kv-cache-memory-bytes` or `--gpu-memory-utilization`.
+An explicit KV memory byte budget takes precedence over utilization; no linear
+conversion from CPU RAM to a GPU utilization percentage is assumed. If staging
+and runtime reserve exhaust the estimated headroom, the warning suggests more
+RAM/container memory or smaller `--max-num-batched-tokens`/`--max-num-seqs`
+instead of zero blocks.
+
+These estimates cover the preallocated arena, staging, estimated metadata and
+runtime reserve. They do not bound runtime memory: `publish_routed_experts()`
+serializes each published payload, the background store may queue pending
+batches, the arena grows when every object is referenced and briefly holds both
+the old and new arena, and concurrent worker startup or other processes add
+more. This is a startup estimate, not an atomic host-memory reservation or a
+runtime limit. Startup continues after memory warnings and can still fail
+during actual allocation or encounter OOM as concurrent allocations and output
+accumulation change memory usage.
 
 ## Output format
 

@@ -4,6 +4,7 @@
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -18,6 +19,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.memory import validate_shm_budget
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -2072,3 +2074,353 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
     assert not store._references
+
+
+@pytest.fixture
+def budget_logs(caplog):
+    from vllm.distributed.aux_output_connector.memory import logger
+
+    logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+@pytest.mark.parametrize("available_host_bytes", [0, 2 << 30])
+def test_budget_covers_every_kv_block_without_silent_truncation(
+    available_host_bytes, budget_logs
+):
+    assert (
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+            min_blocks_for_context=11,
+        )
+        == 3200
+    )
+    assert not any(record.levelname == "WARNING" for record in budget_logs.records)
+    with pytest.raises(ValueError, match="cannot cover all GPU KV blocks") as error:
+        validate_shm_budget(
+            num_blocks=10,
+            scheduler_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3199,
+            hash_block_size=16,
+            available_host_bytes=available_host_bytes,
+            staging_bytes=0,
+            min_blocks_for_context=11,
+            required_context_tokens=160,
+        )
+    message = str(error.value)
+    assert "Unset aux_output_config.max_bytes" in message
+    assert "increase it to at least 3200 bytes" in message
+    assert "--num-gpu-blocks-override" not in message
+    assert "No feasible AuxOutput configuration" not in message
+
+
+def test_host_budget_counts_local_workers_and_hash_object_metadata(budget_logs):
+    """The inferred KV limit includes every local arena and all hash slots."""
+    validate_budget = partial(
+        validate_shm_budget,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        bytes_per_token=20,
+        max_bytes=None,
+        available_host_bytes=(512 << 20) + 22400,
+        staging_bytes=4096,
+        min_blocks_for_context=3,
+        local_output_workers=2,
+        required_context_tokens=32,
+    )
+    assert validate_budget(num_blocks=2) == 640
+    assert not any(record.levelname == "WARNING" for record in budget_logs.records)
+    budget_logs.clear()
+    assert validate_budget(num_blocks=4) == 1280
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "conservative KV block estimate=3" in message
+    assert "--num-gpu-blocks-override 3" in message
+    assert "Startup will continue" in message
+
+
+@pytest.mark.parametrize("num_blocks", [2, 4])
+def test_explicit_arena_budget_warns_with_actionable_adjustments(
+    num_blocks, budget_logs
+):
+    """Fewer KV blocks alone do not shrink an explicit arena allocation."""
+    validate_budget = partial(
+        validate_shm_budget,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        bytes_per_token=20,
+        available_host_bytes=(512 << 20) + 4096 + 3 * (320 + 512),
+        staging_bytes=4096,
+        min_blocks_for_context=3,
+        required_context_tokens=32,
+    )
+    assert validate_budget(num_blocks=num_blocks, max_bytes=4 * 320) == 4 * 320
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "Unset aux_output_config.max_bytes" in message
+    if num_blocks == 2:
+        assert "--num-gpu-blocks-override" not in message
+    else:
+        assert (
+            "Along with that arena adjustment, consider --num-gpu-blocks-override 3"
+            in message
+        )
+    assert "conservative KV block estimate=3" in message
+    chosen_blocks = min(num_blocks, 3)
+    assert (
+        validate_budget(num_blocks=chosen_blocks, max_bytes=None) == chosen_blocks * 320
+    )
+
+
+def test_arena_budget_matches_complete_store_slots():
+    assert (
+        validate_shm_budget(
+            num_blocks=2,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=3 * 320 - 1,
+            available_host_bytes=(512 << 20) + 2 * (320 + 512),
+            staging_bytes=0,
+            min_blocks_for_context=3,
+        )
+        == 640
+    )
+
+
+@pytest.mark.parametrize("required_context_tokens", [None, 16])
+@pytest.mark.parametrize("available_host_bytes", [0, (512 << 20) + 4096])
+def test_staging_exhaustion_warns_without_suggesting_gpu_blocks(
+    required_context_tokens, available_host_bytes, budget_logs
+):
+    assert (
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=None,
+            available_host_bytes=available_host_bytes,
+            staging_bytes=4096,
+            min_blocks_for_context=2,
+            required_context_tokens=required_context_tokens,
+        )
+        == 320
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "Staging and runtime reserve exhaust the estimated headroom" in message
+    assert "--max-num-batched-tokens/--max-num-seqs" in message
+    assert "Startup will continue" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+def test_sub_block_arena_limit_is_distinguished_from_ram_exhaustion():
+    with pytest.raises(ValueError, match="cannot hold one KV block") as error:
+        validate_shm_budget(
+            num_blocks=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=20,
+            max_bytes=319,
+            available_host_bytes=2 << 30,
+            staging_bytes=0,
+            min_blocks_for_context=2,
+        )
+    assert "No GPU KV block fits the current host budget" not in str(error.value)
+
+
+@pytest.mark.parametrize("max_bytes", [None, 64 * 64 * 100])
+def test_host_budget_warns_without_suggesting_blocks_below_context(
+    max_bytes, budget_logs
+):
+    """A reduced block count must not be suggested when it cannot hold the request."""
+    assert (
+        validate_shm_budget(
+            num_blocks=64,
+            scheduler_block_size=64,
+            hash_block_size=64,
+            bytes_per_token=100,
+            max_bytes=max_bytes,
+            available_host_bytes=(512 << 20) + 16 * 64 * 100,
+            staging_bytes=0,
+            min_blocks_for_context=17,
+            required_context_tokens=1024,
+        )
+        == 64 * 64 * 100
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "supports 14 KV blocks (896 tokens)" in message
+    assert "fewer than the 17 blocks needed to serve max_model_len=1024" in message
+    assert "No feasible AuxOutput configuration" not in message
+    assert "Startup will continue" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+@pytest.mark.parametrize("max_bytes", [None, 128 * 16 * 10])
+def test_null_block_makes_nominal_context_capacity_infeasible(max_bytes, budget_logs):
+    """64 blocks cover 1024 tokens before the reserved null block."""
+    assert (
+        validate_shm_budget(
+            num_blocks=128,
+            scheduler_block_size=16,
+            hash_block_size=8,
+            bytes_per_token=10,
+            max_bytes=max_bytes,
+            available_host_bytes=(512 << 20) + 128 * (8 * 10 + 512),
+            staging_bytes=0,
+            min_blocks_for_context=65,
+            required_context_tokens=1024,
+        )
+        == 128 * 16 * 10
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "supports 64 KV blocks (1024 tokens)" in message
+    assert "fewer than the 65 blocks needed to serve max_model_len=1024" in message
+    assert "Startup will continue" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+@pytest.mark.parametrize("max_bytes", [None, 128 * 16 * 10])
+def test_blocks_covering_context_are_recommended(max_bytes, budget_logs):
+    assert (
+        validate_shm_budget(
+            num_blocks=128,
+            scheduler_block_size=16,
+            hash_block_size=8,
+            bytes_per_token=10,
+            max_bytes=max_bytes,
+            available_host_bytes=(512 << 20) + 140 * (8 * 10 + 512),
+            staging_bytes=0,
+            min_blocks_for_context=65,
+            required_context_tokens=1024,
+        )
+        == 128 * 16 * 10
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "--num-gpu-blocks-override 70" in message
+    assert "(Python: num_gpu_blocks_override=70)" in message
+    assert "Startup will continue" in message
+
+
+def test_no_override_when_estimate_matches_current_blocks(budget_logs):
+    max_bytes = 100 * 16 * 10
+    assert (
+        validate_shm_budget(
+            num_blocks=65,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=10,
+            max_bytes=max_bytes,
+            available_host_bytes=(512 << 20) + 65 * (16 * 10 + 512),
+            staging_bytes=0,
+            min_blocks_for_context=65,
+            required_context_tokens=1024,
+        )
+        == max_bytes
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "Startup will continue" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+@pytest.mark.parametrize("max_bytes", [None, 64 * 16 * 10])
+def test_no_override_without_one_block_of_headroom(max_bytes, budget_logs):
+    assert (
+        validate_shm_budget(
+            num_blocks=64,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            bytes_per_token=10,
+            max_bytes=max_bytes,
+            available_host_bytes=(512 << 20) + 600,
+            staging_bytes=0,
+            min_blocks_for_context=65,
+            required_context_tokens=1024,
+        )
+        == 64 * 16 * 10
+    )
+    message = budget_logs.text
+    assert any(record.levelname == "WARNING" for record in budget_logs.records)
+    assert "cannot fit one GPU KV block" in message
+    assert "Startup will continue" in message
+    assert "--num-gpu-blocks-override" not in message
+
+
+def test_device_blocks_per_request_covers_mixed_groups():
+    from vllm.v1.core.kv_cache_utils import get_num_device_blocks_per_request
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=1024),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=128,
+    )
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    swa = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["swa"], swa),
+        ],
+    )
+
+    # Full attention needs 64 blocks; the 128-token window plus in-flight
+    # tokens needs 17. The caller adds the shared BlockPool null block.
+    assert get_num_device_blocks_per_request(vllm_config, kv_cache_config) == 81
+
+
+@pytest.mark.parametrize(
+    ("limit", "usage", "expected"),
+    [
+        pytest.param(None, None, 1024, id="no-cgroup-limit"),
+        pytest.param(None, 256, 1024, id="unreadable-limit"),
+        pytest.param(1024, None, 1024, id="unreadable-usage"),
+        pytest.param(-1, 0, 1024, id="invalid-limit"),
+        pytest.param(1024, -1, 1024, id="invalid-usage"),
+        pytest.param(1024, 256, 768, id="cgroup-headroom"),
+        pytest.param(2048, 256, 1024, id="system-headroom"),
+        pytest.param(1024, 1024, 0, id="cgroup-at-limit"),
+        pytest.param(1024, 2048, 0, id="cgroup-over-limit"),
+    ],
+)
+def test_host_memory_uses_system_and_cgroup_headroom(
+    monkeypatch, limit, usage, expected
+):
+    """Unreadable cgroup values are None; invalid values must not reduce headroom."""
+    from vllm.distributed.aux_output_connector import memory
+
+    host_memory = memory.psutil.virtual_memory()._replace(available=1024)
+    monkeypatch.setattr(memory.psutil, "virtual_memory", lambda: host_memory)
+    monkeypatch.setattr(memory, "get_cgroup_memory_limit", lambda: limit)
+    monkeypatch.setattr(memory, "get_cgroup_memory_usage", lambda: usage)
+    assert memory.get_available_host_memory() == expected
