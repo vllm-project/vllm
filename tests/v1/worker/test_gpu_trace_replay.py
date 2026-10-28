@@ -14,8 +14,10 @@ from typing import cast
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA required for trace-replay tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
@@ -26,7 +28,7 @@ from vllm.v1.worker.gpu.sample.trace_replay import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 TEST_MAX_MODEL_LEN = 2048
 
 

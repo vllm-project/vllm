@@ -13,8 +13,6 @@ Requirements:
 - `distributed_executor_backend="ray"` — the workers must be Ray actors
 - Ray `>= 2.56.0` on both the trainer and the workers
 - `nixl` installed in the environment shared by trainer and workers
-- Weight loaders that stay inside the supported op set (below)
-- EPLB (`enable_eplb=true`) is rejected: it rearranges experts at runtime, which invalidates the recorded plan
 
 ## How It Works
 
@@ -48,11 +46,11 @@ group N+1   model.norm.weight, lm_head.weight
 
 The layer is the unit of everything that follows: the trainer gathers a layer, publishes it (immediately pullable), and moves on to the next while the consumers pull the one it just published. Once every consumer has signalled that it is done with a layer, the trainer drops it and gains a credit to gather another. `gather_lookahead` is how far ahead of the consumers that loop may run, so at most `gather_lookahead + 1` layers are resident on the trainer at a time. The default of 1 keeps the next layer gathered and pullable while the current one is being pulled — enough to hide the handoff without doubling trainer memory. Raise it only if one layer's gather is slower than its pulls.
 
-Because a layer is also the unit the consumers free and the unit the receive buffers are sized against, it is what keeps memory bounded on both sides: without it the whole model would be one transfer, and both sides would have to hold their full share of it at once. Keying on the index rather than a fixed `model.layers.` prefix is what makes that hold across naming conventions — a VLM's `model.language_model.layers.`, GPT-2's `transformer.h.`, a vision tower's `visual.blocks.`. Sources can control the partition; see [gather groups](base.md#gather-groups).
+Because a layer is also the unit the consumers free and the unit the receive buffers are sized against, it is what keeps memory bounded on both sides: without it the whole model would be one transfer, and both sides would have to hold their full share of it at once. Keying on the index rather than a fixed `model.layers.` prefix is what makes that hold across naming conventions — a VLM's `model.language_model.layers.`, GPT-2's `transformer.h.`, a vision tower's `visual.blocks.`. The outermost index is the one taken, which keeps a MoE layer whole (`model.layers.3.mlp.experts.7.w1` keys on layer 3), and the partition follows `metadata` order, so names sharing a layer index must be contiguous there.
 
 ### Ownership
 
-A trainer rank need not hold the whole model. Each one declares what it holds through [`WeightSource.held_names()`](base.md#held_names-partial-ownership), the fleet all-gathers those declarations at `trainer_init`, and the consumers route each pull to a rank that actually holds the name. Pipeline stages, expert parallelism, and combinations of the two are all the same declaration. Consumers spread their pulls across the ranks that hold a name, so no single trainer NIC becomes the bottleneck.
+A trainer rank need not hold the whole model. The source declares each parameter's owners in [`ParamMeta.owners`](base.md#parammeta-ownership-and-layout), the same on every rank, so the engine builds the ownership table from metadata alone, with no exchange at `trainer_init`. Each rank then iterates only the names it owns, and the consumers route each pull to a rank that owns the name. Pipeline stages, expert parallelism, and combinations of the two are all the same declaration. Consumers spread their pulls across a name's owners, so no single trainer NIC becomes the bottleneck. The producer-server name all-gather at `trainer_init` also carries a digest of each rank's metadata, so a rank whose metadata or owners differ fails at init.
 
 ## Inference Side
 
@@ -111,13 +109,20 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `rank` | — | Keyword-only. This trainer rank; **0 is the sender** |
+| `rank` | — | Keyword-only. This trainer rank; **0 is the sender**. Must equal the default process group rank, since `owners` are matched against it |
 | `num_consumers` | — | Inference workers across the whole fleet (TP × DP) |
 | `trainer_actor_namespace` | `None` | Ray namespace for the serve actors; the workers resolve them by name here |
 | `num_rdt_buffers` | 2 | Ring depth on both sides |
 | `buffer_presize_gb` | 0.0 | Pre-size each buffer slot, in GiB. Set it to cover the largest atomic slice |
 | `gather_lookahead` | 1 | Gathered-but-unfreed layers the gather loop runs ahead by |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
+
+## Limitations
+
+- **Separate fleets only.** The trainer and the inference workers run on different GPUs; colocated setups need [IPC](ipc.md).
+- **No EPLB.** `enable_eplb=true` is rejected: it rearranges experts at runtime, which invalidates the recorded plan.
+- **Supported loader ops only.** A weight loader that needs real data at init raises (see [the op set](#slices-are-tracked-through-vllms-own-weight-loaders)).
+- Names that share a layer index must be contiguous in `metadata` order.
 
 ## Examples
 
