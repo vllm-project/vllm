@@ -52,6 +52,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 else 1
             ),
         )
+        if vllm_config.engram_config and vllm_config.engram_config.pcp_shared_memory:
+            # Replicated drafts disable PCP; preserve the target's storage config.
+            vllm_config.engram_config = replace(
+                vllm_config.engram_config, pcp_shared_memory=False
+            )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(

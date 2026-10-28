@@ -136,6 +136,30 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Sharing host tables across PCP replicas
+
+For DeepSeek V4.1, `pcp_shared_memory` shares each TP head shard across its
+co-located PCP replicas. For example, TP1/PCP4 maps one table copy from four
+workers, while TP2/PCP2 keeps two head shards and maps each from two workers.
+Hash heads, lookup arithmetic and token ownership are unchanged.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --language-model-only --no-async-scheduling \
+  --tensor-parallel-size 1 --prefill-context-parallel-size 4 \
+  --enable-expert-parallel --all2all-backend allgather_reducescatter \
+  --engram-config '{"cpu_offload": true, "pcp_shared_memory": true}'
+```
+
+This option defaults off and requires CPU offload, PCP greater than one,
+DP=PP=1, and a shared IPC namespace within each PCP group. It cannot be combined
+with `dp_shared_memory` or `use_thp`. Unlike the
+automatic DP fallback, an explicit PCP sharing request fails at startup when
+placement or `/dev/shm` capacity is unsuitable. Size both `/dev/shm` and the
+container's host-memory limit for the shared tables and the rest of the model;
+shared-memory pages count toward that limit. A PCP1 DSpark draft keeps private
+tables, without changing the target's sharing configuration.
+
 ## Limitations
 
 - CUDA-alike platforms only.

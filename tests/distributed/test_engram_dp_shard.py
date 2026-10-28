@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engram tables shared by co-located DP replicas.
+"""Engram tables shared by co-located DP or PCP replicas.
 
 Four GPUs on one node split the hash heads four ways, whether as DEP
 (TP1 x DP4, the single-node MoE layout) or TP2 x DP2. A lookup only returns
@@ -9,7 +9,8 @@ its own heads, and each replica trades those tokens back for the heads its
 peers own.
 
 With shared host storage, DP replicas instead map the same TP slice and
-prefetch only their own tokens without DP gathers.
+prefetch only their own tokens without DP gathers. PCP sharing likewise preserves
+the TP head shards while each PCP rank looks up its own token IDs.
 """
 
 from itertools import product
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.multiprocessing as mp
+from transformers import PreTrainedConfig
 
 from vllm.config import (
     EngramConfig,
@@ -308,12 +310,13 @@ def _check_fp8_batch(vllm_config):
                 del graph
 
 
-def _check_shared_storage_lifetime_and_failures(failure):
+def _check_shared_storage_lifetime_and_failures(failure, group=None):
     """One peer's failure must roll back every mapping/registration, without hangs."""
     import gc
     import weakref
 
-    group = get_engram_dp_group()
+    if group is None:
+        group = get_engram_dp_group()
     runtime = torch.cuda.cudart()
     make_file = engram_ops.tempfile.NamedTemporaryFile
     map_file = engram_ops.mmap.mmap
@@ -777,6 +780,140 @@ def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     mp.spawn(_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
+    cleanup_dist_env_and_memory()
+
+
+def _pcp_shared_worker(rank, tp_size, port):
+    world_size = WORLD_SIZE
+    torch.accelerator.set_device_index(rank)
+    update_environment_variables(
+        dict(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(world_size),
+            MASTER_ADDR="localhost",
+            MASTER_PORT=str(port),
+        )
+    )
+    pcp_size = world_size // tp_size
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
+            distributed_executor_backend="mp",
+        )
+    )
+    try:
+        init_distributed_environment()
+        with set_current_vllm_config(config):
+            initialize_model_parallel(
+                tensor_model_parallel_size=tp_size,
+                prefill_context_model_parallel_size=pcp_size,
+            )
+        group = parallel_state.get_pcp_group()
+        assert get_engram_dp_size() == 1
+        if tp_size == 2:
+            # Exercise leader and peer rollback on two independent PCP groups.
+            for failure in ("create", "register", None):
+                _check_shared_storage_lifetime_and_failures(failure, group)
+
+        heads = HEAD_SIZES[:7]  # Uneven TP shards must preserve padded zeros.
+        layout_config = dict(
+            engram_layer_ids=[0],
+            engram_max_ngram_size=2,
+            engram_n_heads=len(heads),
+            engram_head_dim=DIM,
+            engram_compressed_vocab_size=32,
+            engram_pad_token_id=0,
+            engram_vocab_size=heads[0],
+        )
+        oversized = EngramLayout(
+            PreTrainedConfig(engram_num_embeddings=[1 << 50], **layout_config)
+        )
+        layout = EngramLayout(
+            PreTrainedConfig(engram_num_embeddings=[sum(heads)], **layout_config)
+        )
+        # A failure in just one TP shard must stop every PCP replica.
+        capacity_layout = (
+            oversized if engram_ops.get_tensor_model_parallel_rank() == 0 else layout
+        )
+        with pytest.raises(RuntimeError, match="Insufficient shared memory"):
+            engram_ops.can_share_engram_tables(capacity_layout, pcp=True)
+        assert engram_ops.can_share_engram_tables(layout, pcp=True)
+        weight, scales = _full_table(sum(heads))
+        with torch.device("cuda"):
+            shared = ParallelEngramEmbedding(
+                sum(heads), DIM, heads, cpu_offload=True, pcp_shared_memory=True
+            )
+            private = ParallelEngramEmbedding(sum(heads), DIM, heads, cpu_offload=True)
+        for layer in (shared, private):
+            leader = layer is private or group.rank_in_group == 0
+            layer.weight.weight_loader(layer.weight, weight if leader else None)
+            layer.weight_scale_inv.weight_loader(
+                layer.weight_scale_inv, scales if leader else None
+            )
+        assert shared.weight.is_pinned() and shared.dp_size == 1
+        torch.testing.assert_close(
+            shared.weight.float(), private.weight.float(), atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            shared.weight_scale_inv, private.weight_scale_inv, atol=0, rtol=0
+        )
+
+        # One writer changes every mapping, proving this is not per-rank storage.
+        torch.distributed.barrier(group=group.cpu_group)
+        if group.rank_in_group == 0:
+            shared.weight_scale_inv[0].fill_(127)
+        torch.distributed.barrier(group=group.cpu_group)
+        assert torch.all(shared.weight_scale_inv[0] == 127)
+        torch.distributed.barrier(group=group.cpu_group)
+        shared.weight_scale_inv.weight_loader(
+            shared.weight_scale_inv, scales if group.rank_in_group == 0 else None
+        )
+
+        # Replicas own different IDs and can have no decode rows independently.
+        for count in (0 if group.rank_in_group == 1 else 7, 3, 11):
+            ids = _make_ids(heads, count, seed=group.rank_in_group + 31)
+            if count:
+                ids[-1].fill_(-1)
+            out = torch.empty(
+                (count, shared.part_n_hash_cols, DIM),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            ref = torch.empty_like(out)
+            private.lookup(ids, ref)
+            shared.lookup(ids, out)
+            torch.testing.assert_close(out, ref, atol=0, rtol=0)
+            if not count:
+                continue
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                shared.lookup(ids, out)
+            for seed in (42, 57, 42):
+                ids.copy_(_make_ids(heads, count, seed=seed + group.rank_in_group))
+                out.fill_(float("nan"))
+                graph.replay()
+                private.lookup(ids, ref)
+                torch.testing.assert_close(out, ref, atol=0, rtol=0)
+        torch.accelerator.synchronize()
+        del shared, private
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_engram_table_shared_across_pcp_replicas(tp_size):
+    """PCP4 and TP2/PCP2 share pages without changing lookup or graph replay."""
+    if torch.accelerator.device_count() < WORLD_SIZE:
+        pytest.skip(f"Need {WORLD_SIZE} GPUs")
+    mp.spawn(
+        _pcp_shared_worker,
+        args=(tp_size, get_open_port()),
+        nprocs=WORLD_SIZE,
+    )
     cleanup_dist_env_and_memory()
 
 
