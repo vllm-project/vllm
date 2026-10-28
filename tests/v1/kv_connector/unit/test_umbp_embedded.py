@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import tempfile
 import threading
 from types import SimpleNamespace
 
@@ -84,9 +85,16 @@ def test_load_timeout_does_not_count_time_waiting_for_a_worker(blocked_native_lo
     assert queued.status is TransferJobStatus.COMPLETED
 
 
-def test_lookup_server_refuses_a_socket_another_engine_serves(tmp_path):
+@pytest.fixture
+def socket_dir():
+    """Keep AF_UNIX paths short regardless of CI's TMPDIR."""
+    with tempfile.TemporaryDirectory(prefix="umbp-", dir="/tmp") as directory:
+        yield directory
+
+
+def test_lookup_server_refuses_a_socket_another_engine_serves(socket_dir):
     client = SimpleNamespace(batch_exists=lambda keys: [True] * len(keys))
-    path = _lookup_socket_path("taken", (0, 0, 0, 0), str(tmp_path), "dp0")
+    path = _lookup_socket_path("taken", (0, 0, 0, 0), socket_dir, "dp0")
     first = _MoriLookupServer(path, client)
     second = _MoriLookupServer(path, client)
     first.start()
@@ -94,16 +102,16 @@ def test_lookup_server_refuses_a_socket_another_engine_serves(tmp_path):
         with pytest.raises(RuntimeError, match="another live engine"):
             second.start()
         second.close()
-        scheduler = _MoriSchedulerHandle("taken", RankTopology(), str(tmp_path), "dp0")
+        scheduler = _MoriSchedulerHandle("taken", RankTopology(), socket_dir, "dp0")
         assert scheduler.lookup(["k"]) == [True]
     finally:
         second.close()
         first.close()
 
 
-def test_lookup_server_close_does_not_unlink_a_replacement(tmp_path):
+def test_lookup_server_close_does_not_unlink_a_replacement(socket_dir):
     client = SimpleNamespace(batch_exists=lambda keys: [True] * len(keys))
-    path = _lookup_socket_path("replaced", (0, 0, 0, 0), str(tmp_path))
+    path = _lookup_socket_path("replaced", (0, 0, 0, 0), socket_dir)
     first = _MoriLookupServer(path, client)
     first.start()
     first.close()
@@ -111,7 +119,7 @@ def test_lookup_server_close_does_not_unlink_a_replacement(tmp_path):
     second.start()
     try:
         first.close()
-        scheduler = _MoriSchedulerHandle("replaced", RankTopology(), str(tmp_path))
+        scheduler = _MoriSchedulerHandle("replaced", RankTopology(), socket_dir)
         assert scheduler.lookup(["k"]) == [True]
     finally:
         second.close()
