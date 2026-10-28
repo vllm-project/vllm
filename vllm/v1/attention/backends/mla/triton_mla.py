@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import suppress
 from typing import ClassVar
 
 import torch
@@ -380,16 +381,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
         attn_logits: torch.Tensor | None = None
         if is_workspace_manager_initialized():
-            try:
+            # A locked draft lane can be smaller than the target reservation;
+            # retain the direct-allocation fallback in that case.
+            with suppress(AssertionError):
                 (attn_logits,) = current_workspace_manager().get_simultaneous(
                     (logits_shape, torch.float32),
                 )
-            except AssertionError:
-                # The locked workspace of this lane is too small. The DSPark
-                # draft's lane is sized by its cudagraph captures (short dummy
-                # sequences, so few splits), while the builder's reservation
-                # lands in the target's lane. Allocate, as for o and lse.
-                pass
         if attn_logits is None:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q.device
