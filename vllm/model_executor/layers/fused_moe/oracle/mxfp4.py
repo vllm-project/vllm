@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -422,10 +423,14 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
-    if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
-        # Consumer Blackwell: the OAI Triton kernels run but their 99KB shared
-        # memory budget caps them at small tiles, so MARLIN prefills ~10%
-        # faster at equal decode throughput. Keep TRITON as an opt-in.
+    if current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(110)
+        or current_platform.is_device_capability_family(120)
+    ):
+        # Keep TRITON as an opt-in. Consumer Blackwell: the OAI Triton kernels
+        # run but their 99KB shared memory budget caps them at small tiles, so
+        # MARLIN prefills ~10% faster at equal decode throughput. Jetson Thor
+        # (SM110): MARLIN stays the default as it has not been benchmarked.
         _AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.TRITON)
         _AVAILABLE_BACKENDS.insert(
             _AVAILABLE_BACKENDS.index(Mxfp4MoeBackend.BATCHED_MARLIN) + 1,
@@ -515,6 +520,18 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
     activation_key = _resolve_activation_key(model_activation_key)
     if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
         return None
+    if (
+        activation_key == kMxfp8Dynamic
+        and _user_moe_activation_override() is None
+        and current_platform.is_device_capability_family(90)
+    ):
+        # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
+        # run a checkpoint's MXFP8 that way. An explicit request is honored.
+        logger.info_once(
+            "Running checkpoint MXFP8 MoE activations as block FP8 "
+            "(group 128) on Hopper."
+        )
+        activation_key = kFp8Dynamic128Sym
     from vllm.model_executor.layers.quantization.utils.humming import (
         quant_key_to_input_schema,
     )
@@ -2217,6 +2234,8 @@ _MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
     (kMxfp4Static, kFp8Dynamic128Sym),
     (kMxfp4Static, kFp8StaticTensorSym),
     (kMxfp4Static, None),
+    # gfx942's load-time int4 requant of Kimi-K3's MXFP4 experts
+    (kInt4Static32, None),
 ]
 
 
