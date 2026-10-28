@@ -64,6 +64,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
+    "mxfp4": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
