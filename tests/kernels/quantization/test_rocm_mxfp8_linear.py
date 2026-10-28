@@ -46,10 +46,11 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     return layer
 
 
+@pytest.mark.parametrize("backend", ["native", "hipb_mm"])
 @pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
 @torch.inference_mode()
-def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
+def test_rocm_mxfp8_linear_matches_dequant_reference(backend, name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
 
     The reference quantizes the activation with the same quantizer and then
@@ -61,12 +62,19 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     )
     from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
         RocmDotScaledMxfp8LinearKernel,
+        RocmHipbmmMxfp8LinearKernel,
     )
 
     torch.manual_seed(num_tokens)
     device = "cuda"
     layer = _make_layer(n, k, device)
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    reference_weight = dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float()
+    kernel_type = (
+        RocmHipbmmMxfp8LinearKernel
+        if backend == "hipb_mm"
+        else RocmDotScaledMxfp8LinearKernel
+    )
+    kernel = kernel_type(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
 
     x = torch.randn(num_tokens, k, device=device, dtype=torch.bfloat16) * 0.5
@@ -76,10 +84,7 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     assert torch.isfinite(out).all(), f"{name}: non-finite output"
 
     x_q, x_scale = mxfp8_e4m3_quantize(x)
-    expected = (
-        dequant_mxfp8_to_bf16(x_q, x_scale).float()
-        @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
-    )
+    expected = dequant_mxfp8_to_bf16(x_q, x_scale).float() @ reference_weight.T
     rel = (out.float() - expected).norm() / expected.norm()
     assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
 
@@ -284,3 +289,35 @@ def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
     torch.testing.assert_close(
         q_triton.view(torch.uint8), q_torch.view(torch.uint8), rtol=0, atol=0
     )
+
+
+def test_gfx950_scale_layout_linear_compiles() -> None:
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _mxfp8_dot_scaled_linear_gfx950,
+        shuffle_mxfp8_scale_gfx950,
+    )
+
+    input_size = 256
+    output_size = 33
+    torch.manual_seed(2)
+    input = torch.randn(1, input_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(output_size, input_size, device="cuda").to(torch.float8_e4m3fn)
+    weight_scale = torch.randint(
+        119,
+        128,
+        (output_size, input_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    weight_scale = shuffle_mxfp8_scale_gfx950(weight_scale)
+    compiled_linear = torch.compile(
+        _mxfp8_dot_scaled_linear_gfx950,
+        backend="inductor",
+        fullgraph=True,
+    )
+
+    expected = _mxfp8_dot_scaled_linear_gfx950(input, weight, weight_scale)
+    actual = compiled_linear(input, weight, weight_scale)
+    torch.accelerator.synchronize()
+
+    assert torch.equal(actual, expected)
