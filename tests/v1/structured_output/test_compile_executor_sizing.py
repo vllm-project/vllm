@@ -9,10 +9,11 @@ compile — e.g. an 86-worker pool inside a Kubernetes pod limited to 6 CPUs
 on a 172-core node.
 """
 
-from unittest.mock import patch
+import multiprocessing
 
 import pytest
 
+import vllm.envs as envs
 from vllm.v1.structured_output.utils import grammar_compile_max_workers
 
 pytestmark = pytest.mark.cpu_test
@@ -21,6 +22,7 @@ pytestmark = pytest.mark.cpu_test
 class TestGrammarCompileMaxWorkers:
     @pytest.fixture(autouse=True)
     def automatic_sizing(self, monkeypatch):
+        envs.disable_envs_cache()
         monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "0")
 
     @pytest.mark.parametrize(
@@ -38,16 +40,17 @@ class TestGrammarCompileMaxWorkers:
         assert grammar_compile_max_workers(cpu_count) == expected
 
     def test_defaults_to_host_cpu_count(self):
-        with patch("multiprocessing.cpu_count", return_value=32):
-            assert grammar_compile_max_workers() == 8
+        assert grammar_compile_max_workers() == max(
+            1, min(multiprocessing.cpu_count() // 2, 8)
+        )
 
-    def test_env_override(self):
-        with patch("vllm.envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", 4):
-            assert grammar_compile_max_workers(172) == 4
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "4")
+        assert grammar_compile_max_workers(172) == 4
 
-    def test_env_override_zero_means_auto(self):
-        with patch("vllm.envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", 0):
-            assert grammar_compile_max_workers(172) == 8
+    def test_env_override_zero_means_auto(self, monkeypatch):
+        monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "0")
+        assert grammar_compile_max_workers(172) == 8
 
     def test_at_least_one_worker(self):
         assert grammar_compile_max_workers(0) == 1

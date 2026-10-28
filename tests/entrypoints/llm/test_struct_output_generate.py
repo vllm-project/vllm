@@ -205,6 +205,36 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
+def test_structured_output_compile_worker_limit(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with vllm_runner(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        enforce_eager=True,
+        max_model_len=256,
+        structured_outputs_config=dict(backend="xgrammar"),
+        **platform_args,
+    ) as runner:
+        manager = (
+            runner.llm.llm_engine.engine_core.engine_core.structured_output_manager
+        )
+        assert manager.executor._max_workers == 1
+
+        outputs = runner.llm.generate(
+            ["Reply with yes.", "Reply with no."],
+            sampling_params=[
+                SamplingParams(
+                    temperature=0,
+                    max_tokens=16,
+                    structured_outputs=StructuredOutputsParams(choice=[answer]),
+                )
+                for answer in ["yes", "no"]
+            ],
+        )
+        assert [output.outputs[0].text for output in outputs] == ["yes", "no"]
+
+
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,

@@ -2393,6 +2393,7 @@ def compile_factors() -> dict[str, object]:
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
+        "VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
