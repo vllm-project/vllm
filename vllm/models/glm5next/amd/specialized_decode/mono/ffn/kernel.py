@@ -204,7 +204,7 @@ def build_flash_ffn_kernel(
     dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
     kv_fp8: bool = False,
     kv_mxfp4: bool = False,
-    mxfp4_native: bool = True,
+    mxfp4_native: bool = False,
     trace: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
@@ -220,8 +220,8 @@ def build_flash_ffn_kernel(
     ``mxfp4_mla`` rows (256 bytes of E2M1 codes, then 16 E8M0 scales, one a 32
     values), written as ``store_mxfp4_mla`` writes them; with ``mxfp4_native`` the
     split stage feeds the E2M1 codes and their E8M0 scales straight to scaled MFMAs
-    (QK: FP4 keys x MXFP8 query; PV: MXFP8 P x FP4 values), else it unpacks them to
-    bf16 for the bf16 MFMAs.
+    (QK: FP4 keys x MXFP8 query; PV: MXFP8 P x FP4 values), else (the default:
+    4-9% faster per launch at TP=2) it unpacks them to bf16 for the bf16 MFMAs.
 
     ``poll_timeout_us`` bounds every mailbox wait in time. An expired wait
     stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,

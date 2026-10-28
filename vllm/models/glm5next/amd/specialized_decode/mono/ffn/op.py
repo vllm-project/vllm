@@ -169,7 +169,7 @@ class FlashFfnRuntime:
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
         kv_mxfp4: bool = False,
-        mxfp4_native: bool = True,
+        mxfp4_native: bool = False,
         trace: bool = False,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
