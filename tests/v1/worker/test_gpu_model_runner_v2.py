@@ -284,23 +284,24 @@ def _make_capture_runner(
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(
-        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+        supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
     )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
+        capture_stream=object(),
     )
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    runner.input_buffers = object()
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = object()
+    runner.attn_groups = object()
+    runner.kv_cache_config = object()
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     runner.device = None
@@ -329,6 +330,16 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+    assert runner.cudagraph_manager is not None
+    capture_inner_cudagraphs = runner.model_state.capture_inner_cudagraphs
+    assert isinstance(capture_inner_cudagraphs, Mock)
+    capture_inner_cudagraphs.assert_called_once_with(
+        runner.input_buffers,
+        runner.block_tables,
+        runner.attn_groups,
+        runner.kv_cache_config,
+        runner.cudagraph_manager.capture_stream,
+    )
 
 
 def test_capture_model_reports_process_memory(monkeypatch):
@@ -399,7 +410,8 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     """Adaptive verification's cost-profiling dummy runs execute inside
     capture_model's free-memory window. The activations they leave in the
     allocator cache must not be counted as CUDA graph memory, which is taken
-    from the KV cache."""
+    from the KV cache. The memory-profiling pass skips them entirely: it runs
+    on a throwaway KV cache and the real capture recalibrates."""
     runner = _make_capture_runner(monkeypatch, captured=True)
     monkeypatch.setattr(
         runner.cudagraph_manager, "captured_token_counts", lambda: [1, 2], raising=False
@@ -428,7 +440,7 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
 
     assert runner.capture_model(profile_only=profile_only) == 0
-    assert curves == [[]]
+    assert curves == ([] if profile_only else [[]])
 
 
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
@@ -463,7 +475,10 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
-def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_dtype):
+@pytest.mark.parametrize("data_parallel_index", [0, 3])
+def test_standalone_draft_kv_dtype_override(
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index
+):
     @dataclass
     class Config:
         cache_config: CacheConfig
@@ -472,6 +487,7 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
         quant_config: object | None = None
 
     target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
@@ -488,3 +504,5 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+    assert draft_config.parallel_config.data_parallel_index == data_parallel_index
+    assert target.parallel_config.data_parallel_index == data_parallel_index

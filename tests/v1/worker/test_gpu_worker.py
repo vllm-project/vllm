@@ -396,6 +396,7 @@ def test_kv_budget_reserves_workspace_retained_by_graph_setup(
             free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
         ),
         requested_memory=ANY_FREE_MEMORY,
+        use_v2_model_runner=False,
         model_runner=SimpleNamespace(
             model_memory_usage=0,
             profile_run=lambda **_: None,
@@ -449,6 +450,7 @@ def test_kv_budget_retained_by_graph_setup_uses_process_counter(monkeypatch):
             free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
         ),
         requested_memory=ANY_FREE_MEMORY,
+        use_v2_model_runner=False,
         model_runner=SimpleNamespace(
             model_memory_usage=0,
             profile_run=lambda **_: None,
