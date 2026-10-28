@@ -21,21 +21,27 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.reload import direct
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+)
+from vllm.model_executor.model_loader.reload import (
+    direct,
+    finish_reload,
+    start_reload,
+)
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    direct_reload_pending,
     finish_direct_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
-_DEVICE = torch.device("cuda")
+_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class _Method(QuantizeMethodBase):
@@ -156,7 +162,7 @@ def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
 def _reload(model: _ToyModel, weights: dict[str, torch.Tensor]) -> None:
     begin_direct_reload(model)
     model.load_weights(weights.items())
-    finish_direct_reload(model, _MODEL_CONFIG)
+    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
 
 
 def _state(model: torch.nn.Module) -> dict[str, tuple]:
@@ -172,7 +178,7 @@ def _state(model: torch.nn.Module) -> dict[str, tuple]:
     return {
         name: (
             (tuple(t.shape), t.stride(), t.dtype),
-            t.detach().contiguous().reshape(-1).view(torch.uint8).cpu(),
+            t.detach().contiguous().reshape(-1).view(torch.uint8).cpu().clone(),
             t.data_ptr(),
         )
         for name, t in tensors.items()
@@ -291,12 +297,61 @@ class TestRefusals:
         with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
             _cold_start(_checkpoint())
 
+    def test_online_quantization_refused(self, monkeypatch):
+        # finish clears the guard that keeps online quantization from
+        # quantizing its converted bytes again
+        online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        init = _ToyModel.__init__
+
+        def with_online_layer(self):
+            init(self)
+            self.proj.quant_method = online
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
+        with pytest.raises(RuntimeError, match="online quantization"):
+            _cold_start(_checkpoint())
+
+    def test_replaced_param_refused(self):
+        # a new Parameter under a checkpoint name has no checkpoint layout:
+        # the loader would write checkpoint bytes into its runtime layout
+        model = _cold_start(_checkpoint())
+        model.proj.weight = torch.nn.Parameter(model.proj.weight.data, False)
+        before = _state(model)
+        with pytest.raises(RuntimeError, match=r"replaced .*proj\.weight"):
+            begin_direct_reload(model)
+        _assert_same(_state(model), before, addresses=True)
+        assert not direct_reload_pending(model)
+
 
 def test_retry_after_aborted_update_matches_cold_start():
     # Direct reload has no rollback: a failed update leaves the model partly
-    # updated (the worker refuses to run it), and the next full update repairs it.
+    # updated and pending (the worker refuses to run it), and the next full
+    # update repairs it.
     model = _cold_start(_checkpoint())
+    assert not direct_reload_pending(model)
     begin_direct_reload(model)
     model.load_weights(list(_checkpoint(1.01).items())[:3])  # update aborts
+    assert direct_reload_pending(model)
     _reload(model, _checkpoint(1.01))
+    assert not direct_reload_pending(model)
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+
+
+def test_finish_reload_uses_the_mode_start_reload_began(monkeypatch):
+    model = _cold_start(_checkpoint())
+    before = _state(model)
+    start_reload(model)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    model.load_weights(_checkpoint().items())
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    _assert_same(_state(model), before, addresses=True)
+
+
+def test_finish_keeps_guards_of_modules_without_quant_method():
+    # e.g. MoERunnerInterface sets the guard in __init__ for other reasons
+    model = _cold_start(_checkpoint())
+    model.attn.kv_b._already_called_process_weights_after_loading = True
+    model.proj._already_called_process_weights_after_loading = True
+    _reload(model, _checkpoint())
+    assert model.attn.kv_b._already_called_process_weights_after_loading
+    assert "_already_called_process_weights_after_loading" not in vars(model.proj)

@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 
-from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
+from .lifecycle import finish_reload, start_reload
 
 logger = init_logger(__name__)
 
@@ -91,9 +91,11 @@ def reload_weights(
     logger.info_once("Reloading weights inplace...")
     if is_checkpoint_format:
         # load weights from checkpoint/ original model format
-        initialize_layerwise_reload(model)
+        device_config = vllm_config.device_config
+        device = torch.device(load_config.device or device_config.device)
+        start_reload(model)
         loaded_weights = model.load_weights(weights_iterator)
-        finalize_layerwise_reload(model, model_config)
+        finish_reload(model, model_config, device)
 
     else:
         # load weights from kernel format

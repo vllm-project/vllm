@@ -94,12 +94,6 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
-    from .direct import begin_direct_reload, direct_reload_enabled
-
-    if direct_reload_enabled():
-        begin_direct_reload(model)
-        return
-
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
