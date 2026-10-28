@@ -23,11 +23,10 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950, _ON_GFX1151, _ON_RDNA
+    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950, _ON_RDNA
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
-    _ON_GFX1151 = False
     _ON_RDNA = False
 
 logger = init_logger(__name__)
@@ -784,7 +783,7 @@ def paged_mqa_logits_module():
                 str(error),
             )
             return None
-        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+        if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
             function_name = "deepgemm_fp8_paged_mqa_logits"
             required_parameters = {
                 "Preshuffle",
@@ -887,7 +886,7 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+        if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
