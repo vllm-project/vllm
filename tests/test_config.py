@@ -135,6 +135,7 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,
             worker_cls="test-worker",
+            all2all_backend="naive",
         ),
         model_config=(
             None
