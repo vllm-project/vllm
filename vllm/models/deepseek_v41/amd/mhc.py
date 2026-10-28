@@ -10,7 +10,7 @@ from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
     MHCPreDelayedOp,
 )
-from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.torch_utils import aux_stream
 
 # MI355X TP2, TP4 and TP8 improve through 128 tokens, shrinking from about +5%
@@ -19,13 +19,10 @@ MHC_OVERLAP_MAX_TOKENS = 128
 
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx942, on_gfx950
-
     config = vllm_config.model_config.hf_config
+    # Validated and tuned on MI355X (gfx950) only.
     return (
-        (on_gfx942() or on_gfx950())
+        get_cdna_version() == 4
         and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
         and config.hc_mult == 4
         and not vllm_config.parallel_config.use_ubatching
