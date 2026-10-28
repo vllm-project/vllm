@@ -200,7 +200,8 @@ class SimpleCPUOffloadWorker:
             # Allocate non-pinned first, then pin via cudaHostRegister to
             # bypass PyTorch's CUDACachingHostAllocator which rounds up to
             # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
+            # CPU blocks are loaded only after a completed GPU-to-CPU store.
+            tensor = torch.empty(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
             if pin_memory:
                 pin_tensor(tensor)
             self.cpu_kv_caches[name] = tensor
