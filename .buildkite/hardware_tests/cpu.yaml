@@ -68,6 +68,7 @@ steps:
 # which unit tests cannot reach.
 - label: CPU-Spec Decode Tests
   key: cpu-spec-decode-tests
+  automatic_shard: true
   depends_on: []
   soft_fail: true
   device: intel_cpu
@@ -147,6 +148,7 @@ steps:
 
 - label: CPU-Quantization Model Tests
   key: cpu-quantization-model-tests
+  automatic_shard: true
   depends_on: []
   device: intel_cpu
   no_plugin: true

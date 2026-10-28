@@ -1033,6 +1033,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) Batch Invariance (Distributed)"
+      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 45
