@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -43,38 +44,120 @@ def resolve_adaptive_cudagraph_mode(
     return CUDAGraphMode.FULL_AND_PIECEWISE
 
 
-def _assign_draft_token_budget(
+@triton.jit
+def _count_survival_at_least(
+    survival_ptr, num_slots, threshold, BLOCK_SIZE: tl.constexpr
+):
+    count = 0
+    for start in range(0, num_slots, BLOCK_SIZE):
+        offsets = start + tl.arange(0, BLOCK_SIZE)
+        bits = tl.load(survival_ptr + offsets, mask=offsets < num_slots, other=-1)
+        count += tl.sum((bits >= threshold).to(tl.int32))
+    return count
+
+
+@triton.jit(do_not_specialize=["num_reqs", "draft_budget"])
+def _assign_draft_token_budget_kernel(
+    # [max_num_reqs, num_steps]
+    confidence_probs_ptr,
+    confidence_probs_stride,
+    # [num_reqs]
+    idx_mapping_ptr,
+    # [num_reqs]
+    capacities_ptr,
+    # [max_num_reqs * num_steps]
+    survival_ptr,
+    num_reqs,
+    draft_budget,
+    NUM_STEPS: tl.constexpr,
+    BLOCK_REQS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Survival probabilities are non-negative, so their float bits order like
+    # the values; ineligible slots store -1 to rank below every real draft.
+    for start in range(0, num_reqs, BLOCK_REQS):
+        reqs = start + tl.arange(0, BLOCK_REQS)
+        mask = reqs < num_reqs
+        req_state_idx = tl.load(idx_mapping_ptr + reqs, mask=mask, other=0)
+        capacity = tl.load(capacities_ptr + reqs, mask=mask, other=0)
+        survival = tl.full([BLOCK_REQS], 1.0, tl.float32)
+        for step in tl.static_range(NUM_STEPS):
+            prob = tl.load(
+                confidence_probs_ptr + req_state_idx * confidence_probs_stride + step,
+                mask=mask,
+                other=0.0,
+            )
+            survival *= prob
+            bits = tl.where(step < capacity, survival.to(tl.int32, bitcast=True), -1)
+            tl.store(survival_ptr + reqs * NUM_STEPS + step, bits, mask=mask)
+    tl.debug_barrier()
+
+    # Binary search the largest threshold that still admits draft_budget slots.
+    num_slots = num_reqs * NUM_STEPS
+    lo = 0
+    hi = 0x7F800000
+    while lo < hi:
+        mid = lo + (hi - lo + 1) // 2
+        if (
+            _count_survival_at_least(survival_ptr, num_slots, mid, BLOCK_SIZE)
+            >= draft_budget
+        ):
+            lo = mid
+        else:
+            hi = mid - 1
+    ties_left = draft_budget - _count_survival_at_least(
+        survival_ptr, num_slots, lo + 1, BLOCK_SIZE
+    )
+
+    # Admit every slot above the threshold and hand out ties in request order.
+    for start in range(0, num_reqs, BLOCK_REQS):
+        reqs = start + tl.arange(0, BLOCK_REQS)
+        mask = reqs < num_reqs
+        num_above = tl.zeros([BLOCK_REQS], tl.int32)
+        num_tied = tl.zeros([BLOCK_REQS], tl.int32)
+        for step in tl.static_range(NUM_STEPS):
+            bits = tl.load(survival_ptr + reqs * NUM_STEPS + step, mask=mask, other=-1)
+            num_above += (bits > lo).to(tl.int32)
+            num_tied += (bits == lo).to(tl.int32)
+        tied_before = tl.cumsum(num_tied, axis=0) - num_tied
+        num_taken = tl.minimum(num_tied, tl.maximum(ties_left - tied_before, 0))
+        tl.store(capacities_ptr + reqs, num_above + num_taken, mask=mask)
+        ties_left -= tl.sum(num_tied)
+
+
+def assign_draft_token_budget(
     confidence_probs: torch.Tensor,
     idx_mapping: torch.Tensor,
     capacities: torch.Tensor,
     draft_budget: int,
-    num_steps: int,
+    survival: torch.Tensor,
 ) -> None:
     """Admit the globally best `draft_budget` draft slots, in place.
 
     Every (request, step) slot is scored by its survival probability, the running
     product of that request's per-position confidences, and the highest scores win.
-    Survival only decreases along a request, so a global top-k always admits
-    continuously along steps with a request.
+    Survival only decreases along a request, so the winners are always a prefix of
+    each request's steps and only per-request counts are needed.
 
     `capacities` enters holding each request's scheduled draft count (which bounds its
     eligible slots) and leaves holding the admitted count. The caller only calls this
     when `draft_budget < capacities.sum()`, so every winner is a real draft slot.
+    `survival` is int32 scratch with room for `num_reqs * num_steps` slots.
     """
-    survival = confidence_probs[idx_mapping].cumprod(dim=1)
-    steps = torch.arange(num_steps, device=survival.device)
-    # Out-of-range slots score -inf so they never outrank a real draft.
-    out_of_range = steps[None, :] >= capacities[:, None]
-    survival = survival.masked_fill(out_of_range, -float("inf"))
-    flat = survival.flatten()
-    winners = flat.topk(draft_budget).indices
-    admitted = torch.zeros_like(flat, dtype=torch.bool).index_fill_(0, winners, True)
-    torch.sum(admitted.view_as(survival), dim=1, dtype=capacities.dtype, out=capacities)
-
-
-_assign_draft_token_budget_compiled = torch.compile(
-    _assign_draft_token_budget, dynamic=True
-)
+    num_steps = confidence_probs.shape[1]
+    _assign_draft_token_budget_kernel[(1,)](
+        confidence_probs,
+        confidence_probs.stride(0),
+        idx_mapping,
+        capacities,
+        survival,
+        idx_mapping.shape[0],
+        draft_budget,
+        NUM_STEPS=num_steps,
+        BLOCK_REQS=256,
+        BLOCK_SIZE=1024,
+        num_warps=8,
+    )
 
 
 def build_cost_tables_from_curves(
@@ -188,6 +271,9 @@ class AdaptiveVerificationManager:
         self._batch_draft_capacity = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        self._draft_survival = torch.empty(
+            max_num_reqs * self.num_speculative_steps, dtype=torch.int32, device=device
+        )
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
@@ -215,6 +301,14 @@ class AdaptiveVerificationManager:
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+
+    def warmup_budget_kernel(self) -> None:
+        """JIT the draft-budget kernel so the first binding step doesn't compile."""
+        capacities = self._batch_draft_capacity[:1].fill_(self.num_speculative_steps)
+        idx_mapping = torch.zeros(1, dtype=torch.int64, device=capacities.device)
+        assign_draft_token_budget(
+            self._confidence_probs, idx_mapping, capacities, 1, self._draft_survival
+        )
 
     def add_request(self, req_idx: int) -> None:
         if self.use_draft_lengths:
@@ -505,12 +599,12 @@ class AdaptiveVerificationManager:
         else:
             async_tensor_h2d(scheduled_drafts, out=capacities)
             if draft_budget < int(scheduled_drafts.sum()):
-                _assign_draft_token_budget_compiled(
+                assign_draft_token_budget(
                     self._confidence_probs,
                     idx_mapping,
                     capacities,
                     draft_budget,
-                    self.num_speculative_steps,
+                    self._draft_survival,
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
