@@ -1075,6 +1075,16 @@ def build_flash_ffn_kernel(
                 s = fx.Int32(t)
                 stamp(stage)
                 gamma = [ld_bf16(r_g, tid * CPT + q) for q in range(CPT)]
+                # Sinkhorn on wave 0: lane 4 i + j holds comb[i][j] (lanes 16..63
+                # repeat it); lanes 0..3 / 4..7 make pre_i / post_i. Loads go out
+                # before the mailbox wait.
+                ci = (lane // HC_MULT) % HC_MULT
+                cj = lane % HC_MULT
+                kp = lane % (2 * HC_MULT)
+                o = 2 * HC_MULT
+                sc = [ld_f32(r_scale, i) for i in range(3)]
+                hb_p = ld_f32(r_base, kp)
+                hb_c = [ld_f32(r_base, o + ci * HC_MULT + j) for j in range(HC_MULT)]
                 if tid < PMIX * NP:
                     k = tid // NP
                     part = tid % NP
@@ -1095,74 +1105,31 @@ def build_flash_ffn_kernel(
                         tot = tot + lds_ld(red, tid * NP + p_)
                     lds_st(misc, tid, tot)
                 gpu.barrier()
-                if tid == 0:
-                    rinv = _rsq(lds_ld(misc, N_MIX) * (1.0 / (HC_MULT * HIDDEN)) + EPS)
-                    m = [lds_ld(misc, k) * rinv for k in range(N_MIX)]
-                    sc = [ld_f32(r_scale, i) for i in range(3)]
-                    hb = [ld_f32(r_base, k) for k in range(N_MIX)]
-                    for i in range_constexpr(HC_MULT):
-                        pre_i = sigmoid(m[i] * sc[0] + hb[i]) + HC_EPS
-                        lds_st(misc, 32 + i, pre_i)
-                        post_i = (
-                            sigmoid(m[HC_MULT + i] * sc[1] + hb[HC_MULT + i])
-                            * HC_POST_MULT
-                        )
+                rinv = _rsq(lds_ld(misc, N_MIX) * (1.0 / (HC_MULT * HIDDEN)) + EPS)
+                # comb's inputs into registers: misc is free for the next stage
+                # once the row is out
+                row = [
+                    lds_ld(misc, o + ci * HC_MULT + j) * rinv * sc[2] + hb_c[j]
+                    for j in range(HC_MULT)
+                ]
+                if wave == 0:
+                    gp = sigmoid(
+                        lds_ld(misc, kp) * rinv * (lane < HC_MULT).select(sc[0], sc[1])
+                        + hb_p
+                    )
+                    if lane < HC_MULT:
+                        lds_st(misc, 32 + lane, gp + HC_EPS)
+                    if (lane >= HC_MULT) & (lane < 2 * HC_MULT):
                         if const_expr(attn):
-                            put(mb("mix_a"), s * MIX_A + i, post_i)
+                            put(
+                                mb("mix_a"), s * MIX_A + kp - HC_MULT, gp * HC_POST_MULT
+                            )
                         else:
-                            bo.buffer_store(post_i, _rsrc(post_out), s * HC_MULT + i)
-                    o = 2 * HC_MULT
-                    comb = []
-                    for i in range_constexpr(HC_MULT):
-                        row = [
-                            m[o + i * HC_MULT + j] * sc[2] + hb[o + i * HC_MULT + j]
-                            for j in range(HC_MULT)
-                        ]
-                        mx = row[0]
-                        for j in range_constexpr(1, HC_MULT):
-                            mx = fx.max(mx, row[j])
-                        ex = [_exp(v - mx) for v in row]
-                        den = ex[0]
-                        for j in range_constexpr(1, HC_MULT):
-                            den = den + ex[j]
-                        comb.append([div(v, den) + HC_EPS for v in ex])
-
-                    def norm_cols(cm):
-                        for j in range_constexpr(HC_MULT):
-                            den = cm[0][j]
-                            for i in range_constexpr(1, HC_MULT):
-                                den = den + cm[i][j]
-                            den = den + HC_EPS
-                            for i in range_constexpr(HC_MULT):
-                                cm[i][j] = div(cm[i][j], den)
-                        return cm
-
-                    def norm_rows(cm):
-                        for i in range_constexpr(HC_MULT):
-                            den = cm[i][0]
-                            for j in range_constexpr(1, HC_MULT):
-                                den = den + cm[i][j]
-                            den = den + HC_EPS
-                            cm[i] = [div(v, den) for v in cm[i]]
-                        return cm
-
-                    comb = norm_cols(comb)
-                    for _ in range_constexpr(SINKHORN_ITERS - 1):
-                        comb = norm_cols(norm_rows(comb))
-                    for i in range_constexpr(HC_MULT):
-                        for j in range_constexpr(HC_MULT):
-                            if const_expr(attn):
-                                put(
-                                    mb("mix_a"),
-                                    s * MIX_A + HC_MULT + i * HC_MULT + j,
-                                    comb[i][j],
-                                )
-                            else:
-                                bo.buffer_store(
-                                    comb[i][j],
-                                    _rsrc(comb_out),
-                                    (s * HC_MULT + i) * HC_MULT + j,
-                                )
+                            bo.buffer_store(
+                                gp * HC_POST_MULT,
+                                _rsrc(post_out),
+                                s * HC_MULT + kp - HC_MULT,
+                            )
                 gpu.barrier()
                 pre = [lds_ld(misc, 32 + i) for i in range(HC_MULT)]
                 got = poll(
@@ -1198,6 +1165,45 @@ def build_flash_ffn_kernel(
                             li[2 * q + 1] * rstd * gamma[2 * q + 1],
                         ),
                     )
+                # the Sinkhorn only feeds comb (consumed by a later seam), so it
+                # runs after the layer row is out
+                if wave == 0:
+
+                    def pick(d, vs):
+                        return (d == 0).select(
+                            vs[0], (d == 1).select(vs[1], (d == 2).select(vs[2], vs[3]))
+                        )
+
+                    mx = row[0]
+                    for j in range_constexpr(1, HC_MULT):
+                        mx = fx.max(mx, row[j])
+                    ex = [_exp(v - mx) for v in row]
+                    den = ex[0]
+                    for j in range_constexpr(1, HC_MULT):
+                        den = den + ex[j]
+                    comb = div(pick(cj, ex), den) + HC_EPS
+
+                    def normalize(c, idx, step):
+                        """Divide c by its row (step 1) or column (step 4) sum, added
+                        in index order, plus HC_EPS: the sequential loop's float ops."""
+                        x1 = _xshfl(c, step)
+                        x2 = _xshfl(c, 2 * step)
+                        vs = [c, x1, x2, _xshfl(x1, 2 * step)]
+                        den = pick(idx, vs)
+                        for k in range_constexpr(1, HC_MULT):
+                            den = den + pick(idx ^ k, vs)
+                        return div(c, den + HC_EPS)
+
+                    comb = normalize(comb, ci, HC_MULT)
+                    for _ in range_constexpr(SINKHORN_ITERS - 1):
+                        comb = normalize(normalize(comb, cj, 1), ci, HC_MULT)
+                    if lane < HC_MULT * HC_MULT:
+                        if const_expr(attn):
+                            put(mb("mix_a"), s * MIX_A + HC_MULT + lane, comb)
+                        else:
+                            bo.buffer_store(
+                                comb, _rsrc(comb_out), s * HC_MULT * HC_MULT + lane
+                            )
 
         # ================================================= KDA attention stages
         KD = KDA_DIM
