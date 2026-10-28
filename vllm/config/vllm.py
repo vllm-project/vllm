@@ -650,11 +650,7 @@ class VllmConfig:
     def _resolve_num_hash_lookahead_tokens(self) -> int:
         """Resolve the hash lookahead after the relevant configs are finalized."""
         speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
-        ):
+        if speculative_config is None or not speculative_config.use_hash_lookahead():
             return 0
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None:
@@ -664,10 +660,16 @@ class VllmConfig:
 
             connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
             if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
+                logger.warning_once(
+                    "%s does not support lookahead block hashes, so a prefix hit "
+                    "reuses draft KV built for another next token: outputs stay "
+                    "correct, but %s acceptance drops after prefix hits.",
+                    kv_transfer_config.kv_connector,
+                    speculative_config.method,
+                )
                 return 0
         elif not self.cache_config.enable_prefix_caching:
             return 0
-        # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
 
     @property
