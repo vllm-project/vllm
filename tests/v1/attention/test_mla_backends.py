@@ -390,13 +390,12 @@ def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
     num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
-    if not (
-        is_aiter_found_and_supported()
-        and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
-            num_heads, kv_lora_rank, qk_nope_head_dim
-        )
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+        num_heads, kv_lora_rank, qk_nope_head_dim
     ):
-        pytest.skip("AITER has no tuned fused MLA decode query kernel for this shape")
+        pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
 
     set_random_seed(0)
     q = torch.randn(
