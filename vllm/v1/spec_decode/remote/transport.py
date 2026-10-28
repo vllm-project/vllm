@@ -567,6 +567,8 @@ class Listener:
         """Resolved endpoint, with the actual port for ``tcp://host:0``."""
 
     def accept(self, timeout: float | None = None) -> FramedConnection:
+        if self._sock.fileno() < 0:
+            raise ConnectionClosed("listener closed")
         try:
             self._sock.settimeout(timeout)
             conn, _ = self._sock.accept()
