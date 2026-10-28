@@ -4490,6 +4490,16 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
+    def is_triton_preshuffle_gemm_a8w8_tuned(n: int, k: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("GEMM-A8W8_PRESHUFFLED", n, k)
+        except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
