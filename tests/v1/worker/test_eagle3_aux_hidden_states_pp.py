@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.distributed import parallel_state
+from vllm.model_executor.models import qwen3_5, qwen3_next
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
@@ -204,3 +205,125 @@ def test_minimax_pp2_without_aux_keeps_hidden_and_residual_transport(minimax_pp_
     ) == {"hidden_states", "residual"}
     output = last(None, None, sent)
     torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+
+
+class _Qwen3NextPPAuxLayer(torch.nn.Module):
+    use_attn_reduce_scatter_for_moe = False
+
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+
+    def forward(self, positions, hidden_states, residual):
+        return (
+            torch.full_like(hidden_states, self.index + 1),
+            torch.zeros_like(hidden_states),
+        )
+
+
+class _Qwen3NextPPAuxNorm(torch.nn.Module):
+    def forward(self, hidden_states, residual):
+        return hidden_states + residual, residual
+
+
+@pytest.fixture
+def qwen3_5_pp_stage(monkeypatch):
+    """Exercise the shared Qwen3Next forward path with CPU tensors."""
+    group = SimpleNamespace(world_size=2, is_first_rank=True, is_last_rank=False)
+    monkeypatch.setattr(qwen3_next, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+
+    def make_stage(start, end, taps, world_size=2):
+        group.world_size = world_size
+        group.is_first_rank = start == 0
+        group.is_last_rank = end == 6
+
+        model = qwen3_5.Qwen3_5Model.__new__(qwen3_5.Qwen3_5Model)
+        torch.nn.Module.__init__(model)
+        model.do_not_compile = True
+        model.start_layer = start
+        model.end_layer = end
+        model.layers = torch.nn.ModuleList(
+            _Qwen3NextPPAuxLayer(index) for index in range(6)
+        )
+        model.embed_tokens = torch.nn.Identity()
+        model.norm = _Qwen3NextPPAuxNorm()
+        model._set_aux_hidden_state_layers(taps)
+        return model
+
+    return make_stage
+
+
+def _qwen_aux_state(value):
+    return torch.full((2, 4), float(value), device="cpu")
+
+
+def test_qwen3_5_declares_and_configures_aux_hidden_state_pp(qwen3_5_pp_stage):
+    model = qwen3_5_pp_stage(3, 6, ())
+    target = qwen3_5.Qwen3_5ForCausalLMBase.__new__(qwen3_5.Qwen3_5ForCausalLMBase)
+    torch.nn.Module.__init__(target)
+    target.model = model
+
+    target.set_aux_hidden_state_layers((4, 0, 2, 4))
+
+    assert model.supports_aux_hidden_states_over_pp
+    assert model.aux_hidden_state_layers == (0, 2, 4)
+    assert model._aux_slot_base_cached == 2
+    assert model._aux_upstream_total_cached == 2
+
+
+def test_qwen3_5_pp2_preserves_ordered_global_aux_taps(qwen3_5_pp_stage):
+    taps = (0, 2, 4, 6)
+    positions = torch.arange(2)
+    first = qwen3_5_pp_stage(0, 3, taps)
+    sent = first(None, positions, inputs_embeds=_qwen_aux_state(0))
+    last = qwen3_5_pp_stage(3, 6, taps)
+
+    result = last(None, positions, sent)
+
+    assert isinstance(result, tuple)
+    output, aux = result
+    torch.testing.assert_close(output, _qwen_aux_state(6))
+    for hidden, tap in zip(aux, taps, strict=True):
+        torch.testing.assert_close(hidden, _qwen_aux_state(tap))
+
+
+def test_qwen3_5_missing_upstream_aux_slot_is_not_silently_dropped(
+    qwen3_5_pp_stage,
+):
+    model = qwen3_5_pp_stage(3, 6, (0, 2, 4, 6))
+    incoming = IntermediateTensors(
+        {
+            "hidden_states": _qwen_aux_state(3),
+            "residual": _qwen_aux_state(0),
+            "aux_hidden_states_0": _qwen_aux_state(0),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Missing aux_hidden_states_1"):
+        model(None, torch.arange(2), incoming)
+
+
+@pytest.mark.parametrize("taps", [(), (0, 2, 4, 6)])
+def test_qwen3_5_pp1_output_and_aux_taps(qwen3_5_pp_stage, taps):
+    model = qwen3_5_pp_stage(0, 6, taps, world_size=1)
+    output = model(None, torch.arange(2), inputs_embeds=_qwen_aux_state(0))
+    if taps:
+        output, aux = output
+        for hidden, tap in zip(aux, taps, strict=True):
+            torch.testing.assert_close(hidden, _qwen_aux_state(tap))
+    torch.testing.assert_close(output, _qwen_aux_state(6))
+
+
+def test_qwen3_5_pp2_without_aux_keeps_hidden_and_residual_transport(
+    qwen3_5_pp_stage,
+):
+    positions = torch.arange(2)
+    first = qwen3_5_pp_stage(0, 3, ())
+    sent = first(None, positions, inputs_embeds=_qwen_aux_state(0))
+    assert set(sent.tensors) == {"hidden_states", "residual"}
+
+    last = qwen3_5_pp_stage(3, 6, ())
+    output = last(None, positions, sent)
+    torch.testing.assert_close(output, _qwen_aux_state(6))
