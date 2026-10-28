@@ -818,6 +818,75 @@ def _patch_cpp_indirect_assert_if_needed():
 
 _patch_cpp_indirect_assert_if_needed()
 
+# ===================================================
+# torch < 2.13 Inductor implicit-fallback log message
+# ===================================================
+# Before torch 2.13, GraphLowering.call_function builds
+#   log.info("Creating implicit fallback for:\n%s",
+#            error.operator_str(target, args, kwargs))
+# eagerly, even when INFO logging is off. operator_str stringifies every IR
+# argument and IRNode.__str__ has no depth or cycle protection, so deep IR
+# with shared nodes can effectively hang compilation (see #42129, #43111).
+# Only print the target for vllm ops. Remove once every platform pins
+# torch >= 2.13.
+
+_VLLM_FALLBACK_NAMESPACE_PREFIXES = ("vllm::", "vllm_aiter::")
+
+
+def _apply_inductor_operator_str_patch() -> None:
+    from torch._inductor.exc import OperatorIssue
+
+    original = OperatorIssue.operator_str
+
+    def operator_str(target, args, kwargs) -> str:
+        name = target.name() if hasattr(target, "name") else str(target)
+        if name.startswith(_VLLM_FALLBACK_NAMESPACE_PREFIXES):
+            return f"  target: {target}"
+        return original(target, args, kwargs)
+
+    OperatorIssue.operator_str = staticmethod(operator_str)
+
+
+def _patch_inductor_operator_str_if_needed():
+    """Shorten the implicit-fallback message for vllm ops on torch < 2.13.
+
+    Defers application until torch._inductor.exc is imported, so that
+    importing vllm does not import torch._inductor.
+    """
+    if is_torch_equal_or_newer("2.13.0.dev"):
+        return
+
+    import sys
+
+    target_name = "torch._inductor.exc"
+    if target_name in sys.modules:
+        _apply_inductor_operator_str_patch()
+        return
+
+    import importlib.abc
+
+    class _OperatorStrPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_inductor_operator_str_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _OperatorStrPatchFinder())
+
+
+_patch_inductor_operator_str_if_needed()
+
 
 def _apply_inductor_pattern_matcher_patch() -> None:
     """Allow custom ops and functionalization wrappers with unsupported dtypes."""
