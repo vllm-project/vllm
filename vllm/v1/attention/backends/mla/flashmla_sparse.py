@@ -1345,10 +1345,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             kernel_metadata=attn_metadata.shardq_kernel_metadata,
             req_id_per_token=shardq.req_id_per_token,
         )
-        out = unshard_out(out, shardq.split)
-        if decode_out is None:
-            return out
-        return torch.cat((decode_out, out))
+        out = unshard_out(out, shardq.split, num_leading_rows=num_decode_tokens)
+        if decode_out is not None:
+            out[:num_decode_tokens] = decode_out
+        return out
 
     def _fp8_flash_mla_kernel(
         self,

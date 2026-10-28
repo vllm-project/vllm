@@ -314,10 +314,14 @@ def unshard_out(
     split: ShardQSplit,
     group: dist.ProcessGroup | None = None,
     use_sm: bool | None = None,
+    num_leading_rows: int = 0,
 ) -> torch.Tensor:
     """[T_rank, world * H_local, D] token shard -> [T, H_local, D] head shards.
 
-    The symmetric-memory result views a buffer that the next call reuses.
+    The result has ``num_leading_rows`` uninitialized rows before the T
+    restored ones, for a mixed step's decode output to fill without copying
+    the prefill rows again. The symmetric-memory result views a buffer that
+    the next call reuses.
     """
     _, all_heads, dim = out.shape
     heads = all_heads // split.world
@@ -340,11 +344,12 @@ def unshard_out(
             input_split_sizes=[split.num_local] * split.world,
             group=group,
         )
-        restored = torch.empty_like(recv)
-        restored[split.rank_order] = recv
+        restored = recv.new_empty((num_leading_rows + num_tokens, heads, dim))
+        restored[num_leading_rows + split.rank_order] = recv
         return restored
-    buf = _symm_buffer(group, "out", num_tokens * heads * dim, out.dtype, out.device)
-    key = ("out", out.stride(0), heads, dim, buf.storage.data_ptr())
+    num_rows = num_leading_rows + num_tokens
+    buf = _symm_buffer(group, "out", num_rows * heads * dim, out.dtype, out.device)
+    key = ("out", out.stride(0), heads, dim, num_leading_rows, buf.storage.data_ptr())
     rows = split.sm_rows.get(key)
     if rows is None:
         # Local token p's head block j goes to rank j, at the token's row.
@@ -354,8 +359,11 @@ def unshard_out(
             + peers[None, :] * heads * dim
         )
         dst = buf.peer_ptrs[None, :] + (
-            split.local_idx[:, None] * heads * dim * out.element_size()
+            (split.local_idx[:, None] + num_leading_rows)
+            * heads
+            * dim
+            * out.element_size()
         )
         rows = split.sm_rows[key] = (src.reshape(-1), dst.reshape(-1))
     _push_rows(out, *rows, heads * dim, buf.handle)
-    return buf.storage[: num_tokens * heads * dim].view(num_tokens, heads, dim)
+    return buf.storage[: num_rows * heads * dim].view(num_rows, heads, dim)

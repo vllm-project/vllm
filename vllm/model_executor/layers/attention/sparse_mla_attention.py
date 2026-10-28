@@ -1028,10 +1028,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             block_size=block_size,
             is_decode=False,
         )
-        out = unshard_out(out, shardq.split)
-        if decode_out is None:
-            return out
-        return torch.cat((decode_out, out))
+        out = unshard_out(out, shardq.split, num_leading_rows=num_decode_tokens)
+        if decode_out is not None:
+            out[:num_decode_tokens] = decode_out
+        return out
 
     def _forward_mqa_kernel(
         self,

@@ -67,7 +67,7 @@ def test_indexer_rows_cover_decodes_then_local_prefill(num_decode_tokens):
     )
 
 
-def _round_trip(rank, world, port, use_sm, q_dtype):
+def _round_trip(rank, world, port, use_sm, q_dtype, num_leading_rows):
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     torch.accelerator.set_device_index(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world)
@@ -89,14 +89,24 @@ def _round_trip(rank, world, port, use_sm, q_dtype):
         padded = torch.zeros(sharded.shape[0], world * heads + 8, 512, device="cuda")
         padded[:, : world * heads] = sharded[..., :512].float()
         out = padded.bfloat16()[:, : world * heads]
-        restored = unshard_out(out, split, group, use_sm=use_sm)
-        assert torch.equal(restored, local_heads[..., :512].bfloat16())
+        restored = unshard_out(
+            out, split, group, use_sm=use_sm, num_leading_rows=num_leading_rows
+        )
+        assert restored.shape[0] == num_leading_rows + sum(lens)
+        assert torch.equal(
+            restored[num_leading_rows:], local_heads[..., :512].bfloat16()
+        )
     dist.destroy_process_group()
 
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="needs 2 GPUs")
 @pytest.mark.parametrize("q_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("use_sm", [False, True])
-def test_shard_q_round_trip(use_sm, q_dtype):
+@pytest.mark.parametrize("num_leading_rows", [0, 33])
+def test_shard_q_round_trip(use_sm, q_dtype, num_leading_rows):
     world = 2
-    mp.spawn(_round_trip, args=(world, get_open_port(), use_sm, q_dtype), nprocs=world)
+    mp.spawn(
+        _round_trip,
+        args=(world, get_open_port(), use_sm, q_dtype, num_leading_rows),
+        nprocs=world,
+    )
