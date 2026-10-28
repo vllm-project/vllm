@@ -274,6 +274,10 @@ class Llama4VisionAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
+            # q/k/v arrive as separate checkpoint tensors (possibly in
+            # different load_weights calls): write each into its rows.
+            for param in (self.qkv_proj.weight, self.qkv_proj.bias):
+                param.weight_loader = self._load_qkv_shard
             self.o_proj = ReplicatedLinear(
                 self.num_heads * self.head_dim,
                 self.embed_dim,
@@ -313,6 +317,12 @@ class Llama4VisionAttention(nn.Module):
             is_neox_style=False,
             dtype=torch.complex64,  # important
         )
+
+    def _load_qkv_shard(
+        self, param: torch.Tensor, loaded_weight: torch.Tensor, shard_id: str
+    ) -> None:
+        offset = {"q": 0, "k": self.q_size, "v": self.q_size + self.kv_size}[shard_id]
+        param.data.narrow(0, offset, loaded_weight.shape[0]).copy_(loaded_weight)
 
     def forward(
         self,
@@ -1038,30 +1048,6 @@ class Llama4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def _consolidate_qkv_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        qkv_idx_mappings = {
-            ".self_attn.q_proj": 0,
-            ".self_attn.k_proj": 1,
-            ".self_attn.v_proj": 2,
-        }
-        qkv_weights = {}
-        for name, loaded_weight in weights:
-            for weight_name, idx in qkv_idx_mappings.items():
-                if weight_name not in name:
-                    continue
-                new_name = name.replace(weight_name, ".self_attn.qkv_proj")
-                if new_name not in qkv_weights:
-                    qkv_weights[new_name] = [None] * 3
-                qkv_weights[new_name][idx] = loaded_weight
-                break
-            else:
-                yield name, loaded_weight
-        for key, weight in qkv_weights.items():
-            qkv_weight = torch.cat(weight, dim=0)
-            yield key, qkv_weight
-
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
         format."""
@@ -1115,13 +1101,10 @@ class Llama4ForConditionalGeneration(
         """Load non-language-model weights with stacking support."""
         updated_params = set()
 
-        if self.use_data_parallel:
-            other_weights = self._consolidate_qkv_weights(other_weights)
-
         for name, loaded_weight in other_weights:
             # Try stacked parameter mapping first
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name or self.use_data_parallel:
+                if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]

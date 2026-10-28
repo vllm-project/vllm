@@ -3,6 +3,9 @@
 """RL weight updates call ``load_weights`` once per bucket: the model-level
 finish step runs once after the last call."""
 
+from types import SimpleNamespace
+
+import torch
 from torch import nn
 
 from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
@@ -21,3 +24,15 @@ def test_reload_finish_runs_model_hook_once():
     model = _HookCounter()
     finalize_layerwise_reload(model, None)
     assert model.calls == 1
+
+
+def test_llama4_dp_vision_qkv_shards_split_across_calls():
+    """Llama4 DP vision: q/k/v land in their rows in any order, one per call."""
+    from vllm.model_executor.models.mllama4 import Llama4VisionAttention
+
+    attn = SimpleNamespace(q_size=4, kv_size=4)
+    q, k, v = (torch.full((4, 3), float(i)) for i in range(3))
+    param = torch.empty(12, 3)
+    for shard_id, tensor in (("v", v), ("k", k), ("q", q)):
+        Llama4VisionAttention._load_qkv_shard(attn, param, tensor, shard_id)
+    torch.testing.assert_close(param, torch.cat([q, k, v]))
