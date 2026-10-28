@@ -420,7 +420,7 @@ TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
 All ranks must finish receiving before admission; KV pressure may still delay it.
 Transfer failures use the configured recovery policy. Unexpected poll/channel
 errors are fatal; the `mp` monitor wakes even a paused engine.
-Workers yield to queued RPCs and sleep between polls, adding up to 0.2 ms plus OS
+MP workers yield to queued RPCs and sleep between polls, adding up to 0.2 ms plus OS
 scheduling delay to a new RPC. Benchmark latency and CPU overhead before enabling.
 Post-processing uses the worker's current stream before the next forward.
 Transfer latency may be observed earlier; metrics use ordinary step outputs.
