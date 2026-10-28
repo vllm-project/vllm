@@ -12,7 +12,7 @@ three custom ops so that only attention runs outside piecewise CUDA graphs:
 * back: o_proj GEMV, then residual add + post-attention RMSNorm.
 
 Steps of at most ``MAX_ROWS`` rows run front/back as fused Triton kernels
-(four launches per layer for decode, 13 in the stock chain on MI355X);
+(four launches per layer for decode, 12 in the stock chain on MI355X);
 larger steps run the stock modules inside the same ops.
 
 Programs hand work to each other through arrival counters: the last program
