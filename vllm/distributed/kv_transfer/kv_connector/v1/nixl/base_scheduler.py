@@ -116,6 +116,9 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Payloads the listener serves; a republish after a wake-up updates them.
+        self._handshake_data: dict[tuple[int, int], bytes] = {}
+        self._registration_generation = 0
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -305,7 +308,6 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
 
         """
-        encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -313,12 +315,16 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            encoded = encoder.encode(rank_metadata)
+            if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
+                # Peers must handshake again to load the changed registration.
+                self._registration_generation += 1
+            self._handshake_data[(pp_rank, tp_rank)] = encoded
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
                 tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                str(len(self._handshake_data[(pp_rank, tp_rank)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -327,7 +333,7 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
                 args=(
-                    encoded_data,
+                    self._handshake_data,
                     ready_event,
                     self._stop_event,
                     self.side_channel_host,
@@ -424,9 +430,9 @@ class NixlBaseConnectorScheduler:
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > backoff
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
