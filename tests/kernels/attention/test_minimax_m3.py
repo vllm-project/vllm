@@ -1174,6 +1174,407 @@ def test_aiter_indexer_impl_matches_reference(
     assert torch.equal(sparse_ctx.cpu(), expected_ctx)
 
 
+# NVFP4 index cache (SM100/SM103): MSA Q8KV4 decode on the packed pages, FP8
+# gather + Q8KV8 prefill. Both rank pages from e4m3_rn_satfinite(e2m1 * scale).
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+_NVFP4_PAGE_WIDTH = HEAD_DIM // 2 + HEAD_DIM // 16
+_requires_q8_indexer = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(100)
+        or current_platform.is_device_capability(103)
+        or current_platform.is_device_capability(107)
+    ),
+    reason="The MSA Q8KV4/Q8KV8 indexers require SM100, SM103 or SM107.",
+)
+
+
+def _random_nvfp4_index_pages(
+    num_pages: int, scale_max: float = 0.5, page_pad: int = 0
+) -> torch.Tensor:
+    """``[num_pages, 128, 72]`` uint8 pages: random E2M1 codes, then E4M3 scales."""
+    data_bytes = BLOCK_SIZE * HEAD_DIM // 2
+    page_bytes = BLOCK_SIZE * _NVFP4_PAGE_WIDTH
+    raw = torch.zeros(
+        num_pages, page_bytes + page_pad, dtype=torch.uint8, device="cuda"
+    )
+    raw[:, :data_bytes] = torch.randint(
+        0, 256, (num_pages, data_bytes), dtype=torch.uint8, device="cuda"
+    )
+    scale = torch.rand(num_pages, page_bytes - data_bytes, device="cuda") * scale_max
+    raw[:, data_bytes:page_bytes] = scale.to(torch.float8_e4m3fn).view(torch.uint8)
+    return raw[:, :page_bytes].view(num_pages, BLOCK_SIZE, _NVFP4_PAGE_WIDTH)
+
+
+def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
+    """Reference ``[P, 128, 128]`` e4m3: e2m1 * scale, clamped, rounded once."""
+    num_pages = pages.shape[0]
+    flat = pages.reshape(num_pages, -1)
+    data = flat[:, : BLOCK_SIZE * HEAD_DIM // 2].view(num_pages, BLOCK_SIZE, -1)
+    scale = flat[:, BLOCK_SIZE * HEAD_DIM // 2 :].view(torch.float8_e4m3fn)
+    codes = torch.stack((data & 0xF, data >> 4), dim=-1).reshape(
+        num_pages, BLOCK_SIZE, HEAD_DIM
+    )
+    magnitude = torch.tensor(_E2M1_VALUES, device="cuda")[(codes & 7).long()]
+    value = torch.where(codes >= 8, -magnitude, magnitude)
+    value = value * scale.float().view(num_pages, BLOCK_SIZE, -1).repeat_interleave(
+        16, dim=-1
+    )
+    return value.clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("use_qmul4", [False, True])
+@pytest.mark.parametrize("scale_max", [0.5, 448.0])
+def test_gather_nvfp4_index_k_fp8_bitwise(
+    scale_max: float, use_qmul4: bool, monkeypatch
+):
+    """Each request's leading pages land at its compact offset, bit-identical
+    to the reference dequant (incl. saturation), and nothing else is written,
+    on both the QMUL4 and the fp32 dequant paths."""
+    import vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k as gather_mod
+    from vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k import (
+        minimax_m3_gather_nvfp4_index_k_fp8,
+    )
+
+    if use_qmul4 and not gather_mod._qmul4_supported(0):
+        pytest.skip("Triton's Blackwell ptxas emits PTX older than 9.4 (no QMUL4).")
+    monkeypatch.setattr(gather_mod, "_qmul4_supported", lambda _: use_qmul4)
+
+    torch.manual_seed(0)
+    num_physical = 40
+    kv = _random_nvfp4_index_pages(num_physical, scale_max, page_pad=32)
+    block_table = torch.randperm(num_physical, device="cuda", dtype=torch.int32)[
+        :36
+    ].view(3, 12)
+    num_pages = torch.tensor([5, 0, 12], dtype=torch.int32, device="cuda")
+    page_offsets = torch.cumsum(num_pages, 0, dtype=torch.int32) - num_pages
+    total = int(num_pages.sum())
+    out = torch.full((total + 1, BLOCK_SIZE, HEAD_DIM), 1.0, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+
+    minimax_m3_gather_nvfp4_index_k_fp8(
+        kv, block_table, num_pages, page_offsets, 12, out
+    )
+
+    expected = _dequant_nvfp4_index_pages(kv)
+    for req, (count, offset) in enumerate(
+        zip(num_pages.tolist(), page_offsets.tolist())
+    ):
+        pages = block_table[req, :count].long()
+        assert torch.equal(
+            out[offset : offset + count].view(torch.uint8),
+            expected[pages].view(torch.uint8),
+        )
+    assert torch.all(out[total].float() == 1.0)
+
+
+def _assert_forced_tail_topk(
+    actual: torch.Tensor, scores: torch.Tensor, lengths: torch.Tensor
+) -> None:
+    """Check the Q8 top-k contract on ``[rows, 16]`` output.
+
+    ``scores[row, :lengths[row] - 1]`` are the reference history-page scores.
+    Rows with <= 16 candidates are ``0 .. length - 1`` then ``-1``. Longer rows
+    hold 15 distinct history pages, then the local page. The ranked pages must
+    be the top 15 up to the kernel's 16-bit score-key quantization.
+    """
+    actual = actual.long()
+    rows, max_pages = scores.shape
+    cols = torch.arange(TOPK, device=actual.device)
+    short = lengths <= TOPK
+    expected_short = torch.where(cols < lengths[:, None], cols, -1)
+    assert torch.equal(actual[short], expected_short[short])
+
+    long_rows = (~short).nonzero().flatten()
+    if long_rows.numel() == 0:
+        return
+    actual, scores, lengths = actual[long_rows], scores[long_rows], lengths[long_rows]
+    assert torch.equal(actual[:, -1], lengths - 1)
+    ranked = actual[:, :-1]
+    assert torch.all((ranked >= 0) & (ranked < (lengths - 1)[:, None]))
+    assert torch.all(ranked.sort(dim=1).values.diff(dim=1) > 0)
+    valid = torch.arange(max_pages, device=scores.device) < (lengths - 1)[:, None]
+    history = scores.masked_fill(~valid, float("-inf"))
+    high = history.amax(dim=1)
+    low = scores.masked_fill(~valid, float("inf")).amin(dim=1)
+    tol = 1.5 * (high - low) / 65534.0 + 1e-5 * high.abs()
+    threshold = history.topk(TOPK - 1, dim=1).values[:, -1]
+    assert torch.all(history.gather(1, ranked) >= (threshold - tol)[:, None])
+    must_pick = history > (threshold + tol)[:, None]
+    picked = torch.zeros_like(must_pick).scatter_(1, ranked, True)
+    assert not torch.any(must_pick & ~picked)
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+@pytest.mark.parametrize("decode_query_len", [1, 3, 8])
+def test_nvfp4_indexer_impl_matches_reference(
+    num_idx_heads, decode_query_len, monkeypatch, workspace_init
+):
+    """Drive MiniMaxM3IndexerNvfp4Impl through its metadata builder on a mixed
+    batch (short and full 8-query decodes, fresh and chunked prefills, a request
+    without history pages, several gather chunks) and check every row against
+    a reference computed from the dequantized NVFP4 keys."""
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+        MiniMaxM3IndexerNvfp4Impl,
+        MiniMaxM3IndexerNvfp4MetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads
+    }
+
+    decode_seq_lens = [2305, 2561, 9]
+    prefill = [(2624, 64), (2720, 96), (100, 100), (1500, 1500)]
+    batch = BatchSpec(
+        seq_lens=decode_seq_lens + [s for s, _ in prefill],
+        query_lens=[decode_query_len] * len(decode_seq_lens) + [q for _, q in prefill],
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+    num_blocks = common.block_table_tensor.shape[1]
+    num_physical = batch.batch_size * num_blocks
+    block_table = torch.randperm(num_physical, device=device, dtype=torch.int32)
+    common.block_table_tensor = block_table.view(batch.batch_size, num_blocks)
+    num_tokens = batch.compute_num_tokens()
+
+    index_cache = _random_nvfp4_index_pages(num_physical)
+    index_q = (
+        torch.randn(num_tokens, num_idx_heads * HEAD_DIM, device=device) * 0.5
+    ).to(torch.float8_e4m3fn)
+
+    impl_kwargs = dict(
+        num_kv_heads=num_idx_heads,
+        scale=HEAD_DIM**-0.5,
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=HEAD_DIM,
+        init_blocks=0,
+        local_blocks=1,
+        indexer_kv_dtype="nvfp4",
+    )
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=_NVFP4_PAGE_WIDTH,
+        dtype=torch.uint8,
+    )
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerNvfp4Impl(prefix="idx_nvfp4", **impl_kwargs)
+        builder = MiniMaxM3IndexerNvfp4MetadataBuilder(
+            spec, [impl.index_cache.prefix], vllm_config, device
+        )
+    index_spec = impl.index_cache.get_kv_cache_spec(vllm_config)
+    assert isinstance(index_spec, MLAAttentionSpec)
+    assert index_spec.page_size_bytes == BLOCK_SIZE * _NVFP4_PAGE_WIDTH
+    assert index_spec.dtype == torch.uint8
+    # Spec decode would raise the threshold to 1 + num_speculative_tokens.
+    builder.reorder_batch_threshold = decode_query_len
+    # Fit the longest request's 21 history pages but not two such requests.
+    builder.max_gather_pages = 30
+    impl.index_cache.kv_cache = index_cache
+    impl.topk_indices_buffer = torch.full(
+        (num_tokens, num_idx_heads, TOPK), -2, dtype=torch.int32, device=device
+    )
+
+    # Planning reads only host-side metadata: any device sync is an error.
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        md = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert md.num_decode_tokens == decode_query_len * len(decode_seq_lens)
+    assert len(md.prefill_chunks) == 3
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        assert impl(index_q) == (None, None)
+
+    # Reference: max over each history page's 128 tokens of q . k.
+    keys = _dequant_nvfp4_index_pages(index_cache).float()
+    q = index_q.float().view(num_tokens, num_idx_heads, HEAD_DIM)
+    max_pages = num_blocks
+    scores = torch.full(
+        (num_tokens, num_idx_heads, max_pages), float("-inf"), device=device
+    )
+    lengths = torch.empty(num_tokens, dtype=torch.long, device=device)
+    token = 0
+    for req, (seq_len, q_len) in enumerate(zip(batch.seq_lens, batch.query_lens)):
+        pages = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        k = keys[common.block_table_tensor[req, :pages].long()]
+        rows = slice(token, token + q_len)
+        scores[rows, :, :pages] = torch.einsum("nhd,pkd->nhpk", q[rows], k).amax(dim=-1)
+        positions = torch.arange(seq_len - q_len, seq_len, device=device)
+        lengths[rows] = positions // BLOCK_SIZE + 1
+        token += q_len
+    _assert_forced_tail_topk(
+        impl.topk_indices_buffer.view(-1, TOPK),
+        scores.view(-1, max_pages),
+        lengths.repeat_interleave(num_idx_heads),
+    )
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("decode_query_len", [1, 3, 8])
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+def test_nvfp4_indexer_decode_cuda_graph_replay(
+    decode_query_len, num_idx_heads, monkeypatch, workspace_init
+):
+    """A full CUDA graph captures the decode indexer once per padded batch
+    size; re-planning a later step (new lengths, pages and keys, one
+    zero-length padding request) outside capture and replaying must give that
+    step's top-k, which fails if any captured tensor was re-allocated. The
+    decode reads index_q and writes the top-k in place, copying nothing."""
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+        MiniMaxM3IndexerNvfp4Impl,
+        MiniMaxM3IndexerNvfp4MetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads
+    }
+    num_reqs, max_blocks = 4, 24
+    num_tokens = num_reqs * decode_query_len
+    num_physical = num_reqs * max_blocks
+    index_cache = _random_nvfp4_index_pages(num_physical)
+
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerNvfp4Impl(
+            prefix="idx_nvfp4_graph",
+            num_kv_heads=num_idx_heads,
+            scale=HEAD_DIM**-0.5,
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_idx_heads,
+            index_head_dim=HEAD_DIM,
+            init_blocks=0,
+            local_blocks=1,
+            indexer_kv_dtype="nvfp4",
+        )
+        builder = MiniMaxM3IndexerNvfp4MetadataBuilder(
+            MLAAttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=_NVFP4_PAGE_WIDTH,
+                dtype=torch.uint8,
+            ),
+            [impl.index_cache.prefix],
+            vllm_config,
+            device,
+        )
+    builder.reorder_batch_threshold = decode_query_len
+    impl.index_cache.kv_cache = index_cache
+    impl.topk_indices_buffer = torch.full(
+        (num_tokens, num_idx_heads, TOPK), -2, dtype=torch.int32, device=device
+    )
+    index_q = torch.empty(num_tokens, num_idx_heads * HEAD_DIM, device=device).to(
+        torch.float8_e4m3fn
+    )
+
+    def step(seq_lens, query_lens):
+        common = create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, device
+        )
+        common.block_table_tensor = torch.randperm(
+            num_physical, device=device, dtype=torch.int32
+        )[: num_reqs * max_blocks].view(num_reqs, max_blocks)
+        index_q.copy_(
+            (torch.randn(num_tokens, num_idx_heads * HEAD_DIM, device=device) * 0.5).to(
+                torch.float8_e4m3fn
+            )
+        )
+        return common, builder.build(0, common)
+
+    # Warm up (compiles), then capture the forward of a full batch.
+    common, md = step([2305, 2561, 2944, 700], [decode_query_len] * num_reqs)
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        impl(index_q)
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as prof:
+            impl(index_q)
+            torch.accelerator.synchronize()
+        copies = [
+            e.name for e in prof.events() if "Memcpy" in e.name or "copy_" in e.name
+        ]
+        assert not copies, copies
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            impl(index_q)
+
+    # A later step: the last request pads the graph batch with no tokens.
+    seq_lens = [2800, 1500, 3000, 0]
+    query_lens = [decode_query_len] * 3 + [0]
+    common, md = step(seq_lens, query_lens)
+    assert md.decode_q8kv4.num_reqs == num_reqs
+    # An eager step of another batch size runs before the replay; every decode
+    # wrapper shares one page-score scratch, which this one overwrites.
+    other = create_common_attn_metadata(
+        BatchSpec(seq_lens=[1800, 900], query_lens=[decode_query_len] * 2),
+        BLOCK_SIZE,
+        device,
+    )
+    other.block_table_tensor = common.block_table_tensor[:2].clone()
+    other_md = builder.build(0, other)
+    with set_forward_context({impl.index_cache.prefix: other_md}, vllm_config):
+        impl(index_q[: 2 * decode_query_len])
+    assert len(builder.decode_wrappers) == 2
+    impl.topk_indices_buffer.fill_(-2)
+    graph.replay()
+
+    num_real = 3 * decode_query_len
+    keys = _dequant_nvfp4_index_pages(index_cache).float()
+    q = index_q[:num_real].float().view(num_real, num_idx_heads, HEAD_DIM)
+    scores = torch.full(
+        (num_real, num_idx_heads, max_blocks), float("-inf"), device=device
+    )
+    lengths = torch.empty(num_real, dtype=torch.long, device=device)
+    for req in range(3):
+        pages = (seq_lens[req] + BLOCK_SIZE - 1) // BLOCK_SIZE
+        k = keys[common.block_table_tensor[req, :pages].long()]
+        rows = slice(req * decode_query_len, (req + 1) * decode_query_len)
+        scores[rows, :, :pages] = torch.einsum("nhd,pkd->nhpk", q[rows], k).amax(dim=-1)
+        positions = torch.arange(
+            seq_lens[req] - decode_query_len, seq_lens[req], device=device
+        )
+        lengths[rows] = positions // BLOCK_SIZE + 1
+    _assert_forced_tail_topk(
+        impl.topk_indices_buffer[:num_real].view(-1, TOPK),
+        scores.view(-1, max_blocks),
+        lengths.repeat_interleave(num_idx_heads),
+    )
+
+
 @pytest.mark.parametrize(
     ("decode_query_len", "max_decode_query_len"),
     [

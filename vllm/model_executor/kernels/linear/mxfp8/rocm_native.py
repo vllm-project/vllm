@@ -35,7 +35,7 @@ def _mxfp8_linear_kernel(
     out_ptr,
     M,
     N,
-    K,
+    K: tl.constexpr,
     stride_xm,
     stride_xk,
     stride_xsm,
@@ -124,10 +124,12 @@ def _mxfp8_dot_scaled_linear(
 # gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
 # room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
+_ON_GFX950 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
 
-    if on_gfx950():
+    _ON_GFX950 = on_gfx950()
+    if _ON_GFX950:
         _BK256_STAGES = 2
 
 
@@ -142,6 +144,11 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
+    if _ON_GFX950 and M <= 16:
+        if K == 6144 and N in (1536, 2560):
+            return 16, 16, 1024, 2, 3
+        if K == 768 and N == 6144:
+            return 16, 16, 256, 2, 3
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
