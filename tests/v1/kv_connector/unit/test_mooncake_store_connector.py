@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import tempfile
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -1163,3 +1164,81 @@ def test_shutdown_scheduler_role_is_noop():
     # Scheduler role holds no store handle, so shutdown must be a safe no-op.
     assert connector.connector_worker is None
     connector.shutdown()
+
+
+def test_scheduler_removes_blocks_that_failed_kv_checksums():
+    """With KV checksums, a load that fails its check has the mismatching
+    blocks removed from the store, keyed by the hash at each block's end;
+    one that could not be checked removes nothing."""
+    vllm_config = _make_vllm_config()
+    vllm_config.kv_transfer_config.enable_kv_checksum = True
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        conn = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+    request = MagicMock(request_id="req", block_hashes=[b"h0", b"h1", b"h2"])
+    client = mock_client_cls.return_value
+
+    assert conn.get_kv_checksum_sources(request) == {
+        CacheHitSource.EXTERNAL_UNSPECIFIED
+    }
+    conn.on_kv_checksum_failure(request, {})
+    client.remove.assert_not_called()
+    conn.on_kv_checksum_failure(request, {0: [1, 2]})
+    client.remove.assert_called_once_with([0, 0], [b"h1", b"h2"])
+
+
+def test_unchecked_store_loads_are_reported(caplog_vllm):
+    """With KV checksums enabled, a store layout that cannot carry them is
+    reported at startup rather than leaving its loads silently unchecked."""
+    vllm_config = _make_vllm_config()
+    vllm_config.kv_transfer_config.enable_kv_checksum = True
+    vllm_config.kv_transfer_config.kv_connector_extra_config["store_tp_size"] = 1
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ),
+    ):
+        conn = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+
+    assert conn.get_kv_checksum_sources(MagicMock()) == frozenset()
+    assert "KV loaded from the Mooncake store is not checked" in caplog_vllm.text
+
+
+def test_lookup_key_remove_reaches_the_rank0_worker(monkeypatch):
+    """LookupKeyClient.remove() hands each (store group, block hash) to the
+    rank 0 worker's remove_blocks, and resolves to whether it removed every
+    key."""
+    # IPC socket paths are limited to ~100 characters.
+    rpc_dir = tempfile.TemporaryDirectory(dir="/tmp")
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir.name)
+    vllm_config = _make_vllm_config()
+    store_worker = MagicMock()
+    server = worker.LookupKeyServer(store_worker, vllm_config)
+    client = worker.LookupKeyClient(vllm_config)
+    try:
+        store_worker.remove_blocks.return_value = True
+        assert client.remove([0, 1], [b"ab", b"cd"]).result(timeout=10) is True
+        group_ids, block_hashes = store_worker.remove_blocks.call_args.args
+        assert group_ids == [0, 1]
+        assert [bytes(h) for h in block_hashes] == [b"ab", b"cd"]
+
+        store_worker.remove_blocks.return_value = False
+        assert client.remove([0], [b"ab"]).result(timeout=10) is False
+    finally:
+        client.close()
+        server.running = False
+        rpc_dir.cleanup()

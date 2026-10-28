@@ -14,7 +14,7 @@ enabling prefix caching via hash-based deduplication.
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -45,6 +45,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -52,6 +53,9 @@ from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
 
 logger = init_logger(__name__)
 
@@ -283,6 +287,22 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.register_finished_partial_tail(
             request, block_ids, partial_tail_offloads
         )
+
+    def set_kv_checksum_worker(self, kv_checksum_worker: "KVChecksumWorker") -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.set_kv_checksum_worker(kv_checksum_worker)
+
+    def get_kv_checksum_sources(self, request: Request) -> frozenset[CacheHitSource]:
+        assert self.connector_scheduler is not None
+        if self.connector_scheduler.kv_checksums:
+            return frozenset({self._cache_hit_source})
+        return frozenset()
+
+    def on_kv_checksum_failure(
+        self, request: Request, mismatches: dict[int, list[int]]
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_kv_checksum_failure(request, mismatches)
 
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.

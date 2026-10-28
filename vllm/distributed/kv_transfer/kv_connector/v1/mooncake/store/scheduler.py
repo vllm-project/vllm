@@ -6,13 +6,16 @@
 """Scheduler-side logic for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
+from concurrent.futures import Future
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_checksum.checksum import kv_checksum_enabled
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     MooncakeStoreCoordinator,
+    offloads_kv_checksums,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BoundaryPut,
@@ -57,6 +60,17 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
         return request.prefill_token_ids
     assert request.prompt_token_ids is not None
     return request.prompt_token_ids
+
+
+def _log_remove_failure(future: Future[bool]) -> None:
+    if future.cancelled():
+        return
+    if future.exception() is not None or not future.result():
+        logger.warning(
+            "Mooncake store blocks that failed their KV checksums may not all be "
+            "removed: %s",
+            future.exception() or "the worker could not remove every key",
+        )
 
 
 def _partial_tail_non_mamba_puts(
@@ -182,6 +196,7 @@ class MooncakeStoreScheduler:
         )
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
+        self.kv_checksums = False
         if not self._capacity_only:
             assert all(
                 spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
@@ -190,6 +205,17 @@ class MooncakeStoreScheduler:
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
             )
             self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
+            self.kv_checksums = offloads_kv_checksums(
+                self._store_coord, vllm_config, kv_cache_config
+            )
+            if kv_checksum_enabled(vllm_config) and not self.kv_checksums:
+                logger.warning(
+                    "KV checksums are enabled, but KV loaded from the Mooncake "
+                    "store is not checked: that needs rank-local keys (no "
+                    "store_tp_size or enable_store_tp_lcm), full attention "
+                    "only, the hash block size equal to the block size, no "
+                    "custom_mem_pool and no HiSparse."
+                )
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -759,6 +785,36 @@ class MooncakeStoreScheduler:
         request no longer defers its own free.
         """
         return bool(self._pinned_saves)
+
+    def on_kv_checksum_failure(
+        self, request: Request, mismatches: dict[int, list[int]]
+    ) -> None:
+        """Remove the stored blocks whose loaded KV failed its checksums, on
+        every rank, so that no request loads them again."""
+        group_ids: list[int] = []
+        block_hashes = []
+        for kv_cache_group_id, positions in mismatches.items():
+            group_id = self._store_group_id_by_kv_cache_group_id.get(kv_cache_group_id)
+            if group_id is None:
+                continue
+            spec = self.kv_cache_config.kv_cache_groups[kv_cache_group_id].kv_cache_spec
+            for position in positions:
+                # The block is keyed by the hash at its end.
+                index = (position + 1) * spec.block_size // self._hash_block_size - 1
+                if index < len(request.block_hashes):
+                    group_ids.append(group_id)
+                    block_hashes.append(request.block_hashes[index])
+        if not block_hashes:
+            return
+        logger.warning(
+            "Removing %d Mooncake store blocks of request %s that failed their "
+            "KV checksums.",
+            len(block_hashes),
+            request.request_id,
+        )
+        self.client.remove(group_ids, block_hashes).add_done_callback(
+            _log_remove_failure
+        )
 
     def reset_store(self) -> bool:
         """Trigger a global ``remove_all(force=True)`` on the Mooncake master.

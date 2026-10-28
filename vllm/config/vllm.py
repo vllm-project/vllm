@@ -2099,6 +2099,7 @@ class VllmConfig:
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
+        self._validate_kv_checksum()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -3145,6 +3146,12 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.enable_kv_checksum
+        ):
+            unsupported.append("KV checksums")
+
         if self.model_config is not None and self.model_config.architecture in (
             "Step5ForCausalLM",
             "Step5ForConditionalGeneration",
@@ -3180,6 +3187,30 @@ class VllmConfig:
             raise ValueError(
                 "Adaptive verification is not currently compatible "
                 "with pipeline parallelism"
+            )
+
+    def _validate_kv_checksum(self) -> None:
+        """Validate `kv_transfer_config.enable_kv_checksum` against the platform
+        and parallel setup."""
+        if (
+            self.kv_transfer_config is None
+            or not self.kv_transfer_config.enable_kv_checksum
+        ):
+            return
+        from vllm.distributed.kv_transfer.kv_checksum.checksum import (
+            kv_checksum_platform_supported,
+        )
+
+        if not kv_checksum_platform_supported():
+            raise ValueError(
+                "KV checksums (enable_kv_checksum) need Triton on CUDA, ROCm or XPU."
+            )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            or self.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "KV checksums (enable_kv_checksum) do not support context parallelism."
             )
 
     def _validate_batch_sharded_sampling(self) -> None:

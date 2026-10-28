@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from math import lcm
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    offloads_kv_checksums,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
@@ -16,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -754,3 +757,57 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ({}, True),
+        ({"enabled": False}, False),
+        ({"extra_config": {"store_tp_size": 4}}, False),
+        ({"extra_config": {"enable_store_tp_lcm": True}}, False),
+        ({"extra_config": {"custom_mem_pool": "nvlink"}}, False),
+        ({"hash_block_size": 8}, False),
+        ({"partial_hits": True}, False),
+        ({"hisparse": True}, False),
+        ({"specs": [_full(), _swa()]}, False),
+        ({"specs": [_full(32), _mamba_align(32)], "hash_block_size": 32}, False),
+    ],
+    ids=[
+        "rank-local",
+        "disabled",
+        "store-tp",
+        "store-tp-lcm",
+        "custom-mem-pool",
+        "sub-block-keys",
+        "partial-hash-hits",
+        "hisparse",
+        "swa",
+        "mamba",
+    ],
+)
+def test_kv_checksums_stored_for_rank_local_full_attention_blocks(case, expected):
+    """Each block's KV checksum is stored with its KV only when every group is
+    full attention, each key holds one whole block, keys are rank-local and
+    the KV cache is in the default memory pool."""
+    specs = case.get("specs", [_full()])
+    groups = [KVCacheGroupSpec([f"layer{i}"], spec) for i, spec in enumerate(specs)]
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            enable_kv_checksum=case.get("enabled", True),
+            kv_connector_extra_config=case.get("extra_config", {}),
+        )
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        hisparse_host_num_blocks=4 if case.get("hisparse") else None,
+    )
+    coord = _make_coord(
+        groups,
+        case.get("hash_block_size", 16),
+        enable_partial_hash_hits=case.get("partial_hits", False),
+    )
+
+    assert offloads_kv_checksums(coord, vllm_config, kv_cache_config) is expected

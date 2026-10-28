@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import ctypes
 import itertools
 import json
 import logging
@@ -283,9 +284,11 @@ class _FakeKVTransferConfig:
         *,
         kv_role: str = "kv_both",
         extra_config: dict[str, object] | None = None,
+        enable_kv_checksum: bool = False,
     ) -> None:
         self.kv_role = kv_role
         self.kv_connector_extra_config = extra_config or {}
+        self.enable_kv_checksum = enable_kv_checksum
 
     def get_from_extra_config(self, key: str, default: object) -> object:
         return self.kv_connector_extra_config.get(key, default)
@@ -3718,6 +3721,7 @@ def _make_bare_worker(
     worker.load_async = True
     worker.kv_send_thread = None
     worker.kv_recv_threads = []
+    worker._kv_checksum_worker = None
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
     worker.finished_store_req = set()
@@ -3814,7 +3818,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     config = SimpleNamespace(
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
-            kv_role="kv_both", kv_connector_extra_config={}
+            kv_role="kv_both", kv_connector_extra_config={}, enable_kv_checksum=False
         ),
         kv_events_config=None,
         cache_config=SimpleNamespace(
@@ -3887,7 +3891,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     config = SimpleNamespace(
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
-            kv_role="kv_both", kv_connector_extra_config={}
+            kv_role="kv_both", kv_connector_extra_config={}, enable_kv_checksum=False
         ),
         kv_events_config=None,
         cache_config=SimpleNamespace(
@@ -5192,3 +5196,90 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def test_block_checksum_moves_with_its_kv_through_the_store():
+    """With KV checksums, a store value carries its block's checksum, so
+    loading the value into another block brings the checksum to that block's
+    entry."""
+    num_blocks = 4
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    checksums = torch.tensor([0, 11, 0, 0], dtype=torch.int64)
+    checksum_worker = MagicMock()
+    checksum_worker.init_block_checksums.return_value = checksums
+    worker._kv_checksum_worker = checksum_worker
+    cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+    cache[1] = torch.arange(4)
+
+    _register_with_mocked_threads(worker, {"layer0": cache})
+
+    worker.store.register_buffer.assert_any_call(checksums.data_ptr(), 8 * num_blocks)
+    db = worker.token_dbs[0]
+    addrs, sizes = db.prepare_value_for_block(1)
+    value = b"".join(map(ctypes.string_at, addrs, sizes))
+    addrs, sizes = db.prepare_value_for_block(3)
+    offset = 0
+    for addr, size in zip(addrs, sizes, strict=True):
+        ctypes.memmove(addr, value[offset : offset + size], size)
+        offset += size
+
+    assert torch.equal(cache[3], cache[1])
+    assert checksums.tolist() == [0, 11, 0, 11]
+
+
+def test_wait_for_save_saves_block_checksums_before_the_store_event(monkeypatch):
+    """The checksums of the blocks a save covers are queued before the CUDA
+    event the sending thread waits on before it reads them."""
+    worker = _make_bare_worker()
+    calls = MagicMock()
+    worker._kv_checksum_worker = calls.checksum_worker
+    worker.kv_send_thread = MagicMock()
+    monkeypatch.setattr(mooncake_store_worker.torch.cuda, "Event", calls.event)
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(
+        ReqMeta(
+            req_id="req",
+            token_len_chunk=48,
+            block_ids=([1, 2, 3],),
+            block_hashes=[b"h0", b"h1", b"h2"],
+            can_save=True,
+            token_ids_start=16,
+        )
+    )
+
+    worker.wait_for_save(meta)
+
+    assert [name for name, _, _ in calls.method_calls][:2] == [
+        "checksum_worker.save_block_checksums",
+        "event",
+    ]
+    runs = calls.checksum_worker.save_block_checksums.call_args.args[0]
+    assert list(runs) == [(0, 1, [2, 3], [b"h1", b"h2"])]
+
+
+def test_remove_blocks_removes_the_stored_keys_by_force(monkeypatch):
+    """With KV checksums, blocks are removed under the keys they are stored
+    under (namespaced apart from values without checksums), even while
+    leased; a key a rank never stored is not a failure."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.kv_transfer_config.enable_kv_checksum = True
+    store_worker = worker.MooncakeStoreWorker(vllm_config, _make_kv_cache_config())
+    block_hash = BlockHash(b"\x01\x02")
+    key = store_worker.token_dbs[0].key_for(block_hash)
+    assert "@kv_checksums" in key
+
+    store.batch_remove.return_value = [-704]
+    assert store_worker.remove_blocks([0], [block_hash])
+    store.batch_remove.assert_called_once_with([key], force=True)
+
+    store.batch_remove.return_value = [-706]
+    assert not store_worker.remove_blocks([0], [block_hash])

@@ -79,6 +79,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
@@ -838,7 +839,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
-            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            self.kv_connector = get_kv_connector(
+                self.vllm_config,
+                self.kv_cache_config,
+                kv_caches_dict,
+                self.output_copy_stream,
+            )
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
@@ -1786,8 +1792,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput:
         """Let the EC connector send/recv on a step with no work to run."""
         return ModelRunnerOutput.with_ec_conn_output(
-            output,
-            self.ec_connector.no_forward(scheduler_output).ec_connector_output,
+            output, self.ec_connector.no_forward(scheduler_output).ec_connector_output
         )
 
     @torch.inference_mode()
@@ -1801,7 +1806,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1822,9 +1827,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return self._merge_ec_connector_no_forward(
+                output = self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
+                return self.kv_connector.add_kv_checksums(output)
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
@@ -1880,7 +1886,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
-            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+            output = self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         cudagraph_stats = None
         if not dummy_run:
@@ -2180,7 +2187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | ModelRunnerOutput | None:
+    ) -> AsyncModelRunnerOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2217,7 +2224,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            output = ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         # Last rank: sample tokens
         assert hidden_states is not None
@@ -2379,14 +2387,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
-        return async_output
+        return self.kv_connector.add_kv_checksums(async_output)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
     @step_eplb_after()
-    def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
+    def pool(self) -> AsyncModelRunnerOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2403,7 +2411,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            output = ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+            return self.kv_connector.add_kv_checksums(output)
 
         assert self.pooling_runner is not None
         pooler_output, finished_mask = self.pooling_runner.pool(
@@ -2426,7 +2435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.postprocess_num_computed_tokens(input_batch)
-        return async_output
+        return self.kv_connector.add_kv_checksums(async_output)
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.

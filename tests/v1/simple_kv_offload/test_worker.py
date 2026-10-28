@@ -118,6 +118,7 @@ def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
             active.kv_connector = connector
             active._disabled = False
             active._pending_load_kwargs = None
+            active.kv_checksum_worker = None
             module = "vllm.v1.worker.gpu.kv_connector"
             monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
             monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)

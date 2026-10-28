@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -96,6 +97,10 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    kv_checksums: dict[str, bytes] = field(default_factory=dict)
+    """Producer KV checksums of loads, reported once on receipt (before or
+    with the load's ``finished_recving``), by connectors that carry them in
+    their own messages (see ``SchedulerOutput.kv_checksums_to_send``)."""
 
 
 class SupportsHMA(ABC):
@@ -296,6 +301,16 @@ class KVConnectorBase_V1(ABC):
         Args:
             kv_caches: dictionary of layer names, kv cache
 
+        """
+        return
+
+    def set_kv_checksum_worker(self, kv_checksum_worker: "KVChecksumWorker") -> None:
+        """Give the connector this worker's KV checksum worker, before
+        ``register_kv_caches``. Only called with KV checksums enabled.
+
+        A connector that offloads KV and loads it back can offload checksums
+        with it (``KVChecksumWorker.init_block_checksums``), and names the tiers
+        they come back from in ``get_kv_checksum_sources``.
         """
         return
 
@@ -564,6 +579,33 @@ class KVConnectorBase_V1(ABC):
         if num_external_tokens == 0:
             return {}
         return {self._cache_hit_source: num_external_tokens}
+
+    def get_kv_checksum_sources(self, request: "Request") -> frozenset[CacheHitSource]:
+        """The cache tiers whose loads of ``request`` bring back the checksums
+        this connector offloaded with the KV (see ``set_kv_checksum_worker``);
+        such loads are checked against them; see
+        :meth:`on_kv_checksum_failure` for one that fails.
+
+        Called after :meth:`get_external_cache_hit_sources`.
+        """
+        return frozenset()
+
+    def on_kv_checksum_failure(
+        self, request: "Request", mismatches: dict[int, list[int]]
+    ) -> None:
+        """Handle a load of offloaded KV that failed its checksums. The
+        request itself already takes the KV load failure path; this decides
+        what happens to the offloaded KV, e.g. drop the bad entries or the
+        whole cache. Without that, a retry of the request, or another request
+        with the same prefix, may load the same KV again.
+
+        Args:
+            request: The request whose load failed.
+            mismatches: Per KV cache group, the positions of the blocks whose
+                checksums differ; empty if the load could not be checked.
+
+        """
+        return
 
     @abstractmethod
     def update_state_after_alloc(

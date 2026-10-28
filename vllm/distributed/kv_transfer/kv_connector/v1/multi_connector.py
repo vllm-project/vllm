@@ -36,6 +36,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -257,6 +258,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return ret
 
+    def set_kv_checksum_worker(self, kv_checksum_worker: "KVChecksumWorker") -> None:
+        for c in self._connectors:
+            c.set_kv_checksum_worker(kv_checksum_worker)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
@@ -380,6 +385,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             child_results = connector.get_transfer_results(finished_req_ids)
             results.finished_recving.update(child_results.finished_recving)
             results.failed_recving.update(child_results.failed_recving)
+            results.kv_checksums.update(child_results.kv_checksums)
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
@@ -480,6 +486,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return self._connectors[chosen_connector].get_external_cache_hit_sources(
             request, num_external_tokens
         )
+
+    def get_kv_checksum_sources(self, request: "Request") -> frozenset[CacheHitSource]:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is None:
+            return frozenset()
+        return self._connectors[chosen_connector].get_kv_checksum_sources(request)
+
+    def on_kv_checksum_failure(
+        self, request: "Request", mismatches: dict[int, list[int]]
+    ) -> None:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is not None:
+            self._connectors[chosen_connector].on_kv_checksum_failure(
+                request, mismatches
+            )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

@@ -113,6 +113,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     is_full_attention_spec,
+    sliding_window_transfer_blocks,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -645,16 +646,9 @@ class MoRIIOConnectorScheduler:
                     "--disable-hybrid-kv-cache-manager."
                 )
 
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
-        # +1 conservatively covers window/block boundary overlap.
         self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
-            for n_tokens, block_size in sw_sizes_tokens
+            sliding_window_transfer_blocks(g.kv_cache_spec)
+            for g in kv_cache_config.transfer_groups
         ]
         # Per-group block size over transfer_groups (matching blocks_per_sw and
         # the connector's block payload), used to clamp each full-attention group
