@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
@@ -225,7 +225,9 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
-        self._prefill_progress_requests: dict[str, Request] = {}
+        # Ordered by last report time; only unresolved prefill needs refresh.
+        self._prefill_progress_requests: OrderedDict[str, Request] = OrderedDict()
+        self._prefill_progress_dirty: set[str] = set()
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -1504,6 +1506,7 @@ class Scheduler(SchedulerInterface):
                         request.prefill_progress_pending_kv_tokens = (
                             num_external_computed_tokens if load_kv_async else 0
                         )
+                        self._mark_prefill_progress_dirty(request)
 
                 if load_kv_async:
                     # This path deliberately does not reach `prefill_admitted`
@@ -1817,6 +1820,7 @@ class Scheduler(SchedulerInterface):
         if request.include_prefill_progress:
             request.prefill_progress_cache_tokens = (0, 0)
             request.prefill_progress_pending_kv_tokens = 0
+            self._mark_prefill_progress_dirty(request)
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1913,6 +1917,8 @@ class Scheduler(SchedulerInterface):
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
+        if session.include_prefill_progress:
+            self._mark_prefill_progress_dirty(session)
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
@@ -2494,15 +2500,18 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
-            if request.include_prefill_progress:
+            prefill_progress = None
+            if request.include_prefill_progress and (
+                req_id in self._prefill_progress_requests or finish_reason is not None
+            ):
                 sampled_progress_ids.add(req_id)
-            prefill_progress = self._make_prefill_progress(
-                request,
-                prefill_stats,
-                bool(new_token_ids) and not output_is_stale,
-                finish_reason,
-                prefill_progress_timestamp,
-            )
+                prefill_progress = self._update_prefill_progress(
+                    request,
+                    prefill_stats,
+                    bool(new_token_ids) and not output_is_stale,
+                    finish_reason,
+                    prefill_progress_timestamp,
+                )
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
@@ -2648,10 +2657,32 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
-        for req_id, request in self._prefill_progress_requests.items():
-            if req_id in sampled_progress_ids:
+        dirty = self._prefill_progress_dirty
+        self._prefill_progress_dirty = set()
+        for req_id in dirty:
+            request = self._prefill_progress_requests.get(req_id)
+            if request is None or req_id in sampled_progress_ids:
                 continue
-            progress = self._make_prefill_progress(
+            progress = self._update_prefill_progress(
+                request, request.prefill_stats, False, None, prefill_progress_timestamp
+            )
+            if progress is not None:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id, new_token_ids=[], prefill_progress=progress
+                    )
+                )
+
+        while self._prefill_progress_requests:
+            req_id, request = next(iter(self._prefill_progress_requests.items()))
+            if (
+                prefill_progress_timestamp - request.last_prefill_progress_time
+                < _PREFILL_PROGRESS_MAX_INTERVAL
+            ):
+                break
+            if req_id in sampled_progress_ids:
+                break
+            progress = self._update_prefill_progress(
                 request,
                 request.prefill_stats,
                 False,
@@ -2703,6 +2734,29 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _mark_prefill_progress_dirty(self, request: Request) -> None:
+        self._prefill_progress_requests[request.request_id] = request
+        self._prefill_progress_dirty.add(request.request_id)
+
+    def _update_prefill_progress(
+        self,
+        request: Request,
+        prefill_stats: PrefillStats | None,
+        has_output_tokens: bool,
+        finish_reason: FinishReason | None,
+        timestamp: float,
+    ) -> PrefillProgress | None:
+        progress = self._make_prefill_progress(
+            request, prefill_stats, has_output_tokens, finish_reason, timestamp
+        )
+        self._prefill_progress_dirty.discard(request.request_id)
+        if progress is not None:
+            if progress.phase in (1, 2, 3, 5):
+                self._prefill_progress_requests.move_to_end(request.request_id)
+            else:
+                self._prefill_progress_requests.pop(request.request_id, None)
+        return progress
 
     @staticmethod
     def _make_prefill_progress(
@@ -3103,7 +3157,7 @@ class Scheduler(SchedulerInterface):
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if request.include_prefill_progress:
-                self._prefill_progress_requests[request.request_id] = request
+                self._mark_prefill_progress_dirty(request)
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3189,6 +3243,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         if request.include_prefill_progress:
             self._prefill_progress_requests.pop(request.request_id, None)
+            self._prefill_progress_dirty.discard(request.request_id)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
@@ -3656,6 +3711,7 @@ class Scheduler(SchedulerInterface):
             )
             request.prefill_progress_cache_tokens = (local_cached, external_cached)
             request.prefill_progress_pending_kv_tokens = 0
+            self._mark_prefill_progress_dirty(request)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
@@ -3814,6 +3870,7 @@ class Scheduler(SchedulerInterface):
                         local_cached,
                         external_cached,
                     )
+                    self._mark_prefill_progress_dirty(request)
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -3854,6 +3911,7 @@ class Scheduler(SchedulerInterface):
                     if request.include_prefill_progress:
                         request.prefill_progress_cache_tokens = (0, 0)
                         request.prefill_progress_pending_kv_tokens = 0
+                        self._mark_prefill_progress_dirty(request)
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 

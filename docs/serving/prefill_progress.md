@@ -55,6 +55,21 @@ of active prefills. A worker-wide shared gRPC progress stream would require a
 separate protocol with request lifecycle and reconnection handling; the current
 per-request API does not provide that transport-level batching.
 
+Only unresolved prefill requests remain in refresh tracking, ordered by their
+last report time. Each output batch checks changed requests and the due prefix
+of that order. Stable decode requests leave refresh tracking; preemption,
+invalidation, or new streaming input reactivates them. There is no full scan of
+all opted-in requests on every output batch and no per-request timer.
+
+The Rust engine output channel keeps at most one pending pure-progress output
+per request. A newer snapshot replaces that slot at its new position relative
+to queued model outputs. Tokens and terminal events therefore cannot be crossed
+by a newer re-prefill snapshot. Outputs carrying other metadata remain lossless,
+as do errors and generated tokens. Receiver teardown clears pending state.
+This bounds additional pure-progress buffering, not the existing model-output
+FIFO, which remains unbounded. Slow-consumer memory for model outputs still
+requires separate admission and backpressure analysis.
+
 The thresholds trade fresher load estimates for fewer messages. Validate their
 effect under the deployment's prompt lengths, chunk sizes, and concurrency;
 functional correctness alone does not establish negligible serving overhead.

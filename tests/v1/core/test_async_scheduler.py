@@ -309,6 +309,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler._prefill_progress_requests = {}
+    scheduler._prefill_progress_dirty = set()
     scheduler.running = [request]
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()

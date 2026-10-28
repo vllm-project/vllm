@@ -4998,6 +4998,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler._prefill_progress_requests = {}
+    scheduler._prefill_progress_dirty = set()
     scheduler.running = [request]
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
@@ -8939,3 +8940,79 @@ def test_prefill_progress_reports_queued_requests_and_stops_after_abort():
         for entry in batch.outputs
     )
     assert all(not scheduler.has_request(request.request_id) for request in requests)
+
+
+def test_prefill_progress_only_checks_due_requests_and_reactivates_after_preemption():
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_num_batched_tokens=16, max_model_len=128
+    )
+    requests = create_requests(num_requests=2, num_tokens=32, max_tokens=4)
+    for request in requests:
+        request.include_prefill_progress = True
+        scheduler.add_request(request)
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=10.0):
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            ModelRunnerOutput(
+                req_ids=[requests[0].request_id],
+                req_id_to_index={requests[0].request_id: 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    empty_schedule = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    empty_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    with (
+        patch.object(
+            Scheduler, "_make_prefill_progress", wraps=Scheduler._make_prefill_progress
+        ) as build,
+        patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=10.5),
+    ):
+        scheduler.update_from_output(empty_schedule, empty_output)
+        assert build.call_count == 0
+    with (
+        patch.object(
+            Scheduler, "_make_prefill_progress", wraps=Scheduler._make_prefill_progress
+        ) as build,
+        patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=11.0),
+    ):
+        output = scheduler.update_from_output(empty_schedule, empty_output)
+        assert build.call_count == 2
+        assert sum(len(batch.outputs) for batch in output.values()) == 2
+
+    request = requests[0]
+    request.num_computed_tokens = request.num_prompt_tokens
+    request.append_output_token_ids([42])
+    scheduler._update_prefill_progress(request, None, True, None, 11.1)
+    assert request.request_id not in scheduler._prefill_progress_requests
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 11.2)
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=11.2):
+        output = scheduler.update_from_output(empty_schedule, empty_output)
+    progress = [
+        entry.prefill_progress for batch in output.values() for entry in batch.outputs
+    ]
+    assert len(progress) == 1
+    assert progress[0].phase == 5
+    assert progress[0].remaining_compute_tokens == request.num_prompt_tokens
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler._prefill_progress_requests
+    assert not scheduler._prefill_progress_dirty
