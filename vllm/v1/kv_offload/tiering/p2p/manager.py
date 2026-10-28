@@ -7,6 +7,7 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -35,6 +36,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
@@ -55,8 +57,8 @@ _UNBOUND_STORE_TIMEOUT_S = 60.0
 
 # How long a reaped kv_request_id is remembered so a fetch that arrives
 # after the reap can be rejected immediately. Must exceed the consumer's
-# load timeout (session.client._LOAD_TIMEOUT_S): past that the consumer has
-# already given up on its own, so there is nobody left to reject.
+# longer load timeout (session.client._PD_LOAD_TIMEOUT_S): past that the
+# consumer has already given up on its own, so there is nobody left to reject.
 _REAPED_ID_RETENTION_S = 60.0
 
 # Time we wait during shutdown for inflight transfers to drain via
@@ -69,10 +71,25 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 # enough to avoid busy-spinning the scheduler thread.
 _DRAIN_SLEEP_S = 0.001
 
+# Longest a reaped session's still-running transfer keeps its source pins.
+# NIXL may never report a wedged transfer terminal, and a hold without a
+# bound would look like a full cache; past this the handle is released.
+# The peer cannot reconnect while it holds retained transfers (see
+# _retained_peer), so this also bounds how long it stays unreachable.
+_RETAINED_HOLD_CAP_S = 30.0
+
 # Idle sessions are only reaped when remaining capacity is at most this
 # many slots. Session setup is expensive; below this headroom, keep idle
 # peers so a later burst does not pay handshake again.
 _IDLE_REAP_HEADROOM = 8
+
+# Reconnect backoff after a session ends on a data-plane fault, as for
+# NixlConnector's invalid peers: the first fault reconnects at once; a
+# repeat within the max of the previous wait expiring doubles the wait.
+# Expiry is by time alone: no successful transfer is required, so a peer
+# that is merely idle for the max starts over at an immediate reconnect.
+_RECONNECT_MIN_BACKOFF_S = 1.0
+_RECONNECT_MAX_BACKOFF_S = 60.0
 
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
@@ -354,6 +371,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
         self._sessions: dict[str, P2PSession] = {}
+        # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
+        self._reconnect_backoff: dict[str, tuple[float, float]] = {}
+        # peer_id → data-plane faults over this process's lifetime. Unlike
+        # the backoff it never expires, so the peer-down log shows a peer
+        # that keeps faulting under traffic too sparse to escalate.
+        self._data_plane_faults: dict[str, int] = {}
         # kv_request_id → session, set when the bound session has received
         # FetchMsg for that id. submit_store after binding routes directly
         # to the session; before binding, batches are parked in
@@ -384,6 +407,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # at the top of the next ``serve_external_requests`` where the
         # handle is valid.
         self._failed_serve_ctxs: list[ReqContext] = []
+        # transfer_id → (peer_id, store job_ids, retained_at) for transfers
+        # of reaped sessions that may still be writing; see _poll_retained.
+        self._retained: dict[int, tuple[str, frozenset[int], float]] = {}
+        self._retained_force_released = 0
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -641,9 +668,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Block until every submitted load/store job has completed or failed.
 
         Loops calling ``_poll_once()`` until no session has outstanding
-        inbound loads or in-flight outbound stores. Mid-flight transfers
-        are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
-        needs the primary memoryview to be quiescent, not aborted. Results
+        inbound loads or in-flight outbound stores, and no reaped session's
+        transfer is still retained (bounded by its hold cap). Mid-flight
+        transfers are NOT cancelled — the caller
+        (``TieringOffloadingManager.reset_cache``) needs the primary
+        memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
         """
@@ -651,7 +680,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         warned = False
         while True:
             self._poll_once()
-            pending = any(s.has_pending_work for s in self._sessions.values())
+            pending = bool(self._retained) or any(
+                s.has_pending_work for s in self._sessions.values()
+            )
             if not pending:
                 return
             if not warned and time.monotonic() - start > 5.0:
@@ -714,6 +745,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
+        if self._reconnect_wait(peer_id) > 0 or self._retained_peer(peer_id):
+            return None
 
         max_peers = envs.VLLM_P2P_MAX_PEERS
         if len(self._sessions) >= max_peers:
@@ -770,6 +803,32 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
                 conn.close()
                 continue
+            wait = self._reconnect_wait(conn.peer_id)
+            if wait > 0:
+                logger.info(
+                    "P2P %s: rejecting inbound peer %s — reconnect backoff "
+                    "after a data-plane fault (%.1fs left)",
+                    self._local_id,
+                    conn.peer_id,
+                    wait,
+                )
+                # Tell the peer, so its lookups fall back now rather than
+                # at the handshake deadline.
+                with contextlib.suppress(Exception):
+                    conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+                conn.close()
+                continue
+            if self._retained_peer(conn.peer_id):
+                logger.info(
+                    "P2P %s: rejecting inbound peer %s — its reaped "
+                    "session's transfers are still running",
+                    self._local_id,
+                    conn.peer_id,
+                )
+                with contextlib.suppress(Exception):
+                    conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+                conn.close()
+                continue
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
@@ -819,6 +878,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._retain(pid, close_result.retained)
             # Fail every client-side request (in-flight loads plus unresolved
             # symmetric-P2P probes) toward the dead peer so lookup() returns
             # MISS (local prefill) instead of RETRY forever — even if a fresh
@@ -828,7 +888,109 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
-            logger.warning("P2P %s: peer %s down", self._local_id, pid)
+            fault_info = ""
+            if session.data_plane_fault is not None:
+                faults = self._data_plane_faults.get(pid, 0) + 1
+                self._data_plane_faults[pid] = faults
+                fault_info = f"; data-plane fault #{faults}"
+                backoff = self._schedule_reconnect_backoff(pid)
+                if backoff:
+                    fault_info += f"; reconnect backoff {backoff:.0f}s"
+            logger.warning(
+                "P2P %s: peer %s down (%s)%s",
+                self._local_id,
+                pid,
+                session.death_reason,
+                fault_info,
+            )
+
+    def _retain(self, peer_id: str, retained: dict[int, frozenset[int]]) -> None:
+        """Hold a reaped session's still-running transfers and their pins."""
+        if not retained:
+            return
+        now = time.monotonic()
+        for tid, job_ids in retained.items():
+            self._retained[tid] = (peer_id, job_ids, now)
+        logger.warning(
+            "P2P %s: peer %s reaped with %d transfers still running; holding "
+            "their source pins until they stop (at most %.0fs)",
+            self._local_id,
+            peer_id,
+            len(retained),
+            _RETAINED_HOLD_CAP_S,
+        )
+
+    def _poll_retained(self) -> None:
+        """Unpin retained transfers once they stop, or at the hold cap.
+
+        A store job is failed only once no retained transfer reads it.
+        """
+        if not self._retained:
+            return
+        released = list(self._data.poll_retired())
+        deadline = time.monotonic() - _RETAINED_HOLD_CAP_S
+        expired = [
+            tid
+            for tid, (_, _, retained_at) in self._retained.items()
+            if retained_at <= deadline and tid not in released
+        ]
+        if expired:
+            self._data.force_release_retired(expired)
+            self._retained_force_released += len(expired)
+            logger.error(
+                "P2P %s: %d transfers of reaped peers still running after "
+                "%.0fs; releasing their handles and source pins anyway "
+                "(%d so far)",
+                self._local_id,
+                len(expired),
+                _RETAINED_HOLD_CAP_S,
+                self._retained_force_released,
+            )
+        jobs: set[int] = set()
+        for tid in (*released, *expired):
+            entry = self._retained.pop(tid, None)
+            if entry is not None:
+                jobs |= entry[1]
+        for job_id in jobs - self._retained_job_ids():
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+
+    def _retained_job_ids(self) -> set[int]:
+        return {jid for _, job_ids, _ in self._retained.values() for jid in job_ids}
+
+    def _retained_peer(self, peer_id: str) -> bool:
+        """Whether a reaped session of *peer_id* still has running transfers.
+
+        Its registration stays until they stop. A new session would load
+        the peer's NIXL agent again under the same name: NIXL keeps the old
+        UCX endpoints, possibly failed, and the old registration's release
+        removes the agent under the new one. So the peer stays out until
+        the transfers stop, at most _RETAINED_HOLD_CAP_S.
+        """
+        return any(pid == peer_id for pid, _, _ in self._retained.values())
+
+    def _schedule_reconnect_backoff(self, peer_id: str) -> float:
+        """Record a data-plane fault for *peer_id*; return its reconnect wait.
+
+        The wait doubles (1 s up to the max) when the previous fault's wait
+        expired less than the max ago, and is 0 otherwise. Only time is
+        checked, not whether any transfer succeeded in between.
+        """
+        now = time.monotonic()
+        for pid, (_, retry_at) in list(self._reconnect_backoff.items()):
+            if now - retry_at > _RECONNECT_MAX_BACKOFF_S:
+                del self._reconnect_backoff[pid]
+        prev = self._reconnect_backoff.get(peer_id)
+        backoff = 0.0
+        if prev is not None:
+            backoff = min(
+                max(2 * prev[0], _RECONNECT_MIN_BACKOFF_S), _RECONNECT_MAX_BACKOFF_S
+            )
+        self._reconnect_backoff[peer_id] = (backoff, now + backoff)
+        return backoff
+
+    def _reconnect_wait(self, peer_id: str) -> float:
+        entry = self._reconnect_backoff.get(peer_id)
+        return 0.0 if entry is None else entry[1] - time.monotonic()
 
     def _reap_unbound_stores(self) -> None:
         """Time out submit_store batches that no peer has ever fetched.
@@ -917,6 +1079,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._retain(pid, close_result.retained)
             self._failed_req_ids.update(close_result.failed_req_ids)
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
@@ -995,6 +1158,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._reap_dead_sessions()
         self._reap_unbound_stores()
         self._reap_idle_sessions()
+        self._poll_retained()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1019,6 +1183,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
         self._unbound_stores.clear()
         self._reaped_stores.clear()
+        # The drain above already waited on retained transfers too, and
+        # _data.close() releases whatever is left.
+        for job_id in self._retained_job_ids():
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        self._retained.clear()
         self._control.close()
         self._data.close()
 
@@ -1033,6 +1202,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         wedged peer must not hang shutdown.
         """
         ids = [tid for s in self._sessions.values() for tid in s._server._inflight]
+        ids.extend(self._retained)
         if not ids:
             return
         deadline = time.monotonic() + _SHUTDOWN_DRAIN_TIMEOUT_S

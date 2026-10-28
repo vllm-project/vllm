@@ -221,7 +221,7 @@ class CuMemAllocator:
         # regular caching allocator, so without this, in-flight work
         # (e.g. quant helpers' transient tensors during weight loading)
         # races the unmap and surfaces as CUDA_ERROR_ILLEGAL_ADDRESS.
-        torch.cuda.synchronize(data.handle[0])
+        torch.accelerator.synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
             data.handle[1],
@@ -295,7 +295,7 @@ class CuMemAllocator:
             )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
@@ -413,8 +413,8 @@ class CuMemAllocator:
                 # see https://github.com/pytorch/pytorch/issues/146431 .
                 self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
-                # PyTorch's bug, calling torch.cuda.empty_cache() will error
-                # when using pluggable allocator, see
+                # PyTorch's bug, torch.accelerator.empty_cache() does not
+                # release memory held by a pluggable allocator, see
                 # https://github.com/pytorch/pytorch/issues/145168 .
                 # if we have some memory allocated and then freed,
                 # the memory will not be released, e.g. in online
