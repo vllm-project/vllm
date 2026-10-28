@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Per-response HTTP access log, like the uvicorn access log of Python's
-//! server.
+//! Per-response HTTP access log.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::middleware::Next;
@@ -14,12 +14,12 @@ use tracing::info;
 
 use crate::state::AppState;
 
-/// Log one line per response in uvicorn's access-log shape,
-/// `<client> - "<METHOD> <path?query> HTTP/<version>" <status> <reason>`,
-/// unless the request path is excluded.
+/// Log one INFO event per response, unless the request path is excluded: the
+/// client address, method, request target with its query string, HTTP
+/// version, status, and the latency until the response head is ready.
 ///
-/// Like uvicorn, the line is logged once the response head is ready, so a
-/// streaming response is logged when its stream starts.
+/// A streaming response is logged when its stream starts, so its latency
+/// does not cover the body.
 pub async fn log_access(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -30,23 +30,28 @@ pub async fn log_access(
         return next.run(request).await;
     }
 
-    // uvicorn prints no client for Unix-domain sockets.
+    // Absent for Unix-domain sockets.
     let client = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.to_string())
-        .unwrap_or_default();
+        .map(|ConnectInfo(addr)| *addr);
     let method = request.method().clone();
-    let target = request
+    let uri = request
         .uri()
         .path_and_query()
         .map_or_else(|| path.to_owned(), |target| target.as_str().to_owned());
     let version = request.version();
 
+    let start = Instant::now();
     let response = next.run(request).await;
     info!(
-        "{client} - \"{method} {target} {version:?}\" {}",
-        response.status()
+        client = client.map(display),
+        %method,
+        uri,
+        ?version,
+        status = response.status().as_u16(),
+        latency = ?start.elapsed(),
+        "HTTP response"
     );
     response
 }

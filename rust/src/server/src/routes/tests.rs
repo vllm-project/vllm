@@ -9593,7 +9593,8 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     engine_task.abort_and_join().await;
 }
 
-/// Captures the access-log lines as `LEVEL message`.
+/// Captures the access-log events as `LEVEL field=value ...`, with the
+/// nondeterministic `latency` shown only as present.
 #[derive(Clone, Default)]
 struct AccessLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
 
@@ -9608,10 +9609,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
         }
         let mut line = event.metadata().level().to_string();
         event.record(
-            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
-                if field.name() == "message" {
-                    line.push_str(&format!(" {value:?}"));
-                }
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| match field.name() {
+                "latency" => line.push_str(" latency=<elapsed>"),
+                name => line.push_str(&format!(" {name}={value:?}")),
             },
         );
         self.0.lock().expect("access log lock").push(line);
@@ -9646,13 +9646,13 @@ async fn access_log_lines(
     capture.0.lock().expect("access log lock").clone()
 }
 
-/// Like uvicorn's access log in Python: one INFO line per response, with the
-/// client address, request line including the query string, and status,
-/// including rejected and unrouted requests; excluded paths match without the
-/// query string.
+/// One INFO event per response, like Python's uvicorn access log, with the
+/// client address (absent without one), request target including the query
+/// string, status and latency, including rejected and unrouted requests;
+/// excluded paths match without the query string.
 #[tokio::test]
 #[serial]
-async fn access_log_records_each_response_like_uvicorn() {
+async fn access_log_records_each_response() {
     let get = |uri: &str, authorized: bool| {
         let mut request = Request::builder().method("GET").uri(uri);
         if authorized {
@@ -9685,12 +9685,11 @@ async fn access_log_records_each_response_like_uvicorn() {
 
     expect_test::expect![[r#"
         [
-            "INFO 127.0.0.1:52344 - \"GET /v1/models?limit=1 HTTP/1.1\" 200 OK",
-            "INFO  - \"GET /v1/models HTTP/1.1\" 401 Unauthorized",
-            "INFO  - \"GET /missing HTTP/1.1\" 404 Not Found",
+            "INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models?limit=1\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/missing\" version=HTTP/1.1 status=404 latency=<elapsed>",
         ]
-    "#]]
-    .assert_debug_eq(&lines);
+    "#]].assert_debug_eq(&lines);
 }
 
 /// `--disable-access-log` removes the access log.

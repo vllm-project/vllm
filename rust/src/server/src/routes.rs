@@ -294,7 +294,8 @@ fn build_router_with_options(
     // requests are visible, while metrics/load only see authenticated traffic.
     router = router.layer(TraceLayer::new_for_http());
 
-    // Like uvicorn, log every response, including rejected and unrouted ones.
+    // Log every response, including rejected and unrouted ones, like Python's
+    // uvicorn access log.
     if enable_access_log {
         router = router.layer(from_fn_with_state(state.clone(), middleware::log_access));
     }
