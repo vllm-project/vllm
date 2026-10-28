@@ -118,3 +118,33 @@ def test_non_noop_slice_preserved():
         # The slice should remain (not a no-op).
         assert backend.op_count(torch.ops.aten.slice.Tensor) == 1
         assert backend.op_count(torch.ops.aten.slice_scatter.default) == 1
+
+
+def test_view_chain_eliminated():
+    """View chains collapse like reshape chains. Inductor turns Dynamo's views
+    into reshapes, but vLLM IR lowering traces impls in as aten.view; a leftover
+    view round-trip blocks Inductor fusions (e.g. QK-norm + RoPE)."""
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    def f(x):
+        a = x * 2
+        b = a.view(-1, 32, 128).view(-1, 4096).view(-1, 32, 128)
+        c = a.view(8, 4096)
+        return b + 1, c + 1
+
+    x = torch.randn(8, 4096)
+    gm = make_fx(f, tracing_mode="fake")(x)
+    view = torch.ops.aten.view.default
+    assert len(gm.graph.find_nodes(op="call_function", target=view)) == 4
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(eliminate_noops=True),
+        )
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        NoOpEliminationPass(vllm_config)(gm.graph)
+    gm.recompile()
+
+    assert len(gm.graph.find_nodes(op="call_function", target=view)) == 1
+    torch.testing.assert_close(gm(x), f(x))

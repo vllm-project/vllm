@@ -123,6 +123,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
+        if self.post_lowering_noop_elimination is not None:
+            # Lowered impls add reshapes that can cancel out the caller's
+            # (e.g. RoPE's per-head view after QK-norm); left in place, they
+            # block Inductor fusions.
+            self.post_lowering_noop_elimination(graph)
+            VllmInductorPass.dump_prefix += 1
         self.clone_elimination(graph)
         VllmInductorPass.dump_prefix += 1
 
@@ -218,6 +224,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
+            self.post_lowering_noop_elimination: NoOpEliminationPass | None = None
+            if self.pass_config.eliminate_noops:
+                self.post_lowering_noop_elimination = NoOpEliminationPass(config)
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
@@ -239,6 +248,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        if self.post_lowering_noop_elimination is not None:
+            passes.append(self.post_lowering_noop_elimination.uuid())
         passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())

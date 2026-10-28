@@ -68,11 +68,11 @@ class NoOpEliminationPass(VllmInductorPass):
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
-            if is_func(node, torch.ops.aten.reshape.default):
+            if self.is_reshape(node):
                 # Case 1: rewrite reshape chains to reshapes on the base tensor
                 input = node.args[0]
                 # If the input is a reshape, rebind to that node
-                if is_func(input, torch.ops.aten.reshape.default):
+                if self.is_reshape(input):
                     # The new input is guaranteed not to be a reshape,
                     # because we process nodes in order
                     node.update_arg(0, input.args[0])
@@ -81,9 +81,7 @@ class NoOpEliminationPass(VllmInductorPass):
                         count += 1
 
             # remove reshape/slice if it produces the original shape
-            if is_func(node, torch.ops.aten.reshape.default) or is_func(
-                node, torch.ops.aten.slice.Tensor
-            ):
+            if self.is_reshape(node) or is_func(node, torch.ops.aten.slice.Tensor):
                 input = node.args[0]
                 input_shape = input.meta["val"].shape
                 output_shape = node.meta["val"].shape
@@ -102,6 +100,14 @@ class NoOpEliminationPass(VllmInductorPass):
                     count += 1
 
         logger.debug("Removed %s no-op reshapes and slices", count)
+
+    @staticmethod
+    def is_reshape(node: torch.fx.Node) -> bool:
+        # Views appear when IR op impls are traced in after Dynamo; in the
+        # functional post-grad graph Inductor lowers them like reshapes.
+        return is_func(node, torch.ops.aten.reshape.default) or is_func(
+            node, torch.ops.aten.view.default
+        )
 
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
