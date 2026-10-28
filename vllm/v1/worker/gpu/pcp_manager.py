@@ -440,6 +440,48 @@ class PCPManager:
             for rank in range(self.pcp_world_size)
         )
 
+    def can_ubatch(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        num_tokens_for_dispatch: int,
+    ) -> bool:
+        """Whether the existing midpoint split preserves causal KV availability.
+
+        Check every PCP coordinate using the shared scheduler layout. The first
+        microbatch must publish a prefix of each request before it attends;
+        otherwise a query could need KV published by the second microbatch.
+        This vote and the dispatch token count are identical within each PCP
+        group, so the existing DP handshake also agrees across the EP group.
+        """
+        if not self.shard_decode_requests or not np.any(is_prefilling):
+            return False
+        split = num_tokens_for_dispatch // 2
+        if split == 0:
+            return False
+        query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
+        prefixes: list[list[tuple[int, int]]] = [[] for _ in num_scheduled_tokens]
+        for rank in range(self.pcp_world_size):
+            for segment in self._get_rank_segments(
+                rank, num_scheduled_tokens, is_prefilling, query_start_loc
+            ):
+                length = min(
+                    segment.num_tokens,
+                    max(0, split - segment.rank_local_batch_slice.start),
+                )
+                if length:
+                    start = segment.global_batch_slice.start
+                    prefixes[segment.global_batch_req_idx].append(
+                        (start, start + length)
+                    )
+        for req_idx, intervals in enumerate(prefixes):
+            end = int(query_start_loc[req_idx])
+            for start, stop in sorted(intervals):
+                if start > end:
+                    return False
+                end = max(end, stop)
+        return True
+
     @staticmethod
     def _resolve_num_reqs_after_padding(
         input_batch: InputBatch,
@@ -481,7 +523,7 @@ class PCPManager:
 
         padded_num_tokens = None
         padded_num_reqs = None
-        if batch_desc.cg_mode != CUDAGraphMode.NONE:
+        if batch_desc.cg_mode != CUDAGraphMode.NONE or batch_desc.num_ubatches > 1:
             padded_num_tokens = batch_desc.num_tokens
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
                 padded_num_reqs = batch_desc.num_reqs

@@ -177,6 +177,16 @@ def _slice_input_batch(
             num_reqs_padded=num_reqs_padded,
         )
 
+    pcp = input_batch.pcp
+    if pcp is not None:
+        pcp = replace(
+            pcp,
+            global_query_lens_np=pcp.global_query_lens_np[req_start:req_stop],
+            global_seq_lens_cpu_upper_bound_np=(
+                pcp.global_seq_lens_cpu_upper_bound_np[req_start:req_stop]
+            ),
+        )
+
     return replace(
         input_batch,
         req_ids=input_batch.req_ids[req_start : min(req_stop, input_batch.num_reqs)],
@@ -192,6 +202,7 @@ def _slice_input_batch(
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
         dcp_local_seq_lens=dcp_local_seq_lens,
+        pcp=pcp,
         num_computed_tokens_np=input_batch.num_computed_tokens_np[req_start:req_stop],
         prefill_len_np=input_batch.prefill_len_np[req_start:req_stop],
         num_computed_prefill_tokens_np=input_batch.num_computed_prefill_tokens_np[
@@ -299,6 +310,18 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
     return torch.cat(outputs, dim=0)
 
 
+def slice_slot_mappings(
+    slot_mappings: torch.Tensor, token_slice: slice, pcp_size: int = 1
+) -> torch.Tensor:
+    """Keep each PCP rank's slice in the cache-update all-gather order."""
+    if pcp_size == 1:
+        return slot_mappings[:, token_slice]
+    num_groups = slot_mappings.shape[0]
+    rank_slots = slot_mappings.view(num_groups, pcp_size, -1)
+    # Eager-only: each context owns this compact tensor until its threads join.
+    return rank_slots[:, :, token_slice].reshape(num_groups, -1).contiguous()
+
+
 class UBatchRunner:
     """Runs the model on two or more microbatches that overlap each other.
 
@@ -320,6 +343,7 @@ class UBatchRunner:
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
         self.num_ubatches = self.parallel_config.num_ubatches
+        self.pcp_size = self.parallel_config.prefill_context_parallel_size
         self.dcp_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
@@ -395,7 +419,9 @@ class UBatchRunner:
                 dcp_rank=self.dcp_rank,
                 cp_interleave=self.cp_interleave,
             )
-            ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
+            ubatch_slot_mappings = slice_slot_mappings(
+                slot_mappings, ubatch_slice.token_slice, self.pcp_size
+            )
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
             )

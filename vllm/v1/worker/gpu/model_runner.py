@@ -758,7 +758,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state,
             self.attn_groups,
             self.kv_cache_config,
-            self.max_num_reqs,
+            (
+                self.pcp_manager.input_buffers.max_num_reqs
+                if self.pcp_manager is not None
+                else self.max_num_reqs
+            ),
         )
         if self.speculator is not None:
             self.speculator.pcp_manager = self.pcp_manager
@@ -1871,7 +1875,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
-                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+                self.ubatch_runner is not None
+                and not skip_attn_for_dummy_run
+                # PCP splits only real steps whose midpoint keeps causal prefixes.
+                and (
+                    self.pcp_manager is None
+                    or (
+                        batch_req_state is not None
+                        and self.pcp_manager.can_ubatch(
+                            batch_req_state.num_scheduled_tokens,
+                            batch_req_state.is_prefilling_np,
+                            num_toks,
+                        )
+                    )
+                )
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
