@@ -130,6 +130,7 @@ class EngineCore:
     # object.__new__.
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
+    _kv_cache_reclaimable = False
 
     def __init__(
         self,
@@ -1013,6 +1014,7 @@ class EngineCore:
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
                 self._reset_caches()
+                self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -1060,9 +1062,21 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
+
+    def _set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
+        """Tell the workers whether their extensible KV cache holds nothing to
+        keep, as from a pause that cleared it until the resume, so that a weight
+        reload may borrow its memory."""
+        if reclaimable == self._kv_cache_reclaimable:
+            return
+        self._kv_cache_reclaimable = reclaimable
+        executor = self.model_executor
+        if executor.vllm_config.cache_config.enable_extensible_kv_cache:
+            executor.collective_rpc("set_kv_cache_reclaimable", args=(reclaimable,))
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""

@@ -3,17 +3,25 @@
 """KV cache backing allocation that grows after warmup."""
 
 from bisect import bisect_right
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.utils.extensible_tensor import (
     ExtensibleTensor,
     granule_aligned_blocks,
     granule_block_alignment,
 )
+from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
@@ -417,3 +425,86 @@ def measure_kv_cache_bytes(
     available = min(requested_memory - non_kv_used, headroom - margin)
     available -= transient_peak_bytes
     return max(available, 0)
+
+
+# A layerwise weight update holds a layer's checkpoint-format copy while weight
+# processing (format conversion, padding, shuffles) allocates around as much
+# again, or twice that, before the result is copied into place.
+WEIGHT_UPDATE_PEAK_LAYER_FACTOR = 3
+
+
+@contextmanager
+def kv_cache_lent_for_weight_update(
+    kv_cache: ExtensibleKVCache | None,
+    model: torch.nn.Module,
+    *,
+    reclaimable: bool,
+    fail_if_short: bool,
+) -> Iterator[None]:
+    """Make room for a layerwise weight update of model within the context.
+
+    Only an extensible KV cache (kv_cache, None for a standard one) leaves
+    the free memory short, since it keeps free just the transients warmup
+    measured. When short, release the cache's physical memory for the
+    context if it holds nothing to keep (reclaimable); else fail before any
+    weight changes, when not even the largest layer fits and fail_if_short,
+    or warn.
+    """
+    lent = kv_cache is not None and _release_for_weight_update(
+        kv_cache, model, reclaimable=reclaimable, fail_if_short=fail_if_short
+    )
+    try:
+        yield
+    finally:
+        if lent:
+            assert kv_cache is not None
+            torch.accelerator.empty_cache()
+            kv_cache.recommit()
+            if has_kv_transfer_group():
+                get_kv_transfer_group().restore_kv_caches()
+
+
+def _release_for_weight_update(
+    kv_cache: ExtensibleKVCache,
+    model: torch.nn.Module,
+    *,
+    reclaimable: bool,
+    fail_if_short: bool,
+) -> bool:
+    """Whether kv_cache was released to fit the update; see the caller."""
+    if not kv_cache.buffer.physical_bytes:
+        # Released by sleep or release_kv_cache_memory(), which also restores it.
+        return False
+    layer_bytes = max_layer_reload_bytes(model)
+    needed = WEIGHT_UPDATE_PEAK_LAYER_FACTOR * layer_bytes
+    free = (
+        torch.accelerator.get_memory_info()[0]
+        + torch.accelerator.memory_reserved()
+        - torch.accelerator.memory_allocated()
+    )
+    if free >= needed:
+        return False
+    if reclaimable:
+        logger.info(
+            "Releasing the emptied KV cache's memory for a weight update: "
+            "%s GiB free, about %s GiB needed.",
+            format_gib(free),
+            format_gib(needed),
+        )
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
+        kv_cache.release_physical()
+        return True
+    message = (
+        f"Updating weights layer by layer needs about {format_gib(needed)} GiB "
+        f"of free device memory, at least {format_gib(layer_bytes)} GiB for the "
+        f"largest layer alone, but only {format_gib(free)} GiB is free beside "
+        "the extensible KV cache. Pause generation with the cache cleared "
+        "first, or release it with release_kv_cache_memory(), so that the "
+        "update can borrow its memory; or leave headroom by setting "
+        "gpu_memory_utilization."
+    )
+    if fail_if_short and free < layer_bytes:
+        raise RuntimeError(message)
+    logger.warning(message)
+    return False

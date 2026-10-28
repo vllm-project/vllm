@@ -13,7 +13,7 @@ import pickle
 import runpy
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from functools import cached_property
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -2621,7 +2621,9 @@ def mx_worker(mx_client, monkeypatch):
     worker.vllm_config = worker.weight_transfer_engine.vllm_config
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
-    worker.model_runner = MagicMock()
+    worker._kv_cache_reclaimable = False
+    worker._weight_update_kv_cache_loan = ExitStack()
+    worker.model_runner = MagicMock(extensible_kv_cache=None)
     return worker
 
 

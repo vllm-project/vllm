@@ -591,3 +591,138 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
         with pytest.raises(ValueError, match="own memory pool"):
             Worker.extend_kv_cache(worker, 8)
         assert log == ["ensure_kv_transfer", "get_mem_pool_context"]
+
+
+GiB = GiB_bytes
+
+
+def _weight_update_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    free_bytes: int,
+    layer_bytes: int,
+    reclaimable: bool,
+    log: list[str],
+):
+    """A Worker over an extensible KV cache with free_bytes of free memory
+    and a model whose largest layer reloads layer_bytes."""
+    from vllm.v1.worker import extensible_kv_cache
+    from vllm.v1.worker.gpu_worker import Worker
+
+    monkeypatch.setattr(
+        extensible_kv_cache, "max_layer_reload_bytes", lambda model: layer_bytes
+    )
+    monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (free_bytes, 100 * GiB)
+    )
+    monkeypatch.setattr(torch.accelerator, "memory_reserved", lambda *args: 0)
+    monkeypatch.setattr(torch.accelerator, "memory_allocated", lambda *args: 0)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    kv_cache = SimpleNamespace(
+        buffer=SimpleNamespace(physical_bytes=50 * GiB),
+        release_physical=lambda: log.append("release"),
+        recommit=lambda: log.append("recommit"),
+    )
+    runner = SimpleNamespace(
+        extensible_kv_cache=kv_cache,
+        get_model=lambda: None,
+        reload_weights=lambda *args: log.append("reload"),
+    )
+    worker = object.__new__(Worker)
+    worker.vllm_config = None
+    worker.model_runner = runner
+    worker._kv_cache_reclaimable = reclaimable
+    return worker
+
+
+@pytest.mark.parametrize(
+    ("free_gib", "reclaimable", "expected"),
+    [
+        pytest.param(4, False, ["reload"], id="room"),
+        pytest.param(1, True, ["release", "reload", "recommit"], id="borrows"),
+        pytest.param(2, False, ["reload"], id="short-warns"),
+    ],
+)
+def test_weight_reload_makes_room_from_an_emptied_kv_cache(
+    monkeypatch: pytest.MonkeyPatch, free_gib, reclaimable, expected
+):
+    """A reload that may not fit borrows the extensible KV cache's memory when
+    a pause emptied it, and backs the cache again afterwards."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch,
+        free_bytes=free_gib * GiB,
+        layer_bytes=GiB,
+        reclaimable=reclaimable,
+        log=log,
+    )
+    with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
+        worker.reload_weights()
+    assert log == expected
+
+
+def test_weight_reload_fails_before_loading_when_a_layer_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Failing midway would leave a mix of old and new weights."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=GiB // 2, layer_bytes=GiB, reclaimable=False, log=log
+    )
+    with pytest.raises(RuntimeError, match="largest layer"):
+        worker.reload_weights()
+    assert log == []
+
+
+def test_weight_reload_recommits_the_kv_cache_after_a_failed_reload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=GiB, layer_bytes=GiB, reclaimable=True, log=log
+    )
+
+    def fail(*args):
+        raise ValueError("bad checkpoint")
+
+    worker.model_runner.reload_weights = fail
+    with (
+        patch.object(gpu_worker, "set_current_vllm_config", nullcontext),
+        pytest.raises(ValueError),
+    ):
+        worker.reload_weights()
+    assert log == ["release", "recommit"]
+
+
+def test_weight_reload_leaves_a_released_kv_cache_released(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Whoever released the cache (sleep, release_kv_cache_memory) restores it."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=0, layer_bytes=GiB, reclaimable=True, log=log
+    )
+    worker.model_runner.extensible_kv_cache.buffer.physical_bytes = 0
+    with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
+        worker.reload_weights()
+    assert log == ["reload"]
+
+
+def test_discarding_the_kv_cache_releases_an_extensible_one(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    log: list[str] = []
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: False)
+    kv_cache = SimpleNamespace(release_physical=lambda: log.append("release"))
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(extensible_kv_cache=kv_cache),
+        sleep_mode_backend=SimpleNamespace(discard=lambda tags: log.append("pool")),
+    )
+    Worker.discard(worker, ("kv_cache",))
+    assert log == ["release", "pool"]
+    Worker.discard(worker, ("weights",))
+    assert log == ["release", "pool", "pool"]
