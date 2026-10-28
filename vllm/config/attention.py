@@ -125,6 +125,17 @@ class AttentionConfig:
     indexer on gfx950. This shards indexer *work* and not the KV cache, so it
     is not `decode_context_parallel_size` and requires that to be 1."""
 
+    qsa_dcp_selector: Literal["replicated", "sharded"] = "replicated"
+    """Qwen4Exp QSA selector layout under decode context parallelism (DCP).
+    "replicated" keeps the whole compressed indexer key cache on every DCP
+    rank, and every rank computes the full top-k. "sharded" stores and scores
+    each compressed key only on the DCP rank that owns its tokens; one
+    all-gather of the ranks' local top-k candidates per selection then gives
+    the same global top-k. "sharded" divides the selector cache memory and
+    scoring work per rank by the DCP size, for one extra collective per
+    selection. It needs `cp_kv_cache_interleave_size` to be a multiple of
+    the indexer compress ratio. Without DCP both values behave the same."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred

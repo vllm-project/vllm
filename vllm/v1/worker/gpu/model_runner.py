@@ -674,7 +674,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            slot_mapping_enabled.append(spec.uses_slot_mapping)
             dcp_sharded.append(spec.dcp_sharded)
             sliding_window_reach.append(
                 layer_spec.num_retained_tokens
@@ -717,6 +717,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                block_table_widths=max_num_blocks_per_group,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
