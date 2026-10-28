@@ -92,7 +92,7 @@ void fused_experts_cpu_local_skip(
     const std::optional<at::Tensor>& w1_bias,
     const std::optional<at::Tensor>& w2_bias,
     const std::optional<double>& alpha, const std::optional<double>& limit,
-    bool is_vnni);
+    bool is_vnni, int64_t act_method);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -689,7 +689,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor expert_map, int "
       "moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, Tensor? w1_zero, "
       "Tensor? w2_zero, int[]? block_size, Tensor? w1_bias, Tensor? w2_bias, "
-      "float? alpha, float? limit, bool is_vnni) -> ()");
+      "float? alpha, float? limit, bool is_vnni, int act_method) -> ()");
   ops.impl("fused_experts_cpu_local_skip", torch::kCPU,
            &fused_experts_cpu_local_skip);
   ops.def(

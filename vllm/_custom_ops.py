@@ -3623,6 +3623,7 @@ def fused_experts_cpu_local_skip(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
+    act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
 ) -> None:
     torch.ops._C.fused_experts_cpu_local_skip(
         out,
@@ -3643,6 +3644,7 @@ def fused_experts_cpu_local_skip(
         alpha,
         limit,
         is_vnni,
+        act_method,
     )
 
 

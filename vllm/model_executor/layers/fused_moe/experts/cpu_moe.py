@@ -616,6 +616,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
                 None,  # alpha
                 None,  # limit
                 True,  # is_vnni
+                _CPU_ACT_METHODS[activation],
             )
             return
 
@@ -808,6 +809,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
                 alpha,
                 limit,
                 True,
+                _CPU_ACT_METHODS[activation],
             )
             return
 

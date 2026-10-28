@@ -93,6 +93,7 @@ def _run_single_rank_reference(
     w2_bias=None,
     alpha=None,
     limit=None,
+    act_method=ops.CPUActMethod.SILU_AND_MUL,
 ):
     """Single-process MoE forward over all experts (no EP masking)."""
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
@@ -119,6 +120,7 @@ def _run_single_rank_reference(
         alpha=alpha,
         limit=limit,
         is_vnni=True,
+        act_method=act_method,
     )
     return output
 
@@ -362,6 +364,9 @@ def _moe_prepare_finalize_compile_worker(
         w2_bias=w2_bias,
         alpha=alpha,
         limit=limit,
+        act_method=ops.CPUActMethod.SWIGLU
+        if quant_method == ops.CPUQuantMethod.MXFP4
+        else ops.CPUActMethod.SILU_AND_MUL,
     )
 
     start = sum(token_counts[:dp_rank])
