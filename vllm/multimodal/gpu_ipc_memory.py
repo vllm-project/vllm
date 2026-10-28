@@ -27,7 +27,7 @@ API-server (frontend) process:
    - Deferred decode: the frontend->engine provider does NOT open the handle; it
      returns the picklable :class:`CudaIpcPoolProxy` so it survives engine-core
      scheduling and the engine-core->worker broadcast as metadata, never as a
-     CUDA tensor. Each worker materializes the tensor itself.
+     CUDA tensor. Each worker reconstructs the tensor itself.
    - Receiver (every TP worker): the handle is opened once per process and
      cached, then each request slices the cached mapping and copies its tensor
      out on the worker's own device -- rank 0 is a plain device-to-device copy,
@@ -422,7 +422,7 @@ class _SenderPool:
         self.buf[start : start + n].copy_(src_u8)
         # Block until the async copy lands so a consumer never reads a
         # half-written slice (no cross-process stream ordering); mirrors the
-        # GPU-decode path in vllm/multimodal/video.py.
+        # GPU decoders in vllm/multimodal/video_decoders/.
         torch.accelerator.current_stream(self.device_index).synchronize()
         return start, n, slot
 
@@ -673,7 +673,7 @@ def cuda_ipc_provider(dtype: str, shape: tuple[int, ...], meta: dict) -> Any:
 
     Rebuilds the lightweight :class:`CudaIpcPoolProxy` from plain metadata
     WITHOUT opening the handle, so it can travel through engine-core and the
-    engine-core->worker broadcast as metadata; each worker materializes the
+    engine-core->worker broadcast as metadata; each worker reconstructs the
     on-device tensor itself via :meth:`CudaIpcPoolProxy.reconstruct` (see
     ``reduce_data`` in ``inputs.py``).
     """

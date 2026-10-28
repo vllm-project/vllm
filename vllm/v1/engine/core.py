@@ -1242,7 +1242,7 @@ class EngineCoreProc(EngineCore):
 
         # Out-of-band provider for multimodal tensor IPC. torch_shm drains a
         # queue; cuda_ipc_pool returns a deferred proxy that each worker
-        # materializes.
+        # reconstructs.
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
         self._oob_provider: OOBTensorProvider | None = None
         if tensor_queue is not None:

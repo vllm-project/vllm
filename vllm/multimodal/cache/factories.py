@@ -35,8 +35,8 @@ def _get_cache_type(
     if mm_config.mm_processor_cache_gb <= 0:
         return None
 
-    # cuda_ipc_pool items reference pool slices that are recycled once read,
-    # so they must not be cached across requests.
+    # cuda_ipc_pool items reference pool slices that are recycled once the
+    # workers release them, so they must not be cached across requests.
     if mm_config.mm_tensor_ipc == "cuda_ipc_pool":
         logger.info_once(
             "Disabling the multi-modal processor cache: "

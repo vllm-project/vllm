@@ -5,7 +5,7 @@
 
 The transport keeps GPU-resident feature tensors on the device and ships only a
 small metadata proxy from the API-server (frontend) process to each
-tensor-parallel worker, which materializes the tensor itself. Opening a CUDA IPC
+tensor-parallel worker, which reconstructs the tensor itself. Opening a CUDA IPC
 handle in the same process that exported it is not allowed, so the round-trip is
 exercised across a spawned child process (mirroring the real frontend/worker
 topology).
@@ -130,13 +130,14 @@ def test_roundtrip_same_device(device_index: int):
     assert status == "ok", payload
     assert got_dev == device_index
     torch.testing.assert_close(payload, x.cpu())
-    # Reading does not release: the slice stays leased until the request ends.
+    # Reading does not release: the encoder step releases the slice afterwards.
     assert not _wait_for_recycle(sender, timeout=0.2)
     sender._pool.close()
 
 
 @pytest.mark.skipif(
-    torch.accelerator.device_count() < 2, reason="cross-device P2P needs >=2 GPUs"
+    torch.accelerator.device_count() < 2 or not torch.cuda.can_device_access_peer(0, 1),
+    reason="cross-device P2P needs >=2 GPUs with peer access",
 )
 def test_roundtrip_cross_device_p2p():
     """A worker on a different GPU reads the pool over P2P (rank!=0 path)."""
@@ -240,7 +241,7 @@ def test_tp_size_over_max_falls_back():
 
     The recycling cells are indexed per consumer device; a wider world would
     alias cells, so ``_SenderPool`` refuses to start and the encoder falls back
-    to the regular host-copy transport instead of recycling slices too early.
+    to the regular host-copy transport instead of never recycling slices.
     """
     from vllm.multimodal import gpu_ipc_memory
 

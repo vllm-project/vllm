@@ -444,8 +444,9 @@ class MultiModalConfig:
     - "cuda_ipc_pool": Keep GPU-preprocessed features on the device and transport
       them via a persistent CUDA IPC pool; each tensor-parallel worker reads its
       copy directly from GPU (same-device copy or NVLink/P2P), avoiding a host
-      round trip. Supports `tensor_parallel_size > 1` on a single node with peer
-      access. Only engages for GPU-resident features (e.g.
+      round trip. Supports `tensor_parallel_size` up to 16 on a single node with
+      peer access, without pipeline or data parallelism. Only engages for
+      GPU-resident features (e.g.
       `mm_processor_kwargs={"device": "cuda"}`); CPU features fall back to
       "direct_rpc". Requires `mm_cuda_ipc_pool_gb` > 0 to size the pool, and
       disables the multi-modal processor cache, whose items would otherwise

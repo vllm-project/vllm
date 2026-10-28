@@ -11,7 +11,9 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/multimodal/gpu_ipc_memory.py
   - tests/distributed
+  - tests/v1/test_cuda_ipc_transport.py
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
@@ -19,6 +21,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s v1/test_cuda_ipc_transport.py::test_roundtrip_cross_device_p2p
   mirror:
     amd:
       label: ':amd: (MI300) Distributed Comm Ops'

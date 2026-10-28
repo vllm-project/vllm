@@ -1566,6 +1566,24 @@ class ModelConfig:
                 "mm_tensor_ipc='cuda_ipc_pool' requires --api-server-count=1."
             )
 
+        # The pool is shared with the TP workers of one engine on one node, and
+        # each TP rank needs its own recycling cell.
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.mm_tensor_ipc == "cuda_ipc_pool"
+            and (
+                parallel_config.pipeline_parallel_size > 1
+                or parallel_config.data_parallel_size > 1
+                or parallel_config.tensor_parallel_size > 16
+                or parallel_config.nnodes > 1
+            )
+        ):
+            raise ValueError(
+                "mm_tensor_ipc='cuda_ipc_pool' is not supported with "
+                "pipeline_parallel_size > 1, data_parallel_size > 1, "
+                "tensor_parallel_size > 16 or nnodes > 1."
+            )
+
         if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
             if not current_platform.is_cuda_alike():
                 raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
