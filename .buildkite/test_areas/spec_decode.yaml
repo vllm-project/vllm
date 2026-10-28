@@ -130,6 +130,11 @@ steps:
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
+    - vllm/model_hub.py
+    - vllm/engine/arg_utils.py
+    - vllm/config/
+    - vllm/model_executor/model_loader/
+    - vllm/transformers_utils/
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/v1/attention/backends/
