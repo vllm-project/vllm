@@ -1121,6 +1121,14 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def is_inference_ready(self) -> bool:
+        """Whether the engine can accept and process new requests: it is not
+        paused (including for a checkpoint) or asleep, and no weight update has
+        left the weights incomplete."""
+        return not self.is_sleeping() and not any(
+            self.collective_rpc("has_incomplete_weight_update")
+        )
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 

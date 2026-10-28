@@ -234,6 +234,8 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        # Update targets (is_draft) whose weights may be incomplete.
+        self._incomplete_weight_updates: set[bool] = set()
         self._weight_update_is_draft = False
 
         # Worker profiler. Enabled and configured through profiler_config.
@@ -1542,6 +1544,9 @@ class Worker(WorkerBase):
         if self.weight_transfer_engine is not None:
             self.weight_transfer_engine.shutdown()
 
+    def has_incomplete_weight_update(self) -> bool:
+        return bool(self._incomplete_weight_updates)
+
     def start_weight_update(self) -> None:
         """Start a new weight update session.
 
@@ -1583,6 +1588,9 @@ class Worker(WorkerBase):
                 # Load through the unquantized target head, as without
                 # draft_lm_head_quantization; finish re-derives the copies.
                 share_source_lm_heads(draft_model)
+            # Starting may already move weights; only a successful finish
+            # restores them.
+            self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
@@ -1651,6 +1659,7 @@ class Worker(WorkerBase):
                 (draft_model := self.get_draft_model()) is not None
             ):
                 restore_quantized_lm_heads(draft_model)
+            self._incomplete_weight_updates.discard(self._weight_update_is_draft)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

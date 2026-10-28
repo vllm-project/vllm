@@ -253,9 +253,8 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = state.engine_core_client().subscribe_health();
-        health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
-        health_reporter.set_serving::<grpc::ControlGrpcService>().await;
+        let engine_health = grpc::EngineHealth::subscribe(state.engine_core_client());
+        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
@@ -271,14 +270,7 @@ where
             .add_service(health_service)
             .add_service(control_service)
             .add_service(inference_service);
-        Some((
-            addr,
-            grpc_listener,
-            svc,
-            grpc_tls,
-            health_reporter,
-            engine_health,
-        ))
+        Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
         None
     };
@@ -367,9 +359,7 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((addr, grpc_listener, svc, grpc_tls, health_reporter, engine_health)) =
-                grpc_setup
-            else {
+            let Some((addr, grpc_listener, svc, grpc_tls, health_monitor)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
@@ -382,7 +372,7 @@ where
             };
             let server =
                 svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
+            let health_monitor = health_monitor.run(shutdown);
 
             info!(%addr, tls, model, "gRPC server is ready to accept requests");
 

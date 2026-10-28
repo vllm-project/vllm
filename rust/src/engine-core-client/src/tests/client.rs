@@ -41,7 +41,7 @@ use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
-    setup_mock_engine_with_init, spawn_mock_engine_task,
+    setup_mock_engine_with_init, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -2442,6 +2442,161 @@ async fn wake_up_requires_every_engine_to_be_fully_awake() {
         engine_task.await.unwrap();
     }
     client.shutdown().await.unwrap();
+}
+
+/// Serve utility calls as an engine that is ready unless paused or in a weight
+/// update, in whatever order the client sends them, until `stop` fires.
+async fn serve_readiness_engine(
+    dealer: &mut DealerSocket,
+    push: &mut PushSocket,
+    mut paused: bool,
+    mut stop: oneshot::Receiver<()>,
+) {
+    let mut updating_weights = false;
+    loop {
+        let utility = tokio::select! {
+            utility = recv_engine_message(dealer) => utility,
+            _ = &mut stop => return,
+        };
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+        let payload = decode_value(&utility[1]);
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_u64().expect("call_id");
+        let result = match array[2].as_str().expect("utility method") {
+            "is_inference_ready" => utility_result_value(!paused && !updating_weights),
+            "pause_generation" => {
+                paused = true;
+                utility_result_value(())
+            }
+            "resume_scheduler" | "checkpoint_restore" => {
+                paused = false;
+                utility_result_value(())
+            }
+            "collective_rpc" => {
+                match array[3][0].as_str().expect("worker method") {
+                    "start_weight_update" => updating_weights = true,
+                    "finish_weight_update" => updating_weights = false,
+                    method => panic!("unexpected worker method {method}"),
+                }
+                utility_result_value([()])
+            }
+            method => panic!("unexpected utility call {method}"),
+        };
+        send_outputs(
+            push,
+            UtilityCallOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                output: UtilityOutput {
+                    call_id: call_id.into(),
+                    failure_message: None,
+                    result: Some(result),
+                },
+            }
+            .into(),
+        )
+        .await;
+    }
+}
+
+/// Connect a client to [`serve_readiness_engine`], with `enable_sleep_mode`
+/// set on the engine when it starts paused.
+async fn connect_readiness_engine(
+    engine_id: &'static [u8],
+    start_paused: bool,
+) -> (
+    EngineCoreClient,
+    IpcNamespace,
+    [oneshot::Sender<()>; 2],
+    tokio::task::JoinHandle<()>,
+) {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut ready_response = crate::mock_engine::default_ready_response();
+    ready_response.enable_sleep_mode = start_paused;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.to_vec(),
+        ready_response,
+        move |dealer, push| Box::pin(serve_readiness_engine(dealer, push, start_paused, stop_rx)),
+    );
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    (client, ipc, [stop_tx, shutdown_tx], engine_task)
+}
+
+async fn shutdown_readiness_engine(
+    client: EngineCoreClient,
+    stop: [oneshot::Sender<()>; 2],
+    engine_task: tokio::task::JoinHandle<()>,
+) {
+    for tx in stop {
+        let _ = tx.send(());
+    }
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+async fn wait_until_ready(readiness: &mut tokio::sync::watch::Receiver<bool>) {
+    timeout(Duration::from_secs(2), readiness.wait_for(|ready| *ready))
+        .await
+        .expect("the engine reports ready")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_follows_engine_answers_around_pause() {
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-pause", false).await;
+    let mut readiness = client.subscribe_readiness();
+    assert!(*readiness.borrow());
+
+    client.pause_generation(PauseMode::Abort, false).await.unwrap();
+    assert!(!*readiness.borrow());
+    client.resume_scheduler().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_follows_engine_answers_around_weight_update() {
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-weights", false).await;
+    let mut readiness = client.subscribe_readiness();
+
+    client.start_weight_update().await.unwrap();
+    assert!(!*readiness.borrow());
+    client.finish_weight_update().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_starts_from_engine_answer_with_sleep_mode() {
+    // Prepared for a checkpoint on startup.
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-startup", true).await;
+    let mut readiness = client.subscribe_readiness();
+    assert!(!*readiness.borrow());
+
+    client.checkpoint_restore().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
 }
 
 /// Render the `vllm:engine_sleep_state` series of one model as

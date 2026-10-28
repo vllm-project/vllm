@@ -14,6 +14,7 @@ import torch.nn as nn
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
+from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -74,6 +75,7 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker.vllm_config = VllmConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
     worker._weight_update_is_draft = False
     worker.model_runner = _RecordingModelRunner()
     return worker
@@ -140,6 +142,7 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.finished is True
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+    assert not Worker.has_incomplete_weight_update(worker)
     assert engine.seen_configs == [worker.vllm_config] * 3
     assert worker.model_runner.reset_lora_calls == 1
 
@@ -206,6 +209,57 @@ def test_finish_draft_session_keeps_lora_state(monkeypatch):
 
     assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_refused_draft_start_keeps_weights_complete(monkeypatch):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+
+    def refuse() -> None:
+        raise RuntimeError("no draft model")
+
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", refuse)
+    with pytest.raises(RuntimeError, match="no draft model"):
+        Worker.start_draft_weight_update(worker)
+
+    assert not Worker.has_incomplete_weight_update(worker)
+
+
+def test_draft_update_keeps_failed_base_load_incomplete(monkeypatch):
+    engine = _RecordingEngine(raise_on_update=True)
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
+
+    Worker.start_weight_update(worker)
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+    Worker.start_draft_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert Worker.has_incomplete_weight_update(worker)
+
+
+def test_failed_draft_finish_keeps_weights_incomplete(monkeypatch):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    draft_model = nn.Linear(1, 1)
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
+    monkeypatch.setattr(worker, "get_draft_model", lambda: draft_model)
+    monkeypatch.setattr(gpu_worker, "share_source_lm_heads", lambda model: None)
+
+    def fail_restore(model: nn.Module, refresh: bool = True) -> None:
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(gpu_worker, "restore_quantized_lm_heads", fail_restore)
+
+    Worker.start_draft_weight_update(worker)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        Worker.finish_weight_update(worker)
+
+    assert Worker.has_incomplete_weight_update(worker)
 
 
 def test_double_start_raises():
