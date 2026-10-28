@@ -3866,3 +3866,20 @@ Cycle précédé d'un travail user-dirigé intensif (~18:20→20:10Z), tout comm
 **Sécurité** : aucune IP inconnue en 200 (hairpin 1 007/1 002×200, `?` 621/617×200, poste Paris 16×200, web1 2×200). **2 empreintes nouvelles** `ccd500f719e4`/`64a6d7ec06fd` = UA `ZOLTRAAK/0.2.0 (security-research)` 2×401 `/v1/models` 01:12Z, zéro accès — famille connue (identifiée 27/10 claudish#718), bruit consigné. **nbaudit ok 02:05:55Z** (`19451:Image/` = vague 2 active). Condensation : burst fallback cloud 01:40Z (4 lignes, #2719) puis « Condensation completed » = dégradation gracieuse nominale, cohérente avec la starvation petits appelants du créneau ; WARNs RSM (IdentityManager heartbeat, NonNominativeBaselineService, STALE-FILE #3230) = périmètre RSM, relayés au propriétaire sans action ici. Commit hôte **72,9 %** (marge 104,3 Go, en nette baisse depuis 80,0 %). G: 85 % / 592 G libres, probe OK.
 
 **Structurel** : Q43 (tier RAM 24→32 GiB, plafond ~13→~20 sessions) reste le vrai levier de plafond — GO user en attente, s'applique au prochain restart naturel.
+
+## Cycle 04:1xZ (28/10) — verdict : le 🟠 est retombé SEUL (amortissement), repli po-2024 suspendu
+
+**Prod** : 26 h sans restart (StartedAt 02:15:05Z), health 200 @2,7 ms, OOM 0, RC=0, 3 conteneurs, shm 24G/63G (39 %). VRAM GPU 0 **22 634** (bande, marge 366 MiB). **Zéro WEDGE depuis 00:46:56Z** (> 3,4 h), 3 912 sondes OK, file `running 3 / waiting 0`.
+
+**Les deux jambes du 🟠 ont retombé, sous charge RÉELLE doublée — c'est la clé du verdict** :
+
+1. **Préemptions 19 → 20 (+1/2 h)**, contre +8 au cycle précédent.
+2. **Batterie 6 sondes petits appelants : 0/6 > 9 s** (0,11-0,26 s uniformes), contre 3/7 à 35,6/28,9/9,5 s.
+
+Et le census prouve que ce n'est **pas** une photo inter-crons (la leçon du cycle 00:11Z) : **823 req/2 h à 6,9 req/min, dont 565 corps 100K-1M (69 %)** — le volume long-contexte a DOUBLÉ pendant que tout était servi en 0,1-0,3 s. Mécanisme : à 02:2xZ les sessions récurrentes venaient de lancer leurs passes (prefills froids massifs → KV GPU 95-98 % → préemptions + starvation) ; deux heures plus tard elles tournent en **régime delta** — les socles sont amortis dans les tiers (external hits since-boot 92,3 M, ratio 75,6 %), chaque tour ne paie que son incrément.
+
+**Action** : [REPLY] claudish = **[ASK] repli po-2024 SUSPENDU** — aucune exécution constatée ni confirmée, et le trafic n'a pas chuté (volume 2×) donc aucun repli visible ; la mesure dit que le moteur absorbe seul. Le feu re-montera à la prochaine fenêtre de prefills froids si les deux jambes se remplissent à nouveau — po-2027 reste barreau suivant désigné (il s'est déclaré prêt, 03:11Z). **Test de récurrence : le cycle 06:11Z** — les passes haiku suivantes diront si l'absorption tient.
+
+**Grain socle reçu de po-2027:claudish (02:09Z, à relier au plafond)** : first_user p50 = **65,4 k tok**, **93 % = bloc d'instructions claude-md** (règles projet CoursIA ≈ **42 k tok/requête**, global 9,2 k, un CLAUDE.md Maintenance non identifié à 32,8 k). Levier **par-workspace** : une diète des règles réduirait le socle de chaque tour davantage que tout réglage moteur — complément orthogonal de Q43 (tier RAM 32 GiB).
+
+**Annexes** : 400 window+1 : 2 nouveaux/2 h (récurrence stable, #431 hub). Sécurité : aucune IP inconnue en 200 (hairpin 1 314/1 309, `?` 646/646, poste Paris 10×200, web1 2×200) ; ZOLTRAAK absent de la fenêtre (les 21×401 = boucle clé morte connue `1f7f6080cb65`). **nbaudit ok 04:05:56Z** (`19451:Image/`). Condensation : fallback cloud 03:29Z (#2719) puis completed = dégradation gracieuse nominale. Commit hôte **73,5 %** (marge 101,8 Go). G: écriture OK. Registre : **Q43 seule ouverte**.
