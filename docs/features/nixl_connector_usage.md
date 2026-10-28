@@ -413,26 +413,14 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 ## Early receive reporting
 
 Set `"enable_early_recv": true` in the decoder's `--kv-transfer-config` to report
-completed KV loads before the next step output. It works with the `uni` executor
-and with the `mp` executor when all workers are on the same node, with async or
-synchronous scheduling. PP must be 1: NIXL pull does not support decoder PP.
-NIXL pull connectors support this path, including inside MultiConnector.
-Other connectors retain their normal behavior.
-Early and ordinary notifications share the same all-worker completion count.
+completed NIXL pulls before the next step output. Disabled by default; benchmark
+latency and polling overhead on your workload before enabling it.
 
-With the `mp` executor each worker polls its receives after the step's
-`execute_model` and `sample_tokens` calls and every 0.2 ms while it waits for
-the next RPC, and reports successful receives through a separate channel
-instead of the step output. Polling stops
-while the engine sends nothing for a second. With synchronous scheduling the
-workers poll right before returning each step output instead of after the
-step calls. Notifications may reach the scheduler before its next step; this
-ordering is not guaranteed. With the `uni`
-executor the engine polls the worker's connector right before each schedule.
-Failed loads use the regular completion path. Unexpected poll errors fail the
-engine through the early channel; if that channel also fails, the worker exits
-and the executor's worker monitor shuts down its peers. This feature is disabled by
-default and requires workload-specific latency and overhead validation.
+Supported: `uni`, or single-node `mp`, with synchronous or asynchronous scheduling,
+TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
+All ranks must finish receiving before the request can run. Earlier scheduling is
+best effort. Transfer failures retain the configured recovery policy; unexpected
+poll or notification-channel errors terminate the engine.
 
 ## Metrics Reference
 

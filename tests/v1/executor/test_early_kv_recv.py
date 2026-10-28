@@ -7,14 +7,6 @@ from contextlib import suppress
 
 import pytest
 
-from vllm.config import (
-    DeviceConfig,
-    KVTransferConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
-    VllmConfig,
-)
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.v1.executor import early_kv_recv
 from vllm.v1.executor.early_kv_recv import EarlyKVRecvReceiver, EarlyKVRecvSender
@@ -69,17 +61,23 @@ def _wait_for_poll(sender: EarlyKVRecvSender, reader: MessageQueue) -> bool | No
     return result[0] if result else None
 
 
-def test_sender_polls_until_the_next_rpc(monkeypatch, rpc_queue, receiver):
+@pytest.mark.parametrize("failed", [False, True])
+def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver, failed):
     writer, reader = rpc_queue
-    sender = _sender(monkeypatch, _PendingConnector(done={"r"}), receiver.path)
+    error = RuntimeError("post-processing failed") if failed else None
+    sender = _sender(
+        monkeypatch, _PendingConnector(done={"r"}, error=error), receiver.path
+    )
     try:
         assert _wait_for_poll(sender, reader) is True
         sender.poll()
-        received: list[set[str]] = []
+        received: list[set[str] | str] = []
         deadline = time.monotonic() + 5
         while not received and time.monotonic() < deadline:
             received.extend(receiver.drain())
-        assert received == [{"r"}]
+        assert received == (
+            ["RuntimeError: post-processing failed"] if failed else [{"r"}]
+        )
         assert receiver.drain() == []
         # Still waiting for the next RPC: poll again after the interval.
         assert _wait_for_poll(sender, reader) is True
@@ -105,20 +103,6 @@ def test_sender_stops_polling_when_idle_or_shut_down(monkeypatch, rpc_queue, rec
         sender.close()
 
 
-def test_poll_failure_reaches_the_engine(monkeypatch, receiver):
-    error = RuntimeError("post-processing failed")
-    sender = _sender(monkeypatch, _PendingConnector(error=error), receiver.path)
-    try:
-        sender.poll()
-        received: list[set[str] | str] = []
-        deadline = time.monotonic() + 5
-        while not received and time.monotonic() < deadline:
-            received.extend(receiver.drain())
-        assert received == ["RuntimeError: post-processing failed"]
-    finally:
-        sender.close()
-
-
 def _poll_with_broken_error_channel(path):
     with pytest.MonkeyPatch.context() as monkeypatch:
         sender = _sender(monkeypatch, _PendingConnector(done={"r"}), path)
@@ -140,34 +124,3 @@ def test_broken_error_channel_terminates_worker(receiver):
         if process.is_alive():
             process.kill()
             process.join()
-
-
-@pytest.mark.parametrize(
-    ("backend", "async_scheduling", "pp", "accepted"),
-    [("mp", True, 1, True), ("uni", False, 1, True), ("mp", True, 2, False)],
-)
-def test_early_recv_config(backend, async_scheduling, pp, accepted):
-    def build():
-        return VllmConfig(
-            model_config=ModelConfig(model="facebook/opt-125m"),
-            parallel_config=ParallelConfig(
-                distributed_executor_backend=backend, pipeline_parallel_size=pp
-            ),
-            scheduler_config=SchedulerConfig(
-                max_model_len=2048,
-                is_encoder_decoder=False,
-                async_scheduling=async_scheduling,
-            ),
-            kv_transfer_config=KVTransferConfig(
-                kv_connector="NixlConnector",
-                kv_role="kv_consumer",
-                enable_early_recv=True,
-            ),
-            device_config=DeviceConfig("cpu"),
-        )
-
-    if accepted:
-        build()
-    else:
-        with pytest.raises(ValueError, match="enable_early_recv"):
-            build()

@@ -4548,25 +4548,18 @@ def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker._recving_transfers["request"] = [101]
     worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
+    worker.nixl_wrapper.release_xfer_handle.side_effect = [
+        RuntimeError("release"),
+        None,
+    ]
     assert worker.poll_finished_recving() == set()
+    assert not worker.has_pending_recving()
+    assert worker.poll_finished_recving() == set()
+    assert worker.nixl_wrapper.check_xfer_state.call_count == 1
     results = worker.get_transfer_results()
     assert results.finished_recving == results.failed_recving == {"request"}
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
     worker.nixl_wrapper.send_notif.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_early_recv_does_not_repoll_a_failed_receive(recv_worker):
-    """A failed receive with a retained handle is retried once per step only."""
-    worker = recv_worker
-    worker._worker_polls_recving = True
-    worker._recving_transfers["request"] = [101]
-    worker._recv_failures.add("request")
-    assert worker.poll_finished_recving() == set()
-    worker.nixl_wrapper.check_xfer_state.assert_not_called()
-    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    worker.get_transfer_results()
-    worker.nixl_wrapper.check_xfer_state.assert_called_once_with(101)
 
 
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
