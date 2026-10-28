@@ -29,7 +29,7 @@ def test_reload_finish_runs_model_hook_once():
     assert model.calls == 1
 
 
-def _molmo_embed(module_name: str) -> SimpleNamespace:
+def _molmo_embed(module_name: str) -> tuple[SimpleNamespace, Any]:
     """Stand-in for ``VocabParallelEmbedding``: 5 vocab rows, this rank holds
     rows [3, 5) plus one padding row."""
     import importlib
