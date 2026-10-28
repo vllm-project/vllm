@@ -177,10 +177,10 @@ class _CheckpointingMambaLayer(MambaBase):
     mamba_type = MambaAttentionBackendEnum.MAMBA2
 
     def __init__(self, prefill_checkpoint_alignment: int | None):
-        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
+        self.prefill_checkpoint_alignment = prefill_checkpoint_alignment
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
-        return self._prefill_checkpoint_alignment
+        return self.prefill_checkpoint_alignment
 
     def get_state_shape(self):
         return ((4, 8),)
