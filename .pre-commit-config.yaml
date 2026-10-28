@@ -28,7 +28,7 @@ repos:
   rev: v0.21.0
   hooks:
   - id: markdownlint-cli2
-    language_version: lts
+    language_version: 24.22.1 # Node 26 (current lts) needs libatomic, which the CI runners lack
     args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
