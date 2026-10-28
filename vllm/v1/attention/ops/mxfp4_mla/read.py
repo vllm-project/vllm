@@ -10,6 +10,9 @@ MFMA, so it would only convert twice.
 
 from __future__ import annotations
 
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _e2m1_inline,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.mxfp4_mla import E8M0_BIAS, GROUP_SIZE
@@ -23,41 +26,10 @@ else:
 _HW_UNPACK = tl.constexpr(_ON_GFX950)
 _GROUP = tl.constexpr(GROUP_SIZE)
 
-# E2M1 magnitudes reconstructed arithmetically rather than from a lookup table,
-# so the kernel needs no constant memory. Code index ``c = e << 1 | f``, where
-# ``e`` is the 2-bit exponent and ``f`` the 1-bit mantissa. The exponent bias is
-# 1, and **``e == 0`` is the subnormal range** -- which is the whole subtlety:
-#
-#   e=0: value = 0.5 * f          c=0 -> 0.0    c=1 -> 0.5
-#   e>0: value = (1 + 0.5f) * 2**(e-1)
-#        c=2 -> 1.0 * 2**0 = 1.0        c=5 -> 1.5 * 2**1 = 3.0
-#        c=3 -> 1.5 * 2**0 = 1.5        c=6 -> 1.0 * 2**2 = 4.0
-#        c=4 -> 1.0 * 2**1 = 2.0        c=7 -> 1.5 * 2**2 = 6.0
-#
-# Applying the normal-number formula to ``e == 0`` yields 0.75 for code 1, which
-# is not an E2M1 value at all.
-
-
 # fp32 is 1-8-23, so the exponent field starts at bit 23. Scaling by a power of
 # two is exactly an integer add there, which is how the E8M0 group scale is
 # applied without a transcendental.
 _F32_MANT_BITS = tl.constexpr(23)
-
-
-@triton.jit
-def _e2m1_codes_to_f32(codes):
-    """4-bit E2M1 codes (as integers) -> signed fp32 values.
-
-    Avoids ``tl.exp2``: the exponent only takes values 0..3, so a two-select
-    chain gives the power-of-two term.
-    """
-    magnitude_index = codes & 0x07
-    exponent = (magnitude_index >> 1) & 0x03
-    fraction = (magnitude_index & 0x01).to(tl.float32)
-    # 2**(e-1) for e in {1,2,3} is {1,2,4}; e == 0 is the subnormal range.
-    power = tl.where(exponent == 1, 1.0, tl.where(exponent == 2, 2.0, 4.0))
-    value = tl.where(exponent == 0, 0.5 * fraction, (1.0 + 0.5 * fraction) * power)
-    return tl.where((codes & 0x08) != 0, -value, value)
 
 
 @triton.jit
@@ -153,8 +125,8 @@ def unpack_mxfp4_tile(
     The low nibble holds the lower element index, so the two nibble streams are
     interleaved back into value order rather than concatenated.
     """
-    low = _e2m1_codes_to_f32((packed & 0x0F).to(tl.int32))
-    high = _e2m1_codes_to_f32(((packed >> 4) & 0x0F).to(tl.int32))
+    low = _e2m1_inline((packed & 0x0F).to(tl.int32))
+    high = _e2m1_inline(((packed >> 4) & 0x0F).to(tl.int32))
     values = tl.interleave(low, high)  # [BLOCK_K, LATENT]
 
     # Broadcast the per-group scale byte across its 32 values, then apply it as
