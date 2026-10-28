@@ -70,7 +70,9 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
+    deferred_spec_state_fits,
     fused_gdn_decode_post_conv_mtp_triton,
+    gdn_decode_mtp_update_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
@@ -731,6 +733,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         if self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
+        # On ROCm the Triton MTP kernel can store one state per spec step instead of
+        # one per draft token, replaying the accepted tokens in the next step. This
+        # needs an FP32 state, for exactness, and no prefix caching, which reads the
+        # per-token states.
+        self.defer_gdn_spec_state = (
+            current_platform.is_rocm()
+            and self.enable_fused_gdn_spec_decode
+            and self.cache_config.mamba_cache_mode == "none"
+            and self.get_state_dtype()[1] == torch.float32
+            and deferred_spec_state_fits(
+                self.num_spec, self.head_k_dim, self.head_v_dim
+            )
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1783,7 +1798,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and self.defer_gdn_spec_state:
+            # The state layout must match the fused spec decode path's.
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert num_accepted_tokens is not None
+            num_spec_decodes = attn_metadata.num_spec_decodes
+            core_attn_out_spec, _ = gdn_decode_mtp_update_triton(
+                mixed_qkv=mixed_qkv_spec,
+                a=a_spec,
+                b=b_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=spec_state_indices_tensor[:num_spec_decodes],
+                cu_seqlens=spec_query_start_loc[: num_spec_decodes + 1],
+                num_accepted_tokens=num_accepted_tokens[:num_spec_decodes],
+                state=ssm_state,
+                out=core_attn_out.new_empty(
+                    (mixed_qkv_spec.shape[0], *core_attn_out.shape[1:])
+                ),
+                scale=self.head_k_dim**-0.5,
+                defer_spec_state=True,
+            )
+            core_attn_out_spec = core_attn_out_spec.unsqueeze(0)
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2138,6 +2177,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             scale=self.head_k_dim**-0.5,
             norm_eps=self.layer_norm_epsilon,
             output_gate_activation=self.norm.activation,
+            **({"defer_spec_state": True} if self.defer_gdn_spec_state else {}),
         )
 
     def _forward_core_fused_norm_packed(

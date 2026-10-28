@@ -17,6 +17,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
     fused_gdn_decode_post_conv_mtp_triton,
+    gdn_decode_mtp_update_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
@@ -447,3 +448,91 @@ def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
     )
     for r, g in zip(ref, got, strict=True):
         torch.testing.assert_close(g, r, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_reqs,state_width", [(1, 4), (5, 8), (3, 15)])
+@pytest.mark.parametrize("fused_norm", [True, False])
+@torch.inference_mode()
+def test_fused_gdn_decode_post_conv_mtp_deferred_state(
+    num_reqs: int, state_width: int, fused_norm: bool
+) -> None:
+    """Deferred spec states give the per-token outputs and post-first-token states.
+
+    Every step drafts a random number of tokens per request and accepts a random
+    prefix of the previous step's, and odd steps run only the first request, so the
+    launch config changes between the step that writes the records and the one that
+    replays them.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    H, HV, K, V = 4, 12, 128, 128
+    scale = K**-0.5
+    num_slots = num_reqs * state_width + 1
+    A_log = 0.5 * torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
+    norm_weight = torch.randn(V, dtype=torch.bfloat16, device=device)
+    state_ref = 0.01 * torch.randn(
+        num_slots, HV, V, K, dtype=torch.float32, device=device
+    )
+    state_actual = state_ref.clone()
+    state_indices = (
+        torch.randperm(num_slots - 1, device=device).add(1).int().view(num_reqs, -1)
+    )
+    last_lengths = [1] * num_reqs
+
+    def run(state, defer_spec_state, num_steps_reqs, inputs):
+        mixed_qkv, ba, output_gate, cu_seqlens, num_accepted_tokens = inputs
+        b, a = ba.chunk(2, dim=-1)
+        args = dict(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            state_indices=state_indices[:num_steps_reqs],
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            state=state,
+            out=torch.empty_like(output_gate),
+            scale=scale,
+            defer_spec_state=defer_spec_state,
+        )
+        if not fused_norm:
+            return gdn_decode_mtp_update_triton(**args)[0]
+        return fused_gdn_decode_post_conv_mtp_triton(
+            **args,
+            output_gate=output_gate,
+            norm_weight=norm_weight,
+            norm_eps=1e-6,
+            output_gate_activation="silu",
+        )
+
+    for step in range(8):
+        step_reqs = 1 if step % 2 else num_reqs
+        lengths = torch.randint(1, state_width + 1, (step_reqs,)).tolist()
+        accepted = [
+            int(torch.randint(1, last + 1, ())) for last in last_lengths[:step_reqs]
+        ]
+        last_lengths[:step_reqs] = lengths
+        num_tokens = sum(lengths)
+        inputs = (
+            torch.randn(num_tokens, 2 * H * K + HV * V, device=device).bfloat16(),
+            torch.randn(num_tokens, 2 * HV, device=device).bfloat16(),
+            torch.randn(num_tokens, HV, V, device=device).bfloat16(),
+            torch.tensor(
+                [0, *torch.tensor(lengths).cumsum(0).tolist()],
+                dtype=torch.int32,
+                device=device,
+            ),
+            torch.tensor(accepted, dtype=torch.int32, device=device),
+        )
+        expected = run(state_ref, False, step_reqs, inputs)
+        actual = run(state_actual, True, step_reqs, inputs)
+        torch.testing.assert_close(
+            actual, expected, atol=2e-2, rtol=2e-2, msg=f"step {step}"
+        )
+
+    first_slots = state_indices[:, 0].long()
+    torch.testing.assert_close(
+        state_actual[first_slots], state_ref[first_slots], atol=1e-4, rtol=1e-4
+    )
