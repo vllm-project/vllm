@@ -24,6 +24,8 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
+from vllm.v1.worker.gpu.spec_decode.mtp import speculator as mtp_module
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
@@ -679,3 +681,51 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator._configure_decode_metadata_update()
 
     assert speculator.supports_decode_metadata_update is expected
+
+
+class _SharedTopkDraftModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = SimpleNamespace(
+            set_skip_topk=lambda skip: None,
+            compact_topk_indices=lambda rows: None,
+            topk_cache_layers=lambda: {"mtp.indexer.k_cache"},
+            set_prefill_rows=lambda rows: setattr(self, "prefill_rows", rows),
+        )
+
+
+@pytest.mark.parametrize("share_topk", [False, True])
+def test_mtp_draft_decode_skips_metadata_of_reused_topk_indexer(
+    monkeypatch, share_topk
+):
+    """Draft steps that reuse step 0's top-k never run the indexer, so its
+    caches get no draft decode metadata update; every other group does."""
+    draft_model = _SharedTopkDraftModel()
+    monkeypatch.setattr(mtp_module, "load_eagle_model", lambda *args: draft_model)
+    speculator = object.__new__(MTPSpeculator)
+    speculator.vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(index_share_for_mtp_iteration=share_topk)
+            )
+        ),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    speculator.last_token_indices = torch.zeros(4, dtype=torch.int64)
+    speculator.load_draft_model(torch.nn.Module(), set())
+
+    updated = []
+    speculator.block_tables = SimpleNamespace(cp_size=1)
+    groups = [
+        SimpleNamespace(
+            layer_names=names,
+            update_draft_decode_metadata=lambda md, n=names: updated.append(n),
+        )
+        for names in (["mtp.attn"], ["mtp.indexer.k_cache"])
+    ]
+    speculator.attn_groups = [groups]  # type: ignore[list-item]  # stand-in groups
+    speculator._update_draft_decode_metadata({}, num_reqs=1)
+
+    expected = [["mtp.attn"]] if share_topk else [["mtp.attn"], ["mtp.indexer.k_cache"]]
+    assert updated == expected
+    assert draft_model.prefill_rows is speculator.last_token_indices
