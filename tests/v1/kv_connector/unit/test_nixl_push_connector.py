@@ -951,6 +951,25 @@ class TestPushWriterNotifs:
             assert sent is not original
             assert sent.req_ids == {"req"}
 
+    def test_only_agent_setup_serializes_with_the_writer(self):
+        """The writer lock covers the NIXL agent calls. The handshake's
+        metadata exchange must run without it, or a slow peer stalls the
+        writer for the whole round trip."""
+        w = _StubWriterWorker.fresh()
+        locked: list[bool] = []
+
+        def record(*args, **kwargs):
+            locked.append(w._nixl_io_lock.locked())
+            return "agent"
+
+        with patch.object(NixlBaseConnectorWorker, "add_remote_agent", record):
+            assert w.add_remote_agent(MagicMock()) == "agent"
+        with patch.object(NixlBaseConnectorWorker, "_nixl_handshake", record):
+            w._nixl_handshake("host", 1234, 1, "engine")
+
+        assert locked == [True, False]
+        assert not w._nixl_io_lock.locked()
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside ``_get_new_notifs``."""

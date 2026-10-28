@@ -72,8 +72,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Writer-thread poll cadence while there is in-flight push state. When
-# fully idle, the writer blocks on a wake event signalled by the engine
+# Writer-thread poll cadence while P-side blocks wait for a D PUSH_REG
+# match. Otherwise the writer blocks on a wake event signalled by the engine
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
@@ -348,19 +348,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             finally:
                 self._nixl_io_lock.release()
 
-            # Self-poll while unmatched blocks or outgoing WRITEs remain.
-            with self._sending_transfers_lock:
-                has_inflight_writes = bool(self._sending_transfers)
-            if self._push_finished_blocks or has_inflight_writes:
+            # Self-poll only while P-side blocks wait for a D PUSH_REG match:
+            # that notif has no other wake source, and a long model step would
+            # otherwise hold back the WRITE. Completions need no poll; the
+            # engine keeps stepping while pushes are in flight
+            # (``has_pending_push_work``) and each step wakes the writer.
+            if self._push_finished_blocks:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
                 self._push_writer_wake.clear()
 
-    def _nixl_handshake(self, *args, **kwargs):
-        """Serialize endpoint setup with push data-plane operations."""
+    def add_remote_agent(self, *args, **kwargs):
+        """Serialize NIXL agent setup with push data-plane operations."""
         with self._nixl_io_lock:
-            return super()._nixl_handshake(*args, **kwargs)
+            return super().add_remote_agent(*args, **kwargs)
+
+    def _add_notif_only_remote_agent(self, *args, **kwargs):
+        with self._nixl_io_lock:
+            return super()._add_notif_only_remote_agent(*args, **kwargs)
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:
