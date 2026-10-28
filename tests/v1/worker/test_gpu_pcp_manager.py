@@ -147,6 +147,33 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
+def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
+    """Rank 0's draft logits land in each batch request's persistent slot."""
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    root_tokens = torch.tensor([[11, 12, 13]])
+    root_logits = torch.arange(24, dtype=torch.float32).view(1, 3, 8)
+    broadcasts = iter([root_tokens, root_logits])
+    group = SimpleNamespace(
+        broadcast=lambda tensor, src: tensor.copy_(next(broadcasts))
+    )
+    monkeypatch.setattr(pcp_manager_module, "get_pcp_group", lambda: group)
+    draft_tokens = torch.full((1, 3), -1)
+    draft_logits = torch.full((4, 3, 8), -1.0)
+
+    manager.sync_drafts(draft_tokens, torch.tensor([2]), draft_logits)
+
+    torch.testing.assert_close(draft_tokens, root_tokens)
+    torch.testing.assert_close(draft_logits[2], root_logits[0])
+    assert (draft_logits[[0, 1, 3]] == -1).all()
+
+
 @pytest.mark.parametrize(
     ("pcp_world_size", "num_scheduled_tokens", "is_prefilling", "expected"),
     [

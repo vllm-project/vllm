@@ -18,6 +18,8 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
@@ -31,6 +33,8 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
@@ -357,6 +361,48 @@ def test_register_oot_linear_kernel(platform_mock):
 
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
+    )
+
+
+class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        pass
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_register_oot_fp8_block_linear_kernel(platform_mock, default_vllm_config):
+    """Test that block-scaled FP8 kernel registration works correctly."""
+    platform_mock._enum = PlatformEnum.OOT
+    register_linear_kernel(
+        OOTFp8BlockScaledMMLinearKernel, PlatformEnum.OOT, "fp8_block"
+    )
+
+    kernel = init_fp8_linear_kernel(
+        activation_quant_key=kFp8Dynamic128Sym,
+        weight_quant_key=kFp8Static128BlockSym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(128, 128),
+    )
+
+    assert isinstance(kernel, OOTFp8BlockScaledMMLinearKernel), (
+        "init_fp8_linear_kernel should return an instance of the registered kernel"
     )
 
 

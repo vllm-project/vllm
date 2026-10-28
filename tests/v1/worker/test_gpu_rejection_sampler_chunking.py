@@ -56,6 +56,7 @@ def _make_rejection_sampler(
     rejection_sampler.fly_window_size = 0
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
+    rejection_sampler.draft_logits_num_shards = 1
     rejection_sampler.watermark_key = None
     return rejection_sampler
 

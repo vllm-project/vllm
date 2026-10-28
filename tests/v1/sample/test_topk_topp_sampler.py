@@ -205,6 +205,22 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
         flashinfer_sampler_supported()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
+    """Without flashinfer-cubin, nvcc or ninja, FlashInfer cannot build its
+    sampling kernels, so the sampler must fall back to native sampling."""
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setattr(topk_topp_sampler, "has_flashinfer", lambda: False)
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert topk_topp_sampler.flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="FlashInfer kernels are disabled"):
+        topk_topp_sampler.flashinfer_sampler_supported()
+
+
 # =============================================================================
 # Triton kernel tests
 # =============================================================================

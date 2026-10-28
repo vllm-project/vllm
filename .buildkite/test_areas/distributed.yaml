@@ -13,6 +13,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
+  - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -474,6 +475,7 @@ steps:
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
   mirror:
@@ -495,6 +497,7 @@ steps:
       commands:
       - pytest -v -s distributed/test_custom_all_reduce.py
       - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
       - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
       - pytest -v -s -x lora/test_mixtral.py
       - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
@@ -661,7 +664,15 @@ steps:
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
   commands:
-    - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
+    - >-
+      ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG
+      "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
+      NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
+      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code &&
+      VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py"
+      "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
+      NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
+      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
 - label: ":nvidia: (L4) [Nightly] Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
@@ -695,6 +706,7 @@ steps:
       optional: false
       label: ":amd: (MI250) Pipeline + Context Parallelism"
       dind: false
+      automatic_shard: true
       device: mi250_4
       timeout_in_minutes: 90
       depends_on:

@@ -524,6 +524,7 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -558,6 +559,12 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
 )
 
 nixl_stats = {
@@ -566,8 +573,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [

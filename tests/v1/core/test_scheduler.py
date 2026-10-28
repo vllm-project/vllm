@@ -3504,23 +3504,45 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-def test_kv_connector_honors_skip_reading_prefix_cache():
-    """A request that must score every prompt row takes no external hit."""
+@pytest.mark.parametrize("suffix_scoring", [False, True])
+def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
+    """External hits cannot skip rows required by prompt scoring."""
     BLOCK_SIZE = 16
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
         block_size=BLOCK_SIZE,
     )
-    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
-    scoring.sampling_params.prompt_logprobs = 1
-    scoring.skip_reading_prefix_cache = True
+    scoring_params = (
+        SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (BLOCK_SIZE * 3 - 1),
+            prompt_logprob_start=BLOCK_SIZE,
+            skip_reading_prefix_cache=False,
+        )
+        if suffix_scoring
+        else SamplingParams(prompt_logprobs=1)
+    )
+    (plain,) = create_requests(1, num_tokens=BLOCK_SIZE * 4, req_ids=["plain"])
+    (scoring,) = create_requests(
+        1,
+        num_tokens=BLOCK_SIZE * 4,
+        req_ids=["scoring"],
+        sampling_params=scoring_params,
+    )
+    admission = []
+    scheduler.connector.on_new_request = lambda req: admission.append(
+        req.skip_reading_external_kv
+    )
     scheduler.add_request(plain)
     scheduler.add_request(scoring)
+    assert admission == [False, True]
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
-    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+    # No external hit; suffix scoring still reuses the local blocks plain just
+    # loaded, up to prompt_logprob_start.
+    expected = BLOCK_SIZE * 3 if suffix_scoring else BLOCK_SIZE * 4
+    assert output.num_scheduled_tokens[scoring.request_id] == expected
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -8290,93 +8312,6 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
     assert not output.scheduled_encoder_inputs.get(req_id)
 
 
-class _RecordingGrammar:
-    """Records what reaches ``validate_tokens`` and raises on a negative id.
-
-    llguidance raises ``OverflowError`` on a negative token id, so this mirrors
-    the real failure: the tests below fail on the unpatched scheduler (the -1
-    padding reaches ``validate_tokens``) and pass once it is stripped first.
-    """
-
-    def __init__(self) -> None:
-        self.seen: list[list[int]] = []
-
-    def validate_tokens(self, tokens: list[int]) -> list[int]:
-        if any(t < 0 for t in tokens):
-            raise OverflowError("llguidance rejects negative token ids")
-        self.seen.append(list(tokens))
-        return tokens
-
-
-def _decode_ready_request(scheduler):
-    """Add one request and advance it out of prefill into decode."""
-    request = create_requests(num_requests=1, num_tokens=1)[0]
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-            sampled_token_ids=[[0]],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-    return request
-
-
-def test_update_draft_token_ids_strips_ngram_padding():
-    """ngram_gpu pads unfilled draft slots with -1; manager validation must
-    strip them before grammar.validate_tokens (which otherwise raises)."""
-    scheduler = create_scheduler(num_speculative_tokens=4)
-    request = _decode_ready_request(scheduler)
-
-    grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(
-        grammar=grammar, reasoning_ended=True
-    )
-
-    scheduler.update_draft_token_ids(
-        DraftTokenIds([request.request_id], [[10, 11, -1, -1]])
-    )
-
-    assert grammar.seen == [[10, 11]]
-    assert request.spec_token_ids == [10, 11]
-
-
-def test_update_draft_token_ids_in_output_strips_padding():
-    """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to manager validation is stripped)."""
-    scheduler = create_scheduler(num_speculative_tokens=4)
-    request = _decode_ready_request(scheduler)
-
-    grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(
-        grammar=grammar, reasoning_ended=True
-    )
-
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={request.request_id: [0, 0, 0, 0]}
-    )
-    scheduler.update_draft_token_ids_in_output(
-        DraftTokenIds([request.request_id], [[10, 11, -1, -1]]),
-        scheduler_output,
-    )
-
-    # The grammar only saw the stripped prefix, never a -1.
-    assert grammar.seen == [[10, 11]]
-    # Two drafts were rejected (4 scheduled - 2 valid), padded back with -1.
-    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
-        10,
-        11,
-        -1,
-        -1,
-    ]
-    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
-
-
 def test_diffusion_canvas_width_defaults_to_the_served_canvas():
     def req(extra):
         return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
@@ -8442,13 +8377,10 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
     assert narrow.num_output_placeholders == 4
 
 
-@pytest.mark.parametrize("structured", [False, True])
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.usefixtures("diffusion_model_runner")
-def test_diffusion_scheduler_trims_full_width_worker_drafts(
-    structured, async_scheduling
-):
-    """Padded worker drafts must be narrowed before scheduling or grammar validation."""
+def test_diffusion_scheduler_trims_full_width_worker_drafts(async_scheduling):
+    """Padded worker drafts must be narrowed before scheduling."""
     scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
     wide = _diffusion_request("wide", {})
     narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
@@ -8457,12 +8389,7 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
     prefill = scheduler.schedule()
     _model_output(scheduler, prefill, [[], []])
 
-    if structured:
-        for request in (wide, narrow):
-            request.structured_output_request = SimpleNamespace(
-                grammar=_RecordingGrammar(), reasoning_ended=True
-            )
-    tokens = list(range(8)) if structured else [-1] * 8
+    tokens = [-1] * 8
     drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
     if async_scheduling:
         output = scheduler.schedule()
@@ -8476,9 +8403,6 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
         "narrow": tokens[:4],
     }
     assert output.num_scheduled_tokens == {"wide": 8, "narrow": 4}
-    if structured:
-        assert wide.structured_output_request.grammar.seen == [tokens]
-        assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
 
 
 @pytest.mark.parametrize(

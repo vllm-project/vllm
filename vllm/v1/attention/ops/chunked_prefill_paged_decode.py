@@ -386,7 +386,7 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
-    from vllm.platforms.rocm import use_rocm_custom_paged_attention
+    from vllm.platforms.rocm import on_rdna, use_rocm_custom_paged_attention
 
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
@@ -477,6 +477,14 @@ def chunked_prefill_paged_decode(
         else:
             processed_block_table = block_table.to(torch.int32)
 
+        # RDNA: more warps and no pipelining for large tiles; num_stages=1 also
+        # avoids bad decode output on gfx12 with Triton buffer ops (#62697).
+        launch_kwargs: dict[str, int] = {}
+        tile_size = TRITON_BLOCK_SIZE * triton.next_power_of_2(head_size)
+        if on_rdna() and (TRITON_BLOCK_SIZE >= 32 or tile_size >= 4096):
+            num_warps = 16 if tile_size >= 8192 else 8 if tile_size >= 4096 else 4
+            launch_kwargs = {"num_warps": num_warps, "num_stages": 1}
+
         kernel_paged_attention_2d[
             (
                 num_seqs,
@@ -524,4 +532,5 @@ def chunked_prefill_paged_decode(
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
             INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
+            **launch_kwargs,
         )

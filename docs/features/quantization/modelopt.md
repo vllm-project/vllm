@@ -49,6 +49,15 @@ module prefix and decoder layer indices before constructing quantized layers.
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
 
+## Benchmarking with dummy weights
+
+For performance experiments with random weights, use `--load-format dummy`.
+ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
+gate/up global scales, including for FlashInfer MegaMoE
+(`--moe-backend flashinfer_moe_ep_cutedsl`).
+Dummy weights are for benchmarking, not model quality evaluation. Normal
+checkpoint loading uses the checkpoint's scales.
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.

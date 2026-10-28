@@ -57,8 +57,8 @@ _UNBOUND_STORE_TIMEOUT_S = 60.0
 
 # How long a reaped kv_request_id is remembered so a fetch that arrives
 # after the reap can be rejected immediately. Must exceed the consumer's
-# load timeout (session.client._LOAD_TIMEOUT_S): past that the consumer has
-# already given up on its own, so there is nobody left to reject.
+# longer load timeout (session.client._PD_LOAD_TIMEOUT_S): past that the
+# consumer has already given up on its own, so there is nobody left to reject.
 _REAPED_ID_RETENTION_S = 60.0
 
 # Time we wait during shutdown for inflight transfers to drain via

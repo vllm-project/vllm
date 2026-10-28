@@ -1129,7 +1129,7 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
-                        if request.skip_reading_prefix_cache:
+                        if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1885,6 +1885,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
@@ -2849,7 +2850,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+            request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
             )
 
@@ -2876,10 +2877,7 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
-            # Filter out spec tokens which do not adhere to the grammar.
-            spec_token_ids = self.structured_output_manager.validate_tokens(
-                request, spec_token_ids
-            )
+            # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:

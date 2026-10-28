@@ -449,3 +449,31 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
     expect!["<｜begin▁of▁sentence｜><｜User｜>first\n\n<｜DSML｜invoke name=\"literal\"><｜Assistant｜></think>"]
         .assert_eq(&render(&request));
 }
+
+#[test]
+fn joins_assistant_text_parts_with_reference_separator() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("question"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "answer one".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer two".to_string(),
+                },
+            ]),
+            ChatMessage::user("next"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>answer one
+
+        answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
+    .assert_eq(&render(&request));
+}

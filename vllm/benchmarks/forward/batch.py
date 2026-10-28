@@ -57,7 +57,9 @@ def _num_blocks(
     block_size = kv_block_size(spec, dcp_size)
     if isinstance(spec, UniformTypeKVCacheSpecs):
         spec = spec.first_spec
-    if isinstance(spec, (CircularBufferSpec, MambaSpec)):
+    if isinstance(spec, MambaSpec):
+        return 0, 1 + spec.num_speculative_blocks
+    if isinstance(spec, CircularBufferSpec):
         return 0, 1
     total = -(-kv_len // block_size)
     skipped = 0

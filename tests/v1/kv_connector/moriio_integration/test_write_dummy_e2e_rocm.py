@@ -533,10 +533,18 @@ def _open_port() -> int:
 
 
 def _open_port_block(size: int = _PORT_BLOCK) -> int:
-    """First port of ``size`` consecutive free ports no other server got."""
+    """First port of ``size`` consecutive free ports no other server got.
+
+    The block is below the kernel's ephemeral range: MoRIIO binds these ports
+    only after the model loads, and until then any ``bind(0)`` (RCCL, gloo,
+    ZMQ) could be given a released ephemeral port.
+    """
+    with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+        ephemeral_start = int(f.read().split()[0])
+    rng = random.SystemRandom()
     with _HANDED_OUT_LOCK:
         while True:
-            base = get_open_port()
+            base = rng.randrange(10000, ephemeral_start - size)
             block = range(base, base + size)
             if _HANDED_OUT.isdisjoint(block) and all(_bindable(p) for p in block):
                 _HANDED_OUT.update(block)

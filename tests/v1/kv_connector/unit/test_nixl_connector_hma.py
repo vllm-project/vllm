@@ -1169,6 +1169,7 @@ def _make_mock_worker_for_desc_ids(
     worker._conv_decomp = None
     worker._is_csa_linear = False
     worker._ssm_region_indices = [0] if has_mamba else []
+    worker._group_region_indices = []
     worker._ple_group_index = None
     worker._ple_region_index = None
     if has_mamba:
@@ -1685,11 +1686,10 @@ def test_mamba_n1_p_side_truncation():
     swa_sched.on_new_request(swa_req)
     assert len(swa_req.prompt_token_ids) == 9
 
-    # A request that skips reading the prefix cache (prompt logprobs) is not
-    # cut: the decoder loads nothing and recomputes its whole prompt.
+    # A request that skips reading external KV (prompt logprobs) is not cut:
+    # the decoder loads nothing and recomputes its whole prompt.
     logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
-    assert logprobs_req.sampling_params is not None
-    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    logprobs_req.prefix_cache_hit_limit = 0
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
 

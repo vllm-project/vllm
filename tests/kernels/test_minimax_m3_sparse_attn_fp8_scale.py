@@ -26,6 +26,15 @@ else:
     )
 
 
+PREFILL_KERNELS = [pytest.param(minimax_m3_sparse_attn, id="scalar")]
+if current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn as minimax_m3_sparse_attn_tiled,
+    )
+
+    PREFILL_KERNELS.append(pytest.param(minimax_m3_sparse_attn_tiled, id="query_tiled"))
+
+
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
 HEAD_DIM = 128
@@ -68,8 +77,9 @@ def _make_kv_cache(num_blocks: int, seed: int):
 
 
 @pytest.mark.parametrize("scale_mode", ["scalar", "per_token_head"])
+@pytest.mark.parametrize("sparse_attn", PREFILL_KERNELS)
 @torch.inference_mode()
-def test_minimax_m3_sparse_prefill_fp8_kv_scales(scale_mode: str):
+def test_minimax_m3_sparse_prefill_fp8_kv_scales(sparse_attn, scale_mode: str):
     total_q = 17
     num_blocks = 1
     torch.manual_seed(0)
@@ -86,7 +96,7 @@ def test_minimax_m3_sparse_prefill_fp8_kv_scales(scale_mode: str):
     ref = torch.empty_like(q)
     unscaled = torch.empty_like(q)
 
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_fp8,
         topk,
@@ -101,7 +111,7 @@ def test_minimax_m3_sparse_prefill_fp8_kv_scales(scale_mode: str):
         k_scale=k_scale,
         v_scale=v_scale,
     )
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_dequant,
         topk,
@@ -114,7 +124,7 @@ def test_minimax_m3_sparse_prefill_fp8_kv_scales(scale_mode: str):
         HEAD_DIM**-0.5,
         ref,
     )
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_fp8,
         topk,

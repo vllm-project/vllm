@@ -96,9 +96,12 @@ class LoraState:
         req_ids: list[str],
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
+        num_logits: np.ndarray,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         lora_ids = self.lora_ids[idx_mapping]
-        prompt_lora_mapping = tuple(lora_ids)
+        # One lm_head id per logits row: 1 + num_drafts rows per request
+        # under spec decode.
+        prompt_lora_mapping = tuple(lora_ids.repeat(num_logits))
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests

@@ -289,6 +289,8 @@ def vllm_mx_code(amax):
     e = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).select(
         fx.Int32(1), fx.Int32(0)
     )
+    sub = (bits > 0x400000).select(fx.Int32(1), fx.Int32(0))
+    e = (bits < 0x800000).select(sub, e)
     return fx.min(fx.max(e, fx.Int32(0)), fx.Int32(254))
 
 

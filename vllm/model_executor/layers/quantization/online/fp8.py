@@ -190,7 +190,9 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     activation_quant_key = (
-        kFp8DynamicTokenSym if cutlass_fp8_supported() else kFp8DynamicTensorSym
+        kFp8DynamicTokenSym
+        if cutlass_fp8_supported() or current_platform.is_xpu()
+        else kFp8DynamicTensorSym
     )
 
     def __init__(self):
