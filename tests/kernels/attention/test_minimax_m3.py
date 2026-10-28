@@ -1983,8 +1983,9 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
         assert v_view.shape == (40, 1, 1, 128, 16)
 
 
-def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
-    """Do not pair AITER's separated cache layout with the Triton fallback."""
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+def test_aiter_sparse_pa_serves_every_kv_head_count(monkeypatch, num_kv_heads):
+    """AITER sparse PA is selected whatever the per-rank KV head count is."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -1994,22 +1995,14 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
         lambda: True,
     )
 
-    with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
-
-    # An indexer that emits the attend's page table addresses every head, so
-    # the pairing the check guards against does not arise.
-    assert sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(
-        2, emits_sparse_block_table=True
-    )
+    assert sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(num_kv_heads)
     # The AITER path carries its own backend: its builder is what rebases the
     # block table the indexer's top-k resolves through, so selecting the impl
     # without it would leave that field unset.
     backend, impl_cls = sparse_attn_mod.select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="fp8_e4m3",
-        num_kv_heads=2,
-        emits_sparse_block_table=True,
+        num_kv_heads=num_kv_heads,
     )
     assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
     assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"
@@ -2636,6 +2629,64 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 
     assert torch.equal(sparse_ctx, expected_ctx)
     assert torch.equal(sparse_bt, expected_bt)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+@pytest.mark.parametrize("decode_query_len", [1, 2])
+def test_aiter_decode_sparse_block_table_addresses_each_kv_head(decode_query_len):
+    """Each KV head's row must reach that head's own pages, head minor.
+
+    The attend flattens its ``[num_phys16, num_kv_heads, ...]`` cache before
+    calling Gluon, so the row for (token, head) is ``token * kvh + head`` and
+    page ``p`` of head ``h`` is ``p * kvh + h``. Selecting different blocks per
+    head is what separates a correct table from one that serves head 0 twice.
+    """
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        minimax_m3_build_sparse_block_table_decode,
+    )
+
+    kvh = 2
+    seq_lens = torch.tensor([390, 133], device="cuda", dtype=torch.int32)
+    # No zero entries: a selected page is then nonzero under the single-head
+    # numbering, which separates used slots from the zero fill below.
+    block_table = torch.tensor(
+        [[3, 9, 4, 6], [7, 2, 1, 5]], device="cuda", dtype=torch.int32
+    )
+    topk_idx = torch.tensor(
+        [
+            [[2, 0, 1, -1], [1, 2, 0, -1], [0, -1, 1, -1], [1, 0, -1, -1]],
+            [[1, 2, -1, -1], [0, 2, -1, -1], [1, 0, -1, -1], [0, -1, -1, -1]],
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )[:, : block_table.shape[0] * decode_query_len, :]
+
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
+        topk_idx, block_table, seq_lens, decode_query_len
+    )
+    torch.accelerator.synchronize()
+
+    total_q = topk_idx.shape[1]
+    assert sparse_bt.shape[0] == total_q * kvh
+    for head in range(kvh):
+        head_bt, head_ctx = minimax_m3_build_sparse_block_table_decode(
+            topk_idx[head : head + 1].contiguous(),
+            block_table,
+            seq_lens,
+            decode_query_len,
+        )
+        torch.accelerator.synchronize()
+        rows = torch.arange(head, total_q * kvh, kvh, device="cuda")
+        expected_bt = torch.where(head_bt != 0, head_bt * kvh + head, head_bt)
+        assert torch.equal(sparse_bt[rows], expected_bt)
+        assert torch.equal(sparse_ctx[rows], head_ctx)
+
+    # The heads select different blocks, so an implementation that ignored the
+    # head axis would make the two rows of a token identical.
+    assert not torch.equal(sparse_bt[0::kvh], sparse_bt[1::kvh])
 
 
 @pytest.mark.skipif(

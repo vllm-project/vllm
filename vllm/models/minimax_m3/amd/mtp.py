@@ -106,9 +106,7 @@ def _build_sparse_indexer_context(
     msa_indexer_impl_cls = None
     sparse_bt_buffer = None
     sparse_ctx_buffer = None
-    if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(
-        num_kv_heads, emits_sparse_block_table=True
-    ):
+    if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(num_kv_heads):
         # One row per (token, kv head): the table addresses the attend's cache,
         # not the index cache.
         rows = max_tokens * num_kv_heads

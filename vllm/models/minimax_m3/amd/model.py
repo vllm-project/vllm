@@ -755,9 +755,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # size the buffers its top-k emits into, so there is no second probe
         # here to drift out of step with it -- every input to that selection is
         # global, so a layer could only ever recompute the same answer.
-        #
-        # The attend gate further down needs this too: an emitted table is what
-        # lets it serve more than one KV head per rank.
         self.indexer_emits_table = msa_indexer_impl_cls is not None
         # The backend names the metadata builder, which for the MSA path is
         # the one that rebases the block table the indexer's top-k resolves
@@ -766,7 +763,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
-            emits_sparse_block_table=self.indexer_emits_table,
         )
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
         self.impl: MiniMaxM3SparseImpl = main_impl_cls(  # type: ignore[assignment]
@@ -778,9 +774,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
-        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
-            self.num_kv_heads, emits_sparse_block_table=self.indexer_emits_table
-        )
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(self.num_kv_heads)
         self.kv_cache_k = torch.tensor([])
         self.kv_cache_v = torch.tensor([])
         self._aiter_sparse_pa_cache_data_ptr = 0
@@ -1247,7 +1241,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 attn_metadata = get_forward_context().attn_metadata
-                if self.use_aiter_sparse_pa and isinstance(attn_metadata, dict):
+                # The fused selector emits one table row per token, so more
+                # than one KV head per rank goes through the standalone
+                # builder, which emits the row per (token, kv head) the attend
+                # reads.
+                fuse_decode_table = self.use_aiter_sparse_pa and self.num_kv_heads == 1
+                if fuse_decode_table and isinstance(attn_metadata, dict):
                     main_md = attn_metadata[self.layer_name]
                     assert isinstance(main_md, MiniMaxM3SparseMetadata)
                     if main_md.num_decodes > 0:
@@ -1449,9 +1448,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 indexer_kv_dtype=indexer_kv_dtype,
                 score_type=sparse_cfg.get("sparse_score_type", "max"),
             )
-            if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(
-                num_kv_heads, emits_sparse_block_table=True
-            ):
+            if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(num_kv_heads):
                 # One row per (token, kv head): the table addresses the attend's
                 # cache, not the index cache. Allocated here with the selection
                 # that needs them, and only here -- one allocation serves every

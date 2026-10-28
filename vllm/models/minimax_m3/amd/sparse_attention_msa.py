@@ -152,12 +152,6 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         sparse_bt_buf = getattr(layer, "sparse_bt_buffer", None)
         sparse_ctx_buf = getattr(layer, "sparse_ctx_buffer", None)
         kvh = self.num_kv_heads
-        if kvh != 1 and sparse_bt_buf is None:
-            raise NotImplementedError(
-                "MiniMax-M3 AITER sparse PA needs the page table the indexer's "
-                f"top-k emits to serve per-rank num_kv_heads == {kvh}; the "
-                "Triton builders it falls back to address one head's cache."
-            )
 
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
