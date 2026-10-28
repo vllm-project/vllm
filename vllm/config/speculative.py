@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "glm_ocr_mtp",
     "ernie_mtp",
     "nemotron_h_mtp",
+    "nemotron3_5_transcribe_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -883,6 +884,25 @@ class SpeculativeConfig:
         ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
+
+        if (
+            hf_config.architectures[0]
+            == "Nemotron3_5TranscribeForConditionalGeneration"
+        ):
+            # Its MTP head reads NeMo checkpoint names and takes the audio
+            # embeddings, so it has its own draft class.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.text_config
+            if quantization_config is not None:
+                # The FP8 and NVFP4 checkpoints quantize the MTP head too.
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+            hf_config.model_type = "nemotron3_5_transcribe_mtp"
+            hf_config.update(
+                {
+                    "n_predict": hf_config.num_nextn_predict_layers,
+                    "architectures": ["Nemotron3_5TranscribeMTPModel"],
+                }
+            )
 
         if (
             hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
