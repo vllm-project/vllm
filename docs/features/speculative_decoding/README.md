@@ -20,6 +20,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
 - [FLy Verification (Lossy)](fly.md)
+- [Approximate Speculative Decoding (Lossy)](asd.md)
 - [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
 ## Method Selection at a Glance
@@ -87,7 +88,10 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
-| `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
+| `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or a lossy verifier: `fly` or `approximate` (ASD). |
+| `asd_risk_budget` | `float >= 0` | `8.0` | ASD cumulative local logit regret budget per request. Zero recovers strict greedy verification. |
+| `asd_max_regret_per_value` | `float >= 0` | `0.25` | ASD maximum mismatch regret divided by remaining proposal length. |
+| `asd_max_relaxed_tokens_per_block` | `integer >= 0` | `2` | ASD maximum accepted mismatches per block. Zero is strict. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |

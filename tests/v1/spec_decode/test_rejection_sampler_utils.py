@@ -12,6 +12,7 @@ from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.asd import ASDRiskState
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     gather_draft_sampled,
@@ -26,6 +27,113 @@ VOCAB_SIZE = 4096
 pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for rejection sampler tests", allow_module_level=True)
+
+
+def _asd_inputs(drafts: list[int], regret: float = 0.25) -> dict:
+    k = len(drafts)
+    logits = torch.full((k + 1, 8), -10.0, device="cuda")
+    logits[:, 1] = 0.0
+    logits[:, 2] = -regret
+    return dict(
+        target_logits=logits,
+        draft_logits=None,
+        draft_sampled=torch.tensor([0, *drafts], device="cuda"),
+        cu_num_logits=torch.tensor([0, k + 1], device="cuda", dtype=torch.int32),
+        pos=torch.arange(k + 1, device="cuda", dtype=torch.int32),
+        idx_mapping=torch.tensor([2], device="cuda", dtype=torch.int32),
+        expanded_idx_mapping=torch.full((k + 1,), 2, device="cuda", dtype=torch.int32),
+        expanded_local_pos=torch.arange(k + 1, device="cuda", dtype=torch.int32),
+        temperature=torch.zeros(3, device="cuda"),
+        seed=torch.arange(3, device="cuda"),
+        num_speculative_steps=k,
+    )
+
+
+def test_asd_reuses_suffix_and_preserves_budget_between_rounds():
+    inputs = _asd_inputs([1, 2, 1, 1])
+    spent = torch.zeros(3, device="cuda")
+    kwargs = dict(asd_spent=spent, asd_risk_budget=0.4)
+    sampled, count = rejection_sample(**inputs, **kwargs)
+    assert count.item() == 5
+    assert sampled[0].tolist() == [1, 2, 1, 1, 1]
+    assert spent.tolist() == [0.0, 0.0, 0.25]
+
+    # The next round cannot spend the same request budget again.
+    sampled, count = rejection_sample(**inputs, **kwargs)
+    assert count.item() == 2
+    assert sampled[0, :2].tolist() == [1, 1]
+    assert spent.tolist() == [0.0, 0.0, 0.25]
+
+    # Batch positions may change while the persistent request slot stays fixed.
+    inputs["idx_mapping"].fill_(0)
+    inputs["expanded_idx_mapping"].fill_(0)
+    _, count = rejection_sample(**inputs, **kwargs)
+    assert count.item() == 5
+    assert spent.tolist() == [0.25, 0.0, 0.25]
+
+
+@pytest.mark.parametrize(
+    ("budget", "gate", "cap", "regret", "expected_count", "expected_spent"),
+    [
+        (0.0, 0.25, 2, 0.0, 2, 0.0),  # Strict identity even for argmax ties.
+        (1.0, 0.0, 2, 0.0, 2, 0.0),
+        (1.0, 0.25, 0, 0.0, 2, 0.0),
+        (0.1, 0.25, 2, 0.25, 2, 0.0),
+        (1.0, 0.05, 2, 0.25, 2, 0.0),
+        (1.0, 0.25, 1, 0.25, 3, 0.25),
+        (1.0, 0.25, 2, 0.25, 5, 0.5),
+        (1.0, 0.25, 2, float("inf"), 2, 0.0),
+    ],
+)
+def test_asd_stops_at_first_infeasible_token(
+    budget, gate, cap, regret, expected_count, expected_spent
+):
+    inputs = _asd_inputs([1, 2, 2, 1], regret=regret)
+    spent = torch.zeros(3, device="cuda")
+    sampled, count = rejection_sample(
+        **inputs,
+        asd_spent=spent,
+        asd_risk_budget=budget,
+        asd_max_regret_per_value=gate,
+        asd_max_relaxed_tokens_per_block=cap,
+    )
+    assert count.item() == expected_count
+    assert sampled[0, expected_count - 1].item() == 1  # Recovery or bonus.
+    assert spent[2].item() == expected_spent
+
+
+def test_asd_rejects_placeholder_without_charging_budget():
+    inputs = _asd_inputs([1, -1, 1])
+    spent = torch.zeros(3, device="cuda")
+    sampled, count = rejection_sample(**inputs, asd_spent=spent, asd_risk_budget=8.0)
+    assert count.item() == 2
+    assert sampled[0, :2].tolist() == [1, 1]
+    assert spent.count_nonzero().item() == 0
+
+
+def test_asd_does_not_round_away_regret_at_exhausted_budget():
+    inputs = _asd_inputs([2, 1, 1], regret=2**-26)
+    spent = torch.ones(3, device="cuda", dtype=torch.float64)
+    _, count = rejection_sample(**inputs, asd_spent=spent, asd_risk_budget=1.0)
+    assert count.item() == 1
+    assert spent[2].item() == 1.0
+
+
+def test_asd_state_survives_preemption_and_clears_reused_slots():
+    state = ASDRiskState(3, torch.device("cuda"))
+    state.add_request("a", 2)
+    state.spent[2] = 0.25
+    state.finish_requests(set(), {"a"})
+    state.add_request("b", 2)
+    assert state.spent[2].item() == 0.0
+    state.add_request("a", 0)
+    assert state.spent[0].item() == 0.25
+    state.add_request("a", 0)  # Streaming input preserves the ledger.
+    assert state.spent[0].item() == 0.25
+    state.finish_requests({"a", "b"}, set())
+    state.add_request("c", 0)
+    assert state.spent[0].item() == 0.0
+    assert not state.suspended
 
 
 def _build_rejection_sample_inputs(
@@ -286,6 +394,27 @@ def _assert_distribution_match(
         f"df={df}, threshold={threshold:.1f}. "
         f"Output distribution does not match target distribution."
     )
+
+
+def test_asd_does_not_change_stochastic_sampling():
+    logits = torch.arange(16, device="cuda", dtype=torch.float32) / 4
+    inputs = _build_rejection_sample_inputs(
+        logits,
+        logits.flip(0),
+        num_speculative_steps=4,
+        temperature=1.0,
+        num_trials=16,
+    )
+    expected, expected_count = rejection_sample(**inputs, num_speculative_steps=4)
+    spent = torch.zeros(16, device="cuda")
+    actual, actual_count = rejection_sample(
+        **inputs, num_speculative_steps=4, asd_spent=spent, asd_risk_budget=8.0
+    )
+    assert torch.equal(actual_count, expected_count)
+    positions = torch.arange(5, device="cuda")[None, :]
+    valid = positions < expected_count[:, None]
+    assert torch.equal(actual[valid], expected[valid])
+    assert spent.count_nonzero().item() == 0
 
 
 def test_watermarked_bonus_uses_target_key():
@@ -1107,6 +1236,10 @@ def test_verify_rejects_unproposed_drafts():
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.draft_logits_num_shards = 1
     rejection_sampler.watermark_key = None
+    rejection_sampler.asd_state = None
+    rejection_sampler.asd_risk_budget = 0.0
+    rejection_sampler.asd_max_regret_per_value = 0.25
+    rejection_sampler.asd_max_relaxed_tokens_per_block = 2
 
     def verify() -> tuple[torch.Tensor, torch.Tensor]:
         draft_sampled, pos = gather_draft_sampled(

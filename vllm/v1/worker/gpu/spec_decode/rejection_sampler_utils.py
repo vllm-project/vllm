@@ -570,6 +570,11 @@ def _rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
+    asd_spent_ptr,
+    ASD_ENABLED: tl.constexpr,
+    ASD_RISK_BUDGET: tl.constexpr,
+    ASD_MAX_REGRET_PER_VALUE: tl.constexpr,
+    ASD_MAX_RELAXED_TOKENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -581,6 +586,10 @@ def _rejection_kernel(
     is_greedy = temp == 0.0
 
     accepted_length = tl.zeros((), tl.int64)
+    spent = tl.full((), 0.0, tl.float64)
+    relaxed_tokens = 0
+    if ASD_ENABLED and is_greedy:
+        spent = tl.load(asd_spent_ptr + req_state_idx).to(tl.float64)
     # Freeze the accepted prefix and recovery stats until the window is confirmed.
     pending_rejection = tl.full((), -1, tl.int64)
     rejected_argmax = tl.full((), 0, tl.int64)
@@ -624,6 +633,29 @@ def _rejection_kernel(
                     accepted = u < rate
                 else:
                     accepted = target_argmax == draft_sampled
+                    if ASD_ENABLED and not accepted and is_valid_draft:
+                        top_logit = tl.load(
+                            target_logits_ptr
+                            + logit_idx * target_logits_stride
+                            + target_argmax
+                        ).to(tl.float32)
+                        draft_logit = tl.load(
+                            target_logits_ptr
+                            + logit_idx * target_logits_stride
+                            + draft_sampled
+                        ).to(tl.float32)
+                        regret = (top_logit - draft_logit).to(tl.float64)
+                        suffix_value = num_draft_tokens - i
+                        accepted = (
+                            (regret >= 0.0)
+                            & (regret < float("inf"))
+                            & (regret <= ASD_MAX_REGRET_PER_VALUE * suffix_value)
+                            & (spent + regret <= ASD_RISK_BUDGET)
+                            & (relaxed_tokens < ASD_MAX_RELAXED_TOKENS)
+                        )
+                        if accepted:
+                            spent += regret
+                            relaxed_tokens += 1
                 accepted &= is_valid_draft
                 if FLY_WINDOW_SIZE > 0:
                     target_logit = tl.load(
@@ -748,6 +780,8 @@ def _rejection_kernel(
             rejected_argmax,
         )
 
+    if ASD_ENABLED and is_greedy:
+        tl.store(asd_spent_ptr + req_state_idx, spent)
     tl.store(rejected_steps_ptr + req_idx, accepted_length)
     if USE_BLOCK_VERIFICATION and not is_greedy and accepted_length < num_draft_tokens:
         # Compute the target and draft log exponential sums for the
@@ -1131,6 +1165,10 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     draft_logits_num_shards: int = 1,
+    asd_spent: torch.Tensor | None = None,
+    asd_risk_budget: float = 0.0,
+    asd_max_regret_per_value: float = 0.25,
+    asd_max_relaxed_tokens_per_block: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1362,6 +1400,16 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
+        asd_spent_ptr=asd_spent,
+        ASD_ENABLED=(
+            asd_spent is not None
+            and asd_risk_budget > 0
+            and asd_max_regret_per_value > 0
+            and asd_max_relaxed_tokens_per_block > 0
+        ),
+        ASD_RISK_BUDGET=asd_risk_budget,
+        ASD_MAX_REGRET_PER_VALUE=asd_max_regret_per_value,
+        ASD_MAX_RELAXED_TOKENS=asd_max_relaxed_tokens_per_block,
         num_warps=1,
     )
 

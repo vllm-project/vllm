@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.asd import ASDRiskState
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -162,6 +163,16 @@ class RejectionSampler:
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
+        self.asd_state = (
+            ASDRiskState(sampler.req_states.max_num_reqs, device)
+            if rejection_sample_method == "approximate"
+            else None
+        )
+        self.asd_risk_budget = spec_config.asd_risk_budget
+        self.asd_max_regret_per_value = spec_config.asd_max_regret_per_value
+        self.asd_max_relaxed_tokens_per_block = (
+            spec_config.asd_max_relaxed_tokens_per_block
+        )
         self.fly_window_size = 0
         self.fly_entropy_threshold = spec_config.fly_entropy_threshold
         self.fly_entropy_top_k = spec_config.fly_entropy_top_k
@@ -290,6 +301,10 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            asd_spent=self.asd_state.spent if self.asd_state is not None else None,
+            asd_risk_budget=self.asd_risk_budget,
+            asd_max_regret_per_value=self.asd_max_regret_per_value,
+            asd_max_relaxed_tokens_per_block=self.asd_max_relaxed_tokens_per_block,
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
