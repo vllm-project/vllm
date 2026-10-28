@@ -22,6 +22,13 @@ def enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA
 
 
+def _view_key(cache: torch.Tensor) -> tuple[int, int]:
+    # KV groups alias one allocation with different rows per block (e.g. a
+    # 64-row compressed view and a 32-row SWA view at the same address), so
+    # the address alone does not identify a view's geometry.
+    return cache.data_ptr(), cache.shape[1]
+
+
 @dataclass(frozen=True)
 class Geometry:
     offset: int
@@ -38,7 +45,7 @@ class NativeCachePool:
             raise ValueError("ASM KV cache exceeds the int32 row index range")
         self.kv = caches[0].as_strided((rows, 512), (512, 1), 0)
         self.rope = torch.zeros((rows, 64), dtype=torch.bfloat16, device=self.kv.device)
-        self.entries: dict[int, Geometry] = {}
+        self.entries: dict[tuple[int, int], Geometry] = {}
         self.tables: dict = {}
         for cache in caches:
             assert cache.untyped_storage().data_ptr() == storage.data_ptr(), (
@@ -48,12 +55,12 @@ class NativeCachePool:
             offset = cache.data_ptr() - storage.data_ptr()
             assert offset % 512 == 0 and cache.stride(0) % 512 == 0
             assert cache.stride(1) == 512 and cache.stride(2) == 1
-            self.entries[cache.data_ptr()] = Geometry(
+            self.entries[_view_key(cache)] = Geometry(
                 offset // 512, cache.stride(0) // 512, cache.shape[1], cache.shape[0]
             )
 
     def rope_view(self, cache: torch.Tensor) -> torch.Tensor:
-        g = self.entries[cache.data_ptr()]
+        g = self.entries[_view_key(cache)]
         return self.rope.as_strided(
             (g.count, g.block, 64), (g.stride * 64, 64, 1), g.offset * 64
         )
@@ -103,7 +110,7 @@ def pool() -> NativeCachePool:
                 and cache.shape[-1] == 512
                 and cache.dtype == torch.uint8
             ):
-                caches[cache.data_ptr()] = cache
+                caches[_view_key(cache)] = cache
         if not caches:
             raise RuntimeError("ASM MLA requires bound native KV caches")
         _pool = NativeCachePool(list(caches.values()))
@@ -297,8 +304,8 @@ def decode(
     rows, heads, _ = q.shape
     indices = torch.empty(rows * max_keys, dtype=torch.int32, device=q.device)
     indptr = torch.empty(rows + 1, dtype=torch.int32, device=q.device)
-    gm = p.entries[main.data_ptr()]
-    ge = p.entries[extra.data_ptr()] if extra is not None else gm
+    gm = p.entries[_view_key(main)]
+    ge = p.entries[_view_key(extra)] if extra is not None else gm
     _merge_indices[(rows,)](
         mi,
         mp,

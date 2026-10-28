@@ -2939,3 +2939,40 @@ def test_flash_native_asm_cache_and_decode(rows, ratio, insert_padding, monkeypa
     out.fill_(float("nan"))
     graph.replay()
     torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("rows", [4, 32])
+@torch.inference_mode()
+def test_flash_native_asm_aliased_views(rows, monkeypatch):
+    """KV groups alias one address with different rows per block; each view
+    must keep its own geometry, whichever view the pool registers last."""
+    from vllm.models.deepseek_v41.amd import asm_sparse_mla as asm
+
+    torch.manual_seed(5)
+    device = "cuda"
+    storage = torch.randint(0, 120, (4, 96, 512), dtype=torch.uint8, device=device)
+    wide, narrow = storage[:, :64], storage[:, :32]
+    alone = asm.NativeCachePool([wide])
+    aliased = asm.NativeCachePool([wide, narrow])
+    aliased.rope.copy_(alone.rope.normal_())
+    assert aliased.rope_view(wide).shape == (4, 64, 64)
+    assert aliased.rope_view(narrow).shape == (4, 32, 64)
+    # Slots past the narrow view's 32 rows of the last block.
+    idx = torch.arange(3 * 64 + 32, 4 * 64, device=device, dtype=torch.int32)
+    idx = idx.repeat(rows)
+    ptr = torch.arange(rows + 1, device=device, dtype=torch.int32) * 32
+    sink = torch.randn(64, device=device)
+    q = torch.randn((rows, 64, 512), dtype=torch.bfloat16, device=device)
+    packed = None
+    if rows >= 16:
+        qp = torch.randint(0, 120, (rows, 64, 512), dtype=torch.uint8, device=device)
+        qp[..., 448:] = 127
+        packed = (qp, q[..., 448:].contiguous())
+    outs = []
+    for pool in (alone, aliased):
+        monkeypatch.setattr(asm, "_pool", pool)
+        out = torch.empty_like(q)
+        asm.decode(q, wide, idx, ptr, None, None, None, sink, out, 128, packed=packed)
+        outs.append(out)
+    torch.testing.assert_close(outs[1], outs[0], atol=0, rtol=0)
