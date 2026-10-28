@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.v1.attention.backends.gdn_attn import GDNSpec
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -603,7 +604,6 @@ def _make_mla_hybrid_worker(
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheTensor,
-        MambaSpec,
         MLAAttentionSpec,
     )
 
@@ -614,9 +614,11 @@ def _make_mla_hybrid_worker(
         dtype=torch.float16,
     )
     unified_page = mla_spec.page_size_bytes
-    kda_spec = MambaSpec(
+    kda_spec = GDNSpec(
         block_size=local_block_size,
-        shapes=((8, 3), (1, 4, 4)),
+        # Q|K|V = 8|8|8 conv rows and 8 heads (48 + 64 bytes), so the state
+        # shards evenly up to TP8.
+        shapes=((24, 1), (8, 1, 2)),
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -1328,9 +1330,9 @@ def _make_csa_linear_ple_worker(
         )
         for index in range(2)
     }
-    sharded_mamba_spec = MambaSpec(
+    sharded_mamba_spec = GDNSpec(
         block_size=1,
-        shapes=((8, 3), (1, 4, 4)),
+        shapes=((8, 3), (2, 2, 4)),
         dtypes=(torch.float16, torch.float32),
         page_size_padded=256,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -1533,6 +1535,7 @@ def test_csa_linear_ple_descriptor_is_not_split():
             mapping,
             np.concatenate([attention, mamba]),
             num_fa_descs=int(attention[:, 4].sum()),
+            remote_tp_size=2,
         )
     )
     assert len(splits) == 2
@@ -1574,7 +1577,8 @@ def test_csa_linear_remote_ple_is_copied_whole():
     )
     descriptors = worker._build_mamba_remote(
         metadata,
-        tp_ratio=-2,
+        remote_tp_rank=0,
+        remote_tp_size=2,
         transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
     )
     assert descriptors.shape == (5, 5)
@@ -1585,7 +1589,8 @@ def test_csa_linear_remote_ple_is_copied_whole():
     with pytest.raises(ValueError, match="PLE pages require identical"):
         worker._build_mamba_remote(
             metadata,
-            tp_ratio=-2,
+            remote_tp_rank=0,
+            remote_tp_size=2,
             transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
         )
 

@@ -73,7 +73,7 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        return MambaSpec(
+        spec = MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
             block_size=mamba_block_size,
@@ -89,6 +89,7 @@ class MambaBase(AttentionLayerBase):
                 else vllm_config.num_speculative_tokens
             ),
         )
+        return self.get_attn_backend().customize_mamba_spec(spec)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""

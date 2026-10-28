@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache helper for store."""
 
+import functools
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -21,7 +22,12 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -413,6 +419,233 @@ def get_current_attn_backend(
 ) -> type[AttentionBackend]:
     """Get the first attention backend for the given layers."""
     return get_current_attn_backends(vllm_config, layer_names)[0]
+
+
+def jointly_contiguous_chunks(
+    src: torch.Tensor, dst: torch.Tensor
+) -> list[tuple[int, int, int]]:
+    """Split two same-shape views into byte runs contiguous in both.
+
+    Pairs views returned by ``KVCacheSpec.slice_for_tp_transfer`` on either
+    side, which may differ in physical layout. Returns ``(src_offset,
+    dst_offset, num_bytes)`` per run, with offsets in bytes from the start of
+    each view's storage, in row-major order of the logical shape.
+    """
+    if src.shape != dst.shape or src.element_size() != dst.element_size():
+        raise ValueError(
+            f"Cannot pair {tuple(src.shape)} x {src.element_size()}B with "
+            f"{tuple(dst.shape)} x {dst.element_size()}B."
+        )
+    if src.numel() == 0:
+        return []
+    elem = src.element_size()
+    dims = [
+        (size, s, d)
+        for size, s, d in zip(src.shape, src.stride(), dst.stride())
+        if size != 1
+    ]
+    run = 1
+    while dims and dims[-1][1] == run and dims[-1][2] == run:
+        run *= dims.pop()[0]
+
+    src_offsets = torch.tensor([src.storage_offset()], dtype=torch.int64, device="cpu")
+    dst_offsets = torch.tensor([dst.storage_offset()], dtype=torch.int64, device="cpu")
+    for size, s, d in dims:
+        idx = torch.arange(size, dtype=torch.int64, device="cpu")
+        src_offsets = (src_offsets[:, None] + idx * s).flatten()
+        dst_offsets = (dst_offsets[:, None] + idx * d).flatten()
+    return [
+        (s * elem, d * elem, run * elem)
+        for s, d in zip(src_offsets.tolist(), dst_offsets.tolist())
+    ]
+
+
+def _tp_transfer_specs(
+    spec: AttentionSpec, total_num_kv_heads: int, other_tp_size: int
+) -> tuple[AttentionSpec, AttentionSpec]:
+    """``spec`` and the other engine's spec for the same layer.
+
+    TODO: use the spec the other engine advertises, with both carrying their
+    total KV heads; until then the other side is derived from ours.
+    """
+    mine = spec
+    if spec.max_tp_shards is None:
+        mine = replace(spec, max_tp_shards=total_num_kv_heads)
+    heads = max(1, total_num_kv_heads // other_tp_size)
+    slots = spec.num_head_slots
+    if slots is not None:
+        slots = slots * heads // spec.num_kv_heads
+    return mine, replace(mine, num_kv_heads=heads, num_head_slots=slots)
+
+
+def _meta_block(like: torch.Tensor, num_heads: int) -> torch.Tensor:
+    """One ``[1, H, N, C]`` block nested like ``like``, starting at offset 0."""
+    shape = (1, num_heads, *like.shape[2:])
+    stride = [0] * 4
+    size = 1
+    for dim in sorted(range(1, 4), key=like.stride):
+        stride[dim] = size
+        size *= shape[dim]
+    stride[0] = size
+    return torch.empty_strided(shape, stride, dtype=like.dtype, device="meta")
+
+
+def tp_transfer_chunks(
+    spec: AttentionSpec,
+    block: torch.Tensor,
+    total_num_kv_heads: int,
+    tp_size: int,
+    tp_rank: int,
+    other_tp_size: int,
+    other_tp_rank: int,
+    *,
+    receiving: bool,
+) -> list[tuple[int, int, int]]:
+    """Byte runs of one block moved between this rank and another TP rank,
+    as sliced by ``spec.slice_for_tp_transfer``.
+
+    ``block`` is this rank's ``[1, H, N, C]`` view of a block of the layer;
+    the other rank is assumed to nest its blocks the same way. Returns
+    ``(offset, other_offset, num_bytes)`` per run, from each block's start.
+    """
+    mine, theirs = _tp_transfer_specs(spec, total_num_kv_heads, other_tp_size)
+    return _paired_chunks(
+        (mine, _meta_block(block, mine.num_heads), tp_size, tp_rank),
+        (theirs, _meta_block(block, theirs.num_heads), other_tp_size, other_tp_rank),
+        receiving,
+    )
+
+
+def _paired_chunks(
+    mine: tuple[KVCacheSpec, torch.Tensor, int, int],
+    theirs: tuple[KVCacheSpec, torch.Tensor, int, int],
+    receiving: bool,
+) -> list[tuple[int, int, int]]:
+    """Byte runs of the paired ``slice_for_tp_transfer`` views of two ranks,
+    each given as ``(spec, block, tp_size, tp_rank)``."""
+    spec, block, tp_size, tp_rank = mine
+    other_spec, other_block, other_tp_size, other_tp_rank = theirs
+    views = spec.slice_for_tp_transfer(
+        block,
+        tp_size,
+        tp_rank,
+        other_spec,
+        other_tp_size,
+        other_tp_rank,
+        receiving=receiving,
+    )
+    other_views = other_spec.slice_for_tp_transfer(
+        other_block,
+        other_tp_size,
+        other_tp_rank,
+        spec,
+        tp_size,
+        tp_rank,
+        receiving=not receiving,
+    )
+    assert len(views) == len(other_views)
+    return [
+        chunk
+        for view, other_view in zip(views, other_views)
+        for chunk in jointly_contiguous_chunks(view, other_view)
+    ]
+
+
+def mamba_peer_spec(spec: MambaSpec, tp_size: int, other_tp_size: int) -> MambaSpec:
+    """The other engine's spec for a Mamba layer.
+
+    TODO: use the spec the other engine advertises; until then its sharded
+    states are scaled from ours.
+    """
+    if other_tp_size == tp_size or spec.tp_replicated:
+        return spec
+    return replace(
+        spec,
+        shapes=tuple(
+            (shape[0] * tp_size // other_tp_size, *shape[1:]) for shape in spec.shapes
+        ),
+        page_size_padded=None,
+    )
+
+
+@functools.cache
+def mamba_tp_transfer_chunks(
+    spec: MambaSpec,
+    tp_size: int,
+    tp_rank: int,
+    other_tp_size: int,
+    other_tp_rank: int,
+    *,
+    receiving: bool,
+) -> tuple[tuple[int, int, int], ...]:
+    """Byte runs of one Mamba page moved between this rank and another TP
+    rank, as sliced by ``spec.slice_for_tp_transfer``.
+
+    Returns ``(offset, other_offset, num_bytes)`` per run, from each page's
+    start.
+    """
+    theirs = mamba_peer_spec(spec, tp_size, other_tp_size)
+
+    def page(s: MambaSpec) -> torch.Tensor:
+        return torch.empty(1, 1, 1, s.page_size_bytes, dtype=torch.int8, device="meta")
+
+    return tuple(
+        _paired_chunks(
+            (spec, page(spec), tp_size, tp_rank),
+            (theirs, page(theirs), other_tp_size, other_tp_rank),
+            receiving,
+        )
+    )
+
+
+@functools.cache
+def kv_head_transfer(
+    total_num_kv_heads: int,
+    tp_size: int,
+    tp_rank: int,
+    other_tp_size: int,
+    other_tp_rank: int,
+    *,
+    receiving: bool,
+) -> tuple[slice, slice] | None:
+    """KV heads moved between this rank and another TP rank, as decided by
+    ``AttentionSpec.slice_for_tp_transfer`` for plain head-sharded KV.
+
+    Returns the moved heads' local indices on this rank and on the other, or
+    None if the pair moves nothing.
+    """
+    spec = AttentionSpec(
+        block_size=1,
+        num_kv_heads=max(1, total_num_kv_heads // tp_size),
+        head_size=1,
+        dtype=torch.int8,
+    )
+    mine, theirs = _tp_transfer_specs(spec, total_num_kv_heads, other_tp_size)
+    views = mine.slice_for_tp_transfer(
+        torch.empty(1, mine.num_kv_heads, 1, 1, device="meta"),
+        tp_size,
+        tp_rank,
+        theirs,
+        other_tp_size,
+        other_tp_rank,
+        receiving=receiving,
+    )
+    if not views:
+        return None
+    (other_view,) = theirs.slice_for_tp_transfer(
+        torch.empty(1, theirs.num_kv_heads, 1, 1, device="meta"),
+        other_tp_size,
+        other_tp_rank,
+        mine,
+        tp_size,
+        tp_rank,
+        receiving=not receiving,
+    )
+
+    def heads(view: torch.Tensor) -> slice:
+        return slice(view.storage_offset(), view.storage_offset() + view.shape[1])
+
+    return heads(views[0]), heads(other_view)
 
 
 # ---- Per-engine transfer info ----

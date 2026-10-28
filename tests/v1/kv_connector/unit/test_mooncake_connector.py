@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import ctypes
 import errno
 import socket
 import threading
@@ -59,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVQuantMode,
     MLAAttentionSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -3378,6 +3380,160 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+# NVFP4 head size 32 packs into 16 data bytes + 2 scale bytes per token.
+_NVFP4_PARTS = (16, 2)
+_TOKEN_BYTES = sum(_NVFP4_PARTS)
+
+
+def _hetero_tp_spec(kind: str, total_heads: int, tp: int) -> FullAttentionSpec:
+    num_kv_heads = max(1, total_heads // tp)
+    if kind == "gqa":
+        return FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=num_kv_heads,
+            head_size=_TOKEN_BYTES,
+            dtype=torch.uint8,
+        )
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    spec = FlashInferBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=num_kv_heads,
+            head_size=32,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.NVFP4,
+        )
+    )
+    assert isinstance(spec, FullAttentionSpec)
+    return spec
+
+
+def _hetero_tp_pages(
+    kind: str, kv: torch.Tensor, tp: int, rank: int, hnd: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(raw bytes, [B, H, N, C] view) of one rank's pages, built from global
+    K/V bytes of shape [2, heads, B, N, token bytes]."""
+    total_heads, num_blocks, block_size = kv.shape[1:4]
+    num_heads = max(1, total_heads // tp)
+    start = rank * min(tp, total_heads) // tp * num_heads
+    sides = kv[:, start : start + num_heads]
+    if kind == "gqa":
+        page = torch.cat(list(sides), -1).transpose(0, 1)
+        raw = (page if hnd else page.transpose(1, 2)).contiguous().flatten()
+        slots, token_bytes = num_heads, 2 * _TOKEN_BYTES
+    else:
+        # [K data | K scale | V data | V scale], each in head/token order.
+        token_dims = (1, 0, 2) if hnd else (1, 2, 0)
+        raw = torch.cat(
+            [
+                part.permute(*token_dims, 3).flatten(1)
+                for side in sides
+                for part in side.split(_NVFP4_PARTS, -1)
+            ],
+            1,
+        ).flatten()
+        slots, token_bytes = 2 * num_heads, _TOKEN_BYTES
+    if hnd:
+        return raw, raw.view(num_blocks, slots, block_size, token_bytes)
+    view = raw.view(num_blocks, block_size, slots, token_bytes)
+    return raw, view.transpose(1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["gqa", "nvfp4"])
+@pytest.mark.parametrize("hnd", [True, False], ids=["HND", "NHD"])
+@pytest.mark.parametrize("p_tp,d_tp", [(1, 2), (2, 1), (2, 4), (4, 2), (1, 8)])
+async def test_kv_producer_heterogeneous_tp_sends_spec_sliced_heads(
+    monkeypatch, kind, hnd, p_tp, d_tp
+):
+    """Each decode rank receives exactly its KV heads' bytes, sliced by the
+    layer's spec. FlashInfer NVFP4 pages keep data before scales, so a head is
+    four runs of the page rather than one."""
+    if kind == "nvfp4":
+        pytest.importorskip("flashinfer")
+    total_heads, num_blocks, layer = 4, 3, "model.layers.0.self_attn"
+    shape = (2, total_heads, num_blocks, 4, _TOKEN_BYTES)
+    kv = (torch.arange(torch.Size(shape).numel()) % 251 + 1).to(torch.uint8)
+    kv = kv.view(shape)
+    p_pages = [_hetero_tp_pages(kind, kv, p_tp, r, hnd) for r in range(p_tp)]
+    d_pages = [
+        _hetero_tp_pages(kind, torch.zeros_like(kv), d_tp, r, hnd) for r in range(d_tp)
+    ]
+    d_spec = _hetero_tp_spec(kind, total_heads, d_tp)
+
+    def send_blocks(session, src_ptrs, dst_ptrs, lengths):
+        for src, dst, length in zip(src_ptrs, dst_ptrs, lengths):
+            ctypes.memmove(dst, src, length)
+        return 0
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        origin_sender_loop = worker.sender_loop
+        worker.sender_loop = asyncio.get_event_loop()
+        worker.transfer_topo.total_num_kv_heads = total_heads
+        socket = AsyncMock(spec=zmq.asyncio.Socket)
+        socket.send_multipart = AsyncMock()
+        with patch.object(worker, "_send_blocks", side_effect=send_blocks):
+            for p_rank, (p_raw, p_view) in enumerate(p_pages):
+                p_spec = _hetero_tp_spec(kind, total_heads, p_tp)
+                worker.tp_rank = worker.transfer_topo.tp_rank = p_rank
+                worker.tp_size = worker.transfer_topo.tp_size = p_tp
+                worker._tp_size[worker.engine_id] = p_tp
+                worker._layer_specs[layer] = p_spec
+                worker.kv_caches_base_addr = [p_raw.data_ptr()]
+                worker.block_len_per_layer = [p_view.stride(0)]
+                worker.kv_block_len_per_layer = [p_spec.page_size_bytes]
+                worker.registered_layer_names = [layer]
+                worker.registered_layer_indices = [0]
+                worker._layer_block_views, worker._tp_chunks = {}, {}
+                worker._record_block_view(layer, p_spec, p_view)
+                worker._prepared_transfer_regions.clear()
+
+                transfer_id = f"xfer-{p_rank}"
+                block_ids = [list(range(num_blocks))]
+                send_meta = SendBlockMeta(
+                    p_req_id=f"p-req-{p_rank}",
+                    transfer_id=transfer_id,
+                    local_block_ids=block_ids,
+                    ready=asyncio.Event(),
+                )
+                send_meta.ready.set()
+                worker.reqs_need_send[transfer_id] = send_meta
+                for d_rank in worker.transfer_topo.handshake_target_ranks(d_tp):
+                    d_raw, d_view = d_pages[d_rank]
+                    region = _region(
+                        d_raw.data_ptr(),
+                        block_len=d_view.stride(0),
+                        kv_block_len=d_spec.page_size_bytes,
+                        row_offset=-1,
+                        layer_name=layer,
+                    )
+                    d_req_id = f"d-req-{p_rank}-{d_rank}"
+                    meta = _xfer_meta(
+                        [region],
+                        {d_req_id: (transfer_id, block_ids)},
+                        remote_tp_size=d_tp,
+                        remote_tp_rank=d_rank,
+                    )
+                    socket.send_multipart.reset_mock()
+                    await worker.send_kv_to_decode(b"consumer", socket, meta)
+                    _, payload = socket.send_multipart.call_args[0][0]
+                    response = worker._xfer_resp_decoder.decode(payload)
+                    assert response.status == MooncakeXferResponseStatus.FINISH
+                    assert response.ok_reqs == [d_req_id]
+        worker.sender_loop = origin_sender_loop
+        worker.shutdown()
+
+    for d_rank, (d_raw, _) in enumerate(d_pages):
+        expected, _ = _hetero_tp_pages(kind, kv, d_tp, d_rank, hnd)
+        torch.testing.assert_close(d_raw, expected, rtol=0, atol=0)
 
 
 def test_sleep_unregisters_and_restores_kv_caches():

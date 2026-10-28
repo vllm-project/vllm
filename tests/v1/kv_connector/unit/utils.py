@@ -23,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import jointly_contiguous_chunks
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -39,6 +40,7 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -703,3 +705,43 @@ def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
     offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
     out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
     return out
+
+
+def transfer_kv(
+    src_spec: AttentionSpec,
+    src_caches: list[tuple[torch.Tensor, torch.Tensor]],
+    src_tp: int,
+    dst_spec: AttentionSpec,
+    dst_cache: tuple[torch.Tensor, torch.Tensor],
+    dst_tp: int,
+    dst_rank: int,
+) -> None:
+    """Pull one destination rank's KV from the source ranks, as a connector
+    would, through (raw bytes, logical [B, H, N, C] view) cache pairs.
+
+    Asserts both sides agree on the sources and every destination byte is
+    written exactly once."""
+    dst_raw, dst_view = dst_cache
+    written = 0
+    for src_rank, (src_raw, src_view) in enumerate(src_caches):
+        dst_slices = dst_spec.slice_for_tp_transfer(
+            dst_view, dst_tp, dst_rank, src_spec, src_tp, src_rank, receiving=True
+        )
+        src_slices = src_spec.slice_for_tp_transfer(
+            src_view, src_tp, src_rank, dst_spec, dst_tp, dst_rank, receiving=False
+        )
+        assert len(src_slices) == len(dst_slices)
+        for src, dst in zip(src_slices, dst_slices):
+            for src_off, dst_off, size in jointly_contiguous_chunks(src, dst):
+                dst_raw[dst_off : dst_off + size] = src_raw[src_off : src_off + size]
+                written += size
+    assert written == dst_raw.numel()
+
+
+def rank_kv_heads(tp_rank: int, tp_size: int, total_num_kv_heads: int) -> range:
+    """KV heads vLLM places on a TP rank; ranks beyond the head count replicate."""
+    if tp_size <= total_num_kv_heads:
+        per_rank = total_num_kv_heads // tp_size
+        return range(tp_rank * per_rank, (tp_rank + 1) * per_rank)
+    head = tp_rank * total_num_kv_heads // tp_size
+    return range(head, head + 1)

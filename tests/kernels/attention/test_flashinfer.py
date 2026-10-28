@@ -735,3 +735,53 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
     )
     assert ((deq[:, 0] - kv).norm() / kv.norm()) < 0.2
     assert not layers[0].any()
+
+
+@pytest.mark.parametrize("p_tp,d_tp", [(1, 2), (2, 1), (2, 2)])
+@pytest.mark.parametrize("p_hnd,d_hnd", [(True, True), (True, False), (False, False)])
+def test_nvfp4_spec_tp_slicing(p_tp, d_tp, p_hnd, d_hnd):
+    """NVFP4 pages store each side's data before its scales, so a
+    heterogeneous-TP transfer must move four runs per KV head."""
+    from tests.v1.kv_connector.unit.utils import transfer_kv
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+
+    # Head size 32 packs into 16 data bytes + 2 scale bytes per token.
+    num_heads, num_blocks, block_size, data, scale = 2, 3, 4, 16, 2
+    shape = (2, num_heads, num_blocks, block_size, data + scale)
+    kv = torch.arange(torch.Size(shape).numel(), device="cpu") % 255 + 1
+    kv = kv.to(torch.uint8).view(shape)
+
+    def make_cache(kv: torch.Tensor, tp: int, rank: int, hnd: bool):
+        heads = kv[:, rank * num_heads // tp : (rank + 1) * num_heads // tp]
+        token_dims = (1, 0, 2) if hnd else (1, 2, 0)
+        raw = torch.cat(
+            [
+                part.permute(*token_dims, 3).flatten(1)
+                for side in heads
+                for part in side.split((data, scale), -1)
+            ],
+            1,
+        ).flatten()
+        if hnd:
+            return raw, raw.view(num_blocks, -1, block_size, data + scale)
+        view = raw.view(num_blocks, block_size, -1, data + scale)
+        return raw, view.transpose(1, 2)
+
+    def spec(tp: int):
+        return FlashInferBackend.customize_spec(
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=num_heads // tp,
+                head_size=32,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+            )
+        )
+
+    p_caches = [make_cache(kv, p_tp, r, p_hnd) for r in range(p_tp)]
+    for d_rank in range(d_tp):
+        expected, _ = make_cache(kv, d_tp, d_rank, d_hnd)
+        d_cache = make_cache(torch.zeros_like(kv), d_tp, d_rank, d_hnd)
+        transfer_kv(spec(p_tp), p_caches, p_tp, spec(d_tp), d_cache, d_tp, d_rank)
+        torch.testing.assert_close(d_cache[0], expected, rtol=0, atol=0)

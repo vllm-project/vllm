@@ -20,7 +20,6 @@ import msgspec
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
@@ -37,13 +36,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     kda_conv_ssm,
+    mamba_conv_proj_bytes,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
-    _rank_heads,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    derive_mamba_conv_split,
-)
+from vllm.v1.attention.backends.gdn_attn import GDNSpec
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -54,7 +49,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from .utils import make_moriio_writer
+from .utils import make_moriio_writer, rank_kv_heads
 
 pytestmark = pytest.mark.cpu_test
 
@@ -114,7 +109,7 @@ def _spec(layer: Layer, num_heads: int, tp_size: int):
         return MLAAttentionSpec(
             block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
         )
-    return MambaSpec(
+    return GDNSpec(
         block_size=BLOCK_SIZE,
         shapes=(
             ((2 * KEY_DIM + V_HEADS * V_DIM) // tp_size, CONV_ROWS),
@@ -176,7 +171,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     groups = _groups(model, hma)
     caches, regions, specs, meta_counts = {}, [], {}, {}
     for layer in layers:
-        layer_heads = len(_rank_heads(tp_rank, tp_size, heads))
+        layer_heads = len(rank_kv_heads(tp_rank, tp_size, heads))
         spec = _spec(layer, layer_heads, tp_size)
         specs[layer.name] = spec
         buffer = torch.zeros(spec.page_size_bytes * NUM_BLOCKS, dtype=torch.uint8)
@@ -206,7 +201,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
                 held = (
                     slice(None)
                     if layer.kind == "mla"
-                    else _rank_heads(tp_rank, tp_size, heads)
+                    else rank_kv_heads(tp_rank, tp_size, heads)
                 )
                 cache.copy_(state[layer.name][:, held])
             regions.append(buffer)
@@ -228,9 +223,9 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker._hybrid_payload_index_by_layer = {
         layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
     }
-    worker._conv_decomp = next(
+    worker._conv_proj_bytes = next(
         (
-            derive_mamba_conv_split(spec, tp_size)
+            mamba_conv_proj_bytes(spec)
             for spec in specs.values()
             if isinstance(spec, MambaSpec)
         ),
@@ -337,7 +332,9 @@ def _expected(
             conv, ssm = _mamba_shard(state[layer.name][src], tp_rank, tp_size)
             expected[dst, : conv.numel() + ssm.numel()] = torch.cat([conv, ssm])
         return expected
-    held = slice(None) if layer.kind == "mla" else _rank_heads(tp_rank, tp_size, heads)
+    held = (
+        slice(None) if layer.kind == "mla" else rank_kv_heads(tp_rank, tp_size, heads)
+    )
     for src, dst in pairs:
         expected[dst] = state[layer.name][src, held]
     return expected
@@ -366,9 +363,6 @@ SCENARIOS = [
 def test_write_lands_every_shard_byte_exact(
     monkeypatch, model, producer_tp, consumer_tp, hma, layouts
 ):
-    monkeypatch.setattr(
-        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
-    )
     monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
     heads, layers = MODELS[model]
     state = _global_state(layers, heads)
@@ -446,9 +440,6 @@ def test_write_lands_every_shard_byte_exact(
 def test_write_refuses_peer_with_different_block_size(monkeypatch):
     """Hybrid MLA models get TP-dependent attention block sizes; copying blocks
     between them would misplace tokens, so the write must refuse."""
-    monkeypatch.setattr(
-        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
-    )
     monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)

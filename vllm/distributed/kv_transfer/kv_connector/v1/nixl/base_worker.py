@@ -31,6 +31,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
+    mamba_peer_spec,
+    mamba_tp_transfer_chunks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -61,10 +63,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_representative_spec_type,
     zmq_ctx,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    MambaConvSplitInfo,
-    derive_mamba_conv_split,
-)
 from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
@@ -80,7 +78,7 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
@@ -118,6 +116,15 @@ def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     )
 
 
+def _mamba_state_sizes(spec: MambaSpec) -> tuple[int, int]:
+    """Bytes of the first (conv) state and of the states after it."""
+    sizes = [
+        math.prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(spec.shapes, spec.dtypes)
+    ]
+    return sizes[0], sum(sizes[1:])
+
+
 def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     """Return whether all views share storage and a block stride."""
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
@@ -150,10 +157,9 @@ class NixlBaseConnectorWorker:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
         if self._has_mamba:
-            assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
-            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+            # NIXL regions per SSM layer = byte runs of the spec's TP slices
+            # (Mamba2/GDN: conv x|B|C + SSM = 4; Mamba1: 2; same-TP only: 1).
+            ssm_regions_per_layer = len(self._local_mamba_runs())
             # Count only the regions that actually hold SSM state; must match
             # the descriptors emitted by _build_mamba_local.
             num_ssm_regions = (
@@ -299,13 +305,14 @@ class NixlBaseConnectorWorker:
         src_blocks_data: np.ndarray,
         num_fa_descs: int,
         block_size_ratio: int = 1,
+        remote_tp_size: int | None = None,
     ) -> Iterator[np.ndarray]:
         """Build split handle data for P_TP > D_TP scenario.
 
         num_fa_descs is the boundary between FA and SSM descriptors.
-        Split counts are derived from source_ranks_per_group lengths.
-        FA uses rank_to_attention_slot for the slot offset;
-        SSM uses the rank's positional index.
+        FA split counts are derived from source_ranks_per_group lengths, and
+        FA uses rank_to_attention_slot for the slot offset; SSM descs take the
+        runs the Mamba spec slices for each source rank of ``remote_tp_size``.
         Each Nx5 strided desc covers one region, so slicing it slices every block.
         """
         fa_idx = next(
@@ -315,16 +322,6 @@ class NixlBaseConnectorWorker:
 
         starts = self._strided_desc_starts(src_blocks_data)
         num_descs = int(src_blocks_data[:, 4].sum())
-        has_ssm_descs = num_fa_descs < num_descs
-        ssm_idx = next(
-            (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)),
-            None,
-        )
-        ssm_num_splits = (
-            len(plan.source_ranks_per_group[ssm_idx])
-            if has_ssm_descs and ssm_idx is not None
-            else 0
-        )
         sharded_desc_end = num_descs - (
             self._logical_num_blocks if self._ple_region_index is not None else 0
         )
@@ -344,15 +341,33 @@ class NixlBaseConnectorWorker:
         fa_split = is_fa.copy()
         fa_split[is_fa] = ~fa_replicated
         ssm_split = ~is_fa & (starts < sharded_desc_end)
+        # Per source rank, the (address shift, length) of each SSM desc. Ranks
+        # holding none of this rank's SSM state are never read for it.
+        ssm_descs: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        if ssm_split.any():
+            assert remote_tp_size is not None
+            local_runs = self._local_mamba_runs()
+            num_layers = int(ssm_split.sum()) // len(local_runs)
+            for p_rank in plan.all_source_ranks:
+                runs = self._mamba_runs(remote_tp_size, p_rank)
+                if not runs:
+                    continue
+                assert len(runs) == len(local_runs)
+                shifts = [run[0] - local[0] for run, local in zip(runs, local_runs)]
+                ssm_descs[p_rank] = (
+                    np.tile(np.asarray(shifts, dtype=np.uint64), num_layers),
+                    np.tile(np.asarray([run[2] for run in runs]), num_layers),
+                )
 
-        for p_idx, p_rank in enumerate(plan.all_source_ranks):
+        for p_rank in plan.all_source_ranks:
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
             handle = src_blocks_data.copy()
             handle[fa_split, 1] //= fa_num_splits
             handle[fa_split, 0] += fa_slot * handle[fa_split, 1]
-            if ssm_num_splits:
-                handle[ssm_split, 1] //= ssm_num_splits
-                handle[ssm_split, 0] += p_idx * handle[ssm_split, 1]
+            if p_rank in ssm_descs:
+                shifts, lengths = ssm_descs[p_rank]
+                handle[ssm_split, 0] += shifts
+                handle[ssm_split, 1] = lengths
             yield handle
 
     def _needs_split_local_xfer_handles(self, tp_ratio: int, plan: TPMapping) -> bool:
@@ -682,10 +697,8 @@ class NixlBaseConnectorWorker:
 
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
-        # Conv state sub-projection decomposition (None when no Mamba).
-        # The transfer requires DS (dim, state_len) conv layout so that
-        # conv sub-projections are contiguous in memory.
-        self._conv_decomp: MambaConvSplitInfo | None = None
+        # Spec of the sharded Mamba layers, which slices their pages across TP.
+        self._mamba_spec: MambaSpec | None = None
         self._has_mamba = any(
             isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
         )
@@ -714,25 +727,13 @@ class NixlBaseConnectorWorker:
 
         if self._has_mamba:
             assert self._is_hma_required
-            from vllm.model_executor.layers.mamba.mamba_utils import (
-                is_conv_state_dim_first,
-            )
-
-            assert is_conv_state_dim_first(), (
-                "3-read Mamba conv transfer requires DS conv state layout. "
-                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
-            )
-            mamba_spec = next(
+            self._mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
                 and (not self._is_csa_linear or not spec.tp_replicated)
             )
-            self._conv_decomp = derive_mamba_conv_split(
-                mamba_spec,
-                vllm_config.parallel_config.tensor_parallel_size,
-            )
-            mamba_ssm_size = self._conv_decomp.ssm_sizes
+            mamba_ssm_size = _mamba_state_sizes(self._mamba_spec)
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
@@ -2014,9 +2015,29 @@ class NixlBaseConnectorWorker:
         payload.agent_metadata_bytes = msgspec.msgpack.encode(agent_metadata)
         self._kv_unregistered = False
 
+    def _mamba_runs(
+        self, remote_tp_size: int, remote_tp_rank: int
+    ) -> tuple[tuple[int, int, int], ...]:
+        """``(local_offset, remote_offset, num_bytes)`` runs of a Mamba page
+        moved between this rank and a remote rank, as sliced by its spec."""
+        assert self._mamba_spec is not None
+        return mamba_tp_transfer_chunks(
+            self._mamba_spec,
+            self.transfer_tp_size,
+            self.transfer_tp_rank,
+            remote_tp_size,
+            remote_tp_rank,
+            receiving=True,
+        )
+
+    def _local_mamba_runs(self) -> tuple[tuple[int, int, int], ...]:
+        """Runs of this rank's whole Mamba page, one local desc region each."""
+        return self._mamba_runs(self.transfer_tp_size, self.transfer_tp_rank)
+
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
-        """Build desc regions (conv sub-projections + ssm) per layer for
-        local mamba blocks with DS conv layout, as Nx5 uint64 strided descs.
+        """Build desc regions per layer for local mamba blocks, one per run of
+        the page its spec slices for TP (e.g. conv sub-projections + ssm), as
+        Nx5 uint64 strided descs.
 
         A Mamba block interleaves conv and SSM state, which crucially differ in
         size, so the two are indexed as separate sub-regions. Attention blocks
@@ -2048,9 +2069,7 @@ class NixlBaseConnectorWorker:
         ratio-expanded (see _compute_desc_ids).
         """
         assert base_addresses, "Local KV cache base addresses must not be empty."
-        assert self._conv_decomp is not None
-        conv_offsets = self._conv_decomp.local_conv_offsets
-        conv_size, ssm_size = self._mamba_ssm_size
+        local_runs = self._local_mamba_runs()
         num_blocks = self._logical_num_blocks
         physical_per_logical = self._physical_blocks_per_logical_kv_block
         device_id = self.device_id
@@ -2060,14 +2079,10 @@ class NixlBaseConnectorWorker:
         for i in region_indices:
             base_addr = base_addresses[i]
             block_stride = self.block_stride_per_layer[i] * physical_per_logical
-            for off, sz in conv_offsets:
+            for offset, _, num_bytes in local_runs:
                 strided_descs.append(
-                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                    (base_addr + offset, num_bytes, device_id, block_stride, num_blocks)
                 )
-            # SSM temporal state follows the conv state.
-            strided_descs.append(
-                (base_addr + conv_size, ssm_size, device_id, block_stride, num_blocks)
-            )
 
         if (region_index := self._ple_region_index) is not None:
             block_len = self._ple_page_len() * physical_per_logical
@@ -2084,27 +2099,31 @@ class NixlBaseConnectorWorker:
     def _build_mamba_remote(
         self,
         nixl_agent_meta: NixlAgentMetadata,
-        tp_ratio: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
         transfer_info: EngineTransferInfo,
     ) -> np.ndarray:
-        """Build remote desc regions (conv sub-projections + ssm) per layer.
-        For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. Returns Nx5 uint64 strided descs."""
+        """Build remote desc regions per layer: the runs of the remote page the
+        Mamba spec slices for this rank. Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
-        assert self._conv_decomp is not None
-        effective_ratio = max(tp_ratio, 1)
-        # Mamba conv state is always TP-sharded, even when attention KV
-        # is replicated (num_kv_heads < tp_size).
-        local_offset = self.tp_rank % effective_ratio
-        conv_size_remote = nixl_agent_meta.ssm_sizes[0]
-
-        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
-        if tp_ratio >= 1:
-            ssm_read_size = self._mamba_ssm_size[1]
-        else:
-            ssm_read_size = nixl_agent_meta.ssm_sizes[1]
+        assert self._mamba_spec is not None
+        remote_spec = mamba_peer_spec(
+            self._mamba_spec, self.transfer_tp_size, remote_tp_size
+        )
+        if _mamba_state_sizes(remote_spec) != tuple(nixl_agent_meta.ssm_sizes):
+            raise ValueError(
+                f"Remote Mamba state sizes {nixl_agent_meta.ssm_sizes} differ from "
+                f"the expected {_mamba_state_sizes(remote_spec)} at TP "
+                f"{remote_tp_size}."
+            )
+        runs = self._mamba_runs(remote_tp_size, remote_tp_rank)
+        if not runs:
+            raise NotImplementedError(
+                f"Remote rank {remote_tp_rank} holds none of this rank's Mamba state."
+            )
+        assert len(runs) == len(self._local_mamba_runs())
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
@@ -2121,15 +2140,10 @@ class NixlBaseConnectorWorker:
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
             )
-            for off, sz in conv_offsets:
+            for _, offset, num_bytes in runs:
                 strided_descs.append(
-                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                    (base_addr + offset, num_bytes, device_id, block_stride, num_blocks)
                 )
-            # SSM temporal state is also TP-sharded on the heads dimension.
-            ssm_addr = base_addr + conv_size_remote + local_offset * ssm_read_size
-            strided_descs.append(
-                (ssm_addr, ssm_read_size, device_id, block_stride, num_blocks)
-            )
 
         if (region_index := self._ple_region_index) is not None:
             local_block_len = (
@@ -2312,13 +2326,9 @@ class NixlBaseConnectorWorker:
         )
         if self._has_mamba:
             assert self.num_descs * block_size_ratio == blocks_data[:, 4].sum()
-            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
-            # is unnecessary — a single conv desc per block suffices.  Consider
-            # adding a fast path that falls back to the standard 2-region
-            # registration (_build_fa_local mamba=True) when no hetero-TP
-            # remote has been seen.  Currently we always register 4 regions
-            # because local descs are created before knowing the remote TP.
-            logger.debug("Registering local Mamba descriptors (4 regions/layer)")
+            # Local descs are registered before the remote TP is known, so each
+            # layer keeps one region per run its spec slices, at any TP.
+            logger.debug("Registering local Mamba descriptors")
             mamba = self._build_mamba_local(local_base_addresses)
             blocks_data = np.concatenate([blocks_data, mamba])
 
@@ -2566,6 +2576,7 @@ class NixlBaseConnectorWorker:
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
             remote_dcp_size=remote_dcp_size,
+            mamba_spec=self._mamba_spec,
         )
         if self._head_sharded_draft_regions:
             self.draft_tp_mappings[engine_id] = compute_tp_mapping(
@@ -2574,6 +2585,7 @@ class NixlBaseConnectorWorker:
                 group_spec_types=self._group_spec_types,
                 remote_dcp_size=remote_dcp_size,
                 head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+                mamba_spec=self._mamba_spec,
             )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -2663,6 +2675,7 @@ class NixlBaseConnectorWorker:
                 src_blocks_data,
                 self.num_descs * block_size_ratio,
                 block_size_ratio,
+                remote_tp_size,
             ):
                 if self._mixed_mem_types:
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
@@ -2709,7 +2722,9 @@ class NixlBaseConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
+            mamba = self._build_mamba_remote(
+                nixl_agent_meta, remote_tp_rank, remote_tp_size, transfer_info
+            )
             blocks_data = np.concatenate([blocks_data, mamba])
 
         remote_mem_types = set(self.dst_region_mem_types[engine_id])
