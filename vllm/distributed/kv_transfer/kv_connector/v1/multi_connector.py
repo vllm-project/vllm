@@ -234,11 +234,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return False
         return True
 
-    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
-        super().set_num_hash_lookahead_tokens(num_tokens)
-        for connector in self._connectors:
-            connector.set_num_hash_lookahead_tokens(num_tokens)
-
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)

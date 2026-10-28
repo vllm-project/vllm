@@ -113,9 +113,10 @@ class OffloadingEventsTracker:
         self,
         config: OffloadingKVEventsConfig,
         group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
+        num_hash_lookahead_tokens: int = 0,
     ):
         self.config = config
-        self.num_hash_lookahead_tokens = 0
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Static classification survives resets and never asserts prefix residency.
         self._group_specs = group_specs or {}
         self.self_describing_enabled = (

@@ -27,6 +27,7 @@ from tests.v1.kv_connector.unit.utils import (
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig, SpeculativeConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
     scheduler as scheduler_module,
 )
@@ -162,6 +163,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         get_manager=lambda: manager,
     )
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
@@ -4444,15 +4446,29 @@ class TestEagle:
         ],
     )
     def test_lookahead_lookup_waits_for_full_window(
-        self, request_runner, num_lookahead, num_tokens, blocks_per_chunk, expected
+        self, num_lookahead, num_tokens, blocks_per_chunk, expected
     ):
         """Only chunks whose entire lookahead window is known can hit."""
+        init_none_hash(sha256)
         block_size = 4
-        runner = request_runner(
+        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+        spec.method = "mtp"
+        config = create_vllm_config(
             block_size=block_size,
-            num_gpu_blocks=100,
-            async_scheduling=False,
-            blocks_per_chunk=blocks_per_chunk,
+            hf_overrides={"num_nextn_predict_layers": num_lookahead},
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "spec_name": "MockOffloadingSpec",
+                "spec_module_path": MockOffloadingSpec.__module__,
+                "block_size": block_size * blocks_per_chunk,
+            },
+        )
+        spec.draft_model_config = config.model_config
+        config.speculative_config = spec
+        caches = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     ["mtp"],
@@ -4466,8 +4482,11 @@ class TestEagle:
                 )
             ],
         )
-        connector = runner.scheduler_connector
-        connector.set_num_hash_lookahead_tokens(num_lookahead)
+        connector = OffloadingConnector(config, KVConnectorRole.SCHEDULER, caches)
+        assert (
+            connector.scheduler._events_tracker.num_hash_lookahead_tokens
+            == num_lookahead
+        )
         request = Request(
             request_id="lookahead",
             prompt_token_ids=list(range(num_tokens)),
@@ -4476,7 +4495,7 @@ class TestEagle:
             block_hasher=get_request_block_hasher(block_size, sha256, num_lookahead),
         )
         connector.on_new_request(request)
-        runner.manager.lookup.return_value = LookupResult.HIT
+        _as_mock(connector.scheduler.manager).lookup.return_value = LookupResult.HIT
 
         assert connector.get_num_new_matched_tokens(request, 0) == (
             expected,

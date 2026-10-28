@@ -616,7 +616,7 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
-        self.use_lookahead_block_hashes = False
+        self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -717,6 +717,7 @@ class OffloadingConnectorScheduler:
                 group.group_idx: group.kv_event_group_spec
                 for group in self.config.kv_group_configs
             },
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
 
     # Holds the manager lock for the current schedule(), or None between steps.

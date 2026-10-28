@@ -72,9 +72,7 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        connector = connector_cls(config, role, kv_cache_config)
-        connector.set_num_hash_lookahead_tokens(config.num_hash_lookahead_tokens)
-        return connector
+        return connector_cls(config, role, kv_cache_config)
 
     @classmethod
     def get_connector_class_by_name(

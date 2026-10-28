@@ -302,6 +302,7 @@ def _make_qsa_hybrid_cache_config():
 
 def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     vllm_config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}

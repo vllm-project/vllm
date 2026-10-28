@@ -243,10 +243,6 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
-        self.num_hash_lookahead_tokens = 0
-
-    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
-        self.num_hash_lookahead_tokens = num_tokens
 
     @property
     def role(self) -> KVConnectorRole:

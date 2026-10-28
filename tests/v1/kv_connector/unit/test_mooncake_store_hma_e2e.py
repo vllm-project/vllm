@@ -95,6 +95,7 @@ def _minimal_vllm_config(cache_block_size=16):
     # Without this, MagicMock's truthy use_eagle() triggers the coordinator's
     # "use_eagle && nothing annotated → flag all groups" fallback.
     cfg.speculative_config = None
+    cfg.num_hash_lookahead_tokens = 0
     return cfg
 
 
@@ -682,6 +683,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
         cache_hit_alignment_tokens=4,
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
+    vllm_config.num_hash_lookahead_tokens = num_lookahead
     # Hash unit 4 < mamba block 16 -> partial hash hits are enabled.
     vllm_config.cache_config.prefix_match_unit = 4
     store = _DictStore()
@@ -690,7 +692,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
     worker.tp_size = 1
     worker.pp_size = 1
     worker.num_kv_head = 8
-    worker.coord.num_hash_lookahead_tokens = num_lookahead
+    assert worker.coord.num_hash_lookahead_tokens == num_lookahead
     assert worker.coord.enable_partial_hash_hits
 
     for g_idx, db in enumerate(worker.token_dbs):

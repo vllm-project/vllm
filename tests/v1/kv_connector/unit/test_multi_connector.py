@@ -398,11 +398,9 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Lookahead-hash mode is propagated first; then the cache manager is bound,
-    # completion counts queried, and handshake metadata exchanged before the
-    # request is enqueued.
-    assert storage1_scheduler_events[:8] == [
-        "set_num_hash_lookahead_tokens 0",
+    # The cache manager is bound, completion counts queried, and handshake
+    # metadata exchanged before the request is enqueued.
+    assert storage1_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -411,10 +409,8 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    # Lookahead-hash mode is propagated before the connector is initialized. Layer
-    # hooks run before the deferred load starts after the forward pass.
+    # Layer hooks run before the deferred load starts after the forward pass.
     expected_worker_prefix = [
-        "set_num_hash_lookahead_tokens 0",
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
@@ -430,8 +426,7 @@ def test_multi_example_connector_consistency():
         assert worker_events.index("start_load_kv") > worker_events.index(
             "save_kv_layer"
         )
-    assert storage2_scheduler_events[:8] == [
-        "set_num_hash_lookahead_tokens 0",
+    assert storage2_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -1099,7 +1094,7 @@ Options:
 )
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
-def test_factory_configures_multi_connector_lookahead_block_hashes(
+def test_multi_connector_children_use_configured_lookahead_hashes(
     child_support: list[bool],
     num_lookahead: int,
     prefix_caching: bool,
@@ -1142,12 +1137,12 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
 
     assert isinstance(connector, MultiConnector)
     expected_tokens = num_lookahead if expected else 0
-    assert connector.num_hash_lookahead_tokens == expected_tokens
+    assert connector._vllm_config.num_hash_lookahead_tokens == expected_tokens
     for child in connector.sub_connectors:
-        assert child.num_hash_lookahead_tokens == expected_tokens
+        assert child._vllm_config.num_hash_lookahead_tokens == expected_tokens
         if isinstance(child, MultiConnector):
             assert all(
-                leaf.num_hash_lookahead_tokens == expected_tokens
+                leaf._vllm_config.num_hash_lookahead_tokens == expected_tokens
                 for leaf in child.sub_connectors
             )
 

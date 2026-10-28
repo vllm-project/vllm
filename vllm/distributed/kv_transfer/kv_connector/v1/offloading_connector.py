@@ -76,14 +76,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> bool:
         return True
 
-    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
-        super().set_num_hash_lookahead_tokens(num_tokens)
-        if self.connector_scheduler is not None:
-            self.connector_scheduler.use_lookahead_block_hashes = num_tokens > 0
-            self.connector_scheduler._events_tracker.num_hash_lookahead_tokens = (
-                num_tokens
-            )
-
     @property
     def requires_kv_delivery(self) -> bool:
         # Runs as kv_both, but is a best-effort cache: a dropped save is just a

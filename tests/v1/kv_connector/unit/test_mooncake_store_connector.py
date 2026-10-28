@@ -1207,7 +1207,6 @@ def test_finish_during_prefill_saves_only_completed_kv(
         connector = mooncake_store_connector.MooncakeStoreConnector(
             config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
         )
-    connector.set_num_hash_lookahead_tokens(1)
     pool = BlockPool(num_gpu_blocks=16, enable_caching=True, hash_block_size=16)
     connector.bind_gpu_block_pool(pool)
     owned = pool.get_new_blocks(2)
@@ -1315,7 +1314,6 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
             KVConnectorRole.SCHEDULER,
             kv_config,
         )
-    connector.set_num_hash_lookahead_tokens(1)
     pool = BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
     connector.bind_gpu_block_pool(pool)
     owned = pool.get_new_blocks(3)

@@ -204,18 +204,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
-    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
-        super().set_num_hash_lookahead_tokens(num_tokens)
-        if self._capacity_only:
-            return
-        if self.connector_scheduler is not None:
-            coord = self.connector_scheduler._store_coord
-        else:
-            assert self.connector_worker is not None
-            coord = self.connector_worker.coord
-        if coord is not None:
-            coord.num_hash_lookahead_tokens = num_tokens
-
     def shutdown(self):
         """Release connector resources on teardown.
 

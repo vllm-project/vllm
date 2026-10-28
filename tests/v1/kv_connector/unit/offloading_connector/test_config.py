@@ -48,6 +48,7 @@ def _make_vllm_config(
     decode_context_parallel_size: int = 1,
 ) -> VllmConfig:
     config = MagicMock()
+    config.num_hash_lookahead_tokens = 0
     config.cache_config.block_size = 16
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None

@@ -92,6 +92,7 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
         # to divide groups that participate in prefix caching. Non-shareable
@@ -122,7 +123,7 @@ class MooncakeStoreCoordinator:
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
         self.use_eagle = use_eagle
-        self.num_hash_lookahead_tokens = 0
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -159,6 +160,7 @@ class MooncakeStoreCoordinator:
             scheduler_block_size,
             hash_block_size,
             use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size
