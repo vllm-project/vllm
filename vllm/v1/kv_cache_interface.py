@@ -61,6 +61,7 @@ class KVQuantMode(IntEnum):
     OCTAVE_K3V4 = 12
     OCTAVE_K3V3 = 13
     OCTAVE_K3V3_COMPACT = 14
+    MXFP4 = 16  # packed e2m1 data + e8m0 scales per 32 values (ROCm gfx950)
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
@@ -81,6 +82,11 @@ class KVQuantMode(IntEnum):
     def is_nvfp4(self) -> bool:
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
+
+    @property
+    def is_mxfp4(self) -> bool:
+        """True for the packed MXFP4 K/V quantization mode."""
+        return self == KVQuantMode.MXFP4
 
     @property
     def is_octave(self) -> bool:
@@ -144,6 +150,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode[kv_cache_dtype.upper()]
     if kv_cache_dtype == "ultraquant_4bit":
         return KVQuantMode.ULTRAQUANT_4BIT
+    if kv_cache_dtype == "mxfp4":
+        return KVQuantMode.MXFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE

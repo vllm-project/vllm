@@ -98,7 +98,8 @@ class AttentionConfig:
     indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
     formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
     backend; MiniMax M3 supports nvfp4 on SM100/SM103/SM107 with at most 8
-    decode queries per request."""
+    decode queries per request, and mxfp4 on ROCm gfx950 together with
+    `--kv-cache-dtype mxfp4`."""
 
     indexer_decode_cp: bool = False
     """Split the sparse-attention indexer's decode scoring across the
