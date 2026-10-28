@@ -442,6 +442,34 @@ mod tests {
         assert_eq!(rendered.effective_template_kwargs["thinking"], true);
     }
 
+    #[tokio::test]
+    async fn reasoning_effort_map_rewrites_typed_effort_only() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"deepseek_v4"}"#,
+            "{}",
+        );
+        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("high"));
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "max"
+        );
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.template_kwargs =
+            [("reasoning_effort".to_string(), serde_json::json!("high"))].into();
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "high"
+        );
+    }
+
     #[test]
     fn auto_uses_harmony_renderer_and_output_processor_for_gpt_oss_model_type() {
         let backend = backend_for_selection(
