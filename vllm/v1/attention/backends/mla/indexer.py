@@ -27,6 +27,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
     native_next_n_supported,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
@@ -1086,9 +1087,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Materialize the rank on device during builder initialization. Creating
         # this scalar in build() would introduce a GPU<->CPU sync in the decode
         # hot path.
-        self.dcp_rank_tensor = torch.tensor(
-            self.dcp_rank, dtype=torch.int32, device=self.device
-        )
+        with gpu_sync_allowed():
+            self.dcp_rank_tensor = torch.tensor(
+                self.dcp_rank, dtype=torch.int32, device=self.device
+            )
         self.expanded_block_table_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
