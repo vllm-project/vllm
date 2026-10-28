@@ -850,10 +850,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.sparse_ctx_buffer = sparse_ctx_buffer
         # Same condition the forward dispatches on, so the indexer built here
         # and the branch that calls it cannot disagree about which one this is.
+        self.indexer: MiniMaxM3Indexer | MiniMaxM3MSAIndexer | None
         if self.use_nvfp4_kv:
             self.indexer = MiniMaxM3MSAIndexer(
                 impl_cls=MiniMaxM3IndexerRocmNvfp4Impl, **indexer_kwargs
             )
+        elif self.skip_index_topk:
+            self.indexer = None
         elif msa_indexer_impl_cls is None:
             # Self-contained nn.Module: owns its side cache, selects its impl.
             self.indexer = MiniMaxM3Indexer(**indexer_kwargs)
@@ -1020,6 +1023,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
         if index_k is None or index_slot_mapping is None:
             return
+        assert self.indexer is not None
         index_cache = self.indexer.index_cache.kv_cache
         if index_cache.numel() == 0:
             return
@@ -1074,6 +1078,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.skip_index_topk:
             return q, None
 
+        assert self.indexer is not None
         index_q = self.index_q_norm(
             index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
         )
@@ -1108,6 +1113,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             minimax_m3_norm_rope_nvfp4_insert,
         )
 
+        assert self.indexer is not None
         num_tokens = qkv.shape[0]
         q = qkv.new_empty((num_tokens, self.q_size))
         index_q = qkv.new_empty(
@@ -1177,6 +1183,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.use_nvfp4_kv:
+            assert self.indexer is not None
             q, index_q = self._norm_rope_nvfp4_insert(
                 qkv,
                 positions,
@@ -1282,6 +1289,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     skip_index_branch=True,
                 )
         else:
+            assert self.indexer is not None
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
             # index_q matches the index-K cache dtype (e4m3 for the AITER fp8
             # score path); the fused kernel emits fp8 directly when this buffer
@@ -1403,6 +1411,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None
         if not self.skip_index_topk:
             assert index_query is not None
+            assert self.indexer is not None
             # The MSA indexer emits the attend table into its persistent
             # buffers, resolving its selection through the page-16 rebase of the
             # attend's block table. The neutral indexer can instead fuse decode
