@@ -755,12 +755,18 @@ def select_mxfp4_moe_backend(
             for backend, reason in unsupported_reasons
         ]
     )
+    # Name the platform and avoid blaming the user's configuration: on a
+    # platform with no native MXFP4 MoE kernel the candidate set is AMD-only
+    # by construction, so "deployment configuration" was misleading and the
+    # listed backends (AITER / amd-quark) are unreachable here. The real
+    # per-backend reasons are kept below.
     raise NotImplementedError(
-        "No MXFP4 MoE backend supports the deployment configuration. "
-        f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+        f'quantization="mxfp4" has no usable MoE backend on this platform '
+        f"({current_platform.device_type}) for the requested configuration "
+        f"(weight_key=kMxfp4Static, activation_key={activation_key}). "
         f"Candidate backends were: "
         f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
-        f"Unsupported reasons: {unsupported_log}. "
+        f"Unsupported reasons: {unsupported_log}."
     )
 
 
