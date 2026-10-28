@@ -7,6 +7,7 @@ each verify request on device. The KDA spec path must therefore plan from the
 device offsets, never from host lengths that merely look uniform.
 """
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -25,6 +26,13 @@ from vllm.v1.kv_cache_interface import MambaSpec
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 NUM_SPEC = 3
+
+
+@pytest.fixture(autouse=True)
+def _no_breakable_cudagraph_env_leak(monkeypatch):
+    # The Qwen3.5 config below auto-enables breakable cudagraphs via a
+    # process-wide env var; keep it from leaking into other tests.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
 
 def _config(adaptive: bool):
