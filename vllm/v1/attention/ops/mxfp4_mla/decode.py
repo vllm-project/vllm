@@ -61,7 +61,8 @@ def _bytes_of_words(w):
 def _fold_v_scales(k_scale, valid, BLOCK_K: tl.constexpr):
     """Per-token V multipliers relative to each 32-token block's largest scale.
 
-    Returns ``(v_mult [BLOCK_K, 16] fp32, block_max [BLOCK_K // 32, 16] int32)``.
+    Returns ``(v_mult [BLOCK_K, 16] int32, block_max [BLOCK_K // 32, 16] int32)``,
+    ``v_mult`` holding fp32 bits.
     The fold is exact while a token's scale is within 2**8 of its block's
     maximum, the headroom e4m3 has below 1.0; further below, its V flushes
     toward zero. Masked tokens get code 0 so they cannot raise the maximum.
@@ -70,14 +71,27 @@ def _fold_v_scales(k_scale, valid, BLOCK_K: tl.constexpr):
     codes_blk = tl.reshape(codes, (BLOCK_K // 32, 32, LATENT // 32))
     block_max = tl.max(codes_blk, axis=1)
     shift = tl.reshape(codes_blk - block_max[:, None, :], (BLOCK_K, LATENT // 32))
-    v_mult = ((tl.maximum(shift, -126) + 127) << 23).to(tl.float32, bitcast=True)
+    # fp32 bits, so the per-chunk selects of _widen_v_128 fold (x + 0).
+    v_mult = (tl.maximum(shift, -126) + 127) << 23
     return v_mult, block_max
 
 
 @triton.jit
-def _widen_v_128(
-    row_ptr, valid, v_mult, block_max, CHUNK: tl.constexpr, BLOCK_K: tl.constexpr
-):
+def _load_v_words(word_ptr, CHUNK: tl.constexpr, BLOCK_K: tl.constexpr):
+    """The [BLOCK_K, 16] int32 words of scale groups 4 * CHUNK to 4 * CHUNK + 3."""
+    return tl.reshape(
+        tl.load(
+            word_ptr[:, None, None]
+            + CHUNK * 16
+            + tl.arange(0, 2)[None, :, None] * 8
+            + tl.arange(0, 8)[None, None, :]
+        ),
+        (BLOCK_K, 16),
+    )
+
+
+@triton.jit
+def _widen_v_128(words, v_mult, block_max, CHUNK: tl.constexpr, BLOCK_K: tl.constexpr):
     """V for the 128 dims of scale groups 4 * CHUNK to 4 * CHUNK + 3, as e4m3.
 
     Returns ``(v_fp8 [BLOCK_K, 128], v_scale [128, BLOCK_K // 32])``: the e2m1
@@ -88,22 +102,11 @@ def _widen_v_128(
     ``tl.join`` interleaves; a wrong pairing still compiles, so the bitwise
     test in ``test_mxfp4_mla_native_decode.py`` guards them.
     """
-    words = tl.reshape(
-        tl.load(
-            row_ptr.to(tl.pointer_type(tl.int32))[:, None, None]
-            + CHUNK * 16
-            + tl.arange(0, 2)[None, :, None] * 8
-            + tl.arange(0, 8)[None, None, :],
-            mask=valid[:, None, None],
-            other=0,
-        ),
-        (BLOCK_K, 16),
-    )
     # The 4 words of one scale group share its multiplier.
     chunk_sel = (tl.arange(0, 4) == CHUNK)[None, :, None]
     mult_c = tl.sum(
-        tl.where(chunk_sel, tl.reshape(v_mult, (BLOCK_K, 4, 4)), 0.0), axis=1
-    )
+        tl.where(chunk_sel, tl.reshape(v_mult, (BLOCK_K, 4, 4)), 0), axis=1
+    ).to(tl.float32, bitcast=True)
     mult_w = tl.reshape(
         tl.broadcast_to(mult_c[:, :, None], (BLOCK_K, 4, 4)), (BLOCK_K, 16)
     )
@@ -141,8 +144,7 @@ def _widen_v_128(
 def _pv_128(
     p_fp8,
     p_scale,
-    row_ptr,
-    valid,
+    words,
     v_mult,
     block_max,
     acc,
@@ -150,18 +152,40 @@ def _pv_128(
     BLOCK_K: tl.constexpr,
 ):
     """Add P @ V over the 128 dims of scale groups 4 * CHUNK to 4 * CHUNK + 3."""
-    v_fp8, v_scale = _widen_v_128(row_ptr, valid, v_mult, block_max, CHUNK, BLOCK_K)
+    v_fp8, v_scale = _widen_v_128(words, v_mult, block_max, CHUNK, BLOCK_K)
     return tl.dot_scaled(p_fp8, p_scale, "e4m3", v_fp8, v_scale, "e4m3", acc=acc)
+
+
+@triton.jit
+def _load_tile(cache_ptr, slot, valid, row_pitch, BLOCK_K: tl.constexpr):
+    """Gather a tile's rows once, as V's words, plus their scales as 4 words.
+
+    Masked rows read row 0 unmasked: a masked load is an exec branch per
+    vector, and the vmcnt waits after such branches drain every load in
+    flight, prefetch included. ``_native_tile`` applies the masked defaults.
+    """
+    row_ptr = cache_ptr + tl.where(valid, slot, 0).to(tl.int64) * row_pitch
+    word_ptr = row_ptr.to(tl.pointer_type(tl.int32))
+    k_scale = tl.load(
+        word_ptr[:, None] + LATENT // 8 + tl.arange(0, LATENT // 128)[None, :]
+    )
+    words_0 = _load_v_words(word_ptr, 0, BLOCK_K)
+    words_1 = _load_v_words(word_ptr, 1, BLOCK_K)
+    words_2 = _load_v_words(word_ptr, 2, BLOCK_K)
+    words_3 = _load_v_words(word_ptr, 3, BLOCK_K)
+    return k_scale, words_0, words_1, words_2, words_3
 
 
 @triton.jit
 def _native_tile(
     q_fp8_t,
     q_scale,
-    cache_ptr,
-    slot,
+    k_scale,
+    words_0,
+    words_1,
+    words_2,
+    words_3,
     valid,
-    row_pitch,
     scale_log2,
     head_mask,
     m_i,
@@ -182,21 +206,20 @@ def _native_tile(
     and that block maximum becomes V's E8M0 scale. P is at most 1, so 2**8 of
     headroom keeps P inside e4m3.
     """
-    row_ptr = cache_ptr + tl.where(valid, slot, 0).to(tl.int64) * row_pitch
-    packed = tl.load(
-        row_ptr[:, None] + tl.arange(0, LATENT // 2)[None, :],
-        mask=valid[:, None],
-        other=0,
-    )
+    # Masked rows (which read row 0): E8M0 127 in each scale byte. Their codes
+    # are left as read: e2m1 is finite, their scores are masked, their P is 0,
+    # and _fold_v_scales gives their V a multiplier of at most 1.
+    k_scale = tl.where(valid[:, None], k_scale, 0x7F7F7F7F)
     # E8M0 255 is NaN and e2m1 has no NaN, so capping the code scrubs it.
     k_scale = tl.minimum(
-        tl.load(
-            row_ptr[:, None] + LATENT // 2 + tl.arange(0, LATENT // 32)[None, :],
-            mask=valid[:, None],
-            other=127,
-        ),
-        254,
+        tl.reshape(_bytes_of_words(k_scale), (BLOCK_K, LATENT // 32)), 254
     ).to(tl.uint8)
+    # QK's codes are the bytes of V's words in chunk-major order.
+    packed = tl.join(
+        tl.join(_bytes_of_words(words_0), _bytes_of_words(words_2)),
+        tl.join(_bytes_of_words(words_1), _bytes_of_words(words_3)),
+    )
+    packed = tl.reshape(tl.permute(packed, (0, 4, 5, 1, 2, 3)), (BLOCK_K, LATENT // 2))
 
     # Tokens on M, so the warps split the tile's tokens instead of each
     # recomputing all of it from the whole K.
@@ -214,16 +237,16 @@ def _native_tile(
     p_scale = tl.full((BLOCK_H, BLOCK_K // 32), 127 - 8, tl.uint8)
     alpha_2d = alpha[:, None]
     acc_0 = _pv_128(
-        p_fp8, p_scale, row_ptr, valid, v_mult, block_max, acc_0 * alpha_2d, 0, BLOCK_K
+        p_fp8, p_scale, words_0, v_mult, block_max, acc_0 * alpha_2d, 0, BLOCK_K
     )
     acc_1 = _pv_128(
-        p_fp8, p_scale, row_ptr, valid, v_mult, block_max, acc_1 * alpha_2d, 1, BLOCK_K
+        p_fp8, p_scale, words_1, v_mult, block_max, acc_1 * alpha_2d, 1, BLOCK_K
     )
     acc_2 = _pv_128(
-        p_fp8, p_scale, row_ptr, valid, v_mult, block_max, acc_2 * alpha_2d, 2, BLOCK_K
+        p_fp8, p_scale, words_2, v_mult, block_max, acc_2 * alpha_2d, 2, BLOCK_K
     )
     acc_3 = _pv_128(
-        p_fp8, p_scale, row_ptr, valid, v_mult, block_max, acc_3 * alpha_2d, 3, BLOCK_K
+        p_fp8, p_scale, words_3, v_mult, block_max, acc_3 * alpha_2d, 3, BLOCK_K
     )
     return m_new, l_new, acc_0, acc_1, acc_2, acc_3
 
@@ -272,6 +295,26 @@ def mxfp4_mla_decode_partial_kernel(
         mask=head_mask[:, None],
         other=0.0,
     )
+    kv_start = tl.load(kv_indptr_ptr + query_idx)
+    kv_len = tl.load(kv_indptr_ptr + query_idx + 1) - kv_start
+    chunk = (kv_len + NUM_SPLITS - 1) // NUM_SPLITS
+    kv_lo = split_id * chunk
+    kv_hi = tl.minimum(kv_lo + chunk, kv_len)
+
+    # Software pipeline by hand (num_stages=2 spills): the next tile's rows
+    # are gathered while this tile runs, and its indices one tile earlier.
+    # The first tile's rows are gathered while Q is quantized.
+    k_offsets = tl.arange(0, BLOCK_K)
+    idx_base = kv_indices_ptr + kv_start
+    next_pos = kv_lo + k_offsets
+    next_slot = tl.load(idx_base + next_pos, mask=next_pos < kv_hi, other=-1)
+    after_pos = next_pos + BLOCK_K
+    after_slot = tl.load(idx_base + after_pos, mask=after_pos < kv_hi, other=-1)
+    next_valid = (next_pos < kv_hi) & (next_slot >= 0) & (next_slot < num_kv)
+    k_scale, words_0, words_1, words_2, words_3 = _load_tile(
+        kv_ptr, next_slot, next_valid, row_pitch, BLOCK_K
+    )
+
     q_val, q_bits = _mxfp8_quantize_rows(q.to(tl.float32), BLOCK_H, LATENT)
     q_fp8_t = tl.trans(q_val.to(tl.float8e4nv))
     q_scale = q_bits.to(tl.uint8)
@@ -285,33 +328,34 @@ def mxfp4_mla_decode_partial_kernel(
     acc_2 = tl.zeros((BLOCK_H, 128), dtype=tl.float32)
     acc_3 = tl.zeros((BLOCK_H, 128), dtype=tl.float32)
 
-    kv_start = tl.load(kv_indptr_ptr + query_idx)
-    kv_len = tl.load(kv_indptr_ptr + query_idx + 1) - kv_start
-    chunk = (kv_len + NUM_SPLITS - 1) // NUM_SPLITS
-    kv_lo = split_id * chunk
-    kv_hi = tl.minimum(kv_lo + chunk, kv_len)
-
-    k_offsets = tl.arange(0, BLOCK_K)
-    next_slot = tl.load(
-        kv_indices_ptr + kv_start + kv_lo + k_offsets,
-        mask=kv_lo + k_offsets < kv_hi,
-        other=-1,
-    )
     for k_start in tl.range(kv_lo, kv_hi, BLOCK_K):
-        k_pos = k_start + k_offsets
-        slot = next_slot
-        next_pos = k_pos + BLOCK_K
-        next_slot = tl.load(
-            kv_indices_ptr + kv_start + next_pos, mask=next_pos < kv_hi, other=-1
+        valid = next_valid
+        cur_k_scale = k_scale
+        cur_0 = words_0
+        cur_1 = words_1
+        cur_2 = words_2
+        cur_3 = words_3
+        # Indices before rows: the in-order vmcnt wait on the indices then
+        # cannot also wait on the rows being prefetched.
+        next_pos = after_pos
+        next_slot = after_slot
+        after_pos = next_pos + BLOCK_K
+        after_slot = tl.load(
+            idx_base + after_pos, mask=after_pos < kv_hi, other=-1
         )
-        valid = (k_pos < kv_hi) & (slot >= 0) & (slot < num_kv)
+        next_valid = (next_pos < kv_hi) & (next_slot >= 0) & (next_slot < num_kv)
+        k_scale, words_0, words_1, words_2, words_3 = _load_tile(
+            kv_ptr, next_slot, next_valid, row_pitch, BLOCK_K
+        )
         m_i, l_i, acc_0, acc_1, acc_2, acc_3 = _native_tile(
             q_fp8_t,
             q_scale,
-            kv_ptr,
-            slot,
+            cur_k_scale,
+            cur_0,
+            cur_1,
+            cur_2,
+            cur_3,
             valid,
-            row_pitch,
             scale_log2,
             head_mask,
             m_i,

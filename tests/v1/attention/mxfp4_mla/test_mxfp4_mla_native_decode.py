@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.mxfp4_mla.decode import (
     TILE_K,
     _fold_v_scales,
+    _load_v_words,
     _widen_v_128,
 )
 
@@ -49,8 +50,10 @@ def _widen_kernel(cache_ptr, valid_ptr, v_ptr, vs_ptr, BLOCK_K: tl.constexpr):
         other=127,
     )
     v_mult, block_max = _fold_v_scales(k_scale, valid, BLOCK_K)
+    word_ptr = row_ptr.to(tl.pointer_type(tl.int32))
     for chunk in tl.static_range(4):
-        v_fp8, v_scale = _widen_v_128(row_ptr, valid, v_mult, block_max, chunk, BLOCK_K)
+        words = _load_v_words(word_ptr, chunk, BLOCK_K)
+        v_fp8, v_scale = _widen_v_128(words, v_mult, block_max, chunk, BLOCK_K)
         dims = chunk * 128 + tl.arange(0, 128)
         tl.store(v_ptr + tokens[:, None] * 512 + dims[None, :], v_fp8.to(tl.float32))
         tl.store(
@@ -64,7 +67,8 @@ def _widen_kernel(cache_ptr, valid_ptr, v_ptr, vs_ptr, BLOCK_K: tl.constexpr):
 def test_widen_v_matches_dequant():
     """Every e2m1 code, scales spread up to 2**8 below their 32-token block's
     maximum (the exact range), and masked tokens: widened e4m3 V times its
-    block scale equals the dequantized row exactly."""
+    block scale equals the dequantized row exactly. Masked tokens' V is
+    unchecked: the decode zeroes their P instead."""
     set_random_seed(0)
     block_k = TILE_K.value
     cache = torch.randint(0, 256, (block_k, ROW), dtype=torch.uint8)
@@ -80,8 +84,8 @@ def test_widen_v_matches_dequant():
 
     # v_scale[d, b] applies to tokens 32b..32b+31 of dim d.
     block_scale = torch.exp2(v_scale.cpu().float() - 127.0).T.repeat_interleave(32, 0)
-    want = _dequantize(cache) * valid[:, None]
-    assert torch.equal(v.cpu() * block_scale, want)
+    kept = valid.bool()
+    assert torch.equal((v.cpu() * block_scale)[kept], _dequantize(cache)[kept])
 
 
 @pytest.mark.parametrize("num_splits", [1, 3, 8])
