@@ -13,3 +13,9 @@ def reset_default_torch_device():
     """
     yield
     torch.set_default_device(None)
+
+
+@pytest.fixture
+def batch_invariant_kernel() -> None:
+    """Require the batch-invariant sparse-attention kernel."""
+    assert hasattr(torch.ops._C, "deterministic_top_k_per_row_prefill")
