@@ -17,8 +17,8 @@ failed retirement. With PyTorch, Triton and a CUDA GPU installed:
 ```
 
 This test does not perform RDMA. A separate, explicitly unsupported
-[legacy research snapshot](https://github.com/foraxe/nixl/tree/dd70c9828b52b0d1bc19c30ad8966600a596cfc5/research/vllm_engram_repro)
+[legacy research snapshot](https://github.com/foraxe/nixl/tree/b5322e46f6e686ff16bdb3afb8a1a940a64e1163/research/vllm_engram_repro)
 contains the matching owner, reader and GPU GET source. It builds with DOCA
-3.1 and has passed a synthetic cross-node READ; a full vLLM 1P1D run using
-that freshly built snapshot remains to be verified. It is not evidence of
-current-SDK support.
+3.1 and a fresh build passed synthetic cross-node READ and a small real vLLM
+1P1D correctness/performance study. It is not evidence of current-SDK or
+production support.
