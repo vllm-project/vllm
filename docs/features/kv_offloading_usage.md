@@ -64,10 +64,8 @@ boundaries, including with decode context parallelism (DCP). Use
 cache groups. Under DCP, each recurrent block must divide the full-attention
 block, and the hash unit must be divisible by the DCP size.
 
-Partial-tail reuse follows the hit alignment resolved by the core prefix
-cache. EAGLE/MTP groups also require their draft-attention proof tokens to be
-available before a checkpoint can be reused, and are not yet supported with
-DCP.
+Partial-tail reuse follows the hit alignment and the EAGLE/MTP hash lookahead
+resolved by the core prefix cache.
 
 ## Single-Tier Setup (CPU Only)
 

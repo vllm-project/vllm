@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     RequestOffloadState,
     SchedulerOffloadConfig,
 )
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_offload.base import OffloadKey
@@ -70,11 +71,11 @@ def select_store_candidates(
     new_offload_keys: list[OffloadKey] = []
     group_store_ranges: list[tuple[int, int]] = []
 
-    apply_eagle_drop = not config.num_hash_lookahead_tokens
     reachable_boundaries: tuple[int, ...] = ()
     if config.retention_interval is not None:
-        reachable_boundaries = (
-            req.num_prompt_tokens - max(1, config.num_hash_lookahead_tokens),
+        reachable_boundaries = replay_boundaries(
+            req.num_prompt_tokens,
+            num_hash_lookahead_tokens=config.num_hash_lookahead_tokens,
         )
         if req.shared_prefix_boundary:
             reachable_boundaries += (req.shared_prefix_boundary,)
@@ -83,7 +84,7 @@ def select_store_candidates(
         config.kv_group_configs, req_status.group_states, start_chunk_idxs
     ):
         num_chunks = req_status.storable_chunks(
-            group_config, group_state, num_offloadable_tokens, apply_eagle_drop
+            group_config, group_state, num_offloadable_tokens
         )
 
         start_chunk_idx = stored_chunk_idx
@@ -97,7 +98,7 @@ def select_store_candidates(
             and config.retention_interval is None
             and final_swa_alignment_blocks is not None
         )
-        if config.retention_interval is not None or group_config.is_eagle_group:
+        if config.retention_interval is not None:
             store_horizon_chunks = None
         elif req.is_finished():
             store_horizon_chunks = num_chunks
@@ -230,9 +231,6 @@ def _reachable_store_block_mask(
         alignment_tokens=config.alignment_tokens,
         block_size=group_config.block_size,
         manager_config=manager_config,
-        use_eagle=(
-            group_config.is_eagle_group and config.num_hash_lookahead_tokens == 0
-        ),
         retention_interval=config.retention_interval,
         reachable_boundaries=reachable_boundaries,
         dcp_world_size=config.dcp_world_size,
@@ -247,11 +245,10 @@ def _reachable_store_block_mask(
 def _final_swa_alignment_blocks(
     config: SchedulerOffloadConfig, group_config: GroupOffloadConfig
 ) -> int | None:
-    """Return representable final-tail alignment for a non-EAGLE SWA group."""
+    """Return representable final-tail alignment for a SWA group."""
     alignment_tokens = config.alignment_tokens
     if (
         alignment_tokens is None
-        or group_config.is_eagle_group
         or not issubclass(group_config.manager_cls, SlidingWindowManager)
         or alignment_tokens % group_config.tokens_per_block != 0
     ):
