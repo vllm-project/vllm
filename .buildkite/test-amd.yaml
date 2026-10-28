@@ -5791,8 +5791,8 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_2
-  num_gpus: 2
+  agent_pool: mi355_4
+  num_gpus: 4
   optional: true
   working_dir: "/vllm-workspace"
   source_file_dependencies:
