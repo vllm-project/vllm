@@ -20,6 +20,8 @@ from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
+from vllm.config.load import LoadConfig
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
@@ -43,6 +45,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import (  # noqa: E501
+    nvfp4_moe_activation_key,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
     CompressedTensorsW8A8Fp8MoEMethod,
 )
@@ -55,8 +60,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kMxfp8Dynamic,
+    kNvfp4Dynamic,
+    kNvfp4DynamicToken,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -373,6 +382,48 @@ def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
         hidden_states = model(input_ids, positions, None)
         logits = model.compute_logits(hidden_states)
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.parametrize("per_token", [False, True])
+def test_compressed_tensors_moe_activation_override(per_token):
+    """Runtime overrides reach the config without changing HF metadata."""
+    hf_config = {"quant_method": "compressed-tensors", "config_groups": {}}
+    args = (
+        QuantizationConfigArgs(moe={"activation": "nvfp4_per_token"})
+        if per_token
+        else None
+    )
+    config = get_quant_config(
+        Mock(
+            quantization="compressed-tensors",
+            quantization_config=args,
+            hf_config=Mock(quantization_config=hf_config),
+        ),
+        LoadConfig(),
+    )
+    assert isinstance(config, CompressedTensorsConfig)
+    assert config.moe_activation_override == (kNvfp4DynamicToken if per_token else None)
+    assert "_online_quantization_args" not in hf_config
+    assert "_online_quantization_args" not in config.config
+
+
+@pytest.mark.parametrize(
+    "use_a16,activation,expected,error",
+    [
+        (False, None, kNvfp4Dynamic, None),
+        (False, kNvfp4DynamicToken, kNvfp4DynamicToken, None),
+        (True, kNvfp4DynamicToken, None, "W4A4 checkpoint"),
+        (False, kMxfp8Dynamic, None, "Unsupported.*activation override"),
+    ],
+)
+def test_compressed_tensors_nvfp4_moe_activation_key(
+    use_a16, activation, expected, error
+):
+    if error:
+        with pytest.raises(ValueError, match=error):
+            nvfp4_moe_activation_key(use_a16, activation)
+    else:
+        assert nvfp4_moe_activation_key(use_a16, activation) == expected
 
 
 def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
