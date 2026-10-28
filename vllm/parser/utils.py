@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.parser.engine.parser_engine_config import ArgValueExtender
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
@@ -148,3 +149,102 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
         elif ch in "}]":
             depth -= 1
     return None
+
+
+def scan_json_value_extender(raw: str, start: int = 0) -> ArgValueExtender | None:
+    """Return an `O(|delta|)` extender when the JSON object starting at
+    `raw[start]` is still open and ends inside a string value.
+
+    While streaming inside a top-level string value of the object, raw delta
+    characters up to an unescaped closing `"` extend the safe prefix
+    directly; inside a nested string at `depth >= 2` (where
+    `open_value_streams` is `False`), the same extender skips per-character
+    conversion until the string closes.
+
+    Args:
+        raw: Buffer containing the (possibly incomplete) JSON text.
+        start: Index of the opening `{` of the JSON object in `raw`.
+
+    Returns:
+        An `ArgValueExtender` closure if `raw` ends inside an open string
+        value of the object at `raw[start:]`, or `None` otherwise.
+
+    """
+    if start >= len(raw) or raw[start] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    after_colon = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+                if depth == 1:
+                    after_colon = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                return None
+            if depth == 1:
+                after_colon = False
+        elif depth == 1:
+            if ch == ":":
+                after_colon = True
+            elif ch not in _JSON_WS:
+                after_colon = False
+
+    if not (depth >= 1 and after_colon and in_string):
+        return None
+
+    pending_escape = escape
+
+    def extend(delta: str) -> str | None:
+        nonlocal pending_escape
+        esc = pending_escape
+        for ch in delta:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                return None
+        pending_escape = esc
+        return delta
+
+    return extend
+
+
+def json_member_value_extender(raw: str, key: str) -> ArgValueExtender | None:
+    """Return an `O(|delta|)` extender when the top-level object member
+    `key` in `raw` ends inside an open JSON string value.
+
+    Args:
+        raw: Tool-call wrapper JSON prefix (e.g. `{"name":..,"arguments":{..`).
+        key: Top-level member name whose JSON object holds the tool arguments.
+
+    Returns:
+        An `ArgValueExtender` closure if `key`'s object value is open inside
+        a string value, or `None` otherwise.
+
+    """
+    try:
+        span = extract_json_member_object(raw, key)
+    except ValueError:
+        return None
+    if span is None:
+        return None
+    return scan_json_value_extender(span)
