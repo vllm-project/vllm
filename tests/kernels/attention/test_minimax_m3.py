@@ -2016,6 +2016,93 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+@pytest.mark.parametrize("context_len", [200, 2048], ids=["one-shot", "split"])
+def test_aiter_sparse_pa_fp8_kv_matches_fp32_reference(context_len):
+    """FP8 KV must leave Q and P in BF16.
+
+    Against fp32 attention on the dequantized cache, only BF16 roundings of P,
+    of the per-partition outputs and of the output remain (2^-9 each), so
+    |out - ref| <= 2^-8 * sum_i p_i |v_i| + 2^-9 * |ref|. The test allows
+    twice that. Casting Q to e4m3 (2^-4) moves logits of magnitude ~10 by
+    ~0.1 and exceeds it.
+    """
+    pytest.importorskip("aiter")
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        ASM_PAGE_SIZE,
+        minimax_m3_sparse_attn_decode_aiter,
+    )
+    from vllm.platforms.rocm import on_mi3xx
+
+    if not on_mi3xx():
+        pytest.skip("AITER Gluon paged attention needs gfx942 or gfx950")
+    set_random_seed(0)
+    fp8 = current_platform.fp8_dtype()
+    num_tokens, num_heads, x = 4, 16, 16
+    pages = (context_len + ASM_PAGE_SIZE - 1) // ASM_PAGE_SIZE
+    num_pages = num_tokens * pages + 3
+    # Q has the RMS (~1.5) the model's per-head QK norm gives; K * 2 spreads
+    # the logits over about +-10, as measured on MiniMax-M3.
+    q = (1.5 * torch.randn(num_tokens, num_heads, HEAD_DIM, device="cuda")).bfloat16()
+    k = 2 * torch.randn(num_pages * ASM_PAGE_SIZE, HEAD_DIM, device="cuda")
+    v = torch.randn(num_pages * ASM_PAGE_SIZE, HEAD_DIM, device="cuda")
+    k_scale = (k.abs().amax() / torch.finfo(fp8).max).reshape(1)
+    v_scale = (v.abs().amax() / torch.finfo(fp8).max).reshape(1)
+    k8, v8 = (k / k_scale).to(fp8), (v / v_scale).to(fp8)
+    k_cache = (
+        k8.view(num_pages, ASM_PAGE_SIZE, HEAD_DIM // x, x)
+        .permute(0, 2, 1, 3)
+        .contiguous()
+        .unsqueeze(1)
+    )
+    v_cache = (
+        v8.view(num_pages, ASM_PAGE_SIZE // x, x, HEAD_DIM)
+        .permute(0, 1, 3, 2)
+        .contiguous()
+        .unsqueeze(1)
+    )
+    block_table = (
+        torch.randperm(num_pages, device="cuda")[: num_tokens * pages]
+        .view(num_tokens, pages)
+        .int()
+    )
+    context_lens = torch.tensor(
+        [context_len - 7 * i for i in range(num_tokens)],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    sm_scale = HEAD_DIM**-0.5
+    out = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode_aiter(
+        q,
+        k_cache,
+        v_cache,
+        None,
+        None,
+        None,
+        1,
+        sm_scale,
+        out,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        sparse_block_table=block_table,
+        sparse_context_lens=context_lens,
+    )
+
+    kd, vd = k8.float() * k_scale, v8.float() * v_scale
+    offsets = torch.arange(ASM_PAGE_SIZE, device="cuda")
+    for t, n in enumerate(context_lens.tolist()):
+        tokens = (block_table[t, :, None] * ASM_PAGE_SIZE + offsets).flatten()[:n]
+        p = torch.softmax(q[t].float() @ kd[tokens].T * sm_scale, dim=-1)
+        ref = p @ vd[tokens]
+        bound = 2 * (2**-8 * (p @ vd[tokens].abs()) + 2**-9 * ref.abs())
+        err = (out[t].float() - ref).abs()
+        assert (err <= bound).all(), f"row {t}: max err / bound {(err / bound).max()}"
+
+
 def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     """The top-k emits the attend's page table, so it needs that attend.
 

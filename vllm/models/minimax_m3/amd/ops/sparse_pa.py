@@ -532,7 +532,6 @@ def _run_gluon_decode(
     k_scale: torch.Tensor | None,
     v_scale: torch.Tensor | None,
 ) -> None:
-    from aiter import dtypes as aiter_dtypes
     from aiter.ops.triton.gluon.pa_decode_gluon import (
         get_recommended_splits,
         pa_decode_gluon,
@@ -580,7 +579,6 @@ def _run_gluon_decode(
     )
 
     is_fp8 = _is_fp8_kv_cache_tensor(k_cache)
-    compute_type = aiter_dtypes.fp8 if is_fp8 else q.dtype
     if is_fp8:
         if sides_packed and not all(
             scale is None or scale.numel() == 1 for scale in (k_scale, v_scale)
@@ -610,7 +608,8 @@ def _run_gluon_decode(
         query_length=1,
         max_context_partition_num=max_context_partition_num,
         context_partition_size=context_partition_size,
-        compute_type=compute_type,
+        # FP8 compute would round Q and P to e4m3 at no speedup.
+        compute_type=q.dtype,
         query_scale=None,
         key_scale=k_scale_arg,
         value_scale=v_scale_arg,
