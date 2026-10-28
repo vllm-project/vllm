@@ -1411,6 +1411,43 @@ def test_acceptor_start_failure_rolls_back_unix_listener(
         server.stop()
 
 
+def test_normal_stop_racing_accept_closure_does_not_fence_server(adapter, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    class ClosingSocket(socket.socket):
+        def accept(self):
+            entered.set()
+            assert release.wait(2)
+            raise ConnectionClosed("listener closed before accepting")
+
+    monkeypatch.setattr(socket, "socket", ClosingSocket)
+    server = RemoteDraftServer(adapter)
+    server.start("tcp://127.0.0.1:0")
+    errors = []
+
+    def stop():
+        try:
+            server.stop()
+        except BaseException as error:
+            errors.append(error)
+
+    stopper = threading.Thread(target=stop)
+    try:
+        assert entered.wait(2)
+        stopper.start()
+        assert server.wait(2)
+        release.set()
+        stopper.join(2)
+        assert not stopper.is_alive()
+        assert not errors
+        assert not server._shutdown_failed
+    finally:
+        release.set()
+        if stopper.ident is not None:
+            stopper.join(2)
+        server.stop()
+
+
 def test_stop_closes_connection_accepted_before_registration(adapter, monkeypatch):
     accepted = threading.Event()
     register = threading.Event()

@@ -882,6 +882,10 @@ class RemoteDraftServer:
                         retries += 1
                         continue
                     raise
+                except ConnectionClosed:
+                    if self._stopping.is_set():
+                        return
+                    raise
                 retries = 0
                 with self._connections_lock:
                     reject = (
