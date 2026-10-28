@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Balanced MoE routing for benchmarks with dummy weights.
+"""Synthetic MoE routing for forward benchmarks.
 
 Dummy gate weights give degenerate routing, which skews MoE and all-to-all
 cost. The routing still runs; its result is replaced by the fixture at
@@ -18,10 +18,13 @@ take `topk_ids`.
 """
 
 import inspect
+import zlib
 
 import numpy as np
 import torch
 
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
@@ -54,11 +57,41 @@ def balanced_topk_ids(
     return ranks * local + (offset + repeat) % local
 
 
+def zipf_topk_ids(
+    num_tokens: int, num_experts: int, top_k: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Sample distinct experts per token with Zipf(alpha=1.25) popularity."""
+    expert_ids = rng.permutation(num_experts)
+    inverse_weights = np.arange(1, num_experts + 1, dtype=np.float64) ** 1.25
+    ids = np.empty((num_tokens, top_k), dtype=np.int64)
+    for start in range(0, num_tokens, 1024):
+        count = min(1024, num_tokens - start)
+        # Exponential races sample weighted top-k without replacement.
+        scores = rng.exponential(size=(count, num_experts)) * inverse_weights
+        selected = np.argpartition(scores, top_k - 1, axis=1)[:, :top_k]
+        ids[start : start + count] = expert_ids[selected]
+    return ids
+
+
+def _fixture_rows(fixture: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """Select this rank's rows when the model shards tokens across TP ranks."""
+    descriptor = get_forward_context().batch_descriptor
+    offset = 0
+    if descriptor is not None:
+        tp = get_tp_group()
+        full = descriptor.num_tokens
+        if num_tokens < full and num_tokens == -(-full // tp.world_size):
+            offset = tp.rank_in_group * num_tokens
+    return fixture[offset : offset + num_tokens]
+
+
 def _moe_layers(model: torch.nn.Module) -> list[tuple[torch.nn.Module, GateLinear]]:
     """(MoE module, gate) per layer, in model order."""
     layers: dict[GateLinear, torch.nn.Module] = {}
     for module in model.modules():
         gate = getattr(module, "gate", None)
+        if not isinstance(gate, GateLinear):
+            gate = getattr(module, "router", None)
         if not isinstance(gate, GateLinear) or gate in layers:
             continue
         if _top_k(module) is not None:
@@ -76,8 +109,8 @@ def _top_k(module: torch.nn.Module) -> int | None:
     return None
 
 
-class BalancedRouting:
-    """Installs balanced routing for one case; `remove()` restores the model."""
+class RoutingFixture:
+    """Installs synthetic routing for one case; `remove()` restores the model."""
 
     def __init__(
         self,
@@ -88,6 +121,7 @@ class BalancedRouting:
         ep_size: int,
         seed: int,
         device: torch.device,
+        mode: str,
     ):
         layers = _moe_layers(model)
         if not layers:
@@ -101,14 +135,22 @@ class BalancedRouting:
         rows = -(-num_tokens // 256) * 256 + 256
         for layer, (module, gate) in enumerate(layers):
             if (getattr(module, "num_expert_group", None) or 1) > 1:
-                raise NotImplementedError("Balanced routing with grouped top-k.")
+                raise NotImplementedError("Synthetic routing with grouped top-k.")
             num_experts = gate.weight.shape[0]
             top_k = _top_k(module)
             assert top_k is not None
-            rng = np.random.default_rng([seed, layer])
-            ids = balanced_topk_ids(rows * dp_size, num_experts, top_k, ep_size, rng)[
-                dp_rank * rows : (dp_rank + 1) * rows
-            ]
+            layer_seed = layer
+            if mode == "zipf" and gate.prefix:
+                # Preserve layer popularity when pipeline stages change.
+                layer_seed = zlib.crc32(gate.prefix.encode())
+            rng = np.random.default_rng([seed, layer_seed])
+            if mode == "zipf":
+                ids = zipf_topk_ids(rows * dp_size, num_experts, top_k, rng)
+            else:
+                ids = balanced_topk_ids(
+                    rows * dp_size, num_experts, top_k, ep_size, rng
+                )
+            ids = ids[dp_rank * rows : (dp_rank + 1) * rows]
             logits = torch.full((rows, num_experts), _OTHER_LOGIT, dtype=torch.float32)
             logits.scatter_(1, torch.from_numpy(ids), _CHOSEN_LOGIT)
             # Distinct values: no ties for any top-k implementation.
@@ -121,6 +163,8 @@ class BalancedRouting:
             bias = getattr(gate, "e_score_correction_bias", None)
             if bias is None:
                 bias = getattr(module, "e_score_correction_bias", None)
+            if bias is None:
+                bias = getattr(module, "expert_bias", None)
             if isinstance(bias, torch.Tensor):
                 self._biases.append((bias, bias.detach().clone()))
                 bias.data.zero_()
@@ -149,7 +193,7 @@ class BalancedRouting:
             logits = output[0] if isinstance(output, tuple) else output
             if cast[0].dtype != logits.dtype:
                 cast[0] = fixture.to(logits.dtype)  # Once, at warmup.
-            replaced = cast[0][: logits.shape[0]]
+            replaced = _fixture_rows(cast[0], logits.shape[0])
             return (replaced, *output[1:]) if isinstance(output, tuple) else replaced
 
         return hook
@@ -163,7 +207,7 @@ class BalancedRouting:
             ids = kwargs["topk_ids"] if "topk_ids" in kwargs else args[index]
             if cast[0].dtype != ids.dtype:
                 cast[0] = fixture.to(ids.dtype)  # Once, at warmup.
-            replaced = cast[0][: ids.shape[0]]
+            replaced = _fixture_rows(cast[0], ids.shape[0])
             if "topk_ids" in kwargs:
                 return args, {**kwargs, "topk_ids": replaced}
             return (*args[:index], replaced, *args[index + 1 :]), kwargs
@@ -179,7 +223,7 @@ class BalancedRouting:
         ]
         if missed:
             raise RuntimeError(
-                f"Balanced routing didn't reach {len(missed)} MoE layers "
+                f"Synthetic routing didn't reach {len(missed)} MoE layers "
                 f"({missed[0]}): their gate is fused away. Use --routing real."
             )
 
@@ -192,15 +236,15 @@ class BalancedRouting:
 
 def install_routing(
     runner, requested: str, dummy_weights: bool, num_tokens: int, seed: int
-) -> tuple[str, BalancedRouting | None]:
-    """Resolve `--routing` and install balanced routing if selected.
+) -> tuple[str, RoutingFixture | None]:
+    """Resolve `--routing` and install a synthetic fixture if selected.
 
-    `auto` is balanced with dummy weights and real otherwise; it falls back to
+    `auto` is Zipf with dummy weights and real otherwise; it falls back to
     real routing when the model doesn't support the fixture.
     """
     mode = requested
     if mode == "auto":
-        mode = "balanced" if dummy_weights else "real"
+        mode = "zipf" if dummy_weights else "real"
     if mode == "real":
         return mode, None
     parallel = runner.parallel_config
@@ -215,7 +259,9 @@ def install_routing(
     if not parallel.enable_expert_parallel:
         num_tokens *= parallel.prefill_context_parallel_size
     try:
-        routing = BalancedRouting(
+        if mode == "zipf" and parallel.prefill_context_parallel_size > 1:
+            raise NotImplementedError("Zipf routing with prefill context parallelism.")
+        routing = RoutingFixture(
             runner.model,
             num_tokens,
             runner.dp_rank,
@@ -223,9 +269,10 @@ def install_routing(
             ep_size,
             seed,
             runner.device,
+            mode,
         )
     except (ValueError, NotImplementedError) as e:
-        if requested == "balanced":
+        if requested != "auto":
             raise
         logger.warning("Using real routing: %s", e)
         return "real", None

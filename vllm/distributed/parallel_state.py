@@ -1692,7 +1692,7 @@ def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
@@ -1704,12 +1704,14 @@ def graph_capture(device: torch.device):
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
+    A given ``stream`` is reused instead, so graphs captured on it share the
+    caching allocator's free blocks of the graph pool.
     """
     from vllm.device_allocator.alloc_conf import non_expandable_allocations
     from vllm.platforms import current_platform
 
     tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    context = GraphCaptureContext(stream or torch.cuda.Stream(device=device))
     # Let AITER all-reduce register captured buffers instead of copying them.
     # Not with DP AITER collectives: they reduce workspaces allocated earlier.
     non_expandable = (

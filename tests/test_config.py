@@ -354,6 +354,27 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
         config._reject_mismatched_float_kv_cache()
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
+    # the combination fails at startup instead of on the first request that
+    # carries cached context.
+    kwargs = dict(
+        cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+        ),
+    )
+    if dcp_size > 1:
+        with pytest.raises(ValueError, match="decode context parallelism"):
+            VllmConfig(**kwargs)
+    else:
+        VllmConfig(**kwargs)
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
@@ -601,7 +622,11 @@ def test_hisparse_requires_v2_model_runner():
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="decode context parallelism"):
         VllmConfig(
@@ -614,7 +639,11 @@ def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
 
 
 def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="pipeline parallelism"):
         VllmConfig(
@@ -624,7 +653,11 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 
 
 def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
@@ -635,7 +668,11 @@ def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
 
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
@@ -649,7 +686,11 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
 
 
 def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -661,9 +702,9 @@ def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
         )
 
 
-def test_hisparse_rejects_non_cuda(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
-    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+def test_hisparse_rejects_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(current_platform, "get_hisparse_backend_cls", lambda: None)
+    with pytest.raises(ValueError, match="platform does not support HiSparse"):
         VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
 
@@ -711,7 +752,11 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
     ids=["standalone", "multi-connector", "pd-decode"],
 )
 def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
@@ -727,7 +772,11 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
 
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         attention_config=AttentionConfig(
@@ -747,9 +796,9 @@ def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
     assert config.attention_config.hisparse_config.device_buffer_size == 512
 
 
-def test_hisparse_connector_without_cuda_still_rejected(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
-    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+def test_hisparse_connector_with_unsupported_platform_rejected(monkeypatch):
+    monkeypatch.setattr(current_platform, "get_hisparse_backend_cls", lambda: None)
+    with pytest.raises(ValueError, match="platform does not support HiSparse"):
         VllmConfig(
             kv_transfer_config=KVTransferConfig(
                 kv_connector="HiSparseConnector",

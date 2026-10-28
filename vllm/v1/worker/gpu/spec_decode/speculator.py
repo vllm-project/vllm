@@ -277,8 +277,12 @@ class DraftModelSpeculator(BaseSpeculator):
         rows of the requests it owns, at row
         req_state_idx // draft_logits_num_shards.
         """
+        parallel_config = self.vllm_config.parallel_config
         if (
             batch_sharded_sampling_enabled(self.vllm_config, target_model)
+            # PCPManager.sync_drafts indexes the draft logits by request state,
+            # so it must see every request's logits.
+            and parallel_config.prefill_context_parallel_size == 1
             and self.draft_watermarker is None
             and self.supports_batch_sharded_draft_logits()
         ):
@@ -608,6 +612,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
+            max_query_len=num_query_per_req,
             eager=False,
         ), num_batch_tokens
 
