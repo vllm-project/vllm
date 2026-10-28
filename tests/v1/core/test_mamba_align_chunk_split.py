@@ -169,7 +169,7 @@ def _split(
         (3602, 2000, False, MAMBA_BLOCK_SIZE),
         (3602, 3602, True, 3602),
         (2002, 2002, True, 2002),
-        (3602, 512, True, 512),
+        (3602, 512, True, 0),
         (3602, 1700, True, MAMBA_BLOCK_SIZE),
     ],
 )
@@ -184,6 +184,26 @@ def test_internal_checkpoint_split(
             use_eagle=use_eagle,
             num_prefill_checkpoint_blocks=1,
         )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("token_budget", "expected"),
+    [
+        (16384, 0),
+        (4 * MAMBA_BLOCK_SIZE, 0),
+        (4 * MAMBA_BLOCK_SIZE - 1, 512),
+    ],
+)
+def test_sub_block_chunk_only_when_block_exceeds_quarter_of_budget(
+    token_budget: int, expected: int
+) -> None:
+    """A chunk that cannot reach its block boundary is deferred unless the block
+    is more than a quarter of the prefill budget."""
+    (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
+    assert (
+        _split(request, 512, use_eagle=False, max_num_scheduled_tokens=token_budget)
         == expected
     )
 

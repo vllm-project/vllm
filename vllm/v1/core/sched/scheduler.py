@@ -596,13 +596,19 @@ class Scheduler(SchedulerInterface):
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances
-        # to the boundary. A chunk that cannot reach the next boundary advances
-        # sub-block and re-aligns there (the mid-block stop below), rather than
-        # idling the budget: with blocks of a third of the token budget or more,
-        # deferring left up to a block of every step's budget unused.
+        # to the boundary. A chunk that cannot reach the next boundary is
+        # deferred, unless the block exceeds a quarter of the prefill budget:
+        # then deferring idles a large share of every step, so the chunk
+        # advances sub-block and re-aligns there (the mid-block stop below).
+        # With smaller blocks the extra re-align step costs more than the
+        # sub-block chunk recovers.
         if end < prefill_end:
+            max_prefill_tokens = self.max_num_scheduled_tokens
+            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            if long_prefill_threshold > 0:
+                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
             aligned_end = end // block_size * block_size
-            if aligned_end > start:
+            if aligned_end > start or 4 * block_size <= max_prefill_tokens:
                 end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
