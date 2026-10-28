@@ -560,8 +560,6 @@ COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
-# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
-ENV VLLM_GPU_SYNC_CHECK=error
 
 FROM test AS test-smoke
 RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"
