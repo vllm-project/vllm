@@ -77,7 +77,7 @@ class ChatMessage(OpenAIBaseModel):
     role: str
     content: str | None = None
     refusal: str | None = None
-    annotations: OpenAIAnnotation | None = None
+    annotations: list[OpenAIAnnotation] | None = None
     audio: OpenAIChatCompletionAudio | None = None
     function_call: FunctionCall | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -90,6 +90,8 @@ class ChatMessage(OpenAIBaseModel):
         data = handler(self)
         if len(data.get("tool_calls", [])) == 0:
             data.pop("tool_calls", None)
+        if data.get("annotations") is None:
+            data.pop("annotations", None)
         return data
 
 
