@@ -33,6 +33,9 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import get_cdna_version
+
 logger = init_logger(__name__)
 
 # num_kv_splits selection (shared by forward_mqa and the workspace reservation
@@ -77,9 +80,11 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
-    # Every row of a non-causal block sees the same committed prefix, so the
-    # rank-local seq_lens fully describe it under DCP. Only validated on ROCm.
-    supports_non_causal_multi_token_dcp: ClassVar[bool] = current_platform.is_rocm()
+    # Every row of a non-causal block has the same KV extent, so the
+    # rank-local seq_lens fully describe it under DCP. Only validated on gfx942.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = (
+        current_platform.is_rocm() and get_cdna_version() == 3
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -323,7 +328,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 )
                 seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten().clamp(min=0)
             else:
-                # Non-causal draft block: every row sees the same prefix.
+                # Non-causal draft block: every row has the same KV extent.
                 seq_lens = seq_lens.repeat_interleave(query_len)
 
         # Run MQA — always pass layer scales. When KV cache is
