@@ -58,7 +58,9 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
 @pytest.mark.parametrize(
     "name,n,k,num_tokens",
     [(*s, m) for s in V41_ATTN_SHAPES for m in (1, 2, 7, 16, 31, 32, 128, 1024)]
-    + [(*s, m) for s in M3_TP4_SHAPES for m in (16, 17, 32, 33, 48, 64, 65)],
+    + [(*s, m) for s in M3_TP4_SHAPES for m in (16, 17, 32, 33, 48, 64, 65)]
+    # wq_b's K=1280 on the 64-row tile, and the largest tile (M3 qkv at TP=2)
+    + [("wq_b", 64 * 512 // 4, 1280, 48), ("qkv_tp2", 4992, 6144, 32)],
     ids=lambda v: str(v),
 )
 @torch.inference_mode()
