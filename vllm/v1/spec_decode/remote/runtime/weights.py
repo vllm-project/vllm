@@ -96,9 +96,14 @@ def materialize_target_shell(
         "nemotron_h",
         "nemotron_h_puzzle",
     ):
-        # Matches NemotronHForCausalLM.hf_to_vllm_mapper. Converted checkpoints
-        # may already use the native module name; never choose between both.
-        embedding_names = ("backbone.embeddings.weight", *embedding_names)
+        # Match the independent prefix and embedding-name mappings in the
+        # native loader, including partially converted checkpoints.
+        embedding_names = (
+            "backbone.embeddings.weight",
+            "backbone.embed_tokens.weight",
+            "model.embeddings.weight",
+            *embedding_names,
+        )
     tied = getattr(model_config.hf_config, "tie_word_embeddings", False)
     names = embedding_names if tied else (*embedding_names, "lm_head.weight")
     tensors = selected_checkpoint_weights(source, revision, names)
