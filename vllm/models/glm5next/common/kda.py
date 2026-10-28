@@ -359,7 +359,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
         )
-        if self.kda_prefill_backend != "flashkda":
+        if self.kda_prefill_backend == "triton":
             l2norm_fwd_block.register_warmup(
                 dtype=vllm_config.model_config.dtype,
                 dim=self.head_dim,
