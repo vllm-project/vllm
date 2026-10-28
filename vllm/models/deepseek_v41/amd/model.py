@@ -11,6 +11,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_engram_dp_size,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -58,6 +59,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -67,7 +69,13 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import Engram, EngramLayout, NgramHashState
+from ..common.engram import (
+    Engram,
+    EngramLayout,
+    NgramHashState,
+    can_share_engram_tables,
+    gather_engram_hashes,
+)
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -77,6 +85,10 @@ logger = init_logger(__name__)
 
 
 class DeepseekV4MoE(DeepseekV4MoEBase):
+    # TODO: revert once https://github.com/ROCm/aiter/pull/6598 is in the
+    # pinned AITER; with the padding set, its FlyDSL MoE can output NaN.
+    experts_intermediate_pad = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -140,13 +152,25 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
+        )
     backend = vllm_config.attention_config.backend
-    if backend is not None and (
-        backend is not AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4
+    if backend is not None and backend not in (
+        AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
+        AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV41,
     ):
         raise ValueError(
             f"{backend.name} is not supported for DeepSeek V4.1 on ROCm; "
-            "use ROCM_FLASHMLA_SPARSE_DSV4."
+            "use ROCM_FLASHMLA_SPARSE_DSV41."
+        )
+    if backend is AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4:
+        # TODO: Remove DSV4 compatibility after a deprecation period.
+        logger.warning_once(
+            "ROCM_FLASHMLA_SPARSE_DSV4 is deprecated for DeepSeek V4.1 "
+            "and will be removed in a future release. "
+            "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
     return DeepseekV41ROCMAiterMLAAttention
 
@@ -309,9 +333,19 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                # When layer 0 is a whole mono layer (gfx942), the
+                # entry seam projects the expanded residual with the
+                # unfolded hc_attn_fn, as K1 does, instead of the embedding
+                # with the folded copy. The hc copies are equal, so the
+                # products are the same and only their order of addition
+                # changes, and pre_mix None still selects copy 0 as the
+                # layer input. The AITER op mhc_pre_delayed_aiter takes this
+                # form. The folded form has no AITER kernel on gfx942 and runs
+                # the eager reference instead, about 120 small kernels a step.
+                unfolded = self.mono is not None and self.mono.unfolded_entry
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
-                    self.hc_attn_fn_broadcast,
+                    self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
                     self.hc_attn_base,
                     self.rms_norm_eps,
@@ -319,7 +353,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_eps,
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
-                    x=x,
+                    x=None if unfolded else x,
                 )
             else:
                 residual = x
@@ -520,6 +554,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        self.engram_dp_shared_memory = False
+        if self.engram_layout is not None:
+            engram_config = vllm_config.engram_config
+            if engram_config is not None and engram_config.dp_shared_memory:
+                engram_config.dp_shared_memory = can_share_engram_tables(
+                    self.engram_layout
+                )
+                self.engram_dp_shared_memory = engram_config.dp_shared_memory
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -562,6 +604,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
+                lambda: any(i < cut for i in self.aux_hidden_state_layers),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
@@ -602,10 +645,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.mhc_post = MHCPostOp()
 
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -709,12 +749,21 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     swa_metadata.slot_mapping,
                     swa_metadata.block_table,
                 )
+            elif not self.engram_dp_shared_memory and get_engram_dp_size() > 1:
+                # DP-sharded lookups are collective, so a replica skipping the
+                # hash still has to reach them.
+                engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
+            if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
+                # One gather feeds every layer sharing the DP-split table.
+                gathered_hashes = gather_engram_hashes(
+                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+                )
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     engram = getattr(layer, "engram", None)
                     if engram is not None:
                         engram.prepare_embeddings(
-                            engram_hashes[:, engram.layer_hash_index]
+                            gathered_hashes[:, engram.layer_hash_index]
                         )
 
         full_num_tokens = positions.shape[0]
