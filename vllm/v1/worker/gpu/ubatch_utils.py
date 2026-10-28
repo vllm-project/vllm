@@ -347,8 +347,10 @@ class UBatchRunner:
         self.comm_stream = torch.cuda.Stream(device=device)
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
-        # The microbatch threads plus the thread that starts them.
-        self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
+        # Per active count: the microbatch threads plus the thread that starts them.
+        self.ready_barriers = {
+            n: threading.Barrier(n + 1) for n in range(2, self.num_ubatches + 1)
+        }
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
 
@@ -378,7 +380,7 @@ class UBatchRunner:
             else dp_sync_state.uniform_token_count
         )
         ubatch_slices = create_ubatch_slices(
-            input_batch, self.num_ubatches, uniform_token_count
+            input_batch, batch_desc.num_ubatches, uniform_token_count
         )
 
         attn_metadata = []
@@ -484,15 +486,16 @@ class UBatchRunner:
         """
         ubatch_slices = ubatch_state.slices
         assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
-        assert len(ubatch_slices) == self.num_ubatches
+        active_count = len(ubatch_slices)
+        ready_barrier = self.ready_barriers[active_count]
 
         compute_stream = self.capture_stream if for_capture else current_stream()
         ubatch_contexts = make_ubatch_contexts(
-            num_micro_batches=self.num_ubatches,
+            num_micro_batches=active_count,
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
-            ready_barrier=self.ready_barrier,
+            ready_barrier=ready_barrier,
             token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
@@ -540,7 +543,7 @@ class UBatchRunner:
             thread.start()
 
         # Park all threads before the caller starts capture.
-        self.ready_barrier.wait()
+        ready_barrier.wait()
 
         def finish() -> Any:
             try:
@@ -554,9 +557,9 @@ class UBatchRunner:
             if errors:
                 failed = next(iter(errors))
                 raise RuntimeError(
-                    f"Microbatch {failed} of {self.num_ubatches} failed"
+                    f"Microbatch {failed} of {active_count} failed"
                 ) from errors[failed]
-            return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
+            return merge_ubatch_outputs([outputs[i] for i in range(active_count)])
 
         self._pending_finish = finish
         return finish

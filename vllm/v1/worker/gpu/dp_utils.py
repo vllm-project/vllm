@@ -14,7 +14,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    select_num_ubatches,
+)
 
 
 @dataclass(frozen=True)
@@ -125,7 +128,11 @@ def sync_cudagraph_and_dp_padding(
             # Expert all-to-all requires every rank to split and pad equally.
             # Empty microbatches run as dummy batches.
             ubatch_num_tokens = int(num_tokens_across_dp.max())
-            num_ubatches = get_num_ubatches(parallel_config)
+            num_ubatches = select_num_ubatches(
+                parallel_config,
+                int(num_tokens_across_dp.min()),
+                bool(uniform_decode_across_dp),
+            )
             ubatch_desc = None
             if cudagraph_manager is not None:
                 # Match a FULL microbatched CUDA graph, falling back to an eager

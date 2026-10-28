@@ -240,11 +240,17 @@ def maybe_make_prepare_finalize(
 
         all_to_all_args: dict[str, Any] = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
+        buffers = None
+        if get_current_vllm_config().parallel_config.dbo_ubatch_capacity == 3:
+            buffers = [handle] + [
+                all2all_manager.get_handle({"ubatch_id": i}) for i in (1, 2)
+            ]
         prepare_finalize = DeepEPHTPrepareAndFinalize(
             handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            buffers=buffers,
         )
 
     elif moe.use_deepep_ll_kernels:

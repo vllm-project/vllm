@@ -1049,3 +1049,24 @@ def test_too_few_requests_to_align_keeps_midpoint_split():
     input_batch = _make_input_batch([4], [64], _make_buffers())
     first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
     assert first.token_slice.stop == 2
+
+
+def test_bounded_dbo_metadata_switches_two_three_two():
+    """Switch counts without reallocating metadata or changing merged row order."""
+    buffers = _make_buffers()
+    ubatch_buffers = _make_ubatch_buffers(3)
+    pointers = [(q.data_ptr(), s.data_ptr()) for q, s in ubatch_buffers]
+    for count, offset in ((2, 0), (3, 100), (2, 200)):
+        batch = _make_input_batch([7, 5, 6], [17, 25, 36], buffers)
+        batch.input_ids.copy_(torch.arange(18) + offset)
+        outputs = []
+        for index, split in enumerate(create_ubatch_slices(batch, count)):
+            query, seq = ubatch_buffers[index]
+            ubatch = _slice_input_batch(batch, split, query, seq)
+            assert ubatch.query_start_loc.data_ptr() == pointers[index][0]
+            assert ubatch.seq_lens.data_ptr() == pointers[index][1]
+            assert ubatch.query_start_loc[0] == 0
+            assert ubatch.query_start_loc[-1] == split.num_tokens
+            outputs.append(ubatch.input_ids[:, None].clone())
+        assert len(outputs) == count
+        assert torch.equal(merge_ubatch_outputs(outputs)[:, 0], batch.input_ids)

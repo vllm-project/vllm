@@ -577,6 +577,7 @@ class EngineArgs:
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
+    dbo_ubatch_capacity: Literal[2, 3] = ParallelConfig.dbo_ubatch_capacity
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
@@ -1323,6 +1324,9 @@ class EngineArgs:
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--dbo-ubatch-capacity", **parallel_kwargs["dbo_ubatch_capacity"]
+        )
         parallel_group.add_argument(
             "--enable-shm-tensor-arena",
             **parallel_kwargs["enable_shm_tensor_arena"],
@@ -2599,6 +2603,7 @@ class EngineArgs:
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
+            dbo_ubatch_capacity=self.dbo_ubatch_capacity,
             enable_shm_tensor_arena=self.enable_shm_tensor_arena,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,

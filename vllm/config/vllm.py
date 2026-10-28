@@ -3106,6 +3106,8 @@ class VllmConfig:
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
+        if self.parallel_config.dbo_ubatch_capacity == 3:
+            unsupported.append("dual batch overlap with three microbatches")
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
@@ -3276,6 +3278,17 @@ class VllmConfig:
         unsupported: list[str] = []
         model_config = self.model_config
         parallel_config = self.parallel_config
+
+        # Three-way DBO is eager and synchronous only, without drafting.
+        if parallel_config.dbo_ubatch_capacity == 3 and (
+            self.speculative_config is not None
+            or self.scheduler_config.async_scheduling
+            or self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            unsupported.append(
+                "dual batch overlap with three microbatches outside "
+                "--enforce-eager, --no-async-scheduling and no speculative decoding"
+            )
 
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")

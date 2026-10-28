@@ -257,6 +257,12 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+    dbo_ubatch_capacity: Literal[2, 3] = 2
+    """Allocated DBO contexts. The default keeps fixed two-way DBO. Setting 3
+    opts into experimental MRV2 DeepEP HT selection between two and three
+    active microbatches, with three independent native communication buffers.
+    Three is selected when every DP rank has at least three times the relevant
+    DBO token threshold; smaller eligible batches use two."""
     ubatch_size: int = Field(default=0, ge=0)
     """Number of ubatch size."""
 
@@ -667,7 +673,7 @@ class ParallelConfig:
 
     @property
     def num_ubatches(self) -> int:
-        return 2 if self.enable_dbo else self.ubatch_size
+        return self.dbo_ubatch_capacity if self.enable_dbo else self.ubatch_size
 
     @property
     def local_engines_only(self) -> bool:
@@ -1165,6 +1171,14 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
+
+        if self.dbo_ubatch_capacity == 3 and not (
+            self.enable_dbo and self.all2all_backend == "deepep_high_throughput"
+        ):
+            raise ValueError(
+                "dbo_ubatch_capacity=3 requires --enable-dbo and "
+                "--all2all-backend=deepep_high_throughput"
+            )
 
         if (
             self.distributed_executor_backend is not None

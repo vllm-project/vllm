@@ -44,6 +44,7 @@ class SharedExperts(torch.nn.Module):
         moe_config: FusedMoEConfig,
         enable_dbo: bool,
         mk_can_overlap_shared_experts: Callable[[], bool],
+        num_ubatches: int = 2,
     ):
         super().__init__()
 
@@ -52,7 +53,7 @@ class SharedExperts(torch.nn.Module):
         # DBO ubatch id to handle this case.  If DBO is not enabled, the
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
-        self._output: list[torch.Tensor | None] = [None, None]
+        self._output: list[torch.Tensor | None] = [None] * num_ubatches
         self._layer = layer
         self._moe_config = moe_config
 
@@ -79,8 +80,12 @@ class SharedExperts(torch.nn.Module):
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
                 # One pair per DBO ubatch id to sync aux and main stream.
-                self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
-                self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                self._input_ready_event = [
+                    torch.cuda.Event() for _ in range(num_ubatches)
+                ]
+                self._output_ready_event = [
+                    torch.cuda.Event() for _ in range(num_ubatches)
+                ]
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):

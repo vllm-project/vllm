@@ -86,3 +86,25 @@ The `dbo_register_recv_hook` method registers a callback that can be returned by
 The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
 The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
+
+## Experimental bounded microbatch counts (MRV2)
+
+!!! warning "Draft implementation"
+    This has static review and component tests only. Native three-context
+    communication, model outputs and performance have not been qualified.
+
+`--enable-dbo --dbo-ubatch-capacity 3` lets each eager step choose between two
+and three microbatches. The default capacity of two keeps fixed two-way DBO.
+It requires `VLLM_USE_V2_MODEL_RUNNER=1`, `--all2all-backend
+deepep_high_throughput` within one node, `--enforce-eager` and
+`--no-async-scheduling`, without speculative decoding.
+
+The existing DP handshake selects three only when the smallest rank has at
+least three times the relevant decode or prefill DBO token threshold; other
+eligible steps use two. Metadata, workspaces and shared-expert state are sized
+by capacity, while slicing, barriers, threads and merging use the active count.
+
+Each of the three microbatches gets its own native DeepEP HT buffer, cached
+across layers by the existing manager. Each buffer reserves
+`VLLM_DEEPEP_BUFFER_SIZE_MB` MiB (1024 by default), so a rank reserves 3072 MiB
+even on steps that use two microbatches.

@@ -4406,3 +4406,80 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def _make_bounded_dbo_config(*, enforce_eager=True, async_scheduling=False, **parallel):
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="Qwen/Qwen3-30B-A3B",
+            max_model_len=512,
+            enforce_eager=enforce_eager,
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=512,
+            is_encoder_decoder=False,
+            async_scheduling=async_scheduling,
+        ),
+        parallel_config=ParallelConfig(
+            **(
+                {
+                    "enable_dbo": True,
+                    "dbo_ubatch_capacity": 3,
+                    "all2all_backend": "deepep_high_throughput",
+                    "enable_expert_parallel": True,
+                    "data_parallel_size": 2,
+                    "distributed_executor_backend": "mp",
+                    "nnodes": 2,
+                }
+                | parallel
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"all2all_backend": "nixl_ep"},
+        {"all2all_backend": "deepep_low_latency"},
+        {"enable_dbo": False},
+    ],
+)
+def test_bounded_dbo_requires_dbo_with_deepep_ht(overrides):
+    with pytest.raises(ValueError, match="dbo_ubatch_capacity=3 requires"):
+        ParallelConfig(
+            **(
+                {
+                    "enable_dbo": True,
+                    "dbo_ubatch_capacity": 3,
+                    "all2all_backend": "deepep_high_throughput",
+                    "enable_expert_parallel": True,
+                    "data_parallel_size": 2,
+                    "distributed_executor_backend": "mp",
+                }
+                | overrides
+            )
+        )
+
+
+def test_bounded_dbo_supports_eager_synchronous_mrv2(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = _make_bounded_dbo_config()
+    assert config.parallel_config.num_ubatches == 3
+    assert ParallelConfig(enable_dbo=True).num_ubatches == 2
+
+
+@pytest.mark.parametrize(
+    ("runner_v2", "settings", "reason"),
+    [
+        ("1", {"enforce_eager": False}, "three microbatches outside"),
+        ("1", {"async_scheduling": True}, "three microbatches outside"),
+        ("0", {}, "V1 does not support: dual batch overlap with three"),
+    ],
+)
+def test_bounded_dbo_rejects_unsupported_modes(
+    monkeypatch, runner_v2, settings, reason
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", runner_v2)
+    with pytest.raises(ValueError, match=reason):
+        _make_bounded_dbo_config(**settings)

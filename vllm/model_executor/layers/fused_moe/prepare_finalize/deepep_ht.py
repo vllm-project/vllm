@@ -69,9 +69,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,
+        buffers: list[deep_ep.Buffer] | None = None,
     ):
         super().__init__()
-        self.buffer = buffer
+        # One native buffer per microbatch under three-way DBO.
+        self._buffers = buffers or [buffer]
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
@@ -81,10 +83,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. Under DBO microbatching we must track one handle per
         # micro-batch to avoid races between threads.
-        self.handles = [None, None]
+        self.handles = [None] * max(2, len(self._buffers))
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+    @property
+    def buffer(self) -> deep_ep.Buffer:
+        index = dbo_current_ubatch_id() if len(self._buffers) > 1 else 0
+        return self._buffers[index]
 
     def _sync_dbo_comm_if_needed(self) -> None:
         if self.sync_dbo_comm and dbo_enabled():
