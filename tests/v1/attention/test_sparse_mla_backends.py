@@ -287,6 +287,94 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     assert recorded_scale != kv_lora_rank**-0.5
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="trtllm-gen sparse MLA requires SM10x",
+)
+@pytest.mark.parametrize(
+    ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [(128, 64, 128), (256, 0, 256)],
+)
+def test_flashinfer_sparse_mla_attends_tokens_past_grid_limit(
+    default_vllm_config, dist_init, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
+):
+    """trtllm-gen maps each token to gridDim.z (limit 65535); a larger step,
+    e.g. a 64K-token prefill, must still attend every token."""
+    device = torch.device("cuda")
+    num_tokens, num_heads, kv_lora_rank, topk, block_size = (
+        65536 + 4099,
+        16,
+        512,
+        128,
+        64,
+    )
+    head_size = kv_lora_rank + qk_rope_head_dim
+    impl = FlashInferMLASparseImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        kv_b_proj=ColumnParallelLinear(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False
+        ),
+    )
+    gen = torch.Generator(device=device).manual_seed(0)
+    kv_cache = (
+        torch.rand(64, block_size, head_size, generator=gen, device=device) - 0.5
+    ).to(torch.bfloat16)
+    q = (
+        torch.rand(num_tokens, num_heads, head_size, generator=gen, device=device) - 0.5
+    ).to(torch.bfloat16)
+    # Mixed active lengths, valid indices first and -1 padding after, as the
+    # index converters produce.
+    valid_counts = torch.randint(
+        1, topk + 1, (num_tokens,), generator=gen, device=device, dtype=torch.int32
+    )
+    valid_counts[::3] = topk
+    topk_indices = torch.randint(
+        0,
+        kv_cache.shape[0] * block_size,
+        (num_tokens, topk),
+        generator=gen,
+        device=device,
+        dtype=torch.int32,
+    )
+    slots = torch.arange(topk, device=device)
+    topk_indices.masked_fill_(slots[None, :] >= valid_counts[:, None], -1)
+
+    out, lse = impl._forward_mqa_kernel(
+        q,
+        kv_cache,
+        topk_indices,
+        valid_counts,
+        layer=SimpleNamespace(),
+        block_size=block_size,
+        is_decode=False,
+    )
+
+    assert lse is None
+    kv_rows = kv_cache.view(-1, head_size).float()
+    # Both sides of the 65535 boundary, the ends, and a sweep in between.
+    rows = sorted({0, 65534, 65535, 65536, num_tokens - 1, *range(0, num_tokens, 997)})
+    for t in rows:
+        kv = kv_rows[topk_indices[t, : valid_counts[t]].long()]
+        scores = q[t].float() @ kv.T * impl.scale
+        ref = torch.softmax(scores, dim=-1) @ kv[:, :kv_lora_rank]
+        torch.testing.assert_close(out[t].float(), ref, atol=2e-2, rtol=2e-2)
+
+
 def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 
@@ -2157,6 +2245,38 @@ def test_sparse_mla_index_groups_own_distinct_physical_buffers():
     )
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "row_width", "kv_dtype"),
+    [
+        ("fp8_ds_mla", 528, torch.uint8),
+        ("fp8_ds_mla", 656, torch.uint8),
+        ("bfloat16", 512, torch.bfloat16),
+    ],
+)
+def test_hisparse_index_group_preserves_row_width(
+    monkeypatch, kv_cache_dtype, row_width, kv_dtype
+):
+    monkeypatch.setattr(index_group_module, "_create_side_stream", MagicMock())
+    monkeypatch.setattr(index_group_module, "_create_event", MagicMock())
+    create_handle = MagicMock(side_effect=lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        index_group_module, "create_hisparse_cache_handle", create_handle
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object()), model_config=None
+    )
+    builder = SparseMLAIndexGroupBuilder(torch.empty((2, 4), dtype=torch.int32))
+    for leader in (True, False):
+        group, layer_index = builder.register_layer(
+            leader, config, row_width=row_width, kv_cache_dtype=kv_cache_dtype
+        )
+        assert isinstance(group, HiSparseMLAIndexGroup)
+        assert layer_index == (0 if leader else 1)
+        assert create_handle.call_args.kwargs["row_width"] == row_width
+        assert create_handle.call_args.kwargs["kv_dtype"] == kv_dtype
+        assert create_handle.call_args.kwargs["is_index_group_leader"] == leader
+
+
 # HiSparse is host-resident-only and kernel-only: runtime construction
 # raises without the compiled CUDA ops.
 requires_hisparse_ops = pytest.mark.skipif(
@@ -2175,6 +2295,7 @@ def _make_hisparse_runtime(
     max_swap_rows: int | None = None,
     index_group: hisparse_runtime.HiSparseIndexGroup | None = None,
     max_union_rows: int | None = None,
+    kv_dtype: torch.dtype = torch.float32,
 ) -> HiSparseRuntime:
     runtime = HiSparseRuntime(
         config=ResolvedHiSparseConfig(
@@ -2184,7 +2305,7 @@ def _make_hisparse_runtime(
         ),
         max_num_reqs=max_num_reqs,
         row_width=row_width,
-        kv_dtype=torch.float32,
+        kv_dtype=kv_dtype,
         device=DEVICE_TYPE,
         max_swap_rows=max_swap_rows,
         index_group=index_group,
@@ -2195,7 +2316,7 @@ def _make_hisparse_runtime(
     num_blocks = max_num_reqs * blocks_per_request + 1
     raw = torch.zeros(
         num_blocks * block_size * row_width,
-        dtype=torch.float32,
+        dtype=kv_dtype,
         device=DEVICE_TYPE,
     ).view(torch.int8)
     block_table = torch.arange(
@@ -2206,7 +2327,7 @@ def _make_hisparse_runtime(
     runtime.bind_hot_cache(
         raw,
         byte_offset=0,
-        block_stride=block_size * row_width * torch.float32.itemsize,
+        block_stride=block_size * row_width * kv_dtype.itemsize,
         num_blocks=num_blocks,
         block_size=block_size,
         block_table=block_table,
@@ -2668,17 +2789,20 @@ def test_hisparse_resident_rows_bypass_hot_lru():
 
 
 @requires_hisparse_ops
-def test_hisparse_swap_in_preserves_rows_across_eviction():
+@pytest.mark.parametrize(
+    ("row_width", "kv_dtype"),
+    [(64, torch.float32), (528, torch.uint8), (656, torch.uint8)],
+)
+def test_hisparse_swap_in_preserves_rows_across_eviction(row_width, kv_dtype):
     device = torch.device(DEVICE_TYPE)
     block_size = 64
-    row_width = 64
     num_blocks = 64
     top_k = 128
     buf = 256
     num_reqs = 4
 
-    kv_pool = torch.randn(
-        (num_blocks + 1, block_size, row_width), dtype=torch.float32
+    kv_pool = torch.randint(
+        0, 256, (num_blocks + 1, block_size, row_width), dtype=kv_dtype
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
@@ -2687,6 +2811,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         device_buffer_size=buf,
         max_num_reqs=num_reqs,
         row_width=row_width,
+        kv_dtype=kv_dtype,
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
@@ -2700,7 +2825,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
     base = torch.arange(top_k, dtype=torch.int32, device=device)
-    for step in range(3):
+    for step in (0, 0, 1, 2, 0):
         cache.runtime.begin_forward()
         topk = torch.stack(
             [(base + step * top_k + row * 17) % seq_len for row in range(num_reqs)]
@@ -2731,7 +2856,13 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
             hot_indices[valid].to(torch.long)
         ].cpu()
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
-        torch.testing.assert_close(gathered, expected)
+        torch.testing.assert_close(gathered, expected, rtol=0, atol=0)
+
+    hits, misses = runtime.index_group.swap_stats.tolist()
+    valid_rows_per_step = num_reqs * (top_k - 1)
+    assert hits >= valid_rows_per_step
+    assert misses > 3 * valid_rows_per_step
+    assert hits + misses == 5 * valid_rows_per_step
 
 
 @requires_hisparse_ops
@@ -3596,12 +3727,16 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_hisparse_gather_prefill_cache_prefers_resident_rows():
+@pytest.mark.parametrize(
+    ("row_width", "kv_dtype"),
+    [(16, torch.float32), (528, torch.uint8), (656, torch.uint8)],
+)
+def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype):
     """Staged rows come from the resident cache when a shadow page exists."""
     if not _has_hisparse_ops():
         pytest.skip("hisparse CUDA ops unavailable")
     device = torch.device("cuda")
-    block_size, resident_block_size, row_width = 4, 2, 16
+    block_size, resident_block_size = 4, 2
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
     plan = build_hisparse_prefill_staging_plan(
@@ -3619,20 +3754,15 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
     )
 
     num_host_blocks, num_res_blocks = 10, 24
-    host_cache = (
-        torch.arange(num_host_blocks * block_size * row_width, dtype=torch.float32)
-        .view(num_host_blocks, block_size, row_width)
-        .pin_memory()
-    )
-    resident_cache = (
-        (
-            -torch.arange(
-                num_res_blocks * resident_block_size * row_width, dtype=torch.float32
-            )
-            - 1.0
-        )
-        .view(num_res_blocks, resident_block_size, row_width)
-        .to(device)
+    host_cache = torch.randint(
+        0, 128, (num_host_blocks, block_size, row_width), dtype=kv_dtype
+    ).pin_memory()
+    resident_cache = torch.randint(
+        128,
+        256,
+        (num_res_blocks, resident_block_size, row_width),
+        dtype=kv_dtype,
+        device=device,
     )
 
     runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
@@ -4283,10 +4413,11 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     def fake_trtllm(**kwargs):
         trtllm_calls.append(kwargs)
         rows = kwargs["query"].shape[0]
-        out = torch.full(
-            (rows, 1, num_heads, 512), 2.0, dtype=torch.bfloat16, device=device
-        )
-        return (out, lse(rows)) if kwargs.get("return_lse") else out
+        # Like FlashInfer, write into the caller-owned ``out`` / ``lse``.
+        out = kwargs["out"].fill_(2.0)
+        if not kwargs.get("return_lse"):
+            return out
+        return out, kwargs["lse"].copy_(lse(rows))
 
     monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fake_fa4)
     monkeypatch.setattr(
