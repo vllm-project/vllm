@@ -253,6 +253,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         "get_forward_context",
         lambda: SimpleNamespace(cudagraph_runtime_mode=cg_mode),
     )
+    backend = MagicMock()
+    monkeypatch.setattr(worker_module, "get_hisparse_backend", lambda: backend)
 
     slots = torch.arange(block_size) + resident_block * block_size
     request_state_indices = torch.full((1,), -1, dtype=torch.int32)
@@ -286,7 +288,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         ),
         MagicMock(),
     )
-    monkeypatch.setattr(worker.backend, "swap_blocks_batch", swap_blocks_batch)
+    monkeypatch.setattr(backend, "swap_blocks_batch", swap_blocks_batch)
     worker.initialize(
         handles,
         ["target", "draft"],
