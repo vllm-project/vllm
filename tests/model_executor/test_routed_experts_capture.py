@@ -835,15 +835,10 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32)
     )
     model = Mock()
-    kv_cache_config = Mock()
 
-    result = aux_output_worker.get_aux_output_connector(model, config, kv_cache_config)
+    result = aux_output_worker.get_aux_output_connector(model, config)
 
-    constructor.assert_called_once_with(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=config,
-    )
+    constructor.assert_called_once_with(model=model, vllm_config=config)
     assert result is connector
 
 
@@ -869,9 +864,10 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     )
     model = Mock()
     connector = aux_output_worker.AuxOutputWorkerConnector(
-        vllm_config=config,
-        model=model,
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
+        vllm_config=config, model=model
+    )
+    connector.bind_kv_cache(
+        SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()])
     )
 
     constructor.assert_called_once_with(
@@ -882,37 +878,6 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     connector.begin_step(Mock())
     assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
-
-
-@pytest.mark.parametrize("prepared", [False, True], ids=["fallback", "prepared"])
-def test_aux_output_worker_connector_reuses_prepared_capture(monkeypatch, prepared):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    capturer = Mock()
-    constructor = Mock(return_value=capturer)
-    bind = Mock()
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
-    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
-    )
-    config = SimpleNamespace(
-        max_concurrent_batches=2,
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
-    )
-    model = torch.nn.Module()
-
-    if prepared:
-        connector_cls = aux_output_worker.AuxOutputWorkerConnector
-        assert connector_cls.prepare_capture(model, config) is capturer
-        assert connector_cls.prepare_capture(model, config) is capturer
-    connector = aux_output_worker.get_aux_output_connector(model, config, Mock())
-
-    assert connector._capturer is capturer
-    constructor.assert_called_once_with(max_num_batched_tokens=32, vllm_config=config)
-    bind.assert_called_once_with(model, capturer)
 
 
 def test_aux_output_worker_connector_default_capacity(monkeypatch):
@@ -945,16 +910,17 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
         max_concurrent_batches=2,
     )
-    kwargs = dict(
-        vllm_config=config,
-        model=Mock(),
-        kv_cache_config=SimpleNamespace(
+    connector = aux_output_worker.AuxOutputWorkerConnector(
+        vllm_config=config, model=Mock()
+    )
+    store_constructor.assert_not_called()
+
+    connector.bind_kv_cache(
+        SimpleNamespace(
             num_blocks=10,
             kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-        ),
+        )
     )
-
-    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16

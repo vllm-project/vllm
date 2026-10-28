@@ -841,9 +841,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
             # The auxiliary-output data plane needs the resolved KV capacity.
             if self.vllm_config.aux_output_config.enabled:
-                self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
-                )
+                if self.aux_output_connector is None:
+                    self.aux_output_connector = get_aux_output_connector(
+                        self.model, self.vllm_config
+                    )
+                self.aux_output_connector.bind_kv_cache(kv_cache_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1042,7 +1044,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
         if self.vllm_config.aux_output_config.enabled:
-            AuxOutputWorkerConnector.prepare_capture(self.model, self.vllm_config)
+            self.aux_output_connector = get_aux_output_connector(
+                self.model, self.vllm_config
+            )
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:

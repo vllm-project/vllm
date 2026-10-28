@@ -75,12 +75,12 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 @pytest.mark.parametrize(
     "enabled,expected_events",
     [
-        (True, ["allocate", "bind", "dummy_run", "dummy_run"]),
-        (False, ["dummy_run", "dummy_run"]),
+        (True, ["allocate", "bind", "dummy_run"]),
+        (False, ["dummy_run"]),
     ],
     ids=["aux-output-enabled", "aux-output-disabled"],
 )
-def test_profile_run_prepares_aux_output_capture_once_before_forward(
+def test_profile_run_creates_aux_output_connector_before_forward(
     monkeypatch, enabled, expected_events
 ):
     events = []
@@ -88,6 +88,7 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
     model = torch.nn.Module()
     vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enabled=enabled),
+        max_concurrent_batches=1,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
     )
 
@@ -110,6 +111,7 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = vllm_config
     runner.model = model
+    runner.aux_output_connector = None
     runner.supports_mm_inputs = False
     runner.is_last_pp_rank = False
     runner.max_num_tokens = 8
@@ -118,13 +120,13 @@ def test_profile_run_prepares_aux_output_capture_once_before_forward(
     monkeypatch.setattr(runner, "_dummy_run", dummy_run)
 
     runner.profile_run()
-    runner.profile_run()
 
     assert events == expected_events
+    connector = runner.aux_output_connector
     if enabled:
-        connector_cls = aux_output_worker.AuxOutputWorkerConnector
-        assert connector_cls.prepare_capture(model, vllm_config) is capturer
-        assert events == expected_events
+        assert connector is not None and connector._capturer is capturer
+    else:
+        assert connector is None
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
