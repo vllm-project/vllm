@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
+from vllm.logging_utils.formatter import JSON_FORMAT as _JSON_FORMAT
 
 if TYPE_CHECKING:
     from vllm.config.logging import LoggingConfig
@@ -30,7 +31,6 @@ _FORMAT = (
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
-
 _vllm_process_info: tuple[str, int] | None = None
 
 
@@ -211,10 +211,12 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         configure_logging = envs.VLLM_CONFIGURE_LOGGING
         log_level = envs.VLLM_LOGGING_LEVEL
         log_config_file = envs.VLLM_LOGGING_CONFIG_PATH
+        log_formatter = "text"
     else:
         configure_logging = config.configure_logging
         log_level = config.log_level
         log_config_file = config.pylogging_config_file
+        log_formatter = config.formatter
 
     if not configure_logging and log_config_file:
         raise RuntimeError(
@@ -233,12 +235,22 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         # Refresh these values in case env vars have changed.
         vllm_handler["level"] = log_level
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
-        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+        for formatter in logging_config["formatters"].values():
+            formatter["log_level"] = log_level
+
+        if log_formatter == "json":
+            logging_config["formatters"] = {
+                "vllm_json": {
+                    "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "format": _JSON_FORMAT,
+                }
+            }
+            vllm_handler["formatter"] = "vllm_json"
+        else:
+            vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = log_level
-        for formatter in logging_config["formatters"].values():
-            formatter["log_level"] = log_level
 
     if log_config_file:
         if not path.exists(log_config_file):

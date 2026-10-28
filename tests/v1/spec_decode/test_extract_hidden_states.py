@@ -51,7 +51,7 @@ def _create_proposer(
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=num_speculative_tokens,
-        draft_model_config={  # type: ignore[arg-type]
+        draft_model_config={
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": layer_ids,
             }
@@ -103,7 +103,7 @@ def test_proposer_initialization_missing_layer_ids():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={  # type: ignore[arg-type]
+        draft_model_config={
             "hf_config": {}  # Missing eagle_aux_hidden_state_layer_ids
         },
     )
@@ -363,7 +363,7 @@ def test_extract_hidden_states_text_only_config_regression():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={  # type: ignore[arg-type]
+        draft_model_config={
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],
             }
@@ -450,7 +450,7 @@ def test_extract_hidden_states_speculative_config_vlm():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={  # type: ignore[arg-type]
+        draft_model_config={
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": [1, 2],
             }

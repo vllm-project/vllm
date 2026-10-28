@@ -47,16 +47,19 @@ pytestmark = pytest.mark.skipif(
 #
 # The kernel requires 16-aligned heads, so _mla_fp8_prefill_attn replicate-pads
 # q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
-# Cover all three regimes:
+# Cover all four regimes:
+#    8 -> padded to 16 (divisor, repeat_interleave), so the real heads sit at
+#         stride 2 in the padded output. is_valid_fp8_prefill_num_heads keeps
+#         Kimi-K2.x at TP8 off this path, but the unpad must stay correct.
 #   12 -> padded to 16 (non-divisor, tile+slice). Live case: a K3 rank at TP8.
 #   16 -> no padding, output aliases the caller's buffer.
 #   24 -> padded to 32. No current model and TP reaches this band (96 heads
 #         would need TP4, which does not fit in 288 GiB; 128-head models give
 #         128/64/32/16/8), so this case exists to keep the general path honest
-#         for future architectures: it is the only one of the three where
-#         padding above 16 actually happens, so it is what proves the
-#         replicate-pad/slice-back argument holds for a target other than 16.
-HEAD_COUNTS = [12, 16, 24]
+#         for future architectures: it is the only one where padding above
+#         16 actually happens, so it is what proves the replicate-pad/slice-back
+#         argument holds for a target other than 16.
+HEAD_COUNTS = [8, 12, 16, 24]
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
 QK_HEAD_DIM = QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM  # 192
@@ -101,6 +104,7 @@ def _make_impl(num_heads: int):
     impl.scale = SCALE
     impl._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
     impl._mla_reduce_v1 = mla_reduce_v1
+    impl._fp8_prefill_one_scale = None
     return impl
 
 
@@ -121,7 +125,7 @@ def _build_prefill_metadata(
 
     builder = object.__new__(AiterMLAMetadataBuilder)
     builder.num_heads = num_heads
-    builder.mla_dims = SimpleNamespace(v_head_dim=V_HEAD_DIM)  # type: ignore[assignment]
+    builder.mla_dims = SimpleNamespace(v_head_dim=V_HEAD_DIM)
     builder._init_fp8_prefill_ps_buffers(
         max_num_reqs=len(seq_lens),
         max_prefill_qlen=max_q,
@@ -136,7 +140,7 @@ def _build_prefill_metadata(
     prefill = SimpleNamespace(query_start_loc=qo_indptr, max_query_len=max_q)
     metadata = SimpleNamespace(prefill=prefill, num_decodes=0)
     common = SimpleNamespace(query_start_loc_cpu=qo_indptr_cpu)
-    builder._build_fp8_prefill_ps_metadata(metadata, common)  # type: ignore[arg-type]
+    builder._build_fp8_prefill_ps_metadata(metadata, common)
     return metadata, total_q, builder
 
 

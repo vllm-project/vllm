@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import msgspec
+import numpy as np
 import pytest
 import torch
 import zmq.asyncio
@@ -38,7 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _block_ids_for_region,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
+    _contiguous_runs,
     _has_opaque_packed_row,
+    _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
@@ -57,7 +61,12 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from .utils import create_request, create_scheduler, create_vllm_config
+from .utils import (
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 
 
 @pytest.mark.parametrize(
@@ -148,6 +157,7 @@ def test_region_length_validation_checks_replicated_gqa_heads(
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
+    block_size = maybe_update_block_size(16)
     return KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -160,13 +170,21 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
                     "model.layers.1.eagle_attn",
                 ],
                 FullAttentionSpec(
-                    block_size=16,
+                    block_size=block_size,
                     num_kv_heads=4,
                     head_size=64,
                     dtype=torch.float16,
                 ),
             )
         ],
+    )
+
+
+def _make_worker_vllm_config(kv_role: str):
+    return create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role=kv_role,
+        block_size=maybe_update_block_size(16),
     )
 
 
@@ -216,6 +234,9 @@ class FakeMooncakeWrapper:
         return 0
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
+        return 0
+
+    def batch_unregister_memory(self, buffer_addresses) -> int:
         return 0
 
 
@@ -429,9 +450,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
 ):
     """Producer sends its PP layer shard to the matching consumer layer address."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -1205,7 +1224,7 @@ def _xfer_meta(
 @contextlib.contextmanager
 def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
     """Build a worker whose engine registration and sender thread are patched."""
-    vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
+    vllm_config = _make_worker_vllm_config(kv_role)
     connector_mod = (
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
     )
@@ -1241,9 +1260,7 @@ async def test_receive_kv_selects_remote_pp_workers(
     expected_addrs: list[str],
 ):
     """Decode workers should not hard-code producer pp_rank 0."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_consumer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_consumer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         decode_connector = MooncakeConnector(
@@ -1314,7 +1331,7 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
 @pytest.mark.asyncio
 async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
     """P4/D2 must retain KV until both D stages finish, including a no-op pull."""
-    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    config = _make_worker_vllm_config("kv_producer")
     with (
         set_current_vllm_config(config),
         patch_worker_dependencies(),
@@ -1386,9 +1403,7 @@ async def test_kv_producer(monkeypatch):
     Verifies memory offset calculation: ptr = base_addr + block_id * block_len.
     """
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -1549,15 +1564,193 @@ async def test_kv_producer(monkeypatch):
         prefill_worker.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("local_block_ids", "expected_finished"),
+    [
+        ([], set()),
+        ([[]], set()),
+        ([[100]], {"d-req-1"}),
+    ],
+)
+def test_pull_completion_requires_local_blocks(
+    local_block_ids: list[list[int]],
+    expected_finished: set[str],
+):
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.finished_recving_reqs = set()
+    pull_meta = PullReqMeta(
+        d_req_id="d-req-1",
+        transfer_id="xfer-req-1",
+        local_block_ids=local_block_ids,
+        remote_engine_id="p-engine",
+        remote_bootstrap_addr="http://bootstrap:33333",
+        pull_tasks_count=1,
+    )
+    response = MooncakeXferResponse(
+        status=MooncakeXferResponseStatus.FINISH,
+        ok_reqs=["d-req-1"],
+    )
+
+    worker.process_pulling_result(response, {"d-req-1": pull_meta})
+
+    assert pull_meta.pull_tasks_count == 0
+    assert worker.finished_recving_reqs == expected_finished
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "exception", "finish"])
+async def test_peer_failure_only_settles_its_pending_requests(terminal):
+    """Partial and duplicate replies must not release another peer's targets."""
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        metas = {
+            f"d-req-{i}": PullReqMeta(
+                d_req_id=f"d-req-{i}",
+                transfer_id=f"xfer-{i}",
+                local_block_ids=[[i]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            for i in range(1, 4)
+        }
+        requests = list(metas.values())
+        partial = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            ok_reqs=["d-req-1"],
+            err_reqs=["d-req-2"],
+            err_msg="one request failed",
+        )
+        end = (
+            RuntimeError("connection lost")
+            if terminal == "exception"
+            else worker._encoder.encode(
+                MooncakeXferResponse(
+                    status=(
+                        MooncakeXferResponseStatus.FINISH
+                        if terminal == "finish"
+                        else MooncakeXferResponseStatus.ERROR
+                    ),
+                    err_msg="peer finished",
+                )
+            )
+        )
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
+        assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
+        assert [meta.failed for meta in requests] == [False, True, True]
+        assert worker.finished_recving_reqs == set()
+        assert worker.get_block_ids_with_load_errors() == {2, 3}
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH, ok_reqs=list(metas)
+            ),
+            metas,
+        )
+        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert all(meta.pull_tasks_count == 0 for meta in requests)
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_peer_succeeds", [True, False])
+async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
+    """An expired peer's omitted result must not strand the decoder's blocks."""
+    config = _make_test_kv_cache_config()
+    with mooncake_register_worker(config, kv_role="kv_producer") as (producer, _):
+        try:
+            producer.kv_caches_base_addr = [0x1000]
+            producer.block_len_per_layer = [256]
+            producer.kv_block_len_per_layer = [256]
+            producer.registered_layer_names = ["model.layers.0.self_attn"]
+            producer.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter() - 1,
+            )
+            send_meta.ready.set()
+            producer.reqs_need_send[send_meta.transfer_id] = send_meta
+
+            async def expire_before_send():
+                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+
+            metadata = _xfer_meta(
+                [
+                    _region(
+                        0x2000,
+                        row_offset=-1,
+                        layer_name=producer.registered_layer_names[0],
+                    )
+                ],
+                {"d-req-1": (send_meta.transfer_id, [[100]])},
+            )
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(send_meta.ready, "wait", side_effect=expire_before_send),
+                patch.object(producer, "_send_blocks") as send,
+            ):
+                await producer.send_kv_to_decode(b"consumer", sock, metadata)
+                send.assert_not_called()
+            assert send_meta.transfer_id not in producer.reqs_need_send
+            sock.send_multipart.assert_awaited_once()
+            _, payload = sock.send_multipart.call_args.args[0]
+            response = producer._xfer_resp_decoder.decode(payload)
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert not response.ok_reqs
+            assert not response.err_reqs
+        finally:
+            producer.shutdown()
+            producer.is_kv_consumer = True
+
+    with mooncake_register_worker(config) as (worker, _):
+        try:
+            meta = PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[100]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            worker.process_pulling_result(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH,
+                    ok_reqs=[meta.d_req_id] if first_peer_succeeds else None,
+                    err_reqs=None if first_peer_succeeds else [meta.d_req_id],
+                ),
+                {meta.d_req_id: meta},
+            )
+            assert meta.pull_tasks_count == 1
+            assert worker.finished_recving_reqs == set()
+            sock = (
+                mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+            )
+            sock.recv.return_value = payload
+            await worker.receive_kv_from_single_worker(
+                "tcp://producer:1234", {meta.d_req_id: meta}
+            )
+            assert meta.pull_tasks_count == 0
+            assert meta.failed
+            assert worker.finished_recving_reqs == {meta.d_req_id}
+            assert worker.get_block_ids_with_load_errors() == {100}
+            stats = worker.get_kv_connector_stats()
+            assert stats is not None
+            assert stats.reduce()["Num failed recvs"] == 1
+        finally:
+            worker.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 
     Verifies that MooncakeXferMetadata is correctly serialized and sent via ZMQ.
     """
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_consumer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_consumer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies() as mocks:
         decode_connector = MooncakeConnector(
@@ -1627,9 +1820,7 @@ async def test_kv_consumuer(monkeypatch):
 @pytest.mark.asyncio
 async def test_worker_get_finished_timeout(monkeypatch):
     """Tests the cleanup mechanism for requests."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
             vllm_config,
@@ -1679,7 +1870,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
     spec = FullAttentionSpec(
-        block_size=16,
+        block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
         dtype=torch.float16,
@@ -1760,7 +1951,10 @@ def test_register_noncontiguous_packed_allows_matching_pp():
     known. Rejecting every local PP>1 layout at startup is too strict.
     """
     spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        block_size=maybe_update_block_size(16),
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
     )
     layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
     with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _reg):
@@ -1780,8 +1974,9 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, reg):
         worker.use_mla = True
         worker.transfer_topo.is_mla = True
-        mla_cache = torch.zeros((2, 16, 512), dtype=torch.float16)
-        eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
+        block_size = maybe_update_block_size(16)
+        mla_cache = torch.zeros((2, block_size, 512), dtype=torch.float16)
+        eagle_cache = torch.zeros((2, block_size, 8, 64), dtype=torch.float16)
         kv_caches = {
             "model.layers.0.mla_attn": mla_cache,
             "model.layers.1.eagle_attn": eagle_cache,
@@ -1964,6 +2159,99 @@ async def test_build_transfer_params_sends_packed_region_once(
     assert src_ptrs == [0x1000 + 10 * block_len]
     assert dst_ptrs == [0xA000 + 20 * block_len]
     assert lengths == [n_blocks * block_len]
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "starts", "run_lens"),
+    [
+        ([], [], [], []),
+        ([3, 4, 5], [7, 8, 9], [0], [3]),
+        ([5, 4, 3], [9, 8, 7], [0, 1, 2], [1, 1, 1]),
+        ([1, 2, 7, 8, 9], [4, 5, 6, 10, 11], [0, 2, 3], [2, 1, 2]),
+    ],
+)
+def test_contiguous_runs(src, dst, starts, run_lens):
+    """A run breaks wherever either side does not step by +1."""
+    got_starts, got_lens = _contiguous_runs(
+        np.array(src, dtype=np.int64), np.array(dst, dtype=np.int64)
+    )
+    assert got_starts.tolist() == starts
+    assert got_lens.tolist() == run_lens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kv_block_len", [256, 128])
+async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
+    """Fragmented ids give one copy per contiguous run per layer, in layer order.
+
+    A kv_block_len shorter than the block row cannot be merged across blocks.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = False
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
+
+    block_len = 256
+    local_regions, remote_regions = (
+        [
+            _region(
+                base + layer * 0x10000,
+                block_len=block_len,
+                kv_block_len=kv_block_len,
+                row_offset=0,
+                layer_name=f"model.layers.{layer}.self_attn",
+                layer_index=layer,
+            )
+            for layer in range(2)
+        ]
+        for base in (0x100000, 0xA00000)
+    )
+    transfer_id = "xfer-fragmented"
+    send_meta = SendBlockMeta(
+        p_req_id="p-fragmented",
+        transfer_id=transfer_id,
+        local_block_ids=[[3, 4, 9, 6]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-fragmented": (transfer_id, [[7, 8, 2, 5]])}
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-fragmented", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    if kv_block_len == block_len:
+        local_ids, remote_ids, sizes = [3, 9, 6], [7, 2, 5], [512, 256, 256]
+    else:
+        local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        r.base_addr + b * block_len for r in local_regions for b in local_ids
+    ]
+    assert dst_ptrs == [
+        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
+    ]
+    assert lengths == sizes * len(local_regions)
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
@@ -2184,6 +2472,215 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert calls == 6
 
 
+def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMetadata:
+    return MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=9,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        layout_id=layout_id,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_steady_pull_omits_layout_and_unknown_id_asks_for_resend():
+    """A later pull is much smaller, and an unseen layout_id is not guessed."""
+    n = 146
+    names = [f"model.layers.{i}.self_attn" for i in range(n)]
+    req_blocks = {"d": ("xfer", [[1, 2, 3]])}
+    full = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_id=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=list(range(n)),
+        block_lens=[4096] * n,
+        kv_block_lens=[3000] * n,
+        registered_layer_names=names,
+        registered_layer_indices=list(range(n)),
+        registered_group_indices=[i % 5 for i in range(n)],
+        registered_shared_group_ids=[[] for _ in range(n)],
+        registered_row_offsets=[i * 100 for i in range(n)],
+    )
+    steady = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_id=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+    encoder = msgspec.msgpack.Encoder()
+    full_bytes = len(encoder.encode(full))
+    steady_bytes = len(encoder.encode(steady))
+    assert steady_bytes < full_bytes * 0.2
+
+    worker, _, regions, _ = _register_sliced_packed_mla([0, 1])
+    calls = 0
+    original = worker._get_transfer_regions
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    worker._get_transfer_regions = counting
+
+    def handshake(layout_id: int) -> MooncakeXferMetadata:
+        return _xfer_meta(
+            regions,
+            req_blocks,
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_pp_size=worker.pp_size,
+            layout_id=layout_id,
+        )
+
+    prepared = worker._prepare_transfer_regions(handshake(1))
+    assert prepared[2] is None
+    assert calls == 2
+    stored = worker._layout_by_peer[worker._peer_layout_key(handshake(1))]
+    assert stored == (prepared[0], prepared[1])
+
+    # Same layout under a new id hits the tuple cache and must still be stored.
+    worker._prepare_transfer_regions(handshake(3))
+    assert calls == 2
+    assert worker._peer_layout_key(handshake(3)) in worker._layout_by_peer
+
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, _short_xfer_meta(worker, 5, req_blocks))
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_peer_layouts_evict_least_recently_used(monkeypatch):
+    """Stale layout ids are bounded, and an evicted peer is asked to resend."""
+    monkeypatch.setattr(mooncake_connector, "_MAX_PEER_LAYOUTS", 2)
+    worker, _, regions, _ = _register_sliced_packed_mla([0])
+    req_blocks = {"d": ("xfer", [[1]])}
+
+    def handshake(layout_id: int) -> MooncakeXferMetadata:
+        return _xfer_meta(
+            regions,
+            req_blocks,
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_pp_size=worker.pp_size,
+            layout_id=layout_id,
+        )
+
+    worker._prepare_transfer_regions(handshake(1))
+    worker._prepare_transfer_regions(handshake(3))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    worker._prepare_transfer_regions(handshake(5))
+
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 5, req_blocks))
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, _short_xfer_meta(worker, 3, req_blocks))
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+
+
+class _ScriptedSock:
+    def __init__(self, responses: list[bytes], sent: list[bytes]):
+        self._responses = responses
+        self._sent = sent
+
+    def setsockopt(self, *_args, **_kwargs):
+        return None
+
+    async def send(self, data: bytes):
+        self._sent.append(data)
+
+    async def recv(self):
+        return self._responses.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _single_pull() -> dict[str, PullReqMeta]:
+    return {
+        "d": PullReqMeta(
+            d_req_id="d",
+            transfer_id="t",
+            local_block_ids=[[1]],
+            remote_engine_id="p",
+            remote_bootstrap_addr="http://bootstrap",
+        )
+    }
+
+
+async def _pull_once(worker, addr: str, responses: list[MooncakeXferResponse]):
+    sent: list[bytes] = []
+    encoded = [worker._encoder.encode(response) for response in responses]
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+        "mooncake_connector.make_zmq_socket",
+        return_value=_ScriptedSock(encoded, sent),
+    ):
+        await worker.receive_kv_from_single_worker(addr, _single_pull())
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_pull_resends_layout_when_prefill_forgot_it():
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    addr = "tcp://peer:1"
+    worker._acked_layout_peers.add(addr)
+    sent = await _pull_once(
+        worker,
+        addr,
+        [
+            MooncakeXferResponse(status=MooncakeXferResponseStatus.LAYOUT_MISS),
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["d"],
+                layout_id=worker._kv_layout_id,
+            ),
+        ],
+    )
+    assert len(sent) == 2
+    assert len(sent[1]) > len(sent[0])
+    assert addr in worker._acked_layout_peers
+
+
+@pytest.mark.asyncio
+async def test_pull_keeps_layout_for_prefill_that_does_not_echo_it():
+    """A prefill without layout_id support never gets a layout-less pull."""
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    addr = "tcp://old-peer:1"
+    finish = MooncakeXferResponse(
+        status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d"]
+    )
+    first = await _pull_once(worker, addr, [finish])
+    assert addr not in worker._acked_layout_peers
+    second = await _pull_once(worker, addr, [finish])
+    assert len(second[0]) == len(first[0])
+
+
 def test_coalesce_keeps_a_run_inside_its_starting_row():
     """The row bound is the run start, not the previous slice."""
     row = 2500
@@ -2201,12 +2698,41 @@ def _layer_name(idx: int) -> str:
     return f"model.layers.{idx}.mla_attn"
 
 
+@pytest.mark.parametrize(
+    ("source", "destination", "expected_source", "expected_destination"),
+    [
+        ([2, 3, 4], [12, 13, 14], [2, 3, 4], [12, 13, 14]),
+        ([4, 3, 2], [14, 13, 12], [2, 3, 4], [12, 13, 14]),
+        (
+            [9, 8, 7, 20, 21, 30, 29],
+            [109, 108, 107, 120, 121, 130, 129],
+            [7, 8, 9, 20, 21, 29, 30],
+            [107, 108, 109, 120, 121, 129, 130],
+        ),
+        ([6, 4, 5], [106, 104, 105], [6, 4, 5], [106, 104, 105]),
+        ([3, 2, 1], [11, 12, 13], [3, 2, 1], [11, 12, 13]),
+        ([1, 2, 3], [13, 12, 11], [1, 2, 3], [13, 12, 11]),
+    ],
+)
+def test_normalize_paired_block_order(
+    source, destination, expected_source, expected_destination
+):
+    """Normalize joint descending runs without sorting or changing block pairs."""
+    original_source, original_destination = source.copy(), destination.copy()
+    src, dst = _normalize_paired_block_order(source, destination)
+    assert src == expected_source and dst == expected_destination
+    assert source == original_source and destination == original_destination
+    assert sorted(zip(src, dst)) == sorted(zip(source, destination))
+    if source == expected_source and destination == expected_destination:
+        assert src is source and dst is destination
+
+
 def _register_sliced_packed_mla(
     layer_idxs: list[int], *, page: int = 1024, num_blocks: int = 4
 ):
     """Register column slices of one MLA packed row. Returns worker fields."""
     spec = MLAAttentionSpec(
-        block_size=16,
+        block_size=maybe_update_block_size(16),
         num_kv_heads=1,
         head_size=64,
         dtype=torch.uint8,
@@ -2252,7 +2778,7 @@ def test_sliced_packed_mla_registers_each_layer_view():
                 KVCacheGroupSpec(
                     [_layer_name(i) for i in layer_idxs],
                     MLAAttentionSpec(
-                        block_size=16,
+                        block_size=maybe_update_block_size(16),
                         num_kv_heads=1,
                         head_size=64,
                         dtype=torch.uint8,
@@ -2402,9 +2928,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
     remote_block_len = LOCAL_BLOCK_LEN * P_TP_SIZE // d_tp_size
 
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
+    vllm_config = _make_worker_vllm_config("kv_producer")
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -2534,3 +3058,29 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+def test_sleep_unregisters_and_restores_kv_caches():
+    spec = FullAttentionSpec(
+        block_size=maybe_update_block_size(16),
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, reg):
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        views = dense_kv_cache_views(raw, spec, 2, 2, KVCacheLayout.LBHNC)
+        worker.register_kv_caches(dict(zip(layer_names, views)))
+        reg.reset_mock()
+        with patch.object(
+            worker.engine, "batch_unregister_memory", return_value=0
+        ) as unreg:
+            worker.unregister_kv_caches()
+            worker.unregister_kv_caches()
+        unreg.assert_called_once_with([raw.data_ptr()])
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()
+        reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])

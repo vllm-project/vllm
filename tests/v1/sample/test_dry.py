@@ -340,7 +340,7 @@ def _make_v2_state(
         device=device,
         all_token_ids=SimpleNamespace(gpu=all_tokens),
     )
-    state = DryState(_make_vllm_config(), req_states)  # type: ignore[arg-type]
+    state = DryState(_make_vllm_config(), req_states)
     if tokenizer is not None:
         # Re-resolve the default set now that a tokenizer is installed.
         state._tokenizer = tokenizer
@@ -446,7 +446,7 @@ def test_spec_decode_is_refused_at_construction():
     )
     config = _make_vllm_config(speculative_config=SimpleNamespace())
     with pytest.raises(ValueError, match="speculative decoding"):
-        DryState(config, req_states)  # type: ignore[arg-type]
+        DryState(config, req_states)
 
 
 def test_v2_draft_expanded_logits_raise():
@@ -608,7 +608,10 @@ def test_v2_batch_sharded_sampling_matches_unsharded(monkeypatch):
             group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
             with mock.patch.object(batch_shard, "get_tp_group", return_value=group):
                 sharder = batch_shard.BatchSharder(
-                    max_num_reqs=8, max_num_logits_per_req=1, device=DEVICE
+                    max_num_reqs=8,
+                    max_num_logits_per_req=1,
+                    device=DEVICE,
+                    adaptive_verification_enabled=False,
                 )
             local, _, _, _ = sharder.shard_sampler_inputs(batch, None)
             owned = [int(req_id.split("-")[1]) for req_id in local.req_ids]
@@ -918,7 +921,7 @@ def test_loads_through_the_loader_by_fqcn():
     )
     procs = loader.build_custom_logits_processors(
         _make_vllm_config(),
-        req_states,  # type: ignore[arg-type]
+        req_states,
         False,
         [DRY_FQCN],
     )

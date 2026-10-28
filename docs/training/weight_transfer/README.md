@@ -36,6 +36,7 @@ engine drives on your behalf:
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
+| [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
 
 ## Quickstart
 
@@ -111,8 +112,8 @@ on. This is the main rule to internalize:
 | Backend, inference side | `WeightTransferConfig(backend=...)` | A plain string selector — that is all this config holds |
 | Backend, trainer side | `init_info.backend` | A `ClassVar` on each init info; never passed by hand |
 | Wire params (`packed`, buffer sizes) | the backend's `TrainerInitInfo` | The trainer propagates them to the worker during `trainer_init`, so the two sides *cannot* disagree |
-| Weights to send | a [`WeightSource`](base.md#weightsource) | `ModuleSource(model)` covers plain and FSDP-sharded modules |
-| Per-round payload | the backend's update info | Built by the engine (from `source.metadata()`, or from a delta backend's per-round payload); you never construct it |
+| Weights to send | a [`WeightSource`](base.md#weightsource) | Usually written for your framework; `ModuleSource(model)` covers modules every rank holds whole (plain, FSDP, DTensor) |
+| Per-round payload | the backend's update info | Built by the engine (from `source.metadata`, or from a delta backend's per-round payload); you never construct it |
 
 !!! note
     Wire params are deliberately *not* on `WeightTransferConfig` and *not* on the
@@ -125,9 +126,16 @@ on. This is the main rule to internalize:
 For sharded trainers (FSDP, TP/PP/EP), **every trainer rank builds an engine and
 calls `send_weights()`**. Rank 0 is the sender: only it holds a communicator,
 talks to the client, and puts bytes on the wire. Non-sender ranks still iterate
-the `WeightSource`, because materializing a parameter is usually itself a
-collective (an FSDP `full_tensor()` all-gather, a Megatron export) that would
-deadlock if some ranks skipped it.
+the `WeightSource` over the parameters they own, because materializing a
+parameter is usually itself a collective among its owners (an FSDP
+`full_tensor()` all-gather, a Megatron export) that would deadlock if some of
+them skipped it. Which ranks own which parameter is declared in
+[`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
+Only [sharded RDT](sharded_rdt.md) and [NCCL](nccl.md#broadcasting-ranks)
+accept ranks that own different parameters, such as pipeline stages.
+Pipeline-parallel support for IPC is in progress; until then it, like NCCL M2N,
+needs every parameter owned by rank 0 or by every rank (see each backend's
+Limitations).
 
 Pass each process's own `rank` on the init info. It is explicit rather than read
 from a global process group, which is ambiguous once several groups (FSDP / TP /
@@ -144,7 +152,7 @@ engine.send_weights()  # called on every rank
 
 ## API Endpoints
 
-When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first four for you.
+When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](nccl.md#trainer-without-vllm-over-http) and [IPC](ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
@@ -152,6 +160,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the update and optionally commit its `weight_version` |
+| `/shutdown_weight_transfer_engine` | POST | Release the transfer channel without stopping inference |
 | `/update_weight_version` | POST | Update `weight_version` without changing model weights |
 | `/weight_info` | GET | Get the latest committed weight version |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
@@ -160,6 +169,12 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 !!! note
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
+
+!!! warning
+    If `/update_weights` fails, the model is left mid-reload while `/health`
+    stays 200, and `/finish_weight_update` is rejected. Before generating again,
+    resend a full `/start_weight_update` → `/update_weights` →
+    `/finish_weight_update` (see [#57854](https://github.com/vllm-project/vllm/pull/57854)).
 
 The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, sparse-NCCL, or sharded-RDT transport.
 

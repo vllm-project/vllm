@@ -12,12 +12,6 @@ from openai_harmony import Message as OpenAIMessage
 from openai_harmony import ToolNamespaceConfig
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -58,8 +52,21 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    BaseRenderer,
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+    has_non_text_content,
+)
 from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -103,7 +110,7 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 def _reused_prompt_token_ids(
-    request: Any, messages: list[Any] | None = None
+    request: Any, renderer: BaseRenderer, messages: list[Any] | None = None
 ) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
@@ -113,7 +120,8 @@ def _reused_prompt_token_ids(
 
     Returns None without checking the ids when ``echo`` is set or ``messages``
     has non-text content, since both need ``messages`` to be rendered.
-    Otherwise raises VLLMValidationError if the ids are malformed.
+    Otherwise raises VLLMValidationError if the ids are malformed or out of
+    vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
@@ -144,6 +152,8 @@ def _reused_prompt_token_ids(
             "of non-negative integers.",
             parameter="kv_transfer_params.prompt_token_ids",
         )
+    # The engine checks this too, but only after a streamed response starts.
+    renderer.validate_token_ids(ids, parameter="kv_transfer_params.prompt_token_ids")
     return ids
 
 
@@ -162,8 +172,9 @@ class OnlineRenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -180,6 +191,7 @@ class OnlineRenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template
@@ -189,6 +201,7 @@ class OnlineRenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
@@ -203,6 +216,19 @@ class OnlineRenderer:
                 chat_template_content_format=self.chat_template_content_format,
                 chat_template_kwargs=self.default_chat_template_kwargs,
             )
+        )
+
+    def effective_chat_template_kwargs(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+                self.reasoning_effort_map,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
         )
 
     async def render_chat(
@@ -352,14 +378,7 @@ class OnlineRenderer:
                 else None
             ),
         )
-        chat_template_kwargs = (
-            request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
-            )
-            .with_defaults(self.default_chat_template_kwargs)
-            .chat_template_kwargs
-        )
+        chat_template_kwargs = self.effective_chat_template_kwargs(request)
         _, engine_inputs = await self.preprocess_chat(
             request,
             messages,
@@ -410,8 +429,9 @@ class OnlineRenderer:
                 build_harmony_preamble(
                     instructions=instructions,
                     tools=request.tools if with_custom_tools else None,
-                    reasoning_effort=(
-                        request.reasoning.effort if request.reasoning else None
+                    reasoning_effort=map_reasoning_effort(
+                        request.reasoning.effort if request.reasoning else None,
+                        self.reasoning_effort_map,
                     ),
                     with_custom_tools=with_custom_tools,
                     **descriptions,
@@ -530,7 +550,7 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        reuse_ids = _reused_prompt_token_ids(request)
+        reuse_ids = _reused_prompt_token_ids(request, self.renderer)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
@@ -552,7 +572,10 @@ class OnlineRenderer:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
+        reasoning_effort = map_reasoning_effort(
+            request.reasoning_effort, self.reasoning_effort_map
+        )
+        if reasoning_effort == "none":
             raise VLLMValidationError(
                 f"Harmony does not support {reasoning_effort=}",
                 parameter="reasoning_effort",
@@ -773,15 +796,18 @@ class OnlineRenderer:
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        build_kwargs: dict[str, Any] = {}
+        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+            build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
-            default_template, default_template_content_format
+            default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, messages)
+        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
@@ -822,7 +848,8 @@ class OnlineRenderer:
                 and tokenizer.supports_grammar
             )
             should_adjust_request = (
-                parser.reasoning_parser_cls is not None
+                parser.always_adjust_request
+                or parser.reasoning_parser_cls is not None
                 or tool_choice != "none"
                 or is_mistral_grammar_eligible
             )
@@ -834,13 +861,17 @@ class OnlineRenderer:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = parser(
+                request_parser = parser(
                     tokenizer,
                     request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
-                ).adjust_request(
-                    request=request,
                 )
+                prompt_token_ids = extract_prompt_components(
+                    self.model_config, engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    request_parser.set_prompt_token_ids(prompt_token_ids)
+                request = request_parser.adjust_request(request=request)
 
         return conversation, [engine_input]
