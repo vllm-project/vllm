@@ -13,6 +13,16 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
 
+@pytest.fixture
+def full_precision_matmul():
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
 def _metadata(capacity, live, query_len, device="cpu"):
     offsets = torch.arange(capacity + 1, device=device, dtype=torch.int32)
     offsets *= query_len
@@ -140,9 +150,9 @@ def _assert_accuracy(output, expected, dtype):
         (torch.float8_e4m3fn, 163840, 512),
     ],
 )
-def test_prims_ts_packed_prefill_matches_reference(dtype, context, topk, monkeypatch):
+@pytest.mark.usefixtures("full_precision_matmul")
+def test_prims_ts_packed_prefill_matches_reference(dtype, context, topk):
     _require_cuda()
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     torch.manual_seed(11)
     # Long KV also exercises grouped prefill with partial request tails.
     if context == 64:
@@ -211,9 +221,9 @@ def test_prims_ts_packed_prefill_matches_reference(dtype, context, topk, monkeyp
         (torch.float8_e4m3fn, 32, 4),
     ],
 )
-def test_prims_ts_long_decode_and_mtp_replay(dtype, batch, query_len, monkeypatch):
+@pytest.mark.usefixtures("full_precision_matmul")
+def test_prims_ts_long_decode_and_mtp_replay(dtype, batch, query_len):
     _require_cuda()
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     torch.manual_seed(29)
     context, topk, groups = 163840, 512, 2
     kv_lengths = [context - request * 13 for request in range(batch)]
