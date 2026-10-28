@@ -30,6 +30,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
+- `vllm:admission_rejections_total` (Counter) - Admission attempts rejected by a queue limit, by reason.
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
@@ -670,7 +671,7 @@ fall under the more general heading of "Observability".
 vLLM has support for OpenTelemetry tracing:
 
 - Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
-- Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
+- Configured with `--otlp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing docs](../../examples/observability/opentelemetry/README.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)

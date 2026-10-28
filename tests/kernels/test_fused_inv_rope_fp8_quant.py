@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the fused inverse RoPE + block-scaled FP8 quantization kernel.
+"""Unit tests for the fused inverse RoPE + block-scaled FP8 quantization kernel.
 
 Tests compare the fused kernel against a reference implementation built from
 the existing separate operations (inverse RoPE via rotate_neox + FP8 quant
@@ -22,7 +21,12 @@ Usage:
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
 from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import fp8_einsum
 
 # -- Default dimensions matching DeepSeek V3/V4 --------------------------
 HEAD_DIM = 512
@@ -32,6 +36,49 @@ QUANT_GROUP_SIZE = 128
 FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 FP8_DTYPE = torch.float8_e4m3fn
 EPS = 1e-10
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100/SM103"
+)
+@pytest.mark.parametrize("groups", [2, 4])
+@pytest.mark.parametrize("tokens", [1, 6, 18, 32])
+def test_dsv41_fused_wo_a_matches_deepgemm(groups, tokens):
+    """Fused WO-A matches inverse RoPE + fp8_einsum + MXFP8 quantize."""
+    from flashinfer import mxfp8_quantize
+
+    from vllm.models.deepseek_v41.nvidia.ops.fused_wo_a import _FUSED_WO_A_KERNEL
+
+    torch.manual_seed(0)
+    n = groups * 1024
+    x = torch.randn(tokens, 64, 512, device="cuda", dtype=torch.bfloat16)[:, : n // 128]
+    positions = torch.randint(0, 128, (tokens,), device="cuda")
+    rope = make_cos_sin_cache(128, device="cuda")
+    wq = torch.randn(n, 4096, device="cuda").to(FP8_DTYPE)
+    scale = torch.exp2(torch.randint(-8, 0, (n, 128), device="cuda").float())
+    wq, ws = deepgemm_post_process_fp8_weight_block(
+        wq, scale, (1, 32), False, True, groups
+    )
+    q, sf = _FUSED_WO_A_KERNEL(
+        x=x, positions=positions, rope=rope, weight=wq, weight_scale=ws
+    )
+
+    a, sa = fused_inv_rope_fp8_quant(
+        x, positions, rope, groups, 8, quant_group_size=32, tma_aligned_scales=True
+    )
+    y = torch.empty(tokens, groups, 1024, device="cuda", dtype=torch.bfloat16)
+    fp8_einsum("bhr,hdr->bhd", (a, sa), (wq, ws), y, recipe=(1, 1, 32))
+    ref, ref_sf = mxfp8_quantize(y.flatten(1), backend="cute-dsl")
+
+    def rows(scales):  # F8_128x4 bytes -> [128 rows, n / 32 blocks]
+        return scales.view(n // 128, 32, 4, 4).permute(2, 1, 0, 3).reshape(128, -1)
+
+    actual, expected = (
+        d.float().view(tokens, -1, 32) * torch.exp2(rows(s)[:tokens, :, None] - 127.0)
+        for d, s in ((q, sf), (ref, ref_sf))
+    )
+    assert (actual - expected).norm() / expected.norm() < 3e-3
+    assert not rows(sf)[tokens:].any(), "padded scale rows must be zero"
 
 
 # =========================================================================
@@ -132,6 +179,7 @@ def reference_inv_rope(
 
     Returns:
         o with inverse RoPE applied on the rope portion (bf16).
+
     """
     assert cos_sin_cache.dtype == torch.float32
     cos_sin = cos_sin_cache[positions]  # [T, rope_dim] fp32
@@ -164,6 +212,7 @@ def _ref_ue8m0_quant_block(x_f32: torch.Tensor) -> tuple[torch.Tensor, torch.Ten
     Returns:
         x_fp8: same shape, float8_e4m3fn
         scales: [...] float32, one scale per block
+
     """
     absmax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=EPS)
     scale_raw = absmax * (1.0 / FP8_MAX)
@@ -192,6 +241,7 @@ def reference_inv_rope_fp8_quant(
     Returns:
         o_fp8: [T, G, D] FP8 with strides (D, T*D, 1)
         o_scale: [T, G, S] FP32 with strides (S, T*S, 1)
+
     """
     assert cos_sin_cache.dtype == torch.float32
     T, _H, head_dim = o.shape
@@ -402,7 +452,6 @@ def test_output_strides(num_tokens, num_heads, n_groups):
     - FP8: logical [T, G, D] backed by contiguous [G, T, D].
     - Scale: MN-major TMA-aligned (column-major: T-stride=1).
     """
-
     heads_per_group = num_heads // n_groups
     max_pos = 4096
     device = "cuda"
@@ -903,7 +952,6 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
 def test_with_real_deepseek_v4_rope(num_tokens, default_vllm_config):
     """Test with real DeepseekV4ScalingRotaryEmbedding (GPT-J style,
     mscale=0, YaRN scaling) matching the production config."""
-
     num_heads = 64
     n_groups = 8
     heads_per_group = num_heads // n_groups

@@ -9,16 +9,15 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import accumulate, repeat
+from itertools import accumulate
 from typing import TypeAlias
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -29,23 +28,6 @@ from vllm.model_executor.models.intern_vit import (
 )
 
 input_dim_t: TypeAlias = int | tuple[int, int]
-norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
-
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, Iterable) and not isinstance(x, str):
-            return tuple(x)
-        return tuple(repeat(x, n))
-
-    return parse
-
-
-to_1tuple = _ntuple(1)
-to_2tuple = _ntuple(2)
-to_3tuple = _ntuple(3)
-to_4tuple = _ntuple(4)
-to_ntuple = _ntuple
 
 
 def calc_seq_len(size: tuple[int, int], patch_size: int) -> int:
@@ -109,7 +91,7 @@ class ClsToken(nn.Module):
 class ViTPatchGenerator(nn.Module):
     def __init__(
         self,
-        #  config: PretrainedConfig,
+        #  config: PreTrainedConfig,
         patch_size: int,
         embed_dim: int,
         input_dims: input_dim_t,
@@ -227,6 +209,7 @@ class ViTPatchGenerator(nn.Module):
 
         Returns:
             Embedded patches with temporal compression applied.
+
         """
         assert self.temporal_patch_size > 1
         T = self.temporal_patch_size
@@ -534,7 +517,7 @@ class RadioInternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig = None,
+        config: PreTrainedConfig = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -669,7 +652,7 @@ class RadioModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

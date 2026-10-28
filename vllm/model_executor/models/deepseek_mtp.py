@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -51,18 +51,23 @@ from .utils import (
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
+        *,
+        defer_lm_head: bool = False,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "head"),
-        )
+        if defer_lm_head:
+            self.head = None
+        else:
+            self.head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "head"),
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)
@@ -327,7 +332,12 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -529,8 +539,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

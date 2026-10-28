@@ -27,6 +27,7 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -90,7 +91,7 @@ def _get_backend_priorities(
     use_mm_prefix: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.utils.torch_utils import is_quantized_kv_cache
+    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if use_mla:
         if device_capability.major == 10:
@@ -105,9 +106,10 @@ def _get_backend_priorities(
                 ]
             else:
                 # BF16 KV Cache
-                # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+                # Prefer FA4, then FlashInfer at low head counts (FlashMLA uses padding)
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                         AttentionBackendEnum.FLASHMLA_SPARSE,
                     ]
@@ -234,12 +236,18 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
+
+    @classmethod
     def import_kernels(cls) -> None:
         """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+            logger.warning_once(
+                "Failed to import from vllm._C_stable_libtorch: %s", repr(e)
+            )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
         with contextlib.suppress(ImportError):
@@ -263,9 +271,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cuda.set_device(device)
         # With this trick we can force the device to be set eagerly
         # see https://github.com/pytorch/pytorch/issues/155668
@@ -299,10 +305,6 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
-    def log_warnings(cls):
-        pass
-
-    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             # WSL1 has no CUDA support, so being on the CUDA platform under
@@ -328,12 +330,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.data_parallel_size > 1
-        ):
-            raise ValueError("PCP does not support data parallelism on CUDA yet.")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -423,26 +419,6 @@ class CudaPlatformBase(Platform):
                 )
 
         return valid_backends_priorities, invalid_reasons
-
-    @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
-        index_kpool = getattr(
-            vllm_config.model_config.hf_text_config, "index_kpool", None
-        )
-        if not index_kpool or index_kpool <= 1:
-            return None
-        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-
-        # kpool paged-MQA indexer: the storage block (block_size /
-        # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool times a legal pool page.
-        page = min(PAGED_MQA_PAGE_SIZES)
-        if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
-            page = max(PAGED_MQA_PAGE_SIZES)
-        return index_kpool * page
 
     @classmethod
     def get_attn_backend_cls(
@@ -762,6 +738,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_arch_support_pdl(cls) -> bool:
         try:
             device = torch.cuda.current_device()
@@ -831,14 +808,19 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        try:
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        except pynvml.NVMLError:
+            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
+            # device-level NVML memory query - nvidia-smi reports [N/A] for
+            # memory.total there. Fall back to the same source
+            # NonNvmlCudaPlatform reads.
+            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
     @with_nvml_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        query if the set of gpus are fully connected by nvlink (1 hop)
-        """
+        """Query if the set of gpus are fully connected by nvlink (1 hop)."""
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
@@ -1017,11 +999,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 len(set(device_names)) > 1
                 and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
             ):
-                logger.warning(
+                logger.warning_once(
                     "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
                     ", ".join(device_names),
+                    scope="process",
                 )
 
 
@@ -1073,5 +1056,3 @@ finally:
         pynvml.nvmlShutdown()
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
-
-CudaPlatform.log_warnings()

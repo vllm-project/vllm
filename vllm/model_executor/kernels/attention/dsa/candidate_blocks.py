@@ -3,7 +3,14 @@
 
 import torch
 
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import has_deep_select
+from vllm.model_executor.layers.indexer_topk import (
+    deep_select_topk,
+    get_deep_select_stride_requirement,
+    is_deep_select_supported,
+)
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 
 
 @triton.jit
@@ -17,38 +24,47 @@ def _block_scores_kernel(
     starts,
     ends,
     scores,
+    valid_blocks,
     stride_row,
     stride_col,
     stride_start,
     stride_end,
+    stride_scores,
     width,
     nblocks,
     BLOCK_SIZE: tl.constexpr,
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
+    FULL_WIDTH: tl.constexpr,
 ):
+    # Writes each row's valid block count; FULL_WIDTH also scores the -inf tail.
     row = tl.program_id(0).to(tl.int64)
-    blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
     end = tl.load(ends + row // ROW_REPEAT * stride_end)
+    col_end = tl.minimum(end, width)
+    num_valid = tl.cdiv(tl.maximum(col_end - start, 0), BLOCK_SIZE)
+    if tl.program_id(1) == 0:
+        tl.store(valid_blocks + row, num_valid)
+    num_blocks = nblocks if FULL_WIDTH else num_valid
     offsets = tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))
-    cols = start + blocks[:, None] * BLOCK_SIZE + offsets[None, :]
-    values = tl.load(
-        logits + row * stride_row + cols * stride_col,
-        (blocks[:, None] < nblocks)
-        & (offsets[None, :] < BLOCK_SIZE)
-        & (cols < end)
-        & (cols < width),
-        other=-float("inf"),
-    )
-    reduced = tl.reduce(values, 1, _max_with_nan)
-    reduced = tl.where(
-        (end > start) & (blocks == (end - start - 1) // BLOCK_SIZE),
-        float("inf"),
-        reduced,
-    )
-    tl.store(scores + row * nblocks + blocks, reduced, blocks < nblocks)
+    num_tiles = tl.cdiv(num_blocks, TILE)
+    for tile_id in range(tl.program_id(1), num_tiles, tl.num_programs(1)):
+        blocks = tile_id * TILE + tl.arange(0, TILE)
+        cols = start + blocks[:, None] * BLOCK_SIZE + offsets[None, :]
+        values = tl.load(
+            logits + row * stride_row + cols * stride_col,
+            (offsets[None, :] < BLOCK_SIZE) & (cols < col_end),
+            other=-float("inf"),
+        ).to(tl.float32)
+        reduced = tl.reduce(values, 1, _max_with_nan)
+        # Pin the newest block. DeepSelect leaves NaN rows partially written,
+        # so also pin NaN blocks (torch.topk ranks NaN first too).
+        pinned = (end > start) & (blocks == (end - start - 1) // BLOCK_SIZE)
+        if not FULL_WIDTH:
+            pinned |= reduced != reduced
+        reduced = tl.where(pinned, float("inf"), reduced)
+        tl.store(scores + row * stride_scores + blocks, reduced, blocks < num_blocks)
 
 
 @triton.jit(do_not_specialize=["k"])
@@ -66,9 +82,10 @@ def _store_candidates_kernel(
     cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
     value = tl.load(values + row * k + cols, cols < k, other=-float("inf"))
     index = tl.load(indices + row * k + cols, cols < k, other=-1)
+    # NaN scores can occur during warmup; only -inf denotes padding.
     tl.store(
         output + row * out_stride_row + cols * out_stride_col,
-        tl.where(value > -float("inf"), index, -1),
+        tl.where(value != -float("inf"), index, -1),
         cols < OUT_K,
     )
 
@@ -159,22 +176,42 @@ def select_candidate_blocks(
         out.fill_(-1)
         return
     nblocks = triton.cdiv(width, block_size)
-    scores = logits.new_empty((rows, nblocks))
-    _block_scores_kernel[(rows, triton.cdiv(nblocks, 128))](
+    # Logits are max_model_len wide (CUDA-graph static) but rows are shorter:
+    # DeepSelect stops at each row's valid block count. Order does not matter.
+    use_deep_select = has_deep_select() and nblocks >= topk_blocks
+    if use_deep_select:
+        in_align, out_align = get_deep_select_stride_requirement()
+        padded = round_up(nblocks, in_align // logits.element_size())
+        scores = logits.new_empty((rows, padded))[:, :nblocks]
+        use_deep_select = (
+            out.stride(1) == 1
+            and out.stride(0) * out.element_size() % out_align == 0
+            and is_deep_select_supported(scores, topk_blocks)
+        )
+    else:
+        scores = logits.new_empty((rows, nblocks))
+    valid_blocks = torch.empty(rows, dtype=torch.int32, device=logits.device)
+    _block_scores_kernel[(rows, 32)](
         logits,
         row_ks,
         row_ke,
         scores,
+        valid_blocks,
         *logits.stride(),
         row_ks.stride(0) if row_ks is not None else 0,
         row_ke.stride(0),
+        scores.stride(0),
         width,
         nblocks,
         block_size,
         row_ks is not None,
         row_repeat,
-        128,
+        TILE=128,
+        FULL_WIDTH=not use_deep_select,
     )
+    if use_deep_select:
+        deep_select_topk(scores, topk_blocks, end=valid_blocks, output_idx=out)
+        return
     # Keep the existing top-k tie behavior.
     top = scores.topk(min(topk_blocks, nblocks), dim=-1)
     _store_candidates_kernel[(rows, triton.cdiv(topk_blocks, 256))](

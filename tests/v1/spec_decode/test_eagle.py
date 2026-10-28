@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Literal
 from unittest import mock
 
 import numpy as np
@@ -31,7 +32,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import extend_all_queries_by_N
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -46,13 +49,13 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def _create_proposer(
-    method: str,
+    method: Literal["eagle", "eagle3", "draft_model", "dflash"],
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     parallel_drafting: bool = False,
-    rejection_sample_method: str = "standard",
-    draft_sample_method: str = "greedy",
-) -> EagleProposer:
+    rejection_sample_method: Literal["standard", "synthetic", "block"] = "standard",
+    draft_sample_method: Literal["greedy", "probabilistic"] = "greedy",
+) -> SpecDecodeBaseProposer:
     # Method-dependent setup
     if method == "eagle":
         target_model_dir = model_dir
@@ -102,9 +105,14 @@ def _create_proposer(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
         ),
-        attention_config=AttentionConfig(backend=attention_backend),
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum[attention_backend]
+            if attention_backend
+            else None
+        ),
     )
 
+    proposer: SpecDecodeBaseProposer
     if method == "dflash":
         proposer = DFlashProposer(vllm_config=vllm_config, device=device)
     elif "eagle" in method:
@@ -116,8 +124,7 @@ def _create_proposer(
 
 
 def test_prepare_next_token_ids():
-    """
-    Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
+    """Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
     Each will produce a device tensor of next_token_ids, taking as input
     either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
     or the CPU python list[list[int]] with the rejected tokens removed.
@@ -136,7 +143,7 @@ def test_prepare_next_token_ids():
     )
 
     mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
-    mock_requests = {}
+    mock_requests: dict[str, CachedRequestState] = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
         # Each request will have a backup next token id of 10, 20, 30, 40
@@ -196,8 +203,7 @@ def test_prepare_next_token_ids():
 
 
 def test_prepare_inputs():
-    """
-    cu_target_query_lens: [0, a, a + b, a + b + c]
+    """cu_target_query_lens: [0, a, a + b, a + b + c]
     num_rejected_tokens: [n1, n2, n3]
     num_tokens_per_req: [a - n1, b - n2, c - n3]
     cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
@@ -286,8 +292,7 @@ def test_prepare_inputs():
 
 
 def test_prepare_inputs_padded():
-    """
-    Input scenario is 3 requests with num_speculative_tokens == 2 and:
+    """Input scenario is 3 requests with num_speculative_tokens == 2 and:
     - Request 1: query_len = 3, rejected = 1
     - Request 2: query_len = 3, rejected = 0
     - Request 3: query_len = 3, rejected = 2
@@ -297,7 +302,6 @@ def test_prepare_inputs_padded():
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
     """
-
     device = torch.device(DEVICE_TYPE)
 
     expected_token_indices_to_sample = torch.tensor(
@@ -350,8 +354,7 @@ def test_prepare_inputs_padded():
 
 
 def test_set_inputs_first_pass_default_eagle():
-    """
-    Test for set_inputs_first_pass without extra input slots (default EAGLE).
+    """Test for set_inputs_first_pass without extra input slots (default EAGLE).
 
     This tests the path where needs_extra_input_slots=False, which is the
     default EAGLE pathway. In this case:
@@ -436,8 +439,7 @@ def test_set_inputs_first_pass_default_eagle():
 
 
 def test_set_inputs_first_pass_draft_model():
-    """
-    Test for set_inputs_first_pass with a draft model (extra input slots,
+    """Test for set_inputs_first_pass with a draft model (extra input slots,
     no shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -578,8 +580,7 @@ def test_set_inputs_first_pass_draft_model():
 
 
 def test_set_inputs_first_pass_parallel_drafting():
-    """
-    Test for set_inputs_first_pass with parallel drafting (extra input slots,
+    """Test for set_inputs_first_pass with parallel drafting (extra input slots,
     with shift).
 
     This tests the path where needs_extra_input_slots=True and
@@ -955,15 +956,17 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer._draft_attn_layer_names,
+        layer_names=sorted(proposer._draft_attn_layer_names),
         vllm_config=proposer.vllm_config,
         device=device,
     )
 
-    # Mock runner and draft_attn_groups for attention metadata building
-    proposer.runner = mock.MagicMock()
+    # Mock draft_attn_groups for attention metadata building.
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.build_metadata_for_drafting = (
+        attn_metadata_builder.build_for_drafting
+    )
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
     mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
     proposer.draft_attn_groups = [mock_attn_group]
@@ -1000,6 +1003,124 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="uses FLASH_ATTN")
+def test_propose_refreshes_layout_caches_each_draft_step():
+    """Builders called inside the draft loop must see token_to_req_indices()
+    and compute_num_computed_tokens() for the current layout, not values
+    cached during the ragged first pass or an earlier draft step."""
+    device = torch.device(DEVICE_TYPE)
+    num_speculative_tokens = 3
+    seq_lens = [5, 3]
+    batch_size, total_tokens, vocab_size = len(seq_lens), sum(seq_lens), 100
+
+    proposer = _create_proposer(
+        "eagle", num_speculative_tokens, attention_backend="FLASH_ATTN"
+    )
+    hidden_size = proposer.hidden_size
+    model_mock = mock.MagicMock()
+    model_mock.side_effect = [
+        (torch.zeros(n, hidden_size, device=device),) * 2
+        for n in [total_tokens] + [batch_size] * (num_speculative_tokens - 1)
+    ]
+    model_mock.compute_logits.side_effect = [
+        torch.zeros(batch_size, vocab_size, device=device)
+    ] * num_speculative_tokens
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    builder_cls, _ = try_get_attention_backend(AttentionBackendEnum.FLASH_ATTN)
+    builder = builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=["layer.0"],
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+    req_index_buffer = torch.zeros(64, dtype=torch.int32, device=device)
+    observed = []
+
+    def build_for_drafting(common_attn_metadata, draft_index):
+        query_lens = common_attn_metadata.query_start_loc.diff()
+        observed.append(
+            (
+                common_attn_metadata.token_to_req_indices(req_index_buffer).tolist(),
+                torch.repeat_interleave(
+                    torch.arange(len(query_lens), device=device), query_lens
+                ).tolist(),
+                common_attn_metadata.compute_num_computed_tokens().tolist(),
+                (common_attn_metadata.seq_lens - query_lens).tolist(),
+            )
+        )
+        return builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=draft_index
+        )
+
+    attn_group = mock.MagicMock()
+    attn_group.get_metadata_builder.return_value = builder
+    attn_group.build_metadata_for_drafting = build_for_drafting
+    attn_group.layer_names = ["layer.0"]
+    attn_group.kv_cache_spec = builder.kv_cache_spec
+    proposer.draft_attn_groups = [attn_group]
+
+    proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat([torch.arange(n, device=device) for n in seq_lens]),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
+        token_indices_to_sample=None,
+        common_attn_metadata=create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=seq_lens),
+            block_size=BLOCK_SIZE,
+            device=device,
+        ),
+        sampling_metadata=mock.MagicMock(),
+    )
+
+    assert len(observed) == num_speculative_tokens
+    for step, (req, want_req, computed, want_computed) in enumerate(observed):
+        assert req == want_req, f"draft step {step}"
+        assert computed == want_computed, f"draft step {step}"
+
+
+def test_extend_all_queries_by_n_refreshes_token_to_req_indices():
+    """The extended layout must not reuse the token->request mapping cached
+    for the layout it was extended from."""
+    device = torch.device(DEVICE_TYPE)
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[8, 4, 4], query_lens=[3, 1, 1]),
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+    req_index_buffer = torch.zeros(16, dtype=torch.int32, device=device)
+    assert common_attn_metadata.token_to_req_indices(req_index_buffer).tolist() == [
+        0,
+        0,
+        0,
+        1,
+        2,
+    ]
+
+    extended = extend_all_queries_by_N(
+        common_attn_metadata,
+        N=1,
+        arange=torch.arange(8, dtype=torch.int32, device=device),
+        new_slot_mapping=torch.zeros(8, dtype=torch.int64, device=device),
+    )
+
+    assert extended.token_to_req_indices(req_index_buffer).tolist() == [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1061,13 +1182,15 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer._draft_attn_layer_names,
+        layer_names=sorted(proposer._draft_attn_layer_names),
         vllm_config=proposer.vllm_config,
         device=device,
     )
-    proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.build_metadata_for_drafting = (
+        attn_metadata_builder.build_for_drafting
+    )
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
     mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
     proposer.draft_attn_groups = [mock_attn_group]
@@ -1107,8 +1230,7 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
 
 
 def test_set_inputs_first_pass_dflash():
-    """
-    Test for DFlash set_inputs_first_pass.
+    """Test for DFlash set_inputs_first_pass.
 
     DFlash uses cross-attention: context tokens become K/V and only
     query tokens (bonus + mask) are Q. This tests the DFlash-specific
@@ -1141,6 +1263,7 @@ def test_set_inputs_first_pass_dflash():
 
     num_speculative_tokens = 3
     proposer = _create_proposer("dflash", num_speculative_tokens)
+    assert isinstance(proposer, DFlashProposer)
     mask_token_id = proposer.parallel_drafting_token_id
 
     # Setup batch with 3 requests

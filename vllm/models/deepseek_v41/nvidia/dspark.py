@@ -18,10 +18,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -32,7 +29,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -43,19 +43,23 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
     DSparkMarkovHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
+from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
     _linear_scale_param_name,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
+    maybe_init_gemm_rs,
+    prepare_mega_gate_routing_metadata,
 )
 
 logger = init_logger(__name__)
@@ -77,6 +81,9 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
+        self.use_native_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = (
@@ -109,15 +116,30 @@ class DSparkDeepseekV4Model(nn.Module):
         )
 
         current_vllm_config = get_current_vllm_config()
+        # The target model already holds the GEMM-RS workspace (same hidden
+        # size, same TP group); this only re-checks and binds the draft layers.
+        run_gemm_rs = maybe_init_gemm_rs(
+            current_vllm_config, self.use_sequence_parallel
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
+                    run_gemm_rs=run_gemm_rs,
                 )
                 for i in range(self.num_dspark_layers)
             ]
+        )
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "context_wkv_proj"),
+            disable_tp=True,
         )
 
         # Heads: final norm, and the Markov + confidence heads.
@@ -171,15 +193,16 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
-        for i, layer in enumerate(self.layers):
+        all_kv = self.context_wkv_proj(main_x).view(
+            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
+        )
+        for i, (layer, kv) in enumerate(
+            zip(self.layers, all_kv.unbind(1), strict=True)
+        ):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
             attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
@@ -202,6 +225,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 )
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
+        mega_gate_metadata = None
+        if self.use_native_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
@@ -215,17 +247,17 @@ class DSparkDeepseekV4Model(nn.Module):
                 post_mix,
                 res_mix,
                 residual,
+                mega_gate_metadata=mega_gate_metadata,
             )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-            pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
         # Collapse the hc copies with the pre-mix from the last layer's FFN
         # mixes — the mix the reference forward_head applies (hc_pre with the
         # last block's ffn pre-mix). Return the PRE-norm head hidden;
         # compute_logits applies self.norm.
         assert pre_mix is not None
         hidden_states = hc_collapse_triton(hidden_states, pre_mix)
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
 
 
@@ -235,67 +267,24 @@ def _insert_context_kv(
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
-
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
-    """
-    swa_cache = attn.swa_cache_layer.kv_cache
-    block_size = attn.swa_cache_layer.block_size
-    cos_sin_cache = attn.rotary_emb.cos_sin_cache
-    cache_dtype = swa_cache.dtype
-    n_ctx = kv.shape[0]
-    dummy_q = torch.zeros(
-        (n_ctx, attn.n_local_heads, attn.head_dim),
-        dtype=kv.dtype,
-        device=kv.device,
+    """Insert normalized context KV without constructing an unused query."""
+    # The bound cache already is [num_blocks, block_size, bytes_per_token], so
+    # the record width needs no per-layer attribute -- one whose name the
+    # attention layer is free to change (kv_bytes_per_token has to become
+    # swa_bytes_per_token once the sliding-window and compressed records can
+    # differ). block_size stays the layer's, so the op's size(1) check still
+    # cross-checks the two rather than restating the tensor.
+    cache = attn.swa_cache_layer.kv_cache
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kv,
+        cache,
+        slot_mapping,
+        positions,
+        attn.rotary_emb.cos_sin_cache,
+        attn.swa_cache_layer.block_size,
+        attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
+        attn.kv_mxfp8,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-            True,  # apply_q_norm (unused: the query is a discarded dummy)
-            attn.kv_mxfp8,
-        )
-    elif cache_dtype == torch.bfloat16:
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-            dummy_q,
-            kv,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.eps,
-            block_size,
-        )
-    else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # TODO(ben): double-check if this is being dispatched correctly for FI backend
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-            dummy_q,
-            kv,
-            dummy_q_fp8,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn._flashinfer_fp8_kv_scale,
-            attn._flashinfer_fp8_q_scale_inv,
-            attn.eps,
-            block_size,
-        )
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
@@ -394,7 +383,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
         first_layer = self.model.layers[0]
-        use_mega_moe = first_layer.ffn.use_mega_moe
+        use_native_mega_moe = first_layer.ffn.use_native_mega_moe
         # Draft MoE layers use the dspark_* expert counts, not the
         # backbone's (see DeepseekV4MoE and the reference
         # ModelArgs.get_moe_config).
@@ -402,7 +391,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             getattr(self.config, "dspark_n_routed_experts", 0)
             or self.config.n_routed_experts
         )
-        if use_mega_moe:
+        if use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(n_draft_experts)
         else:
             expert_mapping = fused_moe_make_expert_params_mapping(
@@ -430,12 +419,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // tp_size
-        head_start = n_local_head * tp_rank
-        head_end = n_local_head * (tp_rank + 1)
-
+        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
@@ -452,12 +436,25 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     else f".{self.linear_scale_name}"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts." in name:
+                experts = self.model.layers[extract_layer_index(name)].ffn.experts
+                if getattr(experts, "has_fused_shared_experts", False):
+                    loaded_params.add(
+                        experts.load_shared_expert_weight(name, loaded_weight)
+                    )
+                    continue
             if ".shared_experts.w2" in name:
                 name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
             if self.pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
                 )
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+                loaded_params.add(name)
+                continue
 
             # E8M0 expert scales: keep raw exponent bytes.
             if ".experts." in name:
@@ -497,11 +494,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
-                    loaded_params.add(name)
-                    continue
                 if name.endswith(".ffn.gate.bias"):
                     name = name.replace(
                         ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
@@ -513,22 +505,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
-        self.process_weights_after_loading()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def _finalize_moe(self) -> None:
-        for layer in self.model.layers:
-            layer.ffn.finalize_mega_moe_weights()
-
-    def process_weights_after_loading(self) -> None:
-        self._finalize_moe()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
 
         Returns None for non-mtp weights (owned by the target model).
         """
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None

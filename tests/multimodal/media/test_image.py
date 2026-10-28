@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+import struct
 from pathlib import Path
 
 import numpy as np
+import pybase64 as base64
 import pytest
-from PIL import Image
+from PIL import Image, features
+from PIL.BlpImagePlugin import BLPFormatError
 
-from vllm.multimodal.media import ImageMediaIO
+from vllm.multimodal.image import (
+    ALLOWED_IMAGE_FORMATS,
+    open_image,
+)
+from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
@@ -80,6 +88,24 @@ def test_image_media_io_rgba_custom_background(tmp_path):
     assert green_numpy[0][0][2] == 0  # B
 
 
+@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
+def test_image_media_io_rgb_png_transparency(tmp_path, background_color):
+    image = Image.new("RGB", (2, 1), (255, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255))
+    path = tmp_path / "rgb_transparency.png"
+    image.save(path, transparency=(255, 0, 0))
+
+    with Image.open(path) as source:
+        reference = Image.alpha_composite(
+            Image.new("RGBA", source.size, (*background_color, 255)),
+            source.convert("RGBA"),
+        ).convert("RGB")
+
+    image_io = ImageMediaIO(rgba_background_color=background_color)
+    converted = image_io.load_file(path)
+    np.testing.assert_array_equal(np.asarray(converted), np.asarray(reference))
+
+
 def test_image_media_io_no_mode_conversion(tmp_path):
     """image_mode=None skips conversion and preserves the original mode."""
     # RGBA image: opaque black pixel on a fully transparent background
@@ -105,7 +131,6 @@ def test_image_media_io_no_mode_conversion(tmp_path):
 
 def test_image_media_io_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
-
     # Test invalid types
     with pytest.raises(
         ValueError, match="rgba_background_color must be a list or tuple"
@@ -266,6 +291,65 @@ def test_image_pixel_limit_rejected(monkeypatch):
         image_io.load_bytes(data)
 
 
+def test_image_broken_png_rejected():
+    """A PNG with a corrupted chunk structure surfaces as a client-side
+    ValueError (Pillow raises SyntaxError, which is not an OSError)."""
+    # Real-world request bytes: stray bytes between the IDAT CRC and the
+    # IEND chunk shift the stream, so Pillow reads a bogus chunk header.
+    data = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000004000000040806000000a9f19e"
+        "7e000000144944415478da63fccfc0c0c0c0c0c0c0c0c0c000000e0001ff02ab"
+        "ce36890000000049454e44ae426082"
+    )
+
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, SyntaxError)
+
+
+@pytest.mark.parametrize(
+    ("data", "cause"),
+    [
+        # AVIF without a primary item: the AVIF decoder raises RuntimeError
+        # from Image.open().
+        pytest.param(
+            base64.b64decode(
+                "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
+                "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
+                "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
+                "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
+                "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
+                "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
+            ),
+            RuntimeError,
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
+        ),
+        # BLP2 header with compression 0, which Pillow does not know:
+        # BLPFormatError, a NotImplementedError and so a RuntimeError, from
+        # image.load().
+        (
+            b"BLP2"
+            + struct.pack("<i", 0)
+            + bytes([1, 0, 0, 0])
+            + struct.pack("<II", 1, 1)
+            + bytes(128 + 1024),
+            BLPFormatError,
+        ),
+    ],
+    ids=["avif-no-primary-item", "blp-unknown-compression"],
+)
+def test_image_decoder_error_rejected(data, cause):
+    """Decoder errors that are neither OSError nor SyntaxError surface as a
+    client-side ValueError instead of HTTP 500 or 501."""
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, cause)
+
+
 def test_image_pixel_limit_disabled(monkeypatch):
     """Setting VLLM_MAX_IMAGE_PIXELS=0 disables the pixel limit."""
     import vllm.envs as envs
@@ -282,3 +366,134 @@ def test_image_pixel_limit_disabled(monkeypatch):
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
     assert result.media.size == (1000, 1000)
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    from io import BytesIO
+
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (1, 2, 3)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_request_decoded_budget_rejects_aggregate(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 600)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(10, 10)
+
+    image_io.load_bytes(data)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        image_io.load_bytes(data)
+
+
+def test_request_decoded_budget_accepts_images_within_limit(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 800)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(10, 10)
+
+    image_io.load_bytes(data)
+    image_io.load_bytes(data)
+    assert budget.used == 800
+
+
+def test_request_decoded_budget_disabled(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 0)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(100, 100)
+
+    image_io.load_bytes(data)
+    image_io.load_bytes(data)
+    assert budget.used == 0
+
+
+def test_media_connector_enforces_request_decoded_budget(monkeypatch):
+    import pybase64
+
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 600)
+    b64 = pybase64.b64encode(_png_bytes(10, 10)).decode()
+    url = f"data:image/png;base64,{b64}"
+    connector = MediaConnector(decoded_budget=MediaDecodedBudget())
+
+    connector.fetch_image(url)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        connector.fetch_image(url)
+
+
+def test_image_media_io_rejects_postscript_payload():
+    """EPS/PostScript bytes must not reach an external renderer."""
+    import pybase64 as base64
+
+    eps = b"""%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 10 10
+%%EndComments
+0 0 moveto 10 10 lineto stroke
+showpage
+"""
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_bytes(eps)
+
+    payload = base64.b64encode(eps).decode("ascii")
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_io.load_base64("image/png", payload)
+
+
+def test_image_media_io_accepts_common_raster_formats(tmp_path):
+    """Common Pillow-writable raster formats remain loadable."""
+    image_io = ImageMediaIO()
+    formats = (
+        ("PNG", "ok.png"),
+        ("JPEG", "ok.jpg"),
+        ("WEBP", "ok.webp"),
+        ("GIF", "ok.gif"),
+        ("BMP", "ok.bmp"),
+        ("TIFF", "ok.tiff"),
+        ("PPM", "ok.ppm"),
+        ("TGA", "ok.tga"),
+        ("DDS", "ok.dds"),
+        ("PCX", "ok.pcx"),
+        ("SGI", "ok.sgi"),
+        ("QOI", "ok.qoi"),
+        ("JPEG2000", "ok.jp2"),
+    )
+    for fmt, name in formats:
+        path = tmp_path / name
+        Image.new("RGB", (4, 4), (1, 2, 3)).save(path, format=fmt)
+        result = image_io.load_bytes(path.read_bytes())
+        assert result.media.size == (4, 4)
+
+
+def test_allowed_image_formats_exclude_external_renderer_plugins():
+    """Formats that shell out or use stubs stay off the allowlist."""
+    denied = {"EPS", "WMF", "BUFR", "GRIB", "HDF5", "MPEG"}
+    assert denied.isdisjoint(ALLOWED_IMAGE_FORMATS)
+
+
+def test_kimi_fused_vision_rejects_postscript_payload():
+    """Kimi fused vision must use the same image format allowlist."""
+    from vllm.transformers_utils.processors.kimi_k25_vision_fused import _to_pil
+
+    eps = b"""%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 10 10
+%%EndComments
+0 0 moveto 10 10 lineto stroke
+showpage
+"""
+    with pytest.raises(Image.UnidentifiedImageError):
+        _to_pil(eps)
+
+
+def test_open_image_does_not_accept_format_override():
+    """The allowlist helper must not expose a formats override."""
+    assert "formats" not in inspect.signature(open_image).parameters

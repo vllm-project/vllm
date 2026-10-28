@@ -104,6 +104,13 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// Full-attention block size in tokens after initialization, or unavailable.
+    #[serde(default)]
+    pub effective_attention_block_size: Option<u64>,
+    /// JSON-mode dump of this engine's `VllmConfig`, reported only when the
+    /// engine runs with `VLLM_SERVER_DEV_MODE` (for `/server_info`).
+    #[serde(default)]
+    pub vllm_config: Option<serde_json::Value>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
