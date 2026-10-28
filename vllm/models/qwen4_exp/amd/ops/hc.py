@@ -185,8 +185,9 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
     return out
 
 
-# Above this the up GEMM is compute bound and the unfused GEMM + gate-mix wins.
-MAX_FUSED_UP_M = 64
+# On MI355X the fused kernel is 1.15x-1.96x faster than GEMM + gate-mix up to 256
+# tokens, its margin shrinks to 1.02x at 512, and it loses at 1024.
+MAX_FUSED_UP_M = 256
 
 
 @triton.jit
@@ -261,7 +262,12 @@ def _hc_up_gate_mix(
 
     HC_DIM = DIM // hc_count
     out = x.new_empty(M, HC_DIM)
-    BLOCK_M = 16
+    # Tiles from a MI355X sweep at HC=4, DIM=10240, rank 320. Small M is latency
+    # bound: one wave per 16-column tile keeps the most programs in flight.
+    if M <= 48:
+        BLOCK_M, BLOCK_K, num_warps = 16, 32, 1
+    else:
+        BLOCK_M, BLOCK_K, num_warps = 64, 128, 4
     BLOCK_N = 16
     _hc_up_gate_mix_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(HC_DIM, BLOCK_N))](
         x,
@@ -278,8 +284,10 @@ def _hc_up_gate_mix(
         rank,
         BLOCK_M,
         BLOCK_N,
-        BLOCK_K=64,
+        BLOCK_K,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        num_warps=num_warps,
+        num_stages=2,
     )
     return out
 

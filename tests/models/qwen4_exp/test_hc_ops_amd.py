@@ -22,7 +22,7 @@ HYPER_HIDDEN_SIZE = HC * HIDDEN_SIZE
 LORA_RANK = 320
 
 
-@pytest.mark.parametrize("num_tokens", [1, 3, 16, 17, 48, MAX_FUSED_UP_M])
+@pytest.mark.parametrize("num_tokens", [1, 3, 16, 17, 48, 49, 100, MAX_FUSED_UP_M])
 def test_hc_up_gate_mix_matches_unfused(num_tokens: int) -> None:
     torch.manual_seed(0)
     xn = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
