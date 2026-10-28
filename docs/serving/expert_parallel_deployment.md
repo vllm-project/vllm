@@ -328,14 +328,18 @@ Fault tolerance lets vLLM recover from certain distributed engine failures witho
 restarting the entire deployment. An external orchestrator detects failures and
 coordinates recovery across the engines.
 
-To enable it, use `--enable-fault-tolerance` and `--enable-expert-parallel` with
-an FT-capable all-to-all backend (`nixl_ep` or `deepep_low_latency`). Fault
-tolerance requires the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+### Configuring recovery
+
+Both retry and scale-down require `--enable-fault-tolerance`,
+`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+Retry can recover from a fault when all workers remain alive.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough
 redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
 accessible to survivors so they can reload expert weights.
+The orchestrator selects the recovery mode when it sends the recovery request.
 
 ### Coordinating recovery
 
