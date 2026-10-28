@@ -171,8 +171,12 @@ class K2HorizonToolParser(ToolParser):
             # An untyped schema carries no type information, so the
             # model's explicit <arg_type> tag decides.
             target_types = [explicit_base]
-        elif explicit_base in target_types and len(target_types) > 1:
-            target_types = [explicit_base]
+        elif explicit_base is not None and len(target_types) > 1:
+            narrowed = canonical_schema_types([explicit_base]).intersection(
+                canonical_schema_types(target_types)
+            )
+            if narrowed:
+                target_types = sorted(narrowed)
 
         raw_value = (
             value if "string" in canonical_schema_types(target_types) else value.strip()

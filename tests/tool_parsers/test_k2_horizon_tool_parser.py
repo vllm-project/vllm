@@ -294,6 +294,26 @@ def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
     assert json.loads(result.tool_calls[0].function.arguments) == {"note": "  hi  "}
 
 
+def test_xml_union_param_alias_type_narrows_to_declared_type(tokenizer):
+    # ``str`` aliases ``string``; the ``<arg_type>`` tag must narrow a union
+    # schema so the declared type wins over value-based inference.
+    tools = _lookup_tool({"note": {"type": ["string", "integer"]}})
+    request = _request("xml_typed", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+    call = (
+        "<ifm|tool_call>lookup"
+        "<ifm|arg_key>note</ifm|arg_key>"
+        "<ifm|arg_type>str</ifm|arg_type>"
+        "<ifm|arg_value>5</ifm|arg_value>"
+        "</ifm|tool_call>"
+    )
+
+    result = parser.extract_tool_calls(_group(call), request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"note": "5"}
+
+
 def test_json_untyped_param_keeps_containers_structured(tokenizer):
     # Dict/list values for an untyped property stay structured JSON, not
     # double-encoded JSON text a client would have to re-parse.
