@@ -45,7 +45,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.kda_metadata import (
+    PREFILL_CONV_BLOCK_M,
+    KimiK3ROCmKDABackend,
+)
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
@@ -617,7 +620,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         has_initial_state=has_initial_state,
                         activation="silu",
-                        block_m=8,
+                        block_m=PREFILL_CONV_BLOCK_M,
                         metadata=m,
                         preserve_input_dtype=True,
                     )

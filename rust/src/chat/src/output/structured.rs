@@ -10,6 +10,7 @@
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_llm::RequestTimestamps;
 use vllm_text::DecodedLogprobs;
 
@@ -152,6 +153,7 @@ impl StructuredEventState {
         &mut self,
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,
+        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
         finish_reason: FinishReason,
         kv_transfer_params: Option<Box<serde_json::Value>>,
         ec_transfer_params: Option<Box<serde_json::Value>>,
@@ -163,6 +165,7 @@ impl StructuredEventState {
             message: self.message.clone(),
             usage,
             timestamps,
+            spec_decode_metrics,
             finish_reason,
             kv_transfer_params,
             ec_transfer_params,
@@ -317,6 +320,7 @@ pub(crate) async fn structured_chat_event_stream(
             AssistantEvent::Done {
                 usage,
                 timestamps,
+                spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
@@ -324,6 +328,7 @@ pub(crate) async fn structured_chat_event_stream(
                 for next in state.finish(
                     usage,
                     timestamps,
+                    spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
@@ -360,9 +365,10 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -416,9 +422,10 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -470,9 +477,10 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -524,9 +532,10 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -593,9 +602,10 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -643,11 +653,12 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 4,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 3,
                 },
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
