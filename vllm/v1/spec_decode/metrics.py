@@ -253,6 +253,10 @@ class SpecDecodingProm:
                 ("vllm:spec_decode_num_drafts", "Number of spec decoding drafts."),
                 ("vllm:spec_decode_num_draft_tokens", "Number of draft tokens."),
                 ("vllm:spec_decode_num_accepted_tokens", "Number of accepted tokens."),
+                (
+                    "vllm:spec_decode_num_verified_tokens",
+                    "Number of draft tokens verified by the target.",
+                ),
             ]
 
         counters = [
@@ -267,52 +271,40 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_drafts = counters[0]
         self.counter_spec_decode_num_draft_tokens = counters[1]
         self.counter_spec_decode_num_accepted_tokens = counters[2]
-
-        self.counter_spec_decode_num_verified_tokens = None
-        self.counter_spec_decode_num_verified_tokens_per_pos: dict[
-            int, list[prometheus_client.Counter]
-        ] = {}
-        if not is_diffusion:
-            assert speculative_config is not None
-            metric = self._counter_cls(
-                name="vllm:spec_decode_num_verified_tokens",
-                documentation="Draft tokens actually verified by the target.",
-                labelnames=labelnames,
-            )
-            self.counter_spec_decode_num_verified_tokens = create_metric_per_engine(
-                metric, per_engine_labelvalues
-            )
-            per_pos_metric = self._counter_cls(
-                name="vllm:spec_decode_num_verified_tokens_per_pos",
-                documentation="Draft tokens actually verified per draft position.",
-                labelnames=labelnames + ["position"],
-            )
-            self.counter_spec_decode_num_verified_tokens_per_pos = {
-                idx: [
-                    per_pos_metric.labels(*lv, str(pos))
-                    for pos in range(speculative_config.num_speculative_tokens)
-                ]
-                for idx, lv in per_engine_labelvalues.items()
-            }
+        self.counter_spec_decode_num_verified_tokens = (
+            None if is_diffusion else counters[3]
+        )
 
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
+            int, list[prometheus_client.Counter]
+        ] = {}
+        self.counter_spec_decode_num_verified_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
         if not is_diffusion:
             assert speculative_config is not None
             num_spec_tokens = speculative_config.num_speculative_tokens
             pos_labelnames = labelnames + ["position"]
-            base_counter = self._counter_cls(
+            accepted_counter = self._counter_cls(
                 name="vllm:spec_decode_num_accepted_tokens_per_pos",
                 documentation="Accepted tokens per draft position.",
                 labelnames=pos_labelnames,
             )
-            self.counter_spec_decode_num_accepted_tokens_per_pos = {
-                idx: [
-                    base_counter.labels(*lv, str(pos)) for pos in range(num_spec_tokens)
-                ]
-                for idx, lv in per_engine_labelvalues.items()
-            }
+            verified_counter = self._counter_cls(
+                name="vllm:spec_decode_num_verified_tokens_per_pos",
+                documentation="Verified draft tokens per draft position.",
+                labelnames=pos_labelnames,
+            )
+            self.counter_spec_decode_num_accepted_tokens_per_pos = (
+                create_metric_per_engine_and_pos(
+                    accepted_counter, per_engine_labelvalues, num_spec_tokens
+                )
+            )
+            self.counter_spec_decode_num_verified_tokens_per_pos = (
+                create_metric_per_engine_and_pos(
+                    verified_counter, per_engine_labelvalues, num_spec_tokens
+                )
+            )
 
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
         if not self.spec_decoding_enabled:
@@ -338,3 +330,15 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+
+def create_metric_per_engine_and_pos(
+    metric: prometheus_client.Counter,
+    per_engine_labelvalues: dict[int, list[object]],
+    num_positions: int,
+) -> dict[int, list[prometheus_client.Counter]]:
+    """Create a labeled metric child for each engine index and position."""
+    return {
+        idx: [metric.labels(*lv, str(pos)) for pos in range(num_positions)]
+        for idx, lv in per_engine_labelvalues.items()
+    }
