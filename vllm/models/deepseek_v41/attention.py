@@ -70,6 +70,7 @@ from vllm.utils.multi_stream_utils import (
 )
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
@@ -812,6 +813,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         other projection backends consume the normalized Q directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+            return self.q_norm.forward_cuda(qr), None, self.kv_norm.forward_cuda(kv)
         if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
             from vllm.models.deepseek_v41.common.ops.query_quant import (
                 fused_q_kv_rmsnorm_quant,
@@ -1007,6 +1010,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
+                if (
+                    envs.VLLM_BATCH_INVARIANT
+                    and current_platform.is_device_capability_family(100)
+                ):
+                    from vllm.model_executor.kernels.linear.cute_dsl import (
+                        batch_invariant as bi_linear,
+                    )
+
+                    return bi_linear.bf16_fixed_mm(
+                        hidden_states, compressor.fused_wkv_wgate.weight
+                    )
                 return torch.mm(
                     hidden_states,
                     compressor.fused_wkv_wgate.weight.T,
@@ -1058,6 +1072,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 None,
                 index_weights,
             )
+            if envs.VLLM_BATCH_INVARIANT and not getattr(
+                self.indexer.indexer_op, "emits_bi_index_order", False
+            ):
+                metadata = get_forward_context().attn_metadata
+                if isinstance(metadata, dict):
+                    index_metadata = cast(
+                        DeepseekV32IndexerMetadata,
+                        metadata[self.indexer.k_cache.prefix],
+                    )
+                    tokens = (
+                        index_metadata.num_decode_tokens
+                        + index_metadata.num_prefill_tokens
+                    )
+                    assert self.topk_indices_buffer is not None
+                    _sort_valid_topk_indices_(self.topk_indices_buffer[:tokens])
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
@@ -1244,6 +1273,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert self.compressed_cache_prefix is not None
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
+
+
+def _sort_valid_topk_indices_(indices: torch.Tensor) -> None:
+    """Keep selected positions in the deployment attention reduction order."""
+    sentinel = torch.iinfo(indices.dtype).max
+    ordered = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
+    indices.copy_(torch.where(ordered == sentinel, -1, ordered))
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
@@ -1569,9 +1605,12 @@ class DeepseekV4Indexer(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+            # The shortcut keys off the batch's longest request and skips the
+            # candidate write; batch invariance keeps one route per token.
             if (
                 indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
                 and not torch.cuda.is_current_stream_capturing()
+                and not envs.VLLM_BATCH_INVARIANT
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
