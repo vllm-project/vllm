@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import suppress
 from typing import ClassVar
 
 import torch
@@ -34,6 +33,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
+    current_workspace_lane,
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
@@ -381,12 +381,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
         attn_logits: torch.Tensor | None = None
         if is_workspace_manager_initialized():
-            # A locked draft lane can be smaller than the target reservation;
-            # retain the direct-allocation fallback in that case.
-            with suppress(AssertionError):
+            try:
                 (attn_logits,) = current_workspace_manager().get_simultaneous(
                     (logits_shape, torch.float32),
                 )
+            except AssertionError:
+                # The DSpark draft lane is sized only by the draft's cudagraph
+                # captures: its builder reserves in the default lane.
+                if current_workspace_lane() == 0:
+                    raise
         if attn_logits is None:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q.device
