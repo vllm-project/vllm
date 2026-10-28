@@ -156,6 +156,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)"
       dind: false
       device: mi355_dpx
@@ -185,6 +186,7 @@ steps:
   - pytest -v -s entrypoints/cohere
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (API Server Generate)"
       dind: false
       device: mi355_dpx
