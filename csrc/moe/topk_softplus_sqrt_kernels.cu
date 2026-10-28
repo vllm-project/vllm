@@ -17,6 +17,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cstring>
 #include <type_traits>
 
 #include <cuda_runtime.h>
@@ -770,12 +771,11 @@ __device__ __forceinline__ float softplusSqrt(float x) {
   return isnan(v) ? 0.f : v;
 }
 
-// Same contract as topkGatingSoftplusSqrt for fp32 input and a compile-time
-// k, except that the weights are the raw scores rather than (score + bias) -
-// bias. The generic kernel keeps its row in a dynamically indexed private
-// array (scratch on ROCm) and reduces through LDS shuffles; here one wave
-// owns one row, the k loop is unrolled, and the argmax reduces in DPP with a
-// wave-uniform winner.
+// Same contract and output bits as topkGatingSoftplusSqrt for fp32 input and
+// a compile-time k. The generic kernel keeps its row in a dynamically indexed
+// private array (scratch on ROCm) and reduces through LDS shuffles; here one
+// wave owns one row, the k loop is unrolled, and the argmax reduces in DPP
+// with a wave-uniform winner.
 template <int NUM_EXPERTS, int K, bool USE_HASH, typename IndType,
           typename HashIndType>
 __launch_bounds__(64) __global__
@@ -817,11 +817,24 @@ __launch_bounds__(64) __global__
     }
     float scale = routed_scaling_factor;
     if (renormalize) {
+      // The generic fp32 launch has 64 threads per row, and thread
+      // (e / GENERIC_ELTS) % 64 owns expert e. Each thread sums its own
+      // weights in k order and the row then reduces in an XOR butterfly;
+      // repeating both gives the sum the same bits.
+      constexpr int GENERIC_ELTS = NUM_EXPERTS == 384 ? 2 : 4;
       float selected_sum = 0.f;
   #pragma unroll
       for (int k = 0; k < K; ++k) {
-        selected_sum += __int_as_float(
+        const int expert_k = __builtin_amdgcn_readlane(expert, k);
+        const float weight_k = __int_as_float(
             __builtin_amdgcn_readlane(__float_as_int(weight), k));
+        if ((expert_k / GENERIC_ELTS) % 64 == lane) {
+          selected_sum += weight_k;
+        }
+      }
+  #pragma unroll
+      for (int mask = 32; mask > 0; mask /= 2) {
+        selected_sum += __shfl_xor(selected_sum, mask);
       }
       scale /= selected_sum > 0.f ? selected_sum : 1.f;
     }
@@ -834,7 +847,7 @@ __launch_bounds__(64) __global__
   }
 
   // Pad rows score 0 everywhere and skip the bias, like the generic kernel.
-  float score[VPT], raw[VPT];
+  float score[VPT];
   #pragma unroll
   for (int v = 0; v < NUM_VEC; ++v) {
     const int col = v * 64 * VEC + lane * VEC;
@@ -845,14 +858,13 @@ __launch_bounds__(64) __global__
         b = *reinterpret_cast<const float2*>(row_bias + col);
       }
     }
-    raw[v * VEC] = is_pad_row ? 0.f : softplusSqrt(x.x);
-    raw[v * VEC + 1] = is_pad_row ? 0.f : softplusSqrt(x.y);
-    score[v * VEC] = raw[v * VEC] + b.x;
-    score[v * VEC + 1] = raw[v * VEC + 1] + b.y;
+    score[v * VEC] = is_pad_row ? 0.f : softplusSqrt(x.x) + b.x;
+    score[v * VEC + 1] = is_pad_row ? 0.f : softplusSqrt(x.y) + b.y;
   }
 
+  // The generic kernel's weight is (score + bias) - bias, summed in k order.
   int selected[K];
-  float selected_raw[K];
+  float selected_weight[K];
   float selected_sum = 0.f;
   #pragma unroll
   for (int k = 0; k < K; ++k) {
@@ -874,16 +886,16 @@ __launch_bounds__(64) __global__
     wave64ArgmaxStep<0x142, 16>(hi, lo);  // row_bcast:15
     wave64ArgmaxStep<0x143, 32>(hi, lo);  // row_bcast:31
     const int expert = ~__builtin_amdgcn_readlane(static_cast<int>(lo), 63);
-    selected[k] = expert;
-    const int slot = (expert / (64 * VEC)) * VEC + expert % VEC;
-    float mine = raw[0];
-  #pragma unroll
-    for (int i = 1; i < VPT; ++i) {
-      mine = slot == i ? raw[i] : mine;
+    const unsigned key = static_cast<unsigned>(
+        __builtin_amdgcn_readlane(static_cast<int>(hi), 63));
+    float weight =
+        __uint_as_float((key & 0x80000000u) ? (key ^ 0x80000000u) : ~key);
+    if (row_bias != nullptr && !is_pad_row) {
+      weight -= row_bias[expert];
     }
-    selected_raw[k] = __int_as_float(__builtin_amdgcn_readlane(
-        __float_as_int(mine), (expert % (64 * VEC)) / VEC));
-    selected_sum += selected_raw[k];
+    selected[k] = expert;
+    selected_weight[k] = weight;
+    selected_sum += weight;
   #pragma unroll
     for (int i = 0; i < VPT; ++i) {
       const int col = (i / VEC) * 64 * VEC + lane * VEC + i % VEC;
@@ -896,11 +908,11 @@ __launch_bounds__(64) __global__
     if (renormalize) {
       scale /= selected_sum > 0.f ? selected_sum : 1.f;
     }
-    float weight = selected_raw[0];
+    float weight = selected_weight[0];
     int expert = selected[0];
   #pragma unroll
     for (int k = 1; k < K; ++k) {
-      weight = lane == k ? selected_raw[k] : weight;
+      weight = lane == k ? selected_weight[k] : weight;
       expert = lane == k ? selected[k] : expert;
     }
     output[out_offset] = weight * scale;
@@ -935,10 +947,19 @@ void launchTopkSoftplusSqrtWave64(
     case 384:
       LAUNCH_TOPK_WAVE64(384);
       break;
-    default:
+    case 512:
       LAUNCH_TOPK_WAVE64(512);
+      break;
+    default:
+      STD_TORCH_CHECK(false, "topk_softplus_sqrt wave64: unsupported ",
+                      num_experts, " experts");
   }
   #undef LAUNCH_TOPK_WAVE64
+}
+
+// Only measured on gfx950; other wave64 GPUs keep the generic kernel.
+inline bool topkSoftplusSqrtWave64Enabled() {
+  return std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
 }
 #endif
 
@@ -965,7 +986,8 @@ void topkGatingSoftplusSqrtKernelLauncher(
 #else
   if constexpr (std::is_same_v<InputType, float>) {
     if (WARP_SIZE == 64 && topk == 6 &&
-        (num_experts == 256 || num_experts == 384 || num_experts == 512)) {
+        (num_experts == 256 || num_experts == 384 || num_experts == 512) &&
+        topkSoftplusSqrtWave64Enabled()) {
       launchTopkSoftplusSqrtWave64<IndType, HashIndType>(
           gating_output, topk_weights, topk_indices, token_expert_indices,
           num_tokens, num_experts, renormalize, routed_scaling_factor,
