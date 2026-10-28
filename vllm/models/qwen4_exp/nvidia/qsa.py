@@ -271,6 +271,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16, FP8-e4m3 or NVFP4 main KV cache"
             )
+        if self.kv_cache_dtype == "nvfp4":
+            from flashinfer.sparse import qsa_sparse_paged_attention
+
+            self.nvfp4_attention = qsa_sparse_paged_attention
         self.supports_quant_query_input = False
 
     def do_kv_cache_update(
@@ -334,8 +338,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         logical_indices = topk_buffer[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
         if self.kv_cache_dtype == "nvfp4":
-            from flashinfer.sparse import qsa_sparse_paged_attention as fi_attention
-
             from vllm.v1.attention.backends.flashinfer import _nvfp4_kv_views
 
             (k_data, v_data), (k_sf, v_sf), kv_layout = _nvfp4_kv_views(
@@ -345,7 +347,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 k_data, v_data, k_sf, v_sf = (
                     x.transpose(1, 2) for x in (k_data, v_data, k_sf, v_sf)
                 )
-            fi_attention(
+            self.nvfp4_attention(
                 query[:num_tokens],
                 k_data,
                 v_data,
