@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import CompilationMode
 from vllm.distributed import parallel_state
+from vllm.model_executor.models import qwen3_moe
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
@@ -239,3 +242,109 @@ def test_minimax_aux_taps_follow_deferred_tp_all_reduce(minimax_pp_stage, taps):
     for hidden, tap in zip(aux, taps, strict=True):
         torch.testing.assert_close(hidden, _pp_aux_state(_expected_aux_value(tap)))
     torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+
+
+class _PPAuxForwardLayer(_PPAuxLayer):
+    """Single-call forward like Qwen3MoeDecoderLayer."""
+
+    def __init__(self, index):
+        super().__init__(index, deferred=False)
+
+    def forward(self, positions, hidden_states, residual):
+        hidden_states, residual = self.forward_input_norm(hidden_states, residual)
+        return self.forward_after_input_norm(positions, hidden_states, residual)
+
+
+@pytest.fixture
+def qwen3_moe_pp_stage(monkeypatch):
+    """Use the real Qwen3-MoE constructor/forward and aux helpers on CPU tensors."""
+    group = SimpleNamespace(world_size=2, is_first_rank=True, is_last_rank=False)
+    bounds = [0, 3]
+    monkeypatch.setattr(qwen3_moe, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(
+        qwen3_moe, "VocabParallelEmbedding", lambda *args, **kwargs: torch.nn.Identity()
+    )
+    monkeypatch.setattr(qwen3_moe, "RMSNorm", lambda *args, **kwargs: _PPAuxNorm())
+
+    def make_layers(num_layers, build, prefix):
+        return (
+            *bounds,
+            torch.nn.ModuleList(
+                build(f"{prefix}.{index}")
+                if bounds[0] <= index < bounds[1]
+                else torch.nn.Identity()
+                for index in range(num_layers)
+            ),
+        )
+
+    monkeypatch.setattr(qwen3_moe, "make_layers", make_layers)
+
+    def make_stage(start, end, taps, world_size=2):
+        bounds[:] = [start, end]
+        group.world_size = world_size
+        group.is_first_rank = start == 0
+        group.is_last_rank = end == 6
+        config = SimpleNamespace(
+            vocab_size=16, hidden_size=6144, num_hidden_layers=6, rms_norm_eps=1e-6
+        )
+        model = qwen3_moe.Qwen3MoeModel(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=config),
+                quant_config=None,
+                parallel_config=SimpleNamespace(
+                    eplb_config=SimpleNamespace(num_redundant_experts=0)
+                ),
+                compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+            ),
+            decoder_layer_type=lambda **kwargs: _PPAuxForwardLayer(
+                int(kwargs["prefix"].rsplit(".", 1)[1])
+            ),
+        )
+        model._set_aux_hidden_state_layers(taps)
+        target = SimpleNamespace(
+            model=model,
+            make_empty_intermediate_tensors=model.make_empty_intermediate_tensors,
+        )
+        reserve_aux_intermediate_tensor_slots(target)
+        return model, target
+
+    return make_stage
+
+
+# (0, 3, 6) puts a tap on the stage boundary, which both stages could record.
+@pytest.mark.parametrize("taps", [(0, 3, 6), (0, 1, 3), (4, 5, 6)])
+def test_qwen3_moe_pp2_preserves_ordered_global_aux_taps(qwen3_moe_pp_stage, taps):
+    first, _ = qwen3_moe_pp_stage(0, 3, taps)
+    sent = first(None, None, None, _pp_aux_state(7))
+    last, target = qwen3_moe_pp_stage(3, 6, taps)
+    reserved = target.make_empty_intermediate_tensors(2, torch.float32, "cpu")
+    assert set(sent.tensors) == set(reserved.tensors)
+    result = last(None, None, sent)
+    assert isinstance(result, tuple)
+    output, aux = result
+    torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+    for hidden, tap in zip(aux, taps, strict=True):
+        torch.testing.assert_close(hidden, _pp_aux_state(_expected_aux_value(tap)))
+
+
+@pytest.mark.parametrize("taps", [(), (0, 3, 6)])
+def test_qwen3_moe_pp1_output_and_aux_taps(qwen3_moe_pp_stage, taps):
+    model, _ = qwen3_moe_pp_stage(0, 6, taps, world_size=1)
+    output = model(None, None, None, _pp_aux_state(7))
+    if taps:
+        output, aux = output
+        for hidden, tap in zip(aux, taps, strict=True):
+            torch.testing.assert_close(hidden, _pp_aux_state(_expected_aux_value(tap)))
+    torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+
+
+@pytest.mark.parametrize("module_name", ["qwen3_vl_moe", "qwen3_omni_moe_thinker"])
+def test_qwen3_moe_multimodal_llm_does_not_inherit_pp_support(module_name):
+    module = importlib.import_module(f"vllm.model_executor.models.{module_name}")
+    inner = module.Qwen3MoeLLMModel.__new__(module.Qwen3MoeLLMModel)
+    with pytest.raises(ValueError, match="does not support eagle3"):
+        verify_supports_aux_hidden_states_over_pp(
+            SimpleNamespace(model=inner), "eagle3"
+        )
