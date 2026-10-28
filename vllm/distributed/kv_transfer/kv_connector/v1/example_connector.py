@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import safetensors
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -89,6 +89,12 @@ class ExampleConnector(KVConnectorBase_V1):
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     def __init__(
         self,
