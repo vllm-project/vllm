@@ -539,7 +539,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 quant_dtype=current_platform.fp8_dtype(),
             )
         elif (
-            activation == MoEActivation.SILU
+            # Only benchmarked on ROCm.
+            current_platform.is_rocm()
+            and activation == MoEActivation.SILU
             and self.activation_config.clamp_limit is None
             and self.quant_config.use_fp8_w8a8
             and self.per_act_token_quant
