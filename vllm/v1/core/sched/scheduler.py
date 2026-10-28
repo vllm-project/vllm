@@ -54,7 +54,6 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.residual_sjf import get_prefill_token_limits
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
@@ -218,7 +217,6 @@ class Scheduler(SchedulerInterface):
         self._residual_sjf_local_hits: dict[
             Request, tuple[int, int, bytes | None, int]
         ] = {}
-        self._residual_sjf_retry_running = False
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -784,56 +782,12 @@ class Scheduler(SchedulerInterface):
         ):
             defer_prefills = True
 
-        prefill_limits: dict[str, int] = {}
-        reserved_waiting = False
-        plan_prefills = (
-            self.scheduler_config.residual_sjf_preempt_prefills
-            and not defer_prefills
-            and token_budget > 0
-        )
-        if plan_prefills:
-            # Schedule decodes through the normal eligibility/allocation path
-            # before sharing the remaining budget among prefills.
-            self.running.sort(key=lambda r: r.is_prefill_chunk)
-
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
-
-            if plan_prefills and request.is_prefill_chunk:
-                plan_prefills = False
-                queues = []
-                if not preempted_reqs and not self._residual_sjf_retry_running:
-                    queues.append(self.kv_holding_waiting)
-                    if self._pause_state == PauseState.UNPAUSED:
-                        queues.append(self.waiting)
-                candidates = (
-                    r
-                    for queue in queues
-                    for r in queue
-                    if (
-                        r.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
-                        or r.request_id in self.finished_recving_kv_req_ids
-                    )
-                    and not (r.num_stale_output_tokens and not r.drop_stale_output)
-                )
-                prefill_limits, reserved_waiting = get_prefill_token_limits(
-                    self.running,
-                    candidates,
-                    self._get_residual_sjf_cost,
-                    self.block_size,
-                    self.scheduler_config.residual_sjf_max_wait_ms,
-                    token_budget,
-                    input_budget,
-                    long_prefill_token_threshold,
-                    self.max_num_active_reqs
-                    - len(self.running)
-                    - self.num_waiting_for_streaming_input,
-                    draft_slots,
-                )
 
             if (
                 request.num_output_placeholders > 0
@@ -884,11 +838,6 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
-            if prefill_limits:
-                num_new_tokens = min(
-                    num_new_tokens,
-                    prefill_limits.get(request.request_id, num_new_tokens),
-                )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -1643,11 +1592,6 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
-
-        # Retry resident work after failed admission, still protecting decodes.
-        self._residual_sjf_retry_running = reserved_waiting and not (
-            scheduled_new_reqs or scheduled_resumed_reqs
-        )
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -2749,10 +2693,7 @@ class Scheduler(SchedulerInterface):
 
     def _get_residual_sjf_cost(self, request: Request) -> int:
         hit = request.num_computed_tokens
-        if (
-            request.status != RequestStatus.RUNNING
-            and not request.skip_reading_prefix_cache
-        ):
+        if not request.skip_reading_prefix_cache:
             signature = (
                 request.num_tokens,
                 request.num_preemptions,
