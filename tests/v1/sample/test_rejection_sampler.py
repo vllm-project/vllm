@@ -1410,3 +1410,48 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize("rejected_step", [0, 1, 2])
+@pytest.mark.parametrize("draft_vocab_size", [8191, 8193])
+def test_narrow_draft_probs_match_padding_across_vocab_blocks(
+    rejected_step: int, draft_vocab_size: int
+):
+    """Recover a target-only token after an accepted multi-position prefix."""
+    batch_size, num_steps, vocab_size = 4, 3, 8201
+    draft_ids = torch.tensor([0, draft_vocab_size - 1, 1], device=DEVICE_TYPE)
+    draft_probs = torch.zeros(num_steps, draft_vocab_size, device=DEVICE_TYPE)
+    draft_probs[torch.arange(num_steps), draft_ids] = 1.0
+    target_probs = F.pad(draft_probs, (0, vocab_size - draft_vocab_size))
+    target_probs[rejected_step] = 0
+    target_probs[rejected_step, -1] = 1.0
+    draft_probs = draft_probs.repeat(batch_size, 1)
+    outputs = []
+    for probs in (draft_probs, F.pad(draft_probs, (0, vocab_size - draft_vocab_size))):
+        metadata = create_sampling_metadata(
+            all_greedy=False,
+            temperature=torch.ones(batch_size, device=DEVICE_TYPE),
+            generators={
+                i: torch.Generator(device=DEVICE_TYPE).manual_seed(i)
+                for i in range(batch_size)
+            },
+        )
+        outputs.append(
+            rejection_sample(
+                draft_ids.repeat(batch_size).to(torch.int32),
+                [num_steps] * batch_size,
+                num_steps,
+                torch.arange(1, batch_size + 1, device=DEVICE_TYPE, dtype=torch.int32)
+                * num_steps,
+                probs,
+                target_probs.log().repeat(batch_size, 1),
+                torch.zeros((batch_size, 1), device=DEVICE_TYPE, dtype=torch.int32),
+                metadata,
+            )
+        )
+    assert torch.equal(outputs[0], outputs[1])
+    assert (outputs[0][:, rejected_step] == vocab_size - 1).all()
+    assert torch.equal(
+        outputs[0][:, :rejected_step],
+        draft_ids[:rejected_step].expand(batch_size, -1),
+    )
