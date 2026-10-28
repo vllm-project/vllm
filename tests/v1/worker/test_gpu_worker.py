@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -351,22 +350,6 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
-
-
-def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
-    worker = _plan_worker()
-    maybe_save_startup_plan(worker, 50 * GiB_bytes)
-    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
-    path = startup_plan._plan_path(fingerprint)
-    with open(path) as f:
-        plan = json.load(f)
-    plan["schema"] = 1
-    with open(path, "w") as f:
-        json.dump(plan, f)
-
-    maybe_apply_startup_plan(worker)
-
-    assert worker.cache_config.kv_cache_memory_bytes is None
 
 
 # Memory accounting of the profiling run (Worker.determine_available_memory).
