@@ -260,6 +260,11 @@ def _hc_up_gate_mix(
     assert DIM % hc_count == 0
     assert x.stride(1) == 1 and lowrank.stride(1) == 1 and weight.stride(1) == 1
 
+    # Dispatch on M inside the op: a Python branch on the token count in the model
+    # is resolved once at compile time and baked into every captured size.
+    if not 1 <= M <= MAX_FUSED_UP_M:
+        return _hc_gate_mix(x, torch.nn.functional.linear(lowrank, weight), hc_count)
+
     HC_DIM = DIM // hc_count
     out = x.new_empty(M, HC_DIM)
     # Tiles from a MI355X sweep at HC=4, DIM=10240, rank 320. Small M is latency

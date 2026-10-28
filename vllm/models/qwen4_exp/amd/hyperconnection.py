@@ -37,7 +37,6 @@ from ..common.hyperconnection import (
     HyperConnectionConfig,
 )
 from .ops.hc import (
-    MAX_FUSED_UP_M,
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
@@ -152,7 +151,7 @@ class GatedResidual(nn.Module):
         return hidden_states, block_input, injection
 
     def _up_gate_mix(self, xn: torch.Tensor, lowrank: torch.Tensor) -> torch.Tensor:
-        if 1 <= xn.shape[0] <= MAX_FUSED_UP_M and not envs.VLLM_BATCH_INVARIANT:
+        if not envs.VLLM_BATCH_INVARIANT:
             return hc_up_gate_mix(
                 xn, lowrank, self.input_mix_weight_up.weight, self.hc_count
             )
