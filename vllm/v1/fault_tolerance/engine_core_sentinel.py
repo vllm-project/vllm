@@ -68,6 +68,7 @@ class EngineCoreSentinel:
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
         self._recovery_store: TCPStore | None = None
+        self._install_executor_failure_callback()
 
     @property
     def coordinator_disabled(self) -> bool:
@@ -207,6 +208,23 @@ class EngineCoreSentinel:
                 ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output),
             )
         engine.batch_queue.clear()
+
+    def _install_executor_failure_callback(self) -> None:
+        """Report executor failure to the sentinel as well.
+
+        The busy loop cannot consume EXECUTOR_FAILED while it waits for
+        recovery, so the sentinel must observe the failure directly.
+        """
+        executor = self.engine.model_executor
+        upstream_callback = getattr(executor, "failure_callback", None)
+        if upstream_callback is None:
+            return
+
+        def callback() -> None:
+            upstream_callback()
+            self.on_executor_failed()
+
+        executor.register_failure_callback(callback)
 
     def on_executor_failed(self):
         """Notify the client about the executor failure"""

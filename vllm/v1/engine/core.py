@@ -22,7 +22,7 @@ import pydantic
 import zmq
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -1226,10 +1226,9 @@ class EngineCoreProc(EngineCore):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
 
-        def executor_fail_callback():
-            self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
-            if ft_sentinel := getattr(self, "ft_sentinel", None):
-                ft_sentinel.on_executor_failed()
+        executor_fail_callback = lambda: self.input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+        )
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -2447,10 +2446,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.dp_rank = dp_rank
         self.dp_size = dp_size
-        with set_current_vllm_config(vllm_config):
-            dp_group, dp_store = parallel_config.stateless_init_dp_group(
-                return_store=True
-            )
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
