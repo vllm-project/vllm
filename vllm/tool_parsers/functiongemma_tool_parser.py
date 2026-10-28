@@ -4,8 +4,6 @@
 import json
 from collections.abc import Sequence
 
-import regex as re
-
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -25,28 +23,192 @@ from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
+_ESCAPE = "<escape>"
+_ESCAPE_LEN = len(_ESCAPE)
+_CALL_END = "<end_function_call>"
+
+
+def _coerce_bare(raw: str):
+    """JSON-decode a bare FunctionGemma scalar. Unquoted text stays a string."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _parse_functiongemma_fields(args_str: str, *, partial: bool = False) -> dict:
+    """Parse ``key:value`` pairs from a FunctionGemma call body.
+
+    ``<escape>...<escape>`` is always a string, including text that looks
+    like JSON. Bare ``true`` / ``false`` / ``null`` / numbers keep JSON
+    types. Objects and arrays nest. A trailing ``}`` or
+    ``<end_function_call>`` ends the object so a streaming slice can
+    include the call closer.
+    """
+    if not args_str or not args_str.strip():
+        return {}
+
+    result: dict = {}
+    i = 0
+    n = len(args_str)
+
+    while i < n:
+        while i < n and args_str[i] in " ,\n\t":
+            i += 1
+        if i >= n or args_str[i] in "}]" or args_str.startswith(_CALL_END, i):
+            break
+
+        key_start = i
+        while i < n and args_str[i] != ":":
+            i += 1
+        if i >= n:
+            break
+        key = args_str[key_start:i].strip()
+        if not key:
+            break
+        i += 1
+        while i < n and args_str[i] in " \n\t":
+            i += 1
+        if i >= n:
+            if not partial:
+                result[key] = ""
+            break
+
+        if args_str.startswith(_ESCAPE, i):
+            i += _ESCAPE_LEN
+            end_pos = args_str.find(_ESCAPE, i)
+            if end_pos == -1:
+                if not partial:
+                    result[key] = args_str[i:]
+                break
+            result[key] = args_str[i:end_pos]
+            i = end_pos + _ESCAPE_LEN
+        elif args_str[i] == "{":
+            depth = 1
+            obj_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if args_str.startswith(_ESCAPE, i):
+                    i += _ESCAPE_LEN
+                    nxt = args_str.find(_ESCAPE, i)
+                    i = n if nxt == -1 else nxt + _ESCAPE_LEN
+                    continue
+                if args_str[i] == "{":
+                    depth += 1
+                elif args_str[i] == "}":
+                    depth -= 1
+                i += 1
+            inner = args_str[obj_start:] if depth > 0 else args_str[obj_start : i - 1]
+            result[key] = _parse_functiongemma_fields(inner, partial=depth > 0)
+        elif args_str[i] == "[":
+            depth = 1
+            arr_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if args_str.startswith(_ESCAPE, i):
+                    i += _ESCAPE_LEN
+                    nxt = args_str.find(_ESCAPE, i)
+                    i = n if nxt == -1 else nxt + _ESCAPE_LEN
+                    continue
+                if args_str[i] == "[":
+                    depth += 1
+                elif args_str[i] == "]":
+                    depth -= 1
+                i += 1
+            inner = args_str[arr_start:] if depth > 0 else args_str[arr_start : i - 1]
+            result[key] = _parse_functiongemma_array(inner, partial=depth > 0)
+        else:
+            val_start = i
+            while i < n and args_str[i] not in ",}]":
+                i += 1
+            if partial and i >= n:
+                break
+            raw = args_str[val_start:i].strip()
+            if raw == "":
+                break
+            result[key] = _coerce_bare(raw)
+
+    return result
+
+
+def _parse_functiongemma_array(arr_str: str, *, partial: bool = False) -> list:
+    items: list = []
+    i = 0
+    n = len(arr_str)
+    while i < n:
+        while i < n and arr_str[i] in " ,\n\t":
+            i += 1
+        if i >= n or arr_str[i] == "]":
+            break
+        if arr_str.startswith(_ESCAPE, i):
+            i += _ESCAPE_LEN
+            end_pos = arr_str.find(_ESCAPE, i)
+            if end_pos == -1:
+                if not partial:
+                    items.append(arr_str[i:])
+                break
+            items.append(arr_str[i:end_pos])
+            i = end_pos + _ESCAPE_LEN
+        elif arr_str[i] == "{":
+            depth = 1
+            obj_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if arr_str.startswith(_ESCAPE, i):
+                    i += _ESCAPE_LEN
+                    nxt = arr_str.find(_ESCAPE, i)
+                    i = n if nxt == -1 else nxt + _ESCAPE_LEN
+                    continue
+                if arr_str[i] == "{":
+                    depth += 1
+                elif arr_str[i] == "}":
+                    depth -= 1
+                i += 1
+            inner = arr_str[obj_start:] if depth > 0 else arr_str[obj_start : i - 1]
+            items.append(_parse_functiongemma_fields(inner, partial=depth > 0))
+        elif arr_str[i] == "[":
+            depth = 1
+            sub_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if arr_str.startswith(_ESCAPE, i):
+                    i += _ESCAPE_LEN
+                    nxt = arr_str.find(_ESCAPE, i)
+                    i = n if nxt == -1 else nxt + _ESCAPE_LEN
+                    continue
+                if arr_str[i] == "[":
+                    depth += 1
+                elif arr_str[i] == "]":
+                    depth -= 1
+                i += 1
+            inner = arr_str[sub_start:] if depth > 0 else arr_str[sub_start : i - 1]
+            items.append(_parse_functiongemma_array(inner, partial=depth > 0))
+        else:
+            val_start = i
+            while i < n and arr_str[i] not in ",]":
+                i += 1
+            if partial and i >= n:
+                break
+            raw = arr_str[val_start:i].strip()
+            if raw == "":
+                break
+            items.append(_coerce_bare(raw))
+    return items
+
 
 class FunctionGemmaToolParser(ToolParser):
     """Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
 
     Handles the FunctionGemma function call format:
-    <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>
+    <start_function_call>call:func_name{key:<escape>text<escape>,n:1}<end_function_call>
+
+    ``<escape>`` values are strings. Numbers, booleans, null, arrays, and
+    objects are written bare, matching the model chat template.
     """
 
     # FunctionGemma tokens
     tool_call_start_token: str = "<start_function_call>"
     tool_call_end_token: str = "<end_function_call>"
-
-    # Regex patterns
-    tool_call_regex: re.Pattern = re.compile(
-        r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
-        r"|<start_function_call>call:(\w+)\{(.*)",
-        re.DOTALL,
-    )
-    arg_regex: re.Pattern = re.compile(
-        r"(\w+):<escape>(.*?)<escape>",
-        re.DOTALL,
-    )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -58,21 +220,62 @@ class FunctionGemmaToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
         self.buffered_delta_text = ""
 
-    def _parse_arguments(self, args_str: str) -> dict:
-        """Parse FunctionGemma argument string into a dictionary."""
-        arguments: dict = {}
-        if not args_str:
-            return arguments
+    def _parse_arguments(self, args_str: str, *, partial: bool = False) -> dict:
+        """Parse a FunctionGemma argument body into a dictionary."""
+        return _parse_functiongemma_fields(args_str, partial=partial)
 
-        matches = self.arg_regex.findall(args_str)
-        for key, value in matches:
-            try:
-                parsed_value = json.loads(value)
-                arguments[key] = parsed_value
-            except json.JSONDecodeError:
-                arguments[key] = value
+    def _iter_calls(self, text: str):
+        """Yield ``(name, args_body, closed)`` for each call in ``text``.
 
-        return arguments
+        Brace matching skips ``<escape>`` strings, so a nested object does
+        not end the call. An unclosed call yields the text so far and stops.
+        """
+        token = self.tool_call_start_token
+        pos = 0
+        length = len(text)
+        while pos < length:
+            start = text.find(token, pos)
+            if start < 0:
+                return
+            cursor = start + len(token)
+            if not text.startswith("call:", cursor):
+                pos = cursor
+                continue
+            cursor += len("call:")
+            name_end = cursor
+            while name_end < length and (
+                text[name_end].isalnum() or text[name_end] == "_"
+            ):
+                name_end += 1
+            if name_end == cursor or name_end >= length or text[name_end] != "{":
+                pos = start + len(token)
+                continue
+            name = text[cursor:name_end]
+            args_start = name_end + 1
+            depth = 1
+            index = args_start
+            while index < length and depth:
+                if text.startswith(_ESCAPE, index):
+                    index += _ESCAPE_LEN
+                    end = text.find(_ESCAPE, index)
+                    if end < 0:
+                        index = length
+                        break
+                    index = end + _ESCAPE_LEN
+                    continue
+                if text[index] == "{":
+                    depth += 1
+                elif text[index] == "}":
+                    depth -= 1
+                index += 1
+            if depth != 0:
+                yield name, text[args_start:], False
+                return
+            yield name, text[args_start : index - 1], True
+            if text.startswith(self.tool_call_end_token, index):
+                pos = index + len(self.tool_call_end_token)
+            else:
+                pos = index
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -93,7 +296,7 @@ class FunctionGemmaToolParser(ToolParser):
             )
 
         try:
-            matches = self.tool_call_regex.findall(model_output)
+            matches = list(self._iter_calls(model_output))
 
             if not matches:
                 return ExtractedToolCallInformation(
@@ -102,10 +305,7 @@ class FunctionGemmaToolParser(ToolParser):
 
             tool_calls: list[ToolCall] = []
 
-            for match in matches:
-                func_name = match[0] if match[0] else match[2]
-                args_str = match[1] if match[1] else match[3]
-
+            for func_name, args_str, _closed in matches:
                 if not func_name:
                     continue
 
@@ -235,7 +435,9 @@ class FunctionGemmaToolParser(ToolParser):
                             )
 
                         if self.current_tool_name_sent and args_part:
-                            current_args = self._parse_arguments(args_part)
+                            current_args = self._parse_arguments(
+                                args_part, partial=True
+                            )
                             if current_args:
                                 current_args_json = json.dumps(
                                     current_args, ensure_ascii=False
@@ -271,16 +473,14 @@ class FunctionGemmaToolParser(ToolParser):
                 if self.current_tool_id >= 0 and self.current_tool_id < len(
                     self.prev_tool_call_arr
                 ):
-                    all_calls = self.tool_call_regex.findall(current_text)
+                    all_calls = list(self._iter_calls(current_text))
                     args = {}
                     if self.current_tool_id < len(all_calls):
-                        match = all_calls[self.current_tool_id]
-                        if match[0]:
-                            args_str = match[1]
-                            args = self._parse_arguments(args_str)
-                            self.prev_tool_call_arr[self.current_tool_id][
-                                "arguments"
-                            ] = args
+                        _func_name, args_str, _closed = all_calls[self.current_tool_id]
+                        args = self._parse_arguments(args_str)
+                        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                            args
+                        )
 
                     if args:
                         args_json = json.dumps(args, ensure_ascii=False)
