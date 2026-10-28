@@ -562,7 +562,7 @@ def _softmax_kernel(
 
 
 def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """Compute log_softmax using Triton kernel.
+    """Compute row log-softmax with the native CUDA kernel.
 
     Args:
         input: Input tensor
@@ -577,6 +577,11 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
         raise ValueError(
             "This implementation only supports log_softmax along the last dimension"
         )
+
+    if current_platform.is_cuda():
+        from vllm.model_executor.kernels.batch_invariant import native_log_softmax
+
+        return native_log_softmax(input, dim)
 
     # Flatten all dimensions except the last one
     original_shape = input.shape
@@ -1124,6 +1129,20 @@ def rms_norm_batch_invariant(
 
 
 def linear_batch_invariant(input, weight, bias=None):
+    if (
+        input.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and input.is_cuda
+        and current_platform.is_device_capability_family(100)
+        and input.shape[-1] % 8 == 0
+        and bias is None
+    ):
+        from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+            bf16_fixed_mm,
+        )
+
+        output = bf16_fixed_mm(input.reshape(-1, input.shape[-1]), weight)
+        return output.to(input.dtype).view(*input.shape[:-1], weight.shape[0])
     if bias is not None:
         bias = bias.expand(weight.shape[0])
     output = mm_batch_invariant(
