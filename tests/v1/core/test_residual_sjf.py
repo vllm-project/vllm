@@ -252,6 +252,7 @@ def test_local_estimate_respects_read_limit_and_cache_reset(cache_limit, expecte
         sampling_params=SamplingParams(
             prompt_logprobs=1 if cache_limit is not None else None,
             prompt_logprob_start=cache_limit,
+            skip_reading_prefix_cache=False,
         ),
     )
     manager = scheduler.kv_cache_manager
