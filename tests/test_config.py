@@ -4229,6 +4229,18 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
         assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
 
 
+@pytest.mark.parametrize("mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA defaults")
+def test_ir_op_platform_defaults_triton_rms_norm(mode):
+    """The fp32-weight triton RMSNorm comes right before native on CUDA."""
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=mode, backend="inductor")
+    )
+    priority = current_platform.get_default_ir_op_priority(config)
+    assert priority.rms_norm[-2:] == ["triton", "native"]
+    assert priority.fused_add_rms_norm[-2:] == ["triton", "native"]
+
+
 def test_ir_op_priority_str():
     """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig

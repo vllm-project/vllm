@@ -156,11 +156,12 @@ IS_QUANTIZED = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
+    otherwise Inductor handles fusion. The triton RMSNorm only takes fp32
+    weights, which the norm+quant patterns do not match."""
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
-        or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+        or cfg.kernel_config.ir_op_priority.rms_norm[0] not in ("native", "triton")
     )
 
 
