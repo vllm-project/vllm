@@ -237,6 +237,16 @@ class TestTemplateArgumentTypes:
     ):
         assert parser._parse_arguments(prefix, partial=True) == expected
 
+    @pytest.mark.parametrize(
+        "args",
+        ["a:1,items:[1}", "a:1,cfg:{x:1]", "a:1,b:,c:2", "a:1,b:}"],
+    )
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_mismatched_delimiters_stop_parsing(self, parser, args, partial):
+        """A stray closing brace must not spin the parser; the arguments
+        parsed before it are kept and the rest is dropped."""
+        assert parser._parse_arguments(args, partial=partial) == {"a": 1}
+
 
 class TestAdjustRequest:
     def test_skip_special_tokens_disabled(self, parser, mock_request):

@@ -33,6 +33,10 @@ class _IncompleteValue(Exception):
     """The argument text ends before the value does."""
 
 
+class _MalformedValue(Exception):
+    """A delimiter appears where a value or key should start."""
+
+
 def _skip_whitespace(text: str, pos: int) -> int:
     while pos < len(text) and text[pos] in " \n":
         pos += 1
@@ -63,6 +67,7 @@ def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
         _IncompleteValue: ``text`` ends inside the value. A bare scalar at the
             end of a ``partial`` string counts as incomplete, since more digits
             or letters may still follow.
+        _MalformedValue: a delimiter stands where the value should start.
 
     """
     pos = _skip_whitespace(text, pos)
@@ -79,6 +84,8 @@ def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
     end = pos
     while end < len(text) and text[end] not in ",}]":
         end += 1
+    if end == pos:
+        raise _MalformedValue
     if end == len(text) and partial:
         raise _IncompleteValue
     return _decode_bare(text[pos:end]), end
@@ -92,6 +99,8 @@ def _parse_object(text: str, pos: int, partial: bool) -> tuple[dict, int]:
             raise _IncompleteValue
         if text[pos] == "}":
             return obj, pos + 1
+        if text[pos] == "]":
+            raise _MalformedValue
         if text[pos] == ",":
             pos += 1
             continue
@@ -111,6 +120,8 @@ def _parse_array(text: str, pos: int, partial: bool) -> tuple[list, int]:
             raise _IncompleteValue
         if text[pos] == "]":
             return items, pos + 1
+        if text[pos] == "}":
+            raise _MalformedValue
         if text[pos] == ",":
             pos += 1
             continue
@@ -169,7 +180,7 @@ class FunctionGemmaToolParser(ToolParser):
                 break
             try:
                 value, pos = _parse_value(args_str, colon + 1, partial)
-            except _IncompleteValue:
+            except (_IncompleteValue, _MalformedValue):
                 break
             arguments[key] = value
         return arguments
