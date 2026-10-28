@@ -28,17 +28,119 @@ _ESCAPE_LEN = len(_ESCAPE)
 _CALL_END = "<end_function_call>"
 
 
-def _argument_json(arguments: dict, *, finished: bool) -> str:
-    """Serialize arguments so streamed deltas concatenate.
+def _json_scalar(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
-    A later key is inserted before the object's closing brace. While the
-    call is still open, hold that brace back. The finished payload then
-    extends the text already sent instead of slicing through the brace.
+
+def _stable_argument_json(args_str: str, *, finished: bool) -> str:
+    """Serialize a call body so each snapshot is a prefix of a later one.
+
+    ``json.dumps`` closes every container. An array or object that is still
+    open in the source then cannot grow: the next snapshot is not a suffix
+    of the text already sent. Leave those closers unwritten until the source
+    closes them. A bare value at the end of an unfinished chunk is omitted,
+    because another digit may still arrive.
     """
-    text = json.dumps(arguments, ensure_ascii=False)
-    if not finished and text.endswith("}"):
-        return text[:-1]
-    return text
+    if finished:
+        return _json_scalar(_parse_functiongemma_fields(args_str, partial=False))
+    if not args_str or not args_str.strip():
+        return ""
+    body, _index, closed = _emit_object_body(args_str, 0)
+    if not body and not closed:
+        return ""
+    if closed:
+        return "{" + body + "}"
+    return "{" + body
+
+
+def _emit_object_body(src: str, index: int) -> tuple[str, int, bool]:
+    fields: list[str] = []
+    length = len(src)
+    closed = False
+    while index < length:
+        while index < length and src[index] in " ,\n\t":
+            index += 1
+        if index >= length or src.startswith(_CALL_END, index):
+            break
+        if src[index] == "}":
+            index += 1
+            closed = True
+            break
+        if src[index] == "]":
+            break
+        key_start = index
+        while index < length and src[index] != ":":
+            index += 1
+        if index >= length:
+            break
+        key = src[key_start:index].strip()
+        index += 1
+        if not key:
+            break
+        while index < length and src[index] in " \n\t":
+            index += 1
+        if index >= length:
+            break
+        value, index, value_closed = _emit_value(src, index)
+        if not value_closed and not value:
+            break
+        fields.append(_json_scalar(key) + ": " + value)
+        if not value_closed:
+            break
+    return ", ".join(fields), index, closed
+
+
+def _emit_value(src: str, index: int) -> tuple[str, int, bool]:
+    if src.startswith(_ESCAPE, index):
+        value_start = index + _ESCAPE_LEN
+        end_pos = src.find(_ESCAPE, value_start)
+        if end_pos == -1:
+            return "", index, False
+        content = src[value_start:end_pos]
+        return _json_scalar(content), end_pos + _ESCAPE_LEN, True
+    if src[index] == "{":
+        body, index, closed = _emit_object_body(src, index + 1)
+        if closed:
+            return "{" + body + "}", index, True
+        return "{" + body, index, False
+    if src[index] == "[":
+        return _emit_array(src, index)
+    value_start = index
+    length = len(src)
+    while index < length and src[index] not in ",}]":
+        index += 1
+    if index >= length:
+        return "", value_start, False
+    raw = src[value_start:index].strip()
+    if raw == "":
+        return "", value_start, False
+    return _json_scalar(_coerce_bare(raw)), index, True
+
+
+def _emit_array(src: str, index: int) -> tuple[str, int, bool]:
+    index += 1
+    items: list[str] = []
+    length = len(src)
+    closed = False
+    while index < length:
+        while index < length and src[index] in " ,\n\t":
+            index += 1
+        if index >= length:
+            break
+        if src[index] == "]":
+            index += 1
+            closed = True
+            break
+        value, index, value_closed = _emit_value(src, index)
+        if not value_closed and not value:
+            break
+        items.append(value)
+        if not value_closed:
+            break
+    body = ", ".join(items)
+    if closed:
+        return "[" + body + "]", index, True
+    return "[" + body, index, False
 
 
 def _coerce_bare(raw: str):
@@ -451,9 +553,9 @@ class FunctionGemmaToolParser(ToolParser):
                             current_args = self._parse_arguments(
                                 args_part, partial=True
                             )
-                            if current_args:
-                                current_args_json = _argument_json(
-                                    current_args, finished=False
+                            if current_args or args_part.strip():
+                                current_args_json = _stable_argument_json(
+                                    args_part, finished=False
                                 )
                                 prev_streamed = self.streamed_args_for_tool[
                                     self.current_tool_id
@@ -490,6 +592,7 @@ class FunctionGemmaToolParser(ToolParser):
                 ):
                     all_calls = list(self._iter_calls(current_text))
                     args = {}
+                    args_str = ""
                     if self.current_tool_id < len(all_calls):
                         _func_name, args_str, _closed = all_calls[self.current_tool_id]
                         args = self._parse_arguments(args_str)
@@ -497,8 +600,8 @@ class FunctionGemmaToolParser(ToolParser):
                             args
                         )
 
-                    if args:
-                        args_json = _argument_json(args, finished=True)
+                    if args or args_str:
+                        args_json = _stable_argument_json(args_str, finished=True)
                         prev_streamed = self.streamed_args_for_tool[
                             self.current_tool_id
                         ]

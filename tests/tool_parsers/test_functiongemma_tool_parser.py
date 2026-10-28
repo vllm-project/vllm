@@ -185,6 +185,28 @@ class TestBufferDeltaText:
         assert "<start_function_call>" in result
 
 
+def _joined_argument_deltas(parser, request, text: str, cuts: tuple[int, ...]) -> str:
+    previous = ""
+    parts: list[str] = []
+    for end in cuts:
+        chunk = text[len(previous) : end]
+        delta = parser.extract_tool_calls_streaming(
+            previous,
+            previous + chunk,
+            chunk,
+            [],
+            [],
+            [],
+            request,
+        )
+        if delta and delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                if tool_call.function and tool_call.function.arguments:
+                    parts.append(tool_call.function.arguments)
+        previous = text[:end]
+    return "".join(parts)
+
+
 class TestTemplateGrammarStreaming:
     def test_template_argument_grammar_streaming(self, parser, mock_request):
         text = (
@@ -193,38 +215,41 @@ class TestTemplateGrammarStreaming:
             "enabled:true,hour:7,label:<escape>Wake up<escape>,"
             "snooze:{minutes:5}}<end_function_call>"
         )
-        # Name first, then a partial argument body, then the rest of the call.
-        # Argument deltas must concatenate to one JSON object.
+        mon_end = text.index("<escape>mon<escape>") + len("<escape>mon<escape>")
+        minutes_end = text.index("minutes:5") + len("minutes:5")
         cuts = (
             len("<start_function_call>"),
             text.index("{") + 1,
-            text.index("hour:"),
+            mon_end,
+            minutes_end,
             len(text),
         )
-        previous = ""
-        argument_deltas: list[str] = []
-        for end in cuts:
-            chunk = text[len(previous) : end]
-            delta = parser.extract_tool_calls_streaming(
-                previous,
-                previous + chunk,
-                chunk,
-                [],
-                [],
-                [],
-                mock_request,
-            )
-            if delta and delta.tool_calls:
-                for tool_call in delta.tool_calls:
-                    if tool_call.function and tool_call.function.arguments:
-                        argument_deltas.append(tool_call.function.arguments)
-            previous = text[:end]
-        assert json.loads("".join(argument_deltas)) == {
+        assert json.loads(
+            _joined_argument_deltas(parser, mock_request, text, cuts)
+        ) == {
             "days": ["mon", "tue"],
             "enabled": True,
             "hour": 7,
             "label": "Wake up",
             "snooze": {"minutes": 5},
+        }
+
+    def test_open_nested_object_stays_a_prefix(self, parser, mock_request):
+        text = (
+            "<start_function_call>call:set_alarm{"
+            "snooze:{minutes:5,extra:1}}<end_function_call>"
+        )
+        extra_at = text.index("extra:")
+        cuts = (
+            len("<start_function_call>"),
+            text.index("{") + 1,
+            extra_at,
+            len(text),
+        )
+        assert json.loads(
+            _joined_argument_deltas(parser, mock_request, text, cuts)
+        ) == {
+            "snooze": {"minutes": 5, "extra": 1},
         }
 
 
