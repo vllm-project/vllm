@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -228,7 +228,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         fake = SimpleNamespace(
             scale=1.0,
             soft_cap=None,
+            org_vocab_size=3 * tp_size,
             _apply_head=lambda *args, rank=rank: shards[rank].clone(),
+        )
+        fake._mask_outside_vocab = MethodType(
+            logits_processor.LogitsProcessor._mask_outside_vocab, fake
         )
         lm_head = SimpleNamespace(
             tp_size=tp_size,
@@ -364,6 +368,8 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     spec.seeds = torch.arange(3)
     spec.draft_tokens = torch.empty(3, 2, dtype=torch.long)
     spec.draft_logits = None
+    spec.draft_logits_num_shards = 1
+    spec.draft_logits_shard_idx = 0
     spec.use_fp64_gumbel = False
     spec.enable_adaptive_verification = True
     spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
