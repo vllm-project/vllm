@@ -86,6 +86,9 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.logits_processor_validation import (
+    build_logits_processors_params_validator,
+)
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -169,6 +172,12 @@ class EngineCore:
         # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
+        # The Python frontend already runs these per request; frontends that
+        # cannot run Python hooks rely on this check, since a rejected argument
+        # would otherwise fail inside the model runner.
+        self.validate_logits_processors_params = (
+            build_logits_processors_params_validator(vllm_config)
+        )
 
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
@@ -1178,6 +1187,9 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
+
+        if request.sampling_params is not None:
+            self.validate_logits_processors_params(request.sampling_params)
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:

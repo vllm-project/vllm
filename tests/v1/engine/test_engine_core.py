@@ -6,6 +6,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -22,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -37,12 +39,19 @@ from vllm.v1.engine.core import (
     EngineCoreProc,
     EngineShutdownState,
 )
+from vllm.v1.engine.logits_processor_validation import (
+    build_logits_processors_params_validator,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsProcessor as V2LogitsProcessor,
+)
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
+from ..logits_processors.utils import DUMMY_LOGITPROC_ARG, DummyLogitsProcessor
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
@@ -507,6 +516,54 @@ def test_engine_core_invalid_request_id_type():
     engine_core.add_request(*engine_core.preprocess_add_request(valid_request))
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
+
+
+class _TargetTokenV2Processor(V2LogitsProcessor):
+    """A V2 processor whose validate_params rejects a non-int target_token."""
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        target_token = (sampling_params.extra_args or {}).get(DUMMY_LOGITPROC_ARG)
+        if not isinstance(target_token, int):
+            raise ValueError(f"{DUMMY_LOGITPROC_ARG} must be an int")
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "processor"),
+    [
+        pytest.param(False, DummyLogitsProcessor, id="v1"),
+        pytest.param(True, _TargetTokenV2Processor, id="v2"),
+    ],
+)
+def test_preprocess_add_request_validates_custom_logits_processor_args(
+    use_v2_model_runner: bool, processor: type
+):
+    """A frontend that cannot run the custom logits processors' validate_params
+    hooks relies on the engine to reject a bad argument as a validation error,
+    instead of the model runner failing on it."""
+    core = object.__new__(EngineCore)
+    core.mm_receiver_cache = None
+    core.request_block_hasher = None
+    core.validate_logits_processors_params = build_logits_processors_params_validator(
+        SimpleNamespace(
+            use_v2_model_runner=use_v2_model_runner,
+            model_config=SimpleNamespace(
+                logits_processors=[processor], runner_type="generate"
+            ),
+        )
+    )
+
+    valid_request = make_request()
+    valid_request.sampling_params = SamplingParams(extra_args={DUMMY_LOGITPROC_ARG: 1})
+    req, _ = core.preprocess_add_request(valid_request)
+    assert req.request_id == valid_request.request_id
+
+    invalid_request = make_request()
+    invalid_request.sampling_params = SamplingParams(
+        extra_args={DUMMY_LOGITPROC_ARG: "one"}
+    )
+    with pytest.raises(VLLMValidationError, match=DUMMY_LOGITPROC_ARG):
+        core.preprocess_add_request(invalid_request)
 
 
 @create_new_process_for_each_test()
