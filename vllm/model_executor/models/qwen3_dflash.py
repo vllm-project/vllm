@@ -750,6 +750,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
         )
+        self.quant_config = get_draft_quant_config(vllm_config)
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
