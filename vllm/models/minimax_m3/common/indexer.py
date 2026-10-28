@@ -564,7 +564,8 @@ def select_indexer_impl_cls(
         if not fp8_ok:
             raise NotImplementedError(
                 f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 "
-                "support or ROCm gfx942."
+                "support or ROCm gfx942 for the Triton indexer. ROCm gfx950 "
+                "supports fp8 through the AITER MSA indexer."
             )
     is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
     if indexer_kv_dtype == "nvfp4":
