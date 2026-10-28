@@ -13,6 +13,7 @@ a response is only sent after its result frames.
 
 import argparse
 import contextlib
+import errno
 import itertools
 import math
 import threading
@@ -70,6 +71,7 @@ from vllm.v1.spec_decode.remote.transport import (
     DataFrame,
     FramedConnection,
     Listener,
+    ListenerAcceptError,
     TransportError,
     TransportTimeout,
     decode_data_frame,
@@ -92,6 +94,17 @@ DEFAULT_LIMITS = RemoteServerLimits(
 SUPPORTED_TRANSPORTS = (INLINE_TRANSPORT,)
 
 _ACCEPT_POLL_S = 0.2
+_ACCEPT_RETRIES = 5
+_RETRYABLE_ACCEPT_ERRNOS = frozenset(
+    (
+        errno.EINTR,
+        errno.ECONNABORTED,
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ENOBUFS,
+        errno.ENOMEM,
+    )
+)
 _RESULT_FRAMES = 3
 # Input frames an AdvanceAndPropose may reference besides its feature
 # slots: accepted counts, recovery tokens, query lengths, round ids.
@@ -612,6 +625,8 @@ class RemoteDraftServer:
         self.shutdown_timeout_s = shutdown_timeout_s
         self.allow_remote_connections = allow_remote_connections
         self._shutdown_failed = False
+        self._lifecycle_error: BaseException | None = None
+        self._uncertain_thread_start = False
         self._cleanup_failed = False
         self._draining = False
         self._connections_lock = threading.Lock()
@@ -694,6 +709,42 @@ class RemoteDraftServer:
             if entry is not None:
                 self.registry.close(key, owner=entry.owner)
 
+    def _lifecycle_failed(self, error: BaseException) -> None:
+        if self._lifecycle_error is None:
+            self._lifecycle_error = error
+        self._shutdown_failed = True
+        self._draining = True
+        self._stopping.set()
+
+    def _start_thread(self, thread: threading.Thread) -> None:
+        try:
+            thread.start()
+        except BaseException as error:
+            if thread.ident is None and not isinstance(error, RuntimeError):
+                # An allocation failure may follow OS thread creation but precede
+                # publication of its identity. Never discard that possible owner.
+                self._uncertain_thread_start = True
+                self._lifecycle_failed(error)
+            raise
+
+    def _start_listener(self, endpoint: str, *, name: str) -> str:
+        try:
+            self._listener = listen(endpoint)
+            self._stopping.clear()
+            self._acceptor = threading.Thread(
+                target=self._accept_loop, name=name, daemon=True
+            )
+            self._start_thread(self._acceptor)
+            return self._listener.endpoint
+        except BaseException as error:
+            try:
+                self.stop()
+            except BaseException as cleanup_error:
+                raise error from BaseExceptionGroup(
+                    "server startup rollback failed", [cleanup_error]
+                )
+            raise
+
     def start(self, endpoint: str) -> str:
         """Warm up, bind, and serve in the background.
 
@@ -712,7 +763,7 @@ class RemoteDraftServer:
                 "external binding requires allow_remote_connections=True"
             )
         self.adapter.warmup()
-        self._listener = listen(endpoint)
+        self._start_listener(endpoint, name="remote-draft-acceptor")
         if not is_local_endpoint(self._listener.endpoint):
             logger.warning(
                 "Remote draft server listens on %s, which is reachable from "
@@ -720,11 +771,6 @@ class RemoteDraftServer:
                 "a loopback address or a UNIX socket.",
                 self._listener.endpoint,
             )
-        self._stopping.clear()
-        self._acceptor = threading.Thread(
-            target=self._accept_loop, name="remote-draft-acceptor", daemon=True
-        )
-        self._acceptor.start()
         capabilities = self.adapter.capabilities()
         logger.info(
             "Remote draft server %s ready at %s: protocol %d.%d, methods %s, "
@@ -747,36 +793,64 @@ class RemoteDraftServer:
         """Block until ``stop`` is called; returns False on timeout."""
         return self._stopping.wait(timeout)
 
-    def stop(self) -> None:
+    def stop(self, *, deadline: float | None = None) -> None:
         """Stop within the grace period or require process replacement.
 
         A timed-out worker may still use the adapter/GPU. Keep every owner alive,
         forbid restart, and let the process supervisor terminate the process.
         """
-        deadline = time.monotonic() + self.shutdown_timeout_s
+        if deadline is None:
+            deadline = time.monotonic() + self.shutdown_timeout_s
+        errors: list[BaseException] = []
+        previous_failure = self._lifecycle_error
         self._draining = True
         self._stopping.set()
-        listener, self._listener = self._listener, None
+        listener = self._listener
         if listener is not None:
-            listener.close()
+            try:
+                listener.close()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._listener = None
         with self._connections_lock:
             connections = tuple(self._connections)
         for conn in connections:
-            conn.close()
+            try:
+                conn.close()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                with self._connections_lock:
+                    self._connections.discard(conn)
+                    self._handshaking.discard(conn)
+
+        def join(thread: threading.Thread) -> None:
+            try:
+                if thread.ident is not None:
+                    thread.join(max(0.0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    errors.append(RuntimeError(f"{thread.name} is still alive"))
+            except BaseException as error:
+                errors.append(error)
+
         if self._acceptor is not None:
-            self._acceptor.join(max(0.0, deadline - time.monotonic()))
+            join(self._acceptor)
         with self._connections_lock:
             workers = tuple(self._workers)
         for worker in workers:
-            worker.join(max(0.0, deadline - time.monotonic()))
-        if (self._acceptor is not None and self._acceptor.is_alive()) or any(
-            worker.is_alive() for worker in workers
-        ):
-            self._shutdown_failed = True
+            join(worker)
+        if self._lifecycle_error is not previous_failure:
+            assert self._lifecycle_error is not None
+            errors.append(self._lifecycle_error)
+        if self._uncertain_thread_start:
+            errors.append(RuntimeError("OS thread creation could not be confirmed"))
+        if errors:
+            self._lifecycle_failed(errors[0])
             raise ServerShutdownTimeout(
-                "remote draft shutdown grace period expired; live adapter/GPU "
+                "remote draft shutdown could not confirm cleanup; adapter/GPU "
                 "resources are retained and the owning process must be restarted"
-            )
+            ) from BaseExceptionGroup("remote draft cleanup failures", errors)
         self._acceptor = None
         self._workers.clear()
         self._draining = False
@@ -786,33 +860,63 @@ class RemoteDraftServer:
 
     def _accept_loop(self) -> None:
         listener = self._listener
-        assert listener is not None
+        if listener is None:
+            return
+        retries = 0
         while not self._stopping.is_set():
+            conn = None
             try:
-                conn = listener.accept(timeout=_ACCEPT_POLL_S)
-            except TransportTimeout:
-                continue
-            except TransportError:
-                break
-            with self._connections_lock:
-                if (
-                    self._stopping.is_set()
-                    or len(self._connections) >= self.max_connections
-                    or len(self._handshaking) >= self.max_handshakes
-                ):
-                    conn.close()
+                try:
+                    conn = listener.accept(timeout=_ACCEPT_POLL_S)
+                except TransportTimeout:
+                    retries = 0
                     continue
-                self._connections.add(conn)
-                self._handshaking.add(conn)
-                self._workers = [w for w in self._workers if w.is_alive()]
-                worker = threading.Thread(
-                    target=self._serve_connection,
-                    args=(conn,),
-                    name="remote-draft-session",
-                    daemon=True,
+                except ListenerAcceptError as error:
+                    if self._stopping.is_set():
+                        return
+                    if (
+                        error.errno in _RETRYABLE_ACCEPT_ERRNOS
+                        and retries < _ACCEPT_RETRIES
+                    ):
+                        self._stopping.wait(min(0.01 * 2**retries, _ACCEPT_POLL_S))
+                        retries += 1
+                        continue
+                    raise
+                retries = 0
+                with self._connections_lock:
+                    reject = (
+                        self._stopping.is_set()
+                        or len(self._connections) >= self.max_connections
+                        or len(self._handshaking) >= self.max_handshakes
+                    )
+                    if not reject:
+                        self._connections.add(conn)
+                        self._handshaking.add(conn)
+                        self._workers = [w for w in self._workers if w.is_alive()]
+                        worker = threading.Thread(
+                            target=self._serve_connection,
+                            args=(conn,),
+                            name="remote-draft-session",
+                            daemon=True,
+                        )
+                        self._workers.append(worker)
+                        self._start_thread(worker)
+                if reject:
+                    conn.close()
+            except BaseException as error:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except BaseException as cleanup_error:
+                        error = BaseExceptionGroup(
+                            "acceptor failure and connection cleanup failure",
+                            [error, cleanup_error],
+                        )
+                self._lifecycle_failed(error)
+                logger.exception(
+                    "Remote draft acceptor failed; process restart required"
                 )
-                self._workers.append(worker)
-                worker.start()
+                return
 
     def _serve_connection(self, conn: FramedConnection) -> None:
         session = _ServerSession(self, conn)
@@ -837,9 +941,14 @@ class RemoteDraftServer:
             finally:
                 try:
                     conn.close()
-                finally:
+                except BaseException as error:
+                    self._lifecycle_failed(error)
+                    logger.exception("Failed to close remote draft connection")
+                else:
                     with self._connections_lock:
                         self._connections.discard(conn)
+                finally:
+                    with self._connections_lock:
                         self._handshaking.discard(conn)
 
 
