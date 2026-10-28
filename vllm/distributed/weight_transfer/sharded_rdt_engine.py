@@ -403,6 +403,16 @@ class ShardedRDTWeightTransferEngine(
                 "wrong expert slots. Disable EPLB or use another weight-transfer "
                 "backend."
             )
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_enabled,
+        )
+
+        if direct_reload_enabled():
+            raise RuntimeError(
+                "sharded_rdt does not support VLLM_RELOAD_MODE=direct: its replay "
+                "plan is baked by a layerwise (meta) dry run. Use "
+                "VLLM_RELOAD_MODE=layerwise or another weight-transfer backend."
+            )
         # The worker is often a different install from whatever spawned it, so
         # check here too and not only where the actor options are set.
         check_ray_rdt_version()

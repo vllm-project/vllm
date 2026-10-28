@@ -68,6 +68,59 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def _extent(t: torch.Tensor) -> int:
+    """Number of elements spanned by ``t`` in its storage."""
+    if t.numel() == 0:
+        return 0
+    return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
+
+
+def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
+    """``new`` copied into the bytes ``old`` spans if it is smaller, so the loaded
+    storage is kept (with its ``data_ptr``); else ``new`` itself."""
+    storage = old.untyped_storage()
+    offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    if (
+        new.numel() == 0
+        or old.device != new.device
+        or new.untyped_storage().data_ptr() == storage.data_ptr()
+        or _extent(new) != new.numel()  # overlapping or with gaps
+        or offset % size
+        or new.numel() * size >= _extent(old) * old.element_size()
+    ):
+        return new
+    view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
+    return view.copy_(new)
+
+
+def _view_in_place(
+    old_param: torch.Tensor, new_tensor: torch.Tensor
+) -> torch.Tensor | None:
+    """Under direct reload, a view of ``old_param``'s storage shaped like
+    ``new_tensor`` when it fits there, so the address survives a layout change.
+    None when it does not fit or ``new_tensor`` already lives in that storage."""
+    from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+
+    if (
+        not direct_reload_enabled()
+        or new_tensor.device != old_param.device
+        or old_param.is_meta
+    ):
+        return None
+    shape, stride = tuple(new_tensor.shape), new_tensor.stride()
+    if any(st == 0 and s > 1 for s, st in zip(shape, stride)):
+        return None  # overlapping (expanded) layout: cannot be written in place
+    storage = old_param.untyped_storage()
+    if new_tensor.untyped_storage().data_ptr() == storage.data_ptr():
+        return None  # e.g. a transposed view of the same storage: rebind keeps it
+    itemsize = new_tensor.element_size()
+    offset = old_param.storage_offset() * old_param.element_size()
+    if offset % itemsize or offset + _extent(new_tensor) * itemsize > storage.nbytes():
+        return None
+    view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
+    return view.set_(storage, offset // itemsize, shape, stride)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -79,7 +132,8 @@ def replace_parameter(
     The existing parameter object is kept (and so its class and loader attributes
     for weight reloading): ``new_tensor`` is copied into it when shape, stride,
     dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
-    otherwise the parameter's ``.data`` is rebound to ``new_tensor``. A new
+    otherwise a smaller ``new_tensor`` is copied into the parameter's own storage
+    (so the loaded storage never shrinks), else ``.data`` is rebound to it. A new
     parameter is registered only if none exists under ``param_name``, or if the
     existing one is an online requantization source (released after conversion).
 
@@ -131,8 +185,14 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
+        elif (view := _view_in_place(old_param, new_tensor)) is not None:
+            # direct reload: keep the address, write into the existing storage
+            view.copy_(new_tensor)
+            old_param.data = view
+        elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
+            old_param.data = new_tensor  # online quantization frees the source
         else:
-            old_param.data = new_tensor
+            old_param.data = _in_own_storage(old_param, new_tensor)
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return
@@ -147,6 +207,74 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+
+
+def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:
+    """Register the ``src_name`` parameter object under ``dst_name`` as well.
+
+    Both names then refer to one object and so to one storage: the loader writes
+    through the checkpoint name, kernels read the runtime name, and a later
+    `replace_parameter` on either name updates both. ``dst_name`` becomes the
+    name `kernel_parameters` reports for the object."""
+    param = getattr(layer, src_name)
+    existing = layer._parameters.get(dst_name)
+    if existing is not None and existing is not param:
+        raise ValueError(f"{dst_name!r} is already registered as another parameter")
+    layer.register_parameter(dst_name, param)
+    param.runtime_name = dst_name
+
+
+def retire_parameter(layer: torch.nn.Module, name: str) -> None:
+    """Mark a loaded parameter that no kernel reads after post-processing.
+
+    It stays registered with its loaded data (so it can be loaded again);
+    `kernel_parameters` and `get_live_param` skip it."""
+    getattr(layer, name).retired = True
+
+
+def set_kernel_parameter(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """`replace_parameter`, for a tensor kernels read under ``name``: the parameter
+    is live even if it was retired before, and ``name`` becomes its runtime name
+    if it is registered under several names (see `move_parameter`)."""
+    replace_parameter(layer, name, tensor)
+    param = getattr(layer, name)
+    param.__dict__.pop("retired", None)
+    if hasattr(param, "runtime_name"):
+        param.runtime_name = name
+
+
+def _is_live(param: torch.Tensor | None) -> bool:
+    return (
+        param is not None and not getattr(param, "retired", False) and param.numel() > 0
+    )
+
+
+def get_live_param(layer: torch.nn.Module, name: str) -> torch.Tensor | None:
+    """``getattr(layer, name, None)``, treating retired or empty params as absent."""
+    tensor = getattr(layer, name, None)
+    if isinstance(tensor, torch.nn.Parameter) and not _is_live(tensor):
+        return None
+    return tensor
+
+
+def kernel_parameters(layer: torch.nn.Module) -> dict[str, torch.nn.Parameter]:
+    """The layer's own parameters as kernels see them: live parameters only, each
+    object once, under its runtime name (see `move_parameter`)."""
+    names: dict[int, str] = {}
+    params: dict[str, torch.nn.Parameter] = {}
+    for name, param in layer._parameters.items():
+        if not _is_live(param):
+            continue
+        first = names.setdefault(id(param), name)
+        if first == name:
+            params[name] = param
+        elif getattr(param, "runtime_name", None) == name:
+            del params[first]
+            params[name] = param
+            names[id(param)] = name
+    return params
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
