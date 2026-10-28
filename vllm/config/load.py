@@ -66,6 +66,10 @@ class LoadConfig:
     - None (default): Uses memory-mapped (lazy) loading. When an NFS, Lustre,
       or VirtioFS filesystem is detected and the total checkpoint size fits
       within 90%% of available RAM, prefetching is enabled automatically.
+      On multi-VM VirtioFS deployments, each guest has its own page cache and
+      prefetch work is sharded across global ranks. A guest's cache may contain
+      only part of the checkpoint, so measure the benefit with your storage and
+      cache topology.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
       Unlike the default (None), automatic prefetching is not performed.
