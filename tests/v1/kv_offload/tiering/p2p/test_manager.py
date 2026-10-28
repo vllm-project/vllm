@@ -1129,7 +1129,7 @@ class TestHasPendingWork:
         try:
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -1186,7 +1186,7 @@ class TestHasPendingWork:
             assert manager._tier_poll_thread is None
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
