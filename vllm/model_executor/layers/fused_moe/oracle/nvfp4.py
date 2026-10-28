@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import move_parameter
 
 logger = init_logger(__name__)
 
@@ -436,10 +437,10 @@ def convert_to_nvfp4_moe_kernel_format(
                 "strategy": "group",
                 "group_size": 16,
             }
-            # CT pack-quantized reads `weight_packed`; the method renamed it to
-            # `weight`. Re-alias (convert replaces all params anyway).
-            layer.w13_weight_packed = layer.w13_weight
-            layer.w2_weight_packed = layer.w2_weight
+            # CT pack-quantized reads `weight_packed`; the method aliased it as
+            # `weight`. Make the loaded `*_weight_packed` name the runtime one.
+            move_parameter(layer, "w13_weight", "w13_weight_packed")
+            move_parameter(layer, "w2_weight", "w2_weight_packed")
         else:
             quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
 

@@ -24,6 +24,11 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingGroupedExperts,
     HummingIndexedExperts,
 )
+from vllm.model_executor.layers.quantization.utils.humming.linear import (
+    get_live_param,
+    kernel_parameters,
+    replace_layer_parameters,
+)
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     humming_is_layer_skipped,
 )
@@ -168,14 +173,14 @@ def get_humming_moe_quant_config(
         weight_dtype=str(weight_schema.b_dtype),
         weight_group_shape=weight_group_shape,
         activation_group_shape=activation_group_shape,
-        w1_scale=getattr(layer, "w13_weight_scale", None),
-        w1_gscale=getattr(layer, "w13_weight_scale_2", None),
-        w1_zp=getattr(layer, "w13_zero_point", None),
-        w1_bias=getattr(layer, "w13_bias", None),
-        w2_scale=getattr(layer, "w2_weight_scale", None),
-        w2_gscale=getattr(layer, "w2_weight_scale_2", None),
-        w2_zp=getattr(layer, "w2_zero_point", None),
-        w2_bias=getattr(layer, "w2_bias", None),
+        w1_scale=get_live_param(layer, "w13_weight_scale"),
+        w1_gscale=get_live_param(layer, "w13_weight_scale_2"),
+        w1_zp=get_live_param(layer, "w13_zero_point"),
+        w1_bias=get_live_param(layer, "w13_bias"),
+        w2_scale=get_live_param(layer, "w2_weight_scale"),
+        w2_gscale=get_live_param(layer, "w2_weight_scale_2"),
+        w2_zp=get_live_param(layer, "w2_zero_point"),
+        w2_bias=get_live_param(layer, "w2_bias"),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
@@ -189,7 +194,7 @@ def get_humming_moe_quant_config(
         )
         for name in ("input_scale", "input_scale_2"):
             key = f"{prefix}_{name}"
-            value = getattr(layer, f"{sublayer}_{name}", None)
+            value = get_live_param(layer, f"{sublayer}_{name}")
             setattr(config, key, value)
     return config
 
@@ -297,12 +302,17 @@ def _extract_sublayer_tensors(
     layer: "RoutedExperts",
     sublayer_name: str,
 ) -> dict[str, torch.Tensor]:
-    """Extract tensors for a specific sublayer from the layer's state dict."""
-    return dict(
-        (key.removeprefix(sublayer_name + "_"), value)
-        for key, value in layer.state_dict().items()
+    """Extract a sublayer's live params and persistent buffers."""
+    buffers = {
+        name: buffer
+        for name, buffer in layer._buffers.items()
+        if buffer is not None and name not in layer._non_persistent_buffers_set
+    }
+    return {
+        key.removeprefix(sublayer_name + "_"): value
+        for key, value in (kernel_parameters(layer) | buffers).items()
         if key.startswith(sublayer_name + "_")
-    )
+    }
 
 
 def _replace_layer_parameters(
@@ -320,19 +330,15 @@ def _replace_layer_parameters(
         preserve_bias: If True, don't delete bias parameters
 
     """
-    # Delete old parameters
-    for name, _ in list(layer.named_parameters()):
-        if not name.startswith(sublayer_name + "_"):
-            continue
-        if preserve_bias and name == sublayer_name + "_bias":
-            continue
-        delattr(layer, name)
-
-    # Set new parameters
-    for name, tensor in tensors.items():
-        param_name = f"{sublayer_name}_{name}"
-        param = torch.nn.Parameter(tensor, requires_grad=False)
-        setattr(layer, param_name, param)
+    names = [
+        name
+        for name in layer._parameters
+        if name.startswith(sublayer_name + "_")
+        and not (preserve_bias and name == sublayer_name + "_bias")
+    ]
+    replace_layer_parameters(
+        layer, {f"{sublayer_name}_{n}": t for n, t in tensors.items()}, names
+    )
 
 
 def _convert_sublayer_to_humming(

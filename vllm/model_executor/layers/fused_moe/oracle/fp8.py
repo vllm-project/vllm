@@ -39,7 +39,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_kernel_parameter,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 from vllm.utils.math_utils import round_up
@@ -635,6 +639,14 @@ def convert_to_fp8_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
         )
+        if scale_name == "weight_scale_inv":
+            # One param under both names: the loaded `_inv` holds the runtime scale.
+            for prefix in ("w13", "w2"):
+                scale = layer._parameters.pop(f"{prefix}_weight_scale").data
+                move_parameter(
+                    layer, f"{prefix}_{scale_name}", f"{prefix}_weight_scale"
+                )
+                set_kernel_parameter(layer, f"{prefix}_weight_scale", scale)
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale

@@ -43,7 +43,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -172,15 +176,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         if self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
