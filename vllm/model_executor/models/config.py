@@ -99,12 +99,10 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            # MTP shares the target's KV cache layout; a separate draft model
-            # must not inherit a default it was never validated with.
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method != "mtp"
+                and spec_config.method not in ("mtp", "dspark")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
@@ -906,6 +904,15 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
             video_kwargs.setdefault("video_backend", "nemotron_vl")
 
 
+class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1294,6 +1301,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        Nemotron3_5TranscribeForConditionalGenerationConfig
+    ),
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
