@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4 flagship MoE (1.6T total / 49B active) with hybrid CSA+HCA attention, manifold-constrained hyper-connections, Muon-trained on 32T+ tokens, and three-tier reasoning."
   date_added: 2026-04-24
-  date_updated: 2026-10-13
+  date_updated: 2026-10-28
   tasks:
     - text
   performance_headline: "Frontier 1.6T/49B reasoning MoE with native FP4+FP8 weights, MTP and DSpark speculative decoding, and 1M-token context"
@@ -171,6 +171,10 @@ compatible_strategies:
 # latency-oriented alternative.
 default_strategy: single_node_tep
 
+strategy_hardware:
+  single_node_dpa_tp:
+    mi355x: supported
+
 hardware_overrides:
   hopper:
     # H200 (141 GB × 8 = 1128 GB) leaves KV cache tight at 1M context with
@@ -274,6 +278,211 @@ strategy_overrides:
         - "--no-disable-hybrid-kv-cache-manager"
         - "--enable-sleep-mode"
       env: {}
+
+presets:
+  mi355x_agentx_tp:
+    label: "AgentX TP8 + monokernel"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic coding (InferenceX AgentX)"
+    description: "Source reproduction: DSpark K6 and monokernel on eight MI355X GPUs; draft communication precision requires resolution."
+    source:
+      label: "InferenceX #4526"
+      href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4526"
+      key: dsv4-fp4-mi355x-vllm-agentic-mtp
+      revision: 5ec3c995988e5d3632c1ff53e8ae39da3e799892
+    image:
+      vllm: "vllm/vllm-openai-rocm:nightly-e4a5b5537344b103ed10de7764378ef09604ef3d"
+      model_revision: 72e1d3230f6c080a530b0a1d46f8eb4602340597
+      pip: [Pillow, fastapi, uvicorn]
+    tp: 8
+    select:
+      frontend: python
+      features: {tool_calling: true, reasoning: true, spec_decoding: dspark}
+      kv_offload: off
+    args:
+      - "--revision"
+      - "72e1d3230f6c080a530b0a1d46f8eb4602340597"
+      - "--tokenizer-revision"
+      - "72e1d3230f6c080a530b0a1d46f8eb4602340597"
+      - "--async-scheduling"
+      - "--data-parallel-size"
+      - "1"
+      - "--gpu-memory-utilization"
+      - "0.86"
+      - "--moe-backend"
+      - "aiter"
+      - "--monokernel"
+      - "--enable-prefix-caching"
+      - "--no-disable-hybrid-kv-cache-manager"
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "10800"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      OMP_NUM_THREADS: "1"
+    json_args:
+      --compilation-config: {mode: 3, cudagraph_mode: FULL_AND_PIECEWISE}
+      --speculative-config: {num_speculative_tokens: 6}
+    points:
+      c1: {label: "1", concurrency: 1, args: ["--max-num-seqs", "2"]}
+      c4: {label: "4", concurrency: 4, args: ["--max-num-seqs", "8"]}
+      c8: {label: "8", concurrency: 8, args: ["--max-num-seqs", "16"]}
+      c16: {label: "16", concurrency: 16, args: ["--max-num-seqs", "32"]}
+      c32: {label: "32", concurrency: 32, args: ["--max-num-seqs", "64"]}
+      c40: {label: "40", concurrency: 40, args: ["--max-num-seqs", "80"]}
+      c48: {label: "48", concurrency: 48, args: ["--max-num-seqs", "96"]}
+      c56: {label: "56", concurrency: 56, args: ["--max-num-seqs", "112"]}
+      c64: {label: "64", concurrency: 64, args: ["--max-num-seqs", "128"]}
+    runbook: |
+      This opt-in profile serves [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)
+      on one 8× MI355X node. The monokernel is enabled only for the TP8 arm;
+      [vLLM #61482](https://github.com/vllm-project/vllm/pull/61482) added this
+      DSpark-compatible path. These presets do not change the generic defaults.
+
+      **Qualification blocked:** the source enables nondefault INT4 QuickReduce
+      for draft collectives too. For example, 32 active K6 requests produce at
+      least 192 draft rows, making the BF16 attention-output reduction eligible
+      for INT4 communication in the pinned image. This conflicts with
+      [InferenceX's draft-precision rule](https://github.com/SemiAnalysisAI/InferenceX/blob/67de4b34ee1419b2a31c0e7200964a6e78015be4/CONTRIBUTING.md#draft-model-precision).
+      These are faithful source profiles, pending a source correction and
+      qualifying validation; they are not a production recommendation. Real
+      target verification and passing GSM8K do not resolve that precision issue.
+
+      InferenceX installs `Pillow fastapi uvicorn` before engine startup. When
+      using the pinned image interactively, install these prerequisites inside
+      the container, then run the generated Python command in that container:
+
+      ```bash
+      uv pip install Pillow fastapi uvicorn
+      ```
+
+      The generated Docker launch does not perform this setup step; provide the
+      dependencies in its container before using that launch form.
+
+      The source pins the target and tokenizer revisions, but supplies no separate
+      DSpark draft revision. DSpark loads the native draft from the same model ID
+      through the image's default mixed FP8/MXFP4 handling; no draft dtype or
+      quantization override is added. INT4 QuickReduce is shared by eligible
+      standard-path target and draft collectives, rather than being target-only.
+      The KV cache is FP8. The image is recorded as a tag, without a source-pinned
+      digest. Keep inherited environment settings consistent with the preset.
+
+      The generated serving commands use real target verification. For the
+      **InferenceX throughput sweep only**, merge the following keys into their
+      speculative config, retaining DSpark K6 and probabilistic drafting:
+
+      ```json
+      {"rejection_sample_method":"synthetic","synthetic_acceptance_length":3.77}
+      ```
+
+      `3.77` comes from the committed
+      [DeepSeek-V4-Pro thinking-on K6 golden curve](https://github.com/SemiAnalysisAI/InferenceX/blob/5ec3c995988e5d3632c1ff53e8ae39da3e799892/inferencex-e2e/infx/golden_al_distribution/dsv4-pro-0813-dspark.yaml).
+      Synthetic acceptance is a measurement control; do not use it for production
+      or accuracy evaluation. The generic Bench command is a smoke benchmark,
+      not an AgentX replay; reproduce AgentX with the linked InferenceX harness.
+
+      The TP8 scheduler caps are twice the listed client concurrency for AgentX
+      fan-out. No host-memory offload is enabled. The source's obsolete
+      `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=32768` has no effect in this image;
+      the presets retain the effective CLI default of `0` (semantic checkpoints).
+
+      Evidence: [sweep 40260921924, attempt 3](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40260921924/attempts/3)
+      for source head `882db2060239f4d849f8b1c93f3b8b192ad3637e` covers all twelve TP8/DPA
+      throughput points and two real-verification GSM8K evals. The current-head
+      [run 40626241537](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40626241537)
+      only reuses that sweep; its performance/eval matrices are skipped.
+      Its actual CI merge `f301906060dcfd3b63ac6f77a735698f731f65b1` and the cited
+      head produce identical native recipe expansion for this lane.
+      This documentation change does not rerun GPU inference or establish private
+      agentic accuracy evaluation.
+  mi355x_agentx_dpa:
+    label: "AgentX DPA8 + TP experts"
+    hardware: mi355x
+    strategy: single_node_dpa_tp
+    variants: [default]
+    workload: "Agentic coding (InferenceX AgentX)"
+    description: "TP1 attention / DP8 with tensor-sharded experts, DSpark K6 and session-affine routing; monokernel disabled."
+    source:
+      label: "InferenceX #4526"
+      href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4526"
+      key: dsv4-fp4-mi355x-vllm-agentic-mtp
+      revision: 5ec3c995988e5d3632c1ff53e8ae39da3e799892
+    image:
+      vllm: "vllm/vllm-openai-rocm:nightly-e4a5b5537344b103ed10de7764378ef09604ef3d"
+      model_revision: 72e1d3230f6c080a530b0a1d46f8eb4602340597
+      pip: [Pillow, fastapi, uvicorn, "vllm-router==0.1.14"]
+    select:
+      frontend: python
+      features: {tool_calling: true, reasoning: true, spec_decoding: dspark}
+      kv_offload: off
+    args:
+      - "--revision"
+      - "72e1d3230f6c080a530b0a1d46f8eb4602340597"
+      - "--tokenizer-revision"
+      - "72e1d3230f6c080a530b0a1d46f8eb4602340597"
+      - "--async-scheduling"
+      - "--gpu-memory-utilization"
+      - "0.86"
+      - "--moe-backend"
+      - "aiter"
+      - "--enable-prefix-caching"
+      - "--no-disable-hybrid-kv-cache-manager"
+      - "--prefill-schedule-interval"
+      - "8"
+      - "--long-prefill-token-threshold"
+      - "16384"
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "10800"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      OMP_NUM_THREADS: "1"
+    json_args:
+      --compilation-config: {mode: 3, cudagraph_mode: FULL_AND_PIECEWISE}
+      --speculative-config: {num_speculative_tokens: 6}
+    points:
+      c64: {label: "64", concurrency: 64, args: ["--max-num-seqs", "64"]}
+      c128: {label: "128", concurrency: 128, args: ["--max-num-seqs", "128"]}
+      c192: {label: "192", concurrency: 192, args: ["--max-num-seqs", "192"]}
+    runbook: |
+      This is the DP-attention arm of the
+      [TP8 profile](#preset-mi355x_agentx_tp), using the same checkpoint, image,
+      runtime prerequisites and real-versus-synthetic verification distinction.
+      The source qualification blocker described there remains unresolved.
+      Runtime flags are TP1/DP8 with no expert-parallel flag: experts remain
+      tensor-sharded across the eight ranks. The source's matrix label TP8/EP1
+      describes the aggregate topology, not the attention TP argument.
+      Monokernel remains disabled (the image default); TP8-only monokernel
+      eligibility does not extend to this arm.
+
+      Each DP scheduler caps sequences at the listed client concurrency.
+      The measured prefill interval is `8`; the `16384` long-prefill threshold
+      exceeds the `8192` token budget and does not bind.
+
+      For exact source routing, replace the generic router companion with this
+      pinned setup in another shell on the engine's host/container network:
+
+      ```bash
+      uv pip install vllm-router==0.1.14
+      vllm-router \
+        --host 0.0.0.0 --port 8000 \
+        --worker-urls http://localhost:8100 \
+        --intra-node-data-parallel-size 8 \
+        --policy consistent_hash \
+        --request-timeout-secs 14400 \
+        --disable-retries
+      ```
+
+      Clients connect to the router on port `8000`, retaining an `X-Session-ID`
+      across turns of each conversation. InferenceX maps correlation IDs to
+      this header; `AIPERF_HTTP_X_SESSION_ID_FROM_CORRELATION_ID=1` is a benchmark
+      client setting, not an engine environment variable.
 
 guide: |
   ## Overview
@@ -726,81 +935,25 @@ guide: |
     -d '{"model":"deepseek-ai/DeepSeek-V4-Pro-0813","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
   ```
 
-  ## Agentic benchmark reproduction (InferenceX MI355X sweep)
+  ## MI355X AgentX profiles (InferenceX #4526)
 
-  The command above is the default serving configuration. The SemiAnalysis InferenceX
-  MI355X benchmark lane for this checkpoint is a separate high-concurrency benchmark
-  configuration — not the recipe default. To reproduce that sweep, start from the
-  default command above and apply these deltas:
+  The opt-in **AgentX TP8 + monokernel** and **AgentX DPA8 + TP experts** presets
+  cover the [InferenceX #4526](https://github.com/SemiAnalysisAI/InferenceX/pull/4526)
+  agentic-coding lane for
+  [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)
+  on one eight-GPU MI355X node. Both use native DSpark K6, mixed FP8/MXFP4
+  weights and FP8 KV cache; only the TP8 arm enables the monokernel. They pin the
+  source nightly and target/tokenizer revisions, leaving the generic recipe and
+  the separate fixed-sequence lane unchanged.
 
-  **Source configuration:**
+  These source profiles await resolution of the shared INT4 draft-communication
+  precision issue described in their runbooks before production qualification.
 
-  ```yaml
-  image: vllm/vllm-openai-rocm:nightly-eed1f3d0c6043bd494424a22443ee198dd56f657
-  ```
-
-  **Applied to both arms:**
-
-  - Enable `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` (previously commented out).
-  - Disable `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0` for this nightly.
-    DSv4-Pro is a mixed checkpoint (MXFP4 routed experts, FP8 shared expert), and
-    this image fails while loading incompatible scales and shapes when the fused
-    shared-expert path is enabled.
-  - Raise `--gpu-memory-utilization` from `0.8` to `0.86`.
-  - Pin `--max-num-batched-tokens 8192` instead of the nightly default of `16384`.
-    On the TP8 initialization check this raised GPU KV-cache capacity from `4,730,981`
-    to `8,524,228` tokens and reduced peak activation memory from `11.44 GiB` to
-    `8.9 GiB`.
-
-  **Applied to the DP-attention arm only:**
-
-  - Cap `--max-num-seqs` at `CONC` rather than `2*CONC`. The limit is per scheduler
-    and DP-attention runs one scheduler per rank. The pure TP8 arm keeps the existing
-    `2*CONC` headroom for AgentX subagent fan-out.
-  - Add `--prefill-schedule-interval 8` and `--long-prefill-token-threshold 16384`.
-
-  With `--max-num-batched-tokens 8192` now pinned for both arms,
-  `--long-prefill-token-threshold 16384` sits above the token budget and therefore
-  never binds. It is inert rather than harmful, and the DP-attention point was
-  measured with it present.
-
-  `--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}'` is
-  unchanged; it was already in the checked-in recipe.
-
-  Export the AITER and INT4 quantized all-reduce environment variables before launch:
-
-  ```bash
-  export VLLM_ROCM_USE_AITER=1
-  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
-  export VLLM_ROCM_USE_AITER_MOE=1
-  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0
-  export VLLM_ENGINE_READY_TIMEOUT_S=10800
-
-  vllm serve "$MODEL_PATH" --served-model-name "$MODEL" \
-    --host 0.0.0.0 \
-    --port "$VLLM_BACKEND_PORT" \
-    --trust-remote-code \
-    --async-scheduling \
-    --distributed-executor-backend mp \
-    --kv-cache-dtype fp8 \
-    --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.86 \
-    --moe-backend aiter \
-    --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
-    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2.49}' \
-    --tokenizer-mode deepseek_v4 \
-    --tool-call-parser deepseek_v4 \
-    --reasoning-parser deepseek_v4 \
-    --enable-auto-tool-choice \
-    --enable-prefix-caching \
-    --prefix-cache-retention-interval 32768 \
-    --no-disable-hybrid-kv-cache-manager \
-    --max-num-seqs "8"
-  ```
-
-  `--prefix-cache-retention-interval` replaces the `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`
-  env var, removed in vLLM 0.30.0
-  ([vllm-project/vllm#55353](https://github.com/vllm-project/vllm/pull/55353)).
+  Their generated commands retain real target verification for serving and eval.
+  The preset runbooks record runtime package prerequisites, the session-affine
+  DP router, all twelve concurrency points, and the separate throughput-only
+  synthetic acceptance overlay (`3.77`). The source sweep and real GSM8K evals
+  supply external validation; no GPU run was performed for this recipe update.
 
   ## Fixed-sequence benchmark reproduction (InferenceX MI355X 8K/1K)
 
@@ -947,8 +1100,8 @@ guide: |
   | Workload | ISL 8192 / OSL 1024, conc 4–512 | agentic-coding traces |
   | `--gpu-memory-utilization` | `0.8` | `0.86` |
   | Prefix caching | `--no-enable-prefix-caching` | `--enable-prefix-caching` |
-  | Speculation | none (STP) or real MTP, 2 tokens | synthetic MTP, 3 tokens |
-  | `--max-num-seqs` | not passed | `8` |
+  | Speculation | none (STP) or real MTP, 2 tokens | real DSpark K6 for serving/eval; synthetic AL 3.77 for throughput |
+  | `--max-num-seqs` | not passed | per point: twice concurrency for TP8, concurrency for DPA8 |
   | `--max-num-batched-tokens` | not passed | `8192` |
 
   The Agentic lane's synthetic acceptance length is a benchmark-comparability
