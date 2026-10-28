@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -34,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
+    TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -49,6 +51,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     RequestOffloadState,
+    SchedulerOffloadConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
+    OnComputeStoreHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -280,6 +286,8 @@ def _make_partial_tail_scheduler(
     eagle: bool = False,
     cache_hit_alignment_tokens: int | None = 4,
     manager: OffloadingManager | None = None,
+    change_config: Callable[[SchedulerOffloadConfig], SchedulerOffloadConfig]
+    | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -297,7 +305,16 @@ def _make_partial_tail_scheduler(
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     if manager is not None:
         spec.manager = manager
-    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    if change_config is None:
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    # Change the config before the scheduler gives it to its handlers.
+    from_spec = SchedulerOffloadConfig.from_spec
+    with patch.object(
+        SchedulerOffloadConfig,
+        "from_spec",
+        lambda *args: change_config(from_spec(*args)),
+    ):
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def _make_partial_tail_request(
@@ -350,6 +367,31 @@ def test_create_req_context_preserves_kv_hints():
     assert _create_req_context(request, MagicMock()).kv_hints is kv_hints
 
 
+def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_COMPUTE]
+    assert isinstance(handler, OnComputeStoreHandler)
+    return handler
+
+
+def _partial_tail_store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_compute(scheduler)
+    return scheduler._add_store_jobs(
+        handler,
+        handler._build_partial_tail_store_jobs(scheduler_output, scheduler._req_status),
+    )
+
+
+def _store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_compute(scheduler)
+    return scheduler._add_store_jobs(
+        handler, handler._build_store_jobs(scheduler_output, scheduler._req_status)
+    )
+
+
 def _reduce_kv_connector_stats(runner):
     reduced: dict[str, int | float] = {}
     for payload in runner.kv_connector_stats:
@@ -380,7 +422,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     offered_keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
@@ -444,7 +486,7 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 2
     src_specs = [
@@ -460,15 +502,23 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
 
 
 def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
-    scheduler = _make_partial_tail_scheduler()
-    indexer_config = scheduler.config.kv_group_configs[1]
-    scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(
+            kv_group_configs=(config.kv_group_configs[1],)
+        )
+    )
     _make_partial_tail_request(scheduler)
     _as_mock(scheduler.manager.prepare_store).side_effect = (
         lambda keys, req_context, trigger: (generate_store_output(keys))
     )
 
-    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
+    handler = _on_compute(scheduler)
+    jobs = scheduler._add_store_jobs(
+        handler,
+        handler._build_aligned_boundary_store_jobs(
+            {"req": [(1, 98, 16)]}, scheduler._req_status
+        ),
+    )
 
     [job] = jobs.values()
     assert isinstance(job.src_spec, GPULoadStoreSpec)
@@ -530,7 +580,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
         num_scheduled_tokens={"req": 16},
         finished_req_ids=set(),
     )
-    jobs = scheduler._build_store_jobs(output)
+    jobs = _store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     [job] = jobs.values()
@@ -583,9 +633,7 @@ def test_partial_tail_lookup_delays_duplicate_inflight_load():
     first_state.num_locally_computed_tokens = 16
     first_state.update_offload_keys()
     boundary_keys = [
-        scheduler._make_boundary_key(
-            first, group_config.group_idx, 28, first_state.req_context
-        )
+        first_state.register_boundary_key(group_config.group_idx, 28)
         for group_config in scheduler.config.kv_group_configs
     ]
     stored = manager.prepare_store(
@@ -741,10 +789,15 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     assert request.shared_prefix_boundary == 16
 
     # The recompute's Mamba state at the junction is handed off and stored.
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
-    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 77, 16)]})
+    jobs = scheduler._add_store_jobs(
+        _on_compute(scheduler),
+        _on_compute(scheduler)._build_aligned_boundary_store_jobs(
+            {"req": [(1, 77, 16)]}, scheduler._req_status
+        ),
+    )
     [job_id] = jobs
     stored.update(scheduler._job_statuses[job_id].keys)
 
@@ -776,8 +829,9 @@ def test_no_shared_prefix_junction_when_sparse_group_hits():
 
 
 def test_max_load_tokens_rounds_down_without_partial_tail():
-    scheduler = _make_partial_tail_scheduler()
-    scheduler.config = scheduler.config._replace(supports_partial_tail=False)
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(supports_partial_tail=False)
+    )
     request = _make_partial_tail_request(
         scheduler, kv_transfer_params={"max_load_tokens": 20}
     )
@@ -1198,7 +1252,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
             boundary_state_offloads={"req": [(1, 99, 24)]},
         ),
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     [job_id] = jobs
     offered_keys = scheduler.manager.prepare_store.call_args.args[0]
@@ -1261,7 +1315,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
         ),
     )
 
-    assert bool(scheduler._build_partial_tail_store_jobs(output)) == stored
+    assert bool(_partial_tail_store_jobs(scheduler, output)) == stored
     assert scheduler.manager.prepare_store.called == stored
 
 
@@ -1523,6 +1577,14 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
         ),
         num_external_tokens=num_external_tokens,
     )
+    # The load completes before the step that computes the proof.
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs=dict.fromkeys(scheduler._current_batch_load_jobs, 1)
+            )
+        )
+    )
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
@@ -1537,7 +1599,7 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
         ),
     )
 
-    assert bool(scheduler._build_partial_tail_store_jobs(output)) == host_hit
+    assert bool(_partial_tail_store_jobs(scheduler, output)) == host_hit
     assert scheduler.manager.prepare_store.called == host_hit
 
 
@@ -1813,8 +1875,8 @@ def test_finish_mid_prefill_stores_only_computed_blocks(
     runner = request_runner(
         block_size=block_size, num_gpu_blocks=16, async_scheduling=False
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
     # Chunked prefill: 6 of the 16 prompt tokens per step.
     runner.scheduler.max_num_scheduled_tokens = 6
@@ -1880,15 +1942,16 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
         num_scheduled_tokens={req_id: 0}, finished_req_ids=set()
     )
 
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    on_compute = _on_compute(runner.connector_scheduler)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert group_state.next_stored_chunk_idx == 1
+    assert on_compute.first_pending_chunk_idx(req_status, 0) == 1
 
     req.block_hashes.append(missing_hash)
     req_status.update_offload_keys()
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert group_state.next_stored_chunk_idx == 2
+    assert on_compute.first_pending_chunk_idx(req_status, 0) == 2
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):
@@ -2563,6 +2626,67 @@ def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
     assert completed == [StoreTrigger.ON_COMPUTE]
 
 
+class _RecordingStoreHandler(OnComputeStoreHandler):
+    """An ON_COMPUTE handler that records the hooks the scheduler calls."""
+
+    def __init__(self, *args: Any):
+        super().__init__(*args)
+        self.removed: list[str] = []
+
+    def on_request_removed(self, req_id):
+        self.removed.append(req_id)
+        super().on_request_removed(req_id)
+
+
+def _install_recording_handler(runner) -> _RecordingStoreHandler:
+    sched = runner.connector_scheduler
+    handler = _RecordingStoreHandler(sched.config, sched.manager, sched._events_tracker)
+    sched._store_handlers[StoreTrigger.ON_COMPUTE] = handler
+    return handler
+
+
+def test_store_handler_hears_each_request_removal(request_runner):
+    """Each path that removes a request tells the handler, so a handler can
+    drop its own state of the request."""
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    handler = _install_recording_handler(runner)
+    sched = runner.connector_scheduler
+
+    # Finished with no store job.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=[1] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    assert handler.removed == [str(runner.req_id)]
+
+    # Finished, then the last store job completes.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=[2] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    assert handler.removed[1:] == [str(runner.req_id)]
+
+    # Finished with a store job in flight, then a cache reset.
+    runner.new_request(token_ids=[3] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    store_statuses = [s for s in sched._job_statuses.values() if s.is_store]
+    assert store_statuses
+    assert all(s.trigger is StoreTrigger.ON_COMPUTE for s in store_statuses)
+    assert handler.removed[2:] == []
+    sched.reset_cache()
+    assert handler.removed[2:] == [str(runner.req_id)]
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_on_request_finished_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
@@ -2644,7 +2768,7 @@ def test_on_request_finished_fires_after_final_block_store(
 ):
     """on_request_finished fires after the final prepare_store of the request.
 
-    request_finished() keeps req_status alive so _build_store_jobs can retry a
+    request_finished() keeps req_status alive so the ON_COMPUTE handler can retry a
     block on the next step; the retry must be issued before the manager is told
     the request is over. Every attempt made before the request finishes is
     declined here, so the store that succeeds is the one from the finishing
@@ -3445,6 +3569,9 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     sched = runner.connector_scheduler
     manager = CPUOffloadingManager(num_chunks=16)
     sched.manager = manager
+    sched._store_handlers[StoreTrigger.ON_COMPUTE] = OnComputeStoreHandler(
+        sched.config, manager, sched._events_tracker
+    )
     runner.new_request(token_ids=list(range(17)))
     state = sched._req_status["0"]
     state.update_offload_keys()
@@ -3852,8 +3979,8 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
     job_id = next(iter(runner.connector_scheduler._job_statuses))
@@ -3892,8 +4019,8 @@ def test_successful_store_is_published(request_runner, async_scheduling: bool):
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
     job_id = next(iter(runner.connector_scheduler._job_statuses))
@@ -3958,8 +4085,8 @@ def test_failed_load_ends_or_reruns_its_request(
     )
     runner.scheduler.recompute_kv_load_failures = recompute
     runner.new_request(token_ids=[0] * block_size * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
 
@@ -4141,7 +4268,7 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
-    next_stored_chunk_idx for active requests and clears job tracking."""
+    the ON_COMPUTE progress of active requests and clears job tracking."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -4185,11 +4312,12 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Record job counter to verify the reset counter is set correctly.
     job_counter_before_reset = runner.connector_scheduler._job_counter
 
-    # After update_state_after_alloc, next_stored_chunk_idx is advanced to
+    # After update_state_after_alloc, the ON_COMPUTE progress is advanced to
     # skip the loaded prefix; reset_cache must bring it back to 0.
+    on_compute = _on_compute(runner.connector_scheduler)
     for req_status in runner.connector_scheduler._req_status.values():
-        for group_state in req_status.group_states:
-            assert group_state.next_stored_chunk_idx > 0
+        for idx in range(len(req_status.group_states)):
+            assert on_compute.first_pending_chunk_idx(req_status, idx) > 0
 
     # Reset the cache
     runner.connector_scheduler.reset_cache()
@@ -4211,11 +4339,11 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # pre-reset jobs arriving from workers are silently discarded.
     assert runner.connector_scheduler._stale_job_threshold == job_counter_before_reset
 
-    # next_stored_chunk_idx must be reset to 0 for every active request so
+    # The ON_COMPUTE progress must be reset to 0 for every active request so
     # that post-reset stores restart from block 0.
     for req_status in runner.connector_scheduler._req_status.values():
-        for group_state in req_status.group_states:
-            assert group_state.next_stored_chunk_idx == 0
+        for idx in range(len(req_status.group_states)):
+            assert on_compute.first_pending_chunk_idx(req_status, idx) == 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -4292,6 +4420,7 @@ def test_pending_transfer_defers_prefix_lookup():
         SimpleNamespace(group_states=[group_state], transfer_jobs={123}),
     )
     scheduler._req_status = {request.request_id: req_status}
+    scheduler._store_handlers = {}
 
     matched_tokens, is_async = scheduler.get_num_new_matched_tokens(
         request,
@@ -4698,7 +4827,7 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     runner.new_request(token_ids=[0] * block_size * 3)
 
     # First step: prepare_store FAILS -> offloading delayed.
-    # next_stored_chunk_idx stays at 0, block_ids[0] still holds the
+    # The ON_COMPUTE progress stays at 0, block_ids[0] still holds the
     # original block_id for position 0.
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
     runner.run(decoded_tokens=[0])
@@ -5406,14 +5535,14 @@ class TestEagle:
         """Eagle store must not drop interior blocks across prefill chunks.
 
         Regression: the trailing-block exclusion (num_blocks - 1) was applied
-        when collecting keys, but next_stored_chunk_idx advanced by the
+        when collecting keys, but the ON_COMPUTE progress advanced by the
         non-decremented count, so the trailing chunk of every chunked-prefill
         chunk was skipped and never re-considered. With the harness chunk budget
         (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
         block at the chunk boundary, leaving a permanent gap that caps prefix
         reuse at the first hole. Only the trailing decode block may be held
         back; all other blocks must be stored exactly once (no duplicates from
-        next_stored_chunk_idx regressing at the prefill->decode transition).
+        the progress regressing at the prefill->decode transition).
         """
         block_size = 4
         blocks_per_chunk = 1
@@ -6433,8 +6562,8 @@ class TestMambaHybridOffloadServing:
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
-        scheduler._build_partial_tail_store_jobs(out)
-        scheduler._build_store_jobs(out)
+        _partial_tail_store_jobs(scheduler, out)
+        _store_jobs(scheduler, out)
         complete_all_jobs()
 
         req.num_computed_tokens = self.PROMPT_TOKENS
@@ -6443,7 +6572,7 @@ class TestMambaHybridOffloadServing:
         req_status.update_offload_keys()
         scheduler.request_finished(req)
         out2 = SimpleNamespace(num_scheduled_tokens={}, finished_req_ids={"A"})
-        scheduler._build_store_jobs(out2)
+        _store_jobs(scheduler, out2)
         complete_all_jobs()
 
         make_request("A2")
