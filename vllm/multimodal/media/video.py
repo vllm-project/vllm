@@ -166,11 +166,14 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                     and all(isinstance(i, int) for i in frames_indices)
                 ):
                     raise ValueError("frames_indices must be a list of integers")
-                if len(frames_indices) != total:
+                num_sent = data.count(",") + 1
+                if len(frames_indices) != num_sent:
                     raise ValueError(
                         f"frames_indices length ({len(frames_indices)}) must "
-                        f"match number of frames sent ({total})"
+                        f"match number of frames sent ({num_sent})"
                     )
+                # Keep the indices of the frames left after the num_frames limit.
+                frames_indices = frames_indices[:total]
             else:
                 frames_indices = list(range(total))
 
