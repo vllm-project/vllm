@@ -104,6 +104,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "dspark_tp_markov_sampling",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -696,6 +697,15 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    dspark_tp_markov_sampling: bool | None = None
+    """For DSpark drafting with tensor parallelism, run the sequential Markov
+    sampling loop vocab-parallel: each TP rank computes the Markov bias and the
+    Gumbel sample for its share of the vocabulary, and the ranks exchange
+    per-block maxima over symmetric memory. The drafted tokens and cached
+    draft logits are the same as the replicated loop's. Needs CUDA symmetric
+    memory and probabilistic drafting over the full vocabulary; otherwise the
+    replicated loop runs."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

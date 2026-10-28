@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
 from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.tp_markov import TPMarkovSampler
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -93,6 +94,8 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
         self.use_confidence_head: bool = False
+        # Vocab-parallel Markov loop; set in load_model when enabled.
+        self._tp_markov_sampler: TPMarkovSampler | None = None
 
         # Set when the sequential sampling can be batch-sharded across TP.
         self._sharded_sequential_comm: PyNcclCommunicator | None = None
@@ -104,6 +107,24 @@ class DSparkSpeculator(DFlashSpeculator):
             self.vllm_config, target_model
         ):
             self._try_enable_sharded_sequential_sampling()
+        if self.speculative_config.dspark_tp_markov_sampling:
+            self._try_enable_tp_markov_sampling()
+
+    def _try_enable_tp_markov_sampling(self) -> None:
+        # Every TP rank reaches the same decision (the checks follow from the
+        # config or are agreed collectively): the sampler's setup is collective.
+        reason = TPMarkovSampler.unsupported_reason(self)
+        if reason is None:
+            reason = TPMarkovSampler.inexact_projection_reason(self)
+        if reason is not None:
+            logger.warning(
+                "dspark_tp_markov_sampling is ignored because %s; the Markov "
+                "loop runs replicated on every TP rank.",
+                reason,
+            )
+            return
+        self._tp_markov_sampler = TPMarkovSampler(self)
+        logger.info("DSpark Markov sampling is vocab-parallel over TP.")
 
     def _try_enable_sharded_sequential_sampling(self) -> None:
         tp_size = get_tp_group().world_size
@@ -248,6 +269,19 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits = self.model.compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
+
+        if (
+            self._tp_markov_sampler is not None
+            and num_reqs <= self._tp_markov_sampler.max_reqs
+        ):
+            self._tp_markov_sampler.sample(
+                self,
+                num_reqs,
+                base_logits,
+                self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec),
+                self.sample_pos[:num_sample].view(num_reqs, n_spec),
+            )
+            return
 
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
