@@ -925,8 +925,13 @@ class SamplingParams(
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
+        vocab_size = model_config.get_vocab_size()
         if max_logprobs == -1:
-            max_logprobs = model_config.get_vocab_size()
+            max_logprobs = vocab_size
+        elif vocab_size > 0:
+            # max_logprobs is not capped by the vocab at config time, and
+            # torch.topk rejects a k larger than the vocab dimension.
+            max_logprobs = min(max_logprobs, vocab_size)
 
         # Validate sample logprobs.
         if num_logprobs := self.logprobs:
@@ -935,7 +940,8 @@ class SamplingParams(
             if num_logprobs > max_logprobs:
                 raise VLLMValidationError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
+                    f"which is greater than max allowed: {max_logprobs} "
+                    f"(vocabulary size {vocab_size})",
                     parameter="logprobs",
                     value=num_logprobs,
                 )
@@ -980,7 +986,8 @@ class SamplingParams(
             if num_prompt_logprobs > max_logprobs:
                 raise VLLMValidationError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
+                    f"which is greater than max allowed: {max_logprobs} "
+                    f"(vocabulary size {vocab_size})",
                     parameter="prompt_logprobs",
                     value=num_prompt_logprobs,
                 )
