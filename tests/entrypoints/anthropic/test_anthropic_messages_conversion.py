@@ -1536,6 +1536,23 @@ class TestDetectMergeInlineSystem:
             "add_generation_prompt": True,
         }
 
+    def test_non_jinja_merge_warning_omits_chat_template_hint(self, monkeypatch):
+        """--chat-template may not apply to non-jinja renderers (e.g. V4)."""
+        import vllm.entrypoints.anthropic.serving as serving_mod
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            chat_template_content_format="auto",
+            default_chat_template_kwargs={},
+        )
+        assert AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        assert "--chat-template" not in mock_logger.warning_once.call_args.args[0]
+
 
 # ======================================================================
 # Full (non-streaming) response conversion: messages_full_converter

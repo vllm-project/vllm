@@ -294,13 +294,18 @@ class AnthropicServingMessages(OpenAIServingChat):
                 for tools in tool_variants
             )
         if merge:
+            hint = (
+                " Pass a --chat-template that accepts non-leading system "
+                "messages to avoid this."
+                if isinstance(renderer, HfRenderer)
+                else ""
+            )
             logger.warning_once(
                 "The chat template requires system-first ordering, so inline "
                 "system messages in /v1/messages requests (e.g. Claude Code's "
                 "per-turn reminders) are merged into the leading system prompt. "
                 "Each new one changes the prompt prefix, so the rest of the "
-                "conversation misses the prefix cache. Pass a --chat-template "
-                "that accepts non-leading system messages to avoid this."
+                "conversation misses the prefix cache." + hint
             )
         return merge
 
