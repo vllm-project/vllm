@@ -187,10 +187,15 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
         )
 
 
-def test_mooncake_store_supports_sleep_without_loading_store_config(monkeypatch):
-    """Store setup, not the sleep capability query, resolves the transport."""
+def test_mooncake_store_supports_sleep_with_explicit_rdma(monkeypatch, tmp_path):
+    """Disabling auto-discovery keeps explicit RDMA despite NVLink overrides."""
     monkeypatch.setitem(sys.modules, "mooncake", None)
-    monkeypatch.delenv("MOONCAKE_CONFIG_PATH", raising=False)
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text('{"protocol": "rdma", "device_name": "mlx5_0"}')
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MC_MS_AUTO_DISC", "0")
+    monkeypatch.delenv("MC_USE_TENT", raising=False)
+    monkeypatch.delenv("MC_USE_TEV1", raising=False)
     monkeypatch.setenv("MC_FORCE_MNNVL", "1")
     monkeypatch.setenv("MC_INTRANODE_NVLINK", "1")
     config = KVTransferConfig(kv_connector="MooncakeStoreConnector", kv_role="kv_both")

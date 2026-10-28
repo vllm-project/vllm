@@ -11,6 +11,7 @@ and consumer instances read/write KV to/from the store independently,
 enabling prefix caching via hash-based deduplication.
 """
 
+import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
@@ -18,7 +19,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -38,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -126,6 +128,23 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        config = MooncakeStoreConfig.load_from_config()
+        if (
+            config.protocol != "rdma"
+            or not config.device_name
+            or os.getenv("MC_MS_AUTO_DISC", "0") != "0"
+            or any(v in os.environ for v in ("MC_USE_TENT", "MC_USE_TEV1"))
+        ):
+            raise ValueError(
+                "MooncakeStoreConnector sleep requires protocol='rdma', "
+                "device_name set, MC_MS_AUTO_DISC=0 or unset, and "
+                "MC_USE_TENT/MC_USE_TEV1 unset. "
+                "Sleep with NVLink Fabric is not supported yet."
+            )
+        return True
 
     @staticmethod
     def _validate_kv_cache_config(
