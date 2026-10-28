@@ -100,6 +100,37 @@ def _start_health_server(
     return server, thread
 
 
+def _validate_seed_args(
+    args: argparse.Namespace, *, world_size: int, num_groups: int
+) -> None:
+    """Validate the seed CLI options before any daemon spawns."""
+    for flag, host, port in (
+        ("--seed-listen", args.seed_listen_host, args.seed_listen_port),
+        ("--seed-source", args.seed_source_host, args.seed_source_port),
+    ):
+        if (host is None) != (port is None):
+            raise ValueError(f"{flag}-host and {flag}-port must be provided together")
+    has_endpoint = any(
+        value is not None
+        for value in (
+            args.seed_listen_host,
+            args.seed_listen_port,
+            args.seed_source_host,
+            args.seed_source_port,
+        )
+    )
+    if has_endpoint != bool(args.seed_token):
+        raise ValueError("Preload daemons must set --seed-token to enable D2D transfer")
+    for base_port in (args.seed_listen_port, args.seed_source_port):
+        if base_port is None:
+            continue
+        max_port = base_port + num_groups * world_size - 1
+        if not 1 <= base_port <= 65535 or max_port > 65535:
+            raise ValueError(
+                f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
+            )
+
+
 class PreloadSubcommand(CLISubcommand):
     """The `preload` subcommand for the vLLM CLI."""
 
@@ -119,9 +150,9 @@ class PreloadSubcommand(CLISubcommand):
             type=int,
             default=None,
             help="Rendezvous port for the daemon's own TP group. Must differ "
-            "from the engine's --master-port (the daemon holds its group open "
-            "while serving) and match across nodes. Required when --nnodes > "
-            "1; defaults to a free port for single-node.",
+            "from the engine's --master-port (the daemons may still be loading "
+            "when the engine starts) and match across nodes. Required when "
+            "--nnodes > 1; defaults to a free port for single-node.",
         )
         parser.add_argument(
             "--weight-cache-draft-master-port",
@@ -143,6 +174,39 @@ class PreloadSubcommand(CLISubcommand):
             default="0.0.0.0",
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
+        parser.add_argument(
+            "--seed-listen-host",
+            type=str,
+            default=None,
+            help="Host to bind for authenticated daemon-to-daemon requests.",
+        )
+        parser.add_argument(
+            "--seed-listen-port",
+            type=int,
+            default=None,
+            help="Base port for daemon-to-daemon requests; each daemon binds "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--seed-source-host",
+            type=str,
+            default=None,
+            help="Host of a source daemon replica to seed warmup caches from.",
+        )
+        parser.add_argument(
+            "--seed-source-port",
+            type=int,
+            default=None,
+            help="Base port of the source daemon replica; each daemon dials "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--seed-token",
+            type=str,
+            default=None,
+            help="Shared secret for daemon-to-daemon requests. The JSON "
+            "connection is unencrypted; use a trusted network.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -153,6 +217,7 @@ class PreloadSubcommand(CLISubcommand):
             get_draft_daemon_config,
             plan_local_ranks,
         )
+        from vllm.model_executor.model_loader.weight_cache.seed import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
         )
@@ -179,6 +244,7 @@ class PreloadSubcommand(CLISubcommand):
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
+        world_size = dp_size * pp_size * tp_size
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -248,32 +314,54 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        procs = [
-            ctx.Process(
-                target=_run_daemon,
-                args=(
-                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-                    local_rank,
-                    config,
-                    init_method,
-                    args.weight_cache_socket_dir,
-                    ready_queue,
-                    is_draft,
-                    dp_rank,
-                    pp_rank,
-                ),
-                name=(
-                    f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
-                ),
-            )
-            for (is_draft, config, init_method), (
-                local_rank,
-                dp_rank,
-                pp_rank,
-                tp_rank,
-            ) in product(groups, placements)
-        ]
+        _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+
+        def _seed_endpoint(
+            host: str | None, base_port: int | None, offset: int
+        ) -> tuple[str, int] | None:
+            # Validated above: host and port are provided together.
+            if host is None or base_port is None:
+                return None
+            return host, base_port + offset
+
+        procs = []
+        for group_index, (is_draft, config, init_method) in enumerate(groups):
+            # Draft daemons live past the target group's port block so both
+            # roles can be reached over a single seed host:base_port.
+            port_offset = group_index * world_size
+            for local_rank, dp_rank, pp_rank, tp_rank in placements:
+                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
+                offset = port_offset + global_rank
+                seed_config = SeedConfig(
+                    listen=_seed_endpoint(
+                        args.seed_listen_host, args.seed_listen_port, offset
+                    ),
+                    source=_seed_endpoint(
+                        args.seed_source_host, args.seed_source_port, offset
+                    ),
+                    token=args.seed_token,
+                )
+                procs.append(
+                    ctx.Process(
+                        target=_run_daemon,
+                        args=(
+                            global_rank,
+                            local_rank,
+                            config,
+                            init_method,
+                            args.weight_cache_socket_dir,
+                            ready_queue,
+                            is_draft,
+                            dp_rank,
+                            pp_rank,
+                            seed_config,
+                        ),
+                        name=(
+                            f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+                            f"{global_rank}"
+                        ),
+                    )
+                )
         health_state = _HealthState(procs)
         health_server = None
         health_thread = None
