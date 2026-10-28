@@ -14,7 +14,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -434,9 +434,10 @@ class INCARKLinearMethod(INCXPULinearBase):
         layer.ark_weight_type = ark_linear.wdt
         layer.ark_scale_type = ark_linear.sdt
 
-        if hasattr(layer, "qzeros"):
-            del layer.qzeros
-        del layer.scales
+        # ARK holds its own qzeros/scales; the loaded params keep their data.
+        if getattr(layer, "qzeros", None) is not None:
+            retire_parameter(layer, "qzeros")
+        retire_parameter(layer, "scales")
 
     def apply_weights(
         self,

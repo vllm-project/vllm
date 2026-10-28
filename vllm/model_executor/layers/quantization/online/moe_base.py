@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
@@ -237,8 +238,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            triton_weight(layer, "w13_weight"),
+            triton_weight(layer, "w2_weight"),
             router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -264,8 +265,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            triton_weight(layer, "w13_weight"),
+            triton_weight(layer, "w2_weight"),
             topk_weights,
             topk_ids,
             activation=layer.activation,

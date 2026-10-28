@@ -3,6 +3,7 @@
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+from vllm.model_executor.utils import move_parameter
 
 _PACKED_WEIGHTS = ("w13_weight", "w2_weight")
 
@@ -28,7 +29,5 @@ class CompressedTensorsW4A8Mxfp4MoEMethod(Mxfp4MoEMethod):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         for name in _PACKED_WEIGHTS:
-            param = getattr(layer, f"{name}_packed")
-            delattr(layer, f"{name}_packed")
-            layer.register_parameter(name, param)
+            move_parameter(layer, f"{name}_packed", name)
         super().process_weights_after_loading(layer)

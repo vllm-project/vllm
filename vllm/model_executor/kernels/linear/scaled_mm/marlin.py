@@ -73,11 +73,10 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, scale_name, weight_scale.data)
         # Non-block: callers must pass weight in (K, N) layout.
 
-        layer.input_scale = None
+        # A loaded input_scale stays registered; weight-only Marlin ignores it.
         prepare_fp8_layer_for_marlin(
             layer, self.size_k_first, input_dtype=self.marlin_input_dtype
         )
-        del layer.input_scale
 
     def apply_weights(
         self,
