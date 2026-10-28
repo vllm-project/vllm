@@ -298,6 +298,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
+    VLLM_MORI_FP4_COMBINE: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
@@ -2088,6 +2089,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
     ),
+    # MoRI: transport the intra-node combine as packed FP4 (E2M1) blockwise
+    # instead of BF16. Trades precision for transfer size on the MoE residual
+    # path; requires single-node MoRI on gfx950. Disabled by default.
+    "VLLM_MORI_FP4_COMBINE": lambda: bool(int(os.getenv("VLLM_MORI_FP4_COMBINE", "0"))),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.
     # Default: 20 on CUDA (SMs), 64 on ROCm (CUs).
