@@ -4,6 +4,7 @@ psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests >= 2.33.0
+certifi >= 2026.10.19
 tqdm
 blake3
 py-cpuinfo
@@ -15,12 +16,13 @@ protobuf >= 5.29.6, !=6.30.*, !=6.31.*, !=6.32.*, !=6.33.0.*, !=6.33.1.*, !=6.33
 protobuf == 7.36.1; platform_machine == "s390x"
 fastapi[standard] >= 0.133.0, < 0.137.0 # First version supporting Starlette 1.0; < 0.137.0 avoids route-tree change that breaks model-hosting-container-standards handler overrides.
 starlette >= 1.0.1 # CVE-2026-48710: Host header injection in < 1.0.1
-aiohttp >= 3.14.3
+aiohttp >= 3.14.4
+multidict >= 6.9.1
 openai >= 2.25.0  # For Responses API with namespace tools
 pydantic >= 2.12.0
 orjson>=3.11.6
 prometheus_client >= 0.18.0
-pillow >= 12.3.0  # Required for image processing
+pillow >= 13.0.0  # Required for image processing
 prometheus-fastapi-instrumentator >= 8.0.0 # v8 unblocks starlette >= 1.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer == 0.11.3
@@ -53,7 +55,7 @@ setproctitle # Used to set process names for better debugging and monitoring
 oss-harmony >= 0.0.11  # Required for gpt-oss; includes embedded vocabularies
 anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.14, < 1.0.0
-mcp >= 2.0.0, < 3.0.0
+mcp >= 2.2.0, < 3.0.0
 opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0
