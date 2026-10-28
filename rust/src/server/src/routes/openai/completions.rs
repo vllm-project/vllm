@@ -183,7 +183,7 @@ async fn collect_completion(
         let prompt = echo.as_deref().ok_or_else(|| {
             server_error!("prompt-only completion response missing echoed prompt")
         })?;
-        Some(prompt_only_logprobs_to_openai(
+        Some(echoed_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
@@ -345,9 +345,10 @@ async fn completion_chunk_stream(
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
-                    next_text_offset = text_len(prompt);
-                    let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                    // Like Python, the echoed prompt carries its own logprobs, and
+                    // generated tokens continue from the offsets they report.
+                    let logprobs = if requested_logprobs.is_some() {
+                        Some(echoed_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
@@ -356,6 +357,10 @@ async fn completion_chunk_stream(
                     } else {
                         None
                     };
+                    next_text_offset = logprobs
+                        .as_ref()
+                        .and_then(text_end_offset)
+                        .unwrap_or_else(|| text_len(prompt));
                     let mut chunk = delta_chunk(&envelope, prompt.clone(), logprobs);
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
@@ -585,7 +590,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
-fn prompt_only_logprobs_to_openai(
+fn echoed_prompt_logprobs_to_openai(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt: &str,
     prompt_token_ids: &[u32],
@@ -611,7 +616,7 @@ fn prompt_only_logprobs_to_openai(
     }
 
     Err(server_error!(
-        "prompt-only completion requested logprobs but generation returned none"
+        "echoed completion prompt requested logprobs but generation returned none"
     ))
 }
 

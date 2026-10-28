@@ -6465,6 +6465,147 @@ async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 
+/// Like Python, a streamed echo with `logprobs` reports the prompt tokens'
+/// logprobs with the echoed prompt, and the generated tokens' offsets continue
+/// after the reported prompt tokens rather than after the prompt text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_reports_prompt_logprobs() {
+    for return_tokens_as_token_ids in [false, true] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-openai-completion-echo-stream-logprobs".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    assert_eq!(params.prompt_logprobs, Some(1));
+                    for (token_id, alternate_token_id, prompt_logprobs, finish_reason) in [
+                        (b'h', b'H', Some(prompt_logprobs_for_hello()), None),
+                        (b'i', b'I', None, Some(EngineCoreFinishReason::Length)),
+                    ] {
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![token_id as u32],
+                                    finish_reason,
+                                    None,
+                                    Some(sample_logprobs_for_token(
+                                        token_id as u32,
+                                        alternate_token_id as u32,
+                                    )),
+                                    prompt_logprobs,
+                                )],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+        let mut app = build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )));
+
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": "hello",
+                            "stream": true,
+                            "echo": true,
+                            "logprobs": 1,
+                            "return_tokens_as_token_ids": return_tokens_as_token_ids,
+                            "add_special_tokens": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        let choices: Vec<_> = sse_json_payloads(&text)
+            .into_iter()
+            .map(|chunk| chunk["choices"][0].clone())
+            .filter(|choice| choice["logprobs"].is_object())
+            .map(|choice| {
+                let logprobs = &choice["logprobs"];
+                json!([
+                    choice["text"],
+                    logprobs["tokens"],
+                    logprobs["token_logprobs"],
+                    logprobs["top_logprobs"][0],
+                    logprobs["text_offset"],
+                ])
+            })
+            .collect();
+        // As token IDs, each `token_id:NNN` string is 12 characters, so the
+        // generated offsets start after 60 characters, not after `hello`.
+        let expected = if return_tokens_as_token_ids {
+            [
+                json!([
+                    "hello",
+                    [
+                        "token_id:104",
+                        "token_id:101",
+                        "token_id:108",
+                        "token_id:108",
+                        "token_id:111"
+                    ],
+                    [null, -0.3, -0.4, -0.45, -0.5],
+                    null,
+                    [0, 12, 24, 36, 48],
+                ]),
+                json!(["h", ["token_id:104"], [-0.1], {"token_id:104": -0.1, "token_id:72": -0.2}, [60]]),
+                json!(["i", ["token_id:105"], [-0.1], {"token_id:105": -0.1, "token_id:73": -0.2}, [72]]),
+            ]
+        } else {
+            [
+                json!([
+                    "hello",
+                    ["h", "e", "l", "l", "o"],
+                    [null, -0.3, -0.4, -0.45, -0.5],
+                    null,
+                    [0, 1, 2, 3, 4],
+                ]),
+                json!(["h", ["h"], [-0.1], {"h": -0.1, "H": -0.2}, [5]]),
+                json!(["i", ["i"], [-0.1], {"i": -0.1, "I": -0.2}, [6]]),
+            ]
+        };
+        assert_eq!(choices, expected, "{text}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
