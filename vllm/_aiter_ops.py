@@ -270,23 +270,6 @@ def _ck_gemm_shape_is_tuned(
         return False
 
 
-@functools.cache
-def _blockscale_bpreshuffle_tuned_shapes(
-    csv_path: str, gfx: str, cu_num: int
-) -> frozenset[tuple[int, int]]:
-    import pandas as pd
-
-    try:
-        df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[
-            (df["gfx"].astype(str) == str(gfx))
-            & (df["cu_num"].astype(int) == int(cu_num))
-        ]
-        return frozenset(zip(df["N"].astype(int), df["K"].astype(int)))
-    except Exception:
-        return frozenset()
-
-
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported and enabled on gfx9 archs.
@@ -4507,17 +4490,40 @@ class rocm_aiter_ops:
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
+    @functools.cache
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
+        """Whether aiter has a tuned blockscale bpreshuffle config for (N, K).
+
+        A weight is shuffled once at load and then serves every batch size,
+        so probe M values from decode to prefill through aiter's own lookup
+        (which pads M) rather than M=1 alone: some shapes are tuned for
+        prefill-sized M only.
+        """
         if not current_platform.is_rocm():
             return False
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+        from aiter.jit.core import AITER_CONFIGS
+        from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
 
-        configs = aiter_gemm_a8w8_ops.AITER_CONFIGS
-        return (n, k) in _blockscale_bpreshuffle_tuned_shapes(
-            configs.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE,
-            aiter_gemm_a8w8_ops.get_gfx(),
-            aiter_gemm_a8w8_ops.get_cu_num(),
+        config_file = AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        sample_m = (
+            32768,
+            8192,
+            4096,
+            2048,
+            1024,
+            512,
+            256,
+            128,
+            64,
+            32,
+            16,
+            8,
+            4,
+            2,
+            1,
+        )
+        return any(
+            get_CKGEMM_config(m, n, k, config_file) is not None for m in sample_m
         )
 
     @staticmethod
