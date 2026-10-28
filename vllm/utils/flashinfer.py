@@ -519,8 +519,8 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 @functools.cache
 def has_flashinfer_msa() -> bool:
-    """Return ``True`` if FlashInfer MiniMax Sparse Attention (MSA) ops for
-    SM120/SM121 (Consumer Blackwell) are available."""
+    """Return ``True`` if FlashInfer MiniMax Sparse Attention (MSA) ops are
+    available. Which architectures they serve depends on the build."""
     if not has_flashinfer():
         return False
     try:
@@ -553,6 +553,24 @@ def has_flashinfer_msa_packed_kv() -> bool:
     import flashinfer.msa_ops as msa_ops
 
     return bool(getattr(msa_ops, "SUPPORTS_PACKED_KV", False))
+
+
+@functools.cache
+def has_flashinfer_msa_sm90() -> bool:
+    """Return ``True`` if the FlashInfer MSA attention kernels serve SM90
+    (Hopper). Detected from the ``out`` parameter both attention ops gained
+    with their SM90 backend, since flashinfer exposes no capability flag for
+    it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_sparse_attention, msa_sparse_decode_attention
+
+    return all(
+        "out" in inspect.signature(fn).parameters
+        for fn in (msa_sparse_attention, msa_sparse_decode_attention)
+    )
 
 
 @functools.cache

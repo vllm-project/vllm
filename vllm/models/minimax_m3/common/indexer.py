@@ -518,7 +518,7 @@ def select_indexer_impl_cls(
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
-    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). On SM120/SM121, the
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). On SM90 and SM120/SM121, the
     flashinfer.msa_ops impl is used when the caller passes the
     ``minimax_m3_use_flashinfer_msa`` verdict. Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
@@ -612,7 +612,7 @@ def select_indexer_impl_cls(
         )
         return MiniMaxM3IndexerMSAImpl
     if use_flashinfer_msa:
-        # Lazy import so non-SM12x / flashinfer-less setups never import it.
+        # Lazy import so unsupported / flashinfer-less setups never import it.
         from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
             MiniMaxM3IndexerFlashInferImpl,
         )

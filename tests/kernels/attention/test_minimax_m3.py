@@ -1213,22 +1213,32 @@ def _run_indexer_impl_pair(
 
 
 def _has_flashinfer_msa_platform() -> bool:
-    from vllm.utils.flashinfer import has_flashinfer_msa
+    from vllm.utils.flashinfer import has_flashinfer_msa, has_flashinfer_msa_sm90
 
+    if current_platform.is_device_capability(90):
+        return has_flashinfer_msa_sm90()
     return current_platform.is_device_capability_family(120) and has_flashinfer_msa()
 
 
-# The SM120/SM121 FlashInfer indexer must match the Triton impl when driven
-# through the real metadata builders. The short decode request covers the -1
-# clamp; local_blocks=1 covers the local-window bias, with cache values
+def _skip_if_sm90_needs_fp8(dtype: torch.dtype) -> None:
+    # The SM90 kernels read fp8 E4M3 index and main caches only.
+    if current_platform.is_device_capability(90) and dtype != torch.float8_e4m3fn:
+        pytest.skip("FlashInfer MSA on SM90 requires an fp8 E4M3 cache.")
+
+
+# The SM90 / SM120 / SM121 FlashInfer indexer must match the Triton impl when
+# driven through the real metadata builders. The short decode request covers
+# the -1 clamp; local_blocks=1 covers the local-window bias, with cache values
 # decreasing by block id so the window never wins on score alone.
 @pytest.mark.skipif(
     not _has_flashinfer_msa_platform(),
-    reason="FlashInfer MSA indexer requires SM120/SM121 and flashinfer.msa_ops.",
+    reason="FlashInfer MSA indexer requires SM90 or SM120/SM121 and "
+    "flashinfer.msa_ops.",
 )
 @pytest.mark.parametrize("local_blocks", [0, 1])
 @pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monkeypatch):
+    _skip_if_sm90_needs_fp8(index_dtype)
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -2512,6 +2522,8 @@ def test_prefill_sparse_attention_correctness(
 def _has_flashinfer_msa_packed_kv_platform() -> bool:
     if not _has_flashinfer_msa_platform():
         return False
+    if current_platform.is_device_capability(90):
+        return True  # SM90 reads only packed K/V
     from vllm.utils.flashinfer import has_flashinfer_msa_packed_kv
 
     return has_flashinfer_msa_packed_kv()
@@ -2520,8 +2532,10 @@ def _has_flashinfer_msa_packed_kv_platform() -> bool:
 # FlashInfer attend vs the Triton kernels' reference, at the impl's call shape.
 @pytest.mark.skipif(
     not _has_flashinfer_msa_packed_kv_platform(),
-    reason="FlashInfer MSA attend requires SM120/SM121 and packed-KV support.",
+    reason="FlashInfer MSA attend requires SM90, or SM120/SM121 with packed-KV "
+    "support.",
 )
+@pytest.mark.parametrize("kv_dtype", [DTYPE, torch.float8_e4m3fn])
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
@@ -2533,9 +2547,13 @@ def _has_flashinfer_msa_packed_kv_platform() -> bool:
 )
 def test_flashinfer_sparse_attention_matches_reference(
     kv_layout: str,
+    kv_dtype: torch.dtype,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ):
+    _skip_if_sm90_needs_fp8(kv_dtype)
+    if current_platform.is_device_capability(90) and kv_layout != KVCacheLayout.LBHNC:
+        pytest.skip("The SM90 FlashInfer backend declares the LBHNC layout only.")
     from flashinfer.msa_ops import (
         msa_sparse_attention,
         msa_sparse_decode_attention,
@@ -2566,6 +2584,8 @@ def test_flashinfer_sparse_attention_matches_reference(
 
     q = torch.randn(total_q, NUM_Q_HEADS, HEAD_DIM, device="cuda", dtype=DTYPE)
     kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
+    # preserve_format keeps the layout's permuted strides through the cast.
+    kv_cache = kv_cache.to(kv_dtype)
     k_cache, v_cache = kv_cache.split(HEAD_DIM, dim=-1)
 
     topk_shape = (NUM_KV_HEADS, total_q, TOPK)
@@ -2611,9 +2631,10 @@ def test_flashinfer_sparse_attention_matches_reference(
             seqused_k=seq_lens,
         )
 
+    # The reference attends the same (dequantized) cache values.
     expected = _reference_sparse_attn(
         q,
-        kv_cache,
+        kv_cache.to(DTYPE),
         topk_idx,
         block_table,
         q_lens_t,
@@ -2777,6 +2798,48 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
     assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
+
+
+_SM90_FLASHINFER_MSA_SUPPORTED = dict(
+    topk_blocks=TOPK,
+    kv_cache_dtype="fp8_e4m3",
+    num_heads=64,
+    num_kv_heads=4,
+    indexer_kv_dtype="fp8",
+    model_dtype=torch.bfloat16,
+)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"num_heads": 32}, True),  # GQA group 8
+        ({"num_heads": 16}, False),  # GQA group 4
+        ({"kv_cache_dtype": "auto"}, False),
+        ({"indexer_kv_dtype": "bf16"}, False),
+        ({"num_heads": 128, "num_kv_heads": 8}, False),  # 8 index heads
+    ],
+)
+def test_flashinfer_msa_sm90_gate(override, expected, monkeypatch):
+    """On SM90 the FlashInfer pair engages only for configurations FlashInfer
+    supports; anything else keeps the Triton pair."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    platform = sparse_attn_mod.current_platform
+    monkeypatch.setattr(platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        platform, "is_device_capability", lambda cap, device_id=0: cap == 90
+    )
+    monkeypatch.setattr(sparse_attn_mod, "has_flashinfer_msa_sm90", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod, "has_flashinfer_msa_per_token_topk", lambda: True
+    )
+
+    use = sparse_attn_mod.minimax_m3_use_flashinfer_msa(
+        **{**_SM90_FLASHINFER_MSA_SUPPORTED, **override}
+    )
+    assert use == expected
 
 
 def test_msa_indexer_requires_the_aiter_attend(monkeypatch):

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer indexer impl for MiniMax M3 on SM120/SM121.
+"""FlashInfer indexer impl for MiniMax M3 on SM90 and SM120/SM121.
 
 One whole-batch ``msa_proxy_score`` call plus one ``msa_topk_select`` call, no
 decode/prefill split. Each token's causal extent and trailing local window go
@@ -23,6 +23,7 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerMetadata,
     MiniMaxM3IndexerMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -32,6 +33,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 # KV page size == sparse block size == flashinfer's MSA block size.
 PAGE_SIZE = 128
+
+# The SM90 proxy scores an fp8 index cache with fp8 queries only; the SM120/SM121
+# path upcasts them, which every flashinfer build passing the gate accepts.
+_PROXY_TAKES_FP8_Q = current_platform.is_device_capability(90)
 
 
 class MiniMaxM3IndexerFlashInferBackend(MiniMaxM3IndexerBackend):
@@ -141,9 +146,14 @@ class MiniMaxM3IndexerFlashInferImpl(MiniMaxM3IndexerImpl):
         index_q = index_query[:num_tokens].view(
             -1, self.num_index_heads, self.index_head_dim
         )
-        # The proxy takes bf16/fp16 queries only.
-        if index_q.dtype == torch.float8_e4m3fn:
+        if index_q.dtype == torch.float8_e4m3fn and not _PROXY_TAKES_FP8_Q:
             index_q = index_q.to(torch.bfloat16)
+        if _PROXY_TAKES_FP8_Q and md.num_prefills > 0:
+            # flashinfer 0.7.3's SM90 msa_proxy_score can read up to 127 rows
+            # past the end of q on prefill; keep that read in bounds.
+            padded = index_q.new_empty((num_tokens + 127, *index_q.shape[1:]))
+            padded[:num_tokens] = index_q
+            index_q = padded[:num_tokens]
         # Index-K cache viewed as a paged MQA cache.
         kv = self.index_cache.kv_cache
         k_pages = kv.view(kv.shape[0], 1, PAGE_SIZE, self.index_head_dim)

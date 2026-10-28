@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer block-sparse attend for MiniMax M3 on SM120/SM121.
+"""FlashInfer block-sparse attend for MiniMax M3 on SM90 and SM120/SM121.
 
-K and V are views split from the packed-content KV cache, so this impl
-requires flashinfer's packed-KV support (``has_flashinfer_msa_packed_kv``).
-Imported only when ``minimax_m3_use_flashinfer_msa`` passes.
+K and V are views split from the packed-content KV cache, which flashinfer
+reads in place on SM90 and, given packed-KV support
+(``has_flashinfer_msa_packed_kv``), on SM120/SM121. Imported only when
+``minimax_m3_use_flashinfer_msa`` passes.
 """
 
 import torch
@@ -14,11 +15,36 @@ from flashinfer.msa_ops import (
 )
 
 from vllm.forward_context import get_forward_context
+from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.models.minimax_m3.common.sparse_attention import (
+    MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionLayer
+from vllm.v1.kv_cache_interface import KVCacheLayout
+
+_IS_SM90 = current_platform.is_device_capability(90)
+
+
+def _out_kwargs(dst: torch.Tensor) -> dict[str, torch.Tensor]:
+    # flashinfer's MSA attention ops accept out= on SM90 only.
+    return {"out": dst} if _IS_SM90 else {}
+
+
+class MiniMaxM3SparseFlashInferBackend(MiniMaxM3SparseBackend):
+    """MiniMax M3 sparse backend for the flashinfer msa_ops attend."""
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        # The SM90 kernels read each layer's cache as one dense
+        # (num_pages, num_kv_heads, 128, 2 * head_dim) tensor with K and V
+        # interleaved per row, which only the head-major LBHNC layout gives.
+        if _IS_SM90:
+            return (KVCacheLayout.LBHNC,)
+        return super().supported_kv_cache_layouts()
 
 
 class MiniMaxM3SparseFlashInferImpl(MiniMaxM3SparseImpl):
@@ -63,6 +89,7 @@ class MiniMaxM3SparseFlashInferImpl(MiniMaxM3SparseImpl):
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
+            dst = out[:nd]
             o = msa_sparse_decode_attention(
                 q[:nd],
                 k_cache,
@@ -74,12 +101,20 @@ class MiniMaxM3SparseFlashInferImpl(MiniMaxM3SparseImpl):
                 causal=True,
                 softmax_scale=softmax_scale,
                 v_global_scale=v_scale,
+                **_out_kwargs(dst),
             )
-            out[:nd].copy_(o)
+            if o is not dst:
+                dst.copy_(o)
 
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None
+            dst = out[nd:]
+            page_table = p.block_table
+            if _IS_SM90:
+                # The SM90 kernel's work grows with the table's width, so pass
+                # only the pages this batch can address.
+                page_table = page_table[:, : cdiv(p.max_seq_len, SPARSE_BLOCK_SIZE)]
             o = msa_sparse_attention(
                 q[nd:],
                 k_cache,
@@ -88,9 +123,11 @@ class MiniMaxM3SparseFlashInferImpl(MiniMaxM3SparseImpl):
                 p.cu_seqlens_q,
                 causal=True,
                 softmax_scale=softmax_scale,
-                page_table=p.block_table,
+                page_table=page_table,
                 seqused_k=p.seq_lens,
                 v_global_scale=v_scale,
+                **_out_kwargs(dst),
             )
-            out[nd:].copy_(o)
+            if o is not dst:
+                dst.copy_(o)
         return output

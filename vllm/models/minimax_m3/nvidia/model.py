@@ -1021,6 +1021,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             indexer_kv_dtype=self.indexer_kv_dtype,
+            model_dtype=vllm_config.model_config.dtype,
         )
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
