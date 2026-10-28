@@ -34,9 +34,9 @@ def _rank_local_reference(
     layout: RankLocalStoreLayout, start: int, end: int, block_ids: list[int]
 ) -> tuple[list[int], list[int], int]:
     block_id = block_ids[start // layout.block_size]
-    length = len(layout.block_len)
+    length = len(layout.block_stride)
     addrs = [
-        base_addr + block_id * layout.block_len[index % length]
+        base_addr + block_id * layout.block_stride[index % length]
         for index, base_addr in enumerate(layout.kv_caches_base_addr)
     ]
     sizes = [
@@ -101,8 +101,8 @@ def test_rank_local_layout_skips_block_padding():
     layout.register_kv_caches(views, num_blocks)
 
     assert layout.kv_caches_base_addr == [view.data_ptr() for view in views]
-    assert layout.block_len == [page] * num_layers
-    assert layout.block_used_len == [state] * num_layers
+    assert layout.block_stride == [page] * num_layers
+    assert layout.block_len == [state] * num_layers
     addrs, sizes, _ = layout.prepare_values(
         [(0, BLOCK_SIZE), (BLOCK_SIZE, 3 * BLOCK_SIZE)], [2, 0, 1], [0, 0]
     )

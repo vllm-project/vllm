@@ -354,9 +354,9 @@ def test_hybrid_mamba_values_hold_only_group_states():
     state_lens = [state[0].numel() * state.element_size() for state in states]
     attn_db, mamba_db = worker.token_dbs
     attn_layout, mamba_layout = attn_db.store_layout, mamba_db.store_layout
-    assert attn_layout.block_used_len == [page] * num_layers
+    assert attn_layout.block_len == [page] * num_layers
     assert mamba_layout.kv_caches_base_addr == [s.data_ptr() for s in states]
-    assert mamba_layout.block_used_len == state_lens
+    assert mamba_layout.block_len == state_lens
 
     raw = torch.empty(0, dtype=torch.int8).set_(kv_caches["A0"].untyped_storage())
     raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
@@ -525,7 +525,7 @@ def test_store_values_round_trip_every_layout(model, layout):
         if len(groups) == 1 and layout != KVCacheLayout.BHLNC:
             # A single group stores whole blocks, as before. (A BHLNC head's
             # block stride spans every head, so only the head's block is.)
-            assert store_layout.block_used_len == store_layout.block_len
+            assert store_layout.block_len == store_layout.block_stride
         if not layout.is_block_outermost:
             # Exactly the group's bytes: no padding, no other group's slots.
             assert torch.equal(value, owned) and sum(sizes) == owned.sum()
