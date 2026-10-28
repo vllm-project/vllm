@@ -118,6 +118,43 @@ impl FromStr for CheckpointState {
     }
 }
 
+/// Level of the `sleep` utility call, sent as Python's integer level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+pub enum SleepLevel {
+    /// Level 0: pause scheduling only, without changing GPU memory.
+    PauseOnly,
+    /// Level 1: offload model weights to CPU and discard the KV cache.
+    OffloadWeights,
+    /// Level 2: discard all GPU memory.
+    DiscardAll,
+}
+
+impl From<SleepLevel> for u32 {
+    fn from(level: SleepLevel) -> Self {
+        match level {
+            SleepLevel::PauseOnly => 0,
+            SleepLevel::OffloadWeights => 1,
+            SleepLevel::DiscardAll => 2,
+        }
+    }
+}
+
+impl TryFrom<u32> for SleepLevel {
+    type Error = String;
+
+    fn try_from(level: u32) -> std::result::Result<Self, Self::Error> {
+        match level {
+            0 => Ok(Self::PauseOnly),
+            1 => Ok(Self::OffloadWeights),
+            2 => Ok(Self::DiscardAll),
+            other => Err(format!(
+                "invalid sleep level `{other}`; expected one of: 0, 1, 2"
+            )),
+        }
+    }
+}
+
 /// Utility call id as carried on the engine-core MessagePack wire.
 ///
 /// Python emits utility ids as MessagePack integers, including values that may
