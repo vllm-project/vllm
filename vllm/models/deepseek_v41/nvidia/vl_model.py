@@ -324,6 +324,13 @@ class DeepseekV41ForCausalLM(
         self._weights_finalized = True
         return loaded_params
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights
+
     def process_weights_after_loading(self) -> None:
         # Model-level post-load hook (called by the loader after any load
         # format). Under DummyModelLoader the child's load_weights — and

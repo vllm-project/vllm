@@ -1757,6 +1757,20 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cpu_offload": False},
+        {"dp_shared_memory": True},
+        {"use_thp": True},
+        {"embedding_across_dp": True},
+    ],
+)
+def test_engram_rdma_rejects_incompatible_storage(kwargs):
+    with pytest.raises(ValueError, match="rdma_provider"):
+        EngramConfig(rdma_provider="test_provider", **kwargs)
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
