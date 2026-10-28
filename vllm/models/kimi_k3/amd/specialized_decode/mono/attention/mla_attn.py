@@ -222,12 +222,13 @@ def xp_at(r, h, k, lane):
 
 @traced
 def q_split(c, rows, at):
-    """The CTA's bf16 Q rows (slot 1: [row][ENTRY]) -> E4M3 hi, lo of q 2^k
+    """The CTA's bf16 Q rows (slot 1: ``[row][ENTRY]``) -> E4M3 hi, lo of q 2^k
     (a power of two a row: its |max| in [128, 256)): hi + lo is q exactly,
     bf16's 8 bits E4M3's 4 + 4 (lo q - hi, a multiple of hi's ulp / 16; but
-    below 2^-9 of 2^k: 2^-17 of the row's |max|). At dword ``at``: [hi |
-    lo][row][ENTRY] bytes, the tail chunk's also at ``qt``; a row's 2^-k at
-    ``xm`` + row. A row 16 threads, 4 latents a unit (``tid % 16`` + 16 i)."""
+    below 2^-9 of 2^k: 2^-17 of the row's |max|). At dword ``at``:
+    ``[hi | lo][row][ENTRY]`` bytes, the tail chunk's also at ``qt``; a row's
+    2^-k at ``xm`` + row. A row 16 threads, 4 latents a unit (``tid % 16`` +
+    16 i)."""
     tid = c["tid"]
     rr = tid // 16
     if rr < rows:
@@ -488,8 +489,8 @@ def wait_dma():
 
 
 def xm_row(c, r, row):
-    """The waves' values of row ``row`` of row tile r in xm ([r][row][wave]:
-    two b128 reads)."""
+    """The waves' values of row ``row`` of row tile r in xm
+    (``[r][row][wave]``: two b128 reads)."""
     v = [
         fx.Vector(
             fx.ptr_load(

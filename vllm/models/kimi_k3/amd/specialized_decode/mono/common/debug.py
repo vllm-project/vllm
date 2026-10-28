@@ -45,7 +45,7 @@ def stamp(on, tls, tid, k):
 
 @traced
 def stamp_flush(on, tls, tl, tid, bid, points):
-    """The CTA's record -> ``tl`` [CTA][points] int64."""
+    """The CTA's record -> ``tl`` ``[CTA][points]`` int64."""
     if const_expr(on):  # noqa: SIM102
         if tid < points:
             fx.generic_store(
