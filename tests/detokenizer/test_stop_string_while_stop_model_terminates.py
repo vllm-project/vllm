@@ -25,7 +25,9 @@ def include_stop_str_in_output(request):
 
 class _DummyDetokenizer(BaseIncrementalDetokenizer):
     def __init__(
-        self, request: EngineCoreRequest, content_filter: ContentFilter | None = None,
+        self,
+        request: EngineCoreRequest,
+        content_filter: ContentFilter | None = None,
     ):
         super().__init__(request, content_filter)
 
@@ -412,10 +414,14 @@ def test_stop_string_content_filter_failure_matches_all_text():
             "muse_glimmer",
             "meta-models/Muse-Glimmer-30B",
             "<|start|>user<|message|>hi<|eot|><|start|>assistant",
-            " to=self<|message|>Say <block>no</block>.<|eom|><|start|>assistant"
-            " to=user<|message|><block>no</block> Done.<|eot|>",
-            " to=self<|message|>Say <block>no</block>.<|eom|><|start|>assistant"
-            " to=user<|message|><block>no",
+            (
+                " to=self<|message|>Say <block>no</block>.<|eom|><|start|>assistant"
+                " to=user<|message|><block>no</block> Done.<|eot|>"
+            ),
+            (
+                " to=self<|message|>Say <block>no</block>.<|eom|><|start|>assistant"
+                " to=user<|message|><block>no"
+            ),
         ),
     ],
 )
@@ -440,8 +446,7 @@ def test_stop_string_skips_reasoning_with_parser_content_filter(
 
 
 _TOOL_CALL = (
-    '<tool_call>\n{"name": "run", "arguments": {"cmd": "echo </block>"}}\n'
-    "</tool_call>"
+    '<tool_call>\n{"name": "run", "arguments": {"cmd": "echo </block>"}}\n</tool_call>'
 )
 
 
