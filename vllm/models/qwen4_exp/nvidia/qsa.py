@@ -155,7 +155,7 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     # with the layer's per-tensor scales and dequantized on load inside the QSA
     # Triton kernel. flash-attn never runs over this cache, so its fp8 probe
     # does not apply (see supports_kv_cache_dtype and the impl constructor).
-    # nvfp4 (SM80-SM90): FlashInfer's NVFP4 pages, written and read by FlashInfer.
+    # nvfp4: FlashInfer's NVFP4 pages, written and read by FlashInfer.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
@@ -271,11 +271,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16, FP8-e4m3 or NVFP4 main KV cache"
             )
-        if self.kv_cache_dtype == "nvfp4" and not (
-            current_platform.has_device_capability(80)
-            and not current_platform.has_device_capability(100)
-        ):
-            raise NotImplementedError("Qwen4Exp QSA supports NVFP4 KV on SM80-SM90")
         self.supports_quant_query_input = False
 
     def do_kv_cache_update(
