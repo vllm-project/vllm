@@ -269,6 +269,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.restore_kv_caches()
 
+    def checkpoint_prepare(self) -> None:
+        for c in self._connectors:
+            c.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        for c in self._connectors:
+            c.checkpoint_restore()
+
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:
             connector.bind_kv_cache_manager(kv_cache_manager)

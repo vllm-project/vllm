@@ -110,6 +110,18 @@ class ECConnectorBase(ABC):
         """
         return None
 
+    def checkpoint_prepare(self) -> None:
+        """Release what a process checkpoint must not contain, such as
+        transports and peer state. Called on the scheduler-side instance, then
+        on every worker-side instance, once the engine has drained."""
+        return None
+
+    def checkpoint_restore(self) -> None:
+        """Rebuild what `checkpoint_prepare` released, either in a process
+        restored from the checkpoint or in the process that prepared. Called
+        on every worker-side instance, then on the scheduler-side instance."""
+        return None
+
     # ==============================
     # Worker-side methods
     # ==============================

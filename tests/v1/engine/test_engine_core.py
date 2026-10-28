@@ -874,7 +874,13 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.model_executor.is_sleeping = False
     core._reset_caches = MagicMock()
     core.reject_new_requests = False
-    core.scheduler.get_kv_connector.return_value = None
+    kv_connector, ec_connector = MagicMock(), MagicMock()
+    core.scheduler.get_kv_connector.return_value = kv_connector
+    core.scheduler.get_ec_connector.return_value = ec_connector
+    # Record the scheduler-side connector calls among the executor calls.
+    core.model_executor.attach_mock(kv_connector, "kv_connector")
+    core.model_executor.attach_mock(ec_connector, "ec_connector")
+    core.model_executor.get_kv_connector_handshake_metadata.return_value = []
 
     assert core.checkpoint_prepare("wait") is None
     assert core.checkpoint_prepare("wait") is None
@@ -883,6 +889,8 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     assert _executor_calls(core) == [
         "synchronize_device",
         "discard",
+        "kv_connector.checkpoint_prepare",
+        "ec_connector.checkpoint_prepare",
         "checkpoint_prepare",
         "synchronize_device",
     ]
@@ -891,7 +899,13 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.checkpoint_restore()
     core.checkpoint_restore()
     assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
-    assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
+    assert _executor_calls(core) == [
+        "checkpoint_restore",
+        "kv_connector.checkpoint_restore",
+        "ec_connector.checkpoint_restore",
+        "wake_up",
+        "get_kv_connector_handshake_metadata",
+    ]
     core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
     assert not core.reject_new_requests
 
