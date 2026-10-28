@@ -6,20 +6,49 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
-    KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
-    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
+    Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
+    MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
+    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
     CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
     MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
 };
+use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
 
 const WAITING_REASON_CAPACITY: &str = "capacity";
 const WAITING_REASON_DEFERRED: &str = "deferred";
+
+/// `sleep_state` label values of `vllm:engine_sleep_state`, in the order of
+/// [`EngineSleepState::gauge_values`].
+const SLEEP_STATES: [&str; 3] = ["awake", "weights_offloaded", "discard_all"];
+
+/// Engine sleep state exported as `vllm:engine_sleep_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineSleepState {
+    Awake,
+    Asleep(SleepLevel),
+    /// After `release_kv_cache_memory`, which Python records like a level-0
+    /// sleep.
+    KvCacheReleased,
+}
+
+impl EngineSleepState {
+    /// Gauge values for the `awake`, `weights_offloaded` and `discard_all`
+    /// series, as Python's `PrometheusStatLogger.record_sleep_state` sets them.
+    fn gauge_values(self) -> [u64; 3] {
+        match self {
+            Self::Awake => [1, 0, 0],
+            Self::Asleep(SleepLevel::PauseOnly) | Self::KvCacheReleased => [0, 0, 0],
+            Self::Asleep(SleepLevel::OffloadWeights) => [0, 1, 0],
+            Self::Asleep(SleepLevel::DiscardAll) => [0, 0, 1],
+        }
+    }
+}
 
 /// Cached output-batch metric handles for one model and engine index.
 pub(crate) struct IterationMetricHandles {
@@ -57,6 +86,8 @@ struct SchedulerStatsHandles {
     /// One handle per `KvFetchReqsByStage::STAGES` entry.
     scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
+    /// One handle per [`SLEEP_STATES`] entry.
+    engine_sleep_state: [U64Gauge; 3],
 
     // Prefix-cache counters, including the connector-backed external cache path.
     prefix_cache_queries: U64Counter,
@@ -107,6 +138,7 @@ struct SchedulerStatsHandles {
     nixl_num_failed_transfers: U64Counter,
     nixl_num_failed_notifications: U64Counter,
     nixl_num_kv_expired_reqs: U64Counter,
+    nixl_num_notifications_after_expiry: U64Counter,
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     log_stats: SchedulerLogStatsAccumulator,
@@ -130,7 +162,21 @@ impl SchedulerStatsRecorder {
             })
             .collect();
 
-        Self { engines }
+        let recorder = Self { engines };
+        // Engines start awake, as Python sets when it creates the stat logger.
+        recorder.record_sleep_state(EngineSleepState::Awake);
+        recorder
+    }
+
+    /// Record the sleep state of every connected engine. Sleep and wake are
+    /// utility calls on all engines, so the state is not per engine.
+    pub(crate) fn record_sleep_state(&self, state: EngineSleepState) {
+        let values = state.gauge_values();
+        for handles in self.engines.values() {
+            for (gauge, value) in handles.engine_sleep_state.iter().zip(values) {
+                gauge.set(value);
+            }
+        }
     }
 
     /// Record one scheduler-stats payload for the given engine index.
@@ -179,6 +225,13 @@ fn resolve_scheduler_stats_handles(
             })
         }),
         kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
+        engine_sleep_state: SLEEP_STATES.map(|sleep_state| {
+            metrics.engine_sleep_state.get_or_create_owned(&EngineSleepStateLabels {
+                model_name: model_name.to_string(),
+                engine,
+                sleep_state,
+            })
+        }),
         prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
         prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
         external_prefix_cache_queries: metrics
@@ -241,6 +294,9 @@ fn resolve_scheduler_stats_handles(
             .nixl_num_failed_notifications
             .get_or_create_owned(&labels),
         nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
+        nixl_num_notifications_after_expiry: metrics
+            .nixl_num_notifications_after_expiry
+            .get_or_create_owned(&labels),
         labels,
     }
 }
@@ -431,13 +487,21 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.num_descriptors {
         handles.nixl_num_descriptors.observe(*value as f64);
     }
-    handles
-        .nixl_num_failed_transfers
-        .inc_by(stats.num_failed_transfers.iter().sum());
+    handles.nixl_num_failed_transfers.inc_by(
+        stats
+            .num_failed_transfers
+            .iter()
+            .chain(&stats.num_failed_handshakes)
+            .chain(&stats.num_failed_notifications)
+            .sum(),
+    );
     handles
         .nixl_num_failed_notifications
         .inc_by(stats.num_failed_notifications.iter().sum());
     handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
+    handles
+        .nixl_num_notifications_after_expiry
+        .inc_by(stats.num_notifications_after_expiry.iter().sum());
 }
 
 /// Exports `vllm:lora_requests_info` as a single series covering all LoRA
@@ -560,8 +624,10 @@ mod tests {
             bytes_transferred: vec![4096, 8192],
             num_descriptors: vec![2, 4],
             num_failed_transfers: vec![],
-            num_failed_notifications: vec![],
+            num_failed_notifications: vec![1],
+            num_failed_handshakes: vec![1],
             num_kv_expired_reqs: vec![1],
+            num_notifications_after_expiry: vec![2],
         }
     }
 
@@ -707,6 +773,14 @@ mod tests {
                 "vllm:nixl_num_kv_expired_reqs_total{model_name=\"model\",engine=\"0\"} 1"
             )
         );
+        assert!(
+            rendered.contains(
+                "vllm:nixl_num_failed_transfers_total{model_name=\"model\",engine=\"0\"} 2"
+            )
+        );
+        assert!(rendered.contains(
+            "vllm:nixl_num_notifications_after_expiry_total{model_name=\"model\",engine=\"0\"} 2"
+        ));
         assert!(
             rendered
                 .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")

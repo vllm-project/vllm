@@ -223,7 +223,6 @@ pub mod kv_connector {
 
     /// NIXL connector transfer telemetry.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
     pub struct NixlStats {
         /// Time spent transferring each successful request.
         pub transfer_duration: Vec<f64>,
@@ -237,8 +236,14 @@ pub mod kv_connector {
         pub num_failed_transfers: Vec<u64>,
         /// Notification failure counter increments collected since the previous update.
         pub num_failed_notifications: Vec<u64>,
+        /// Handshake failure counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_failed_handshakes: Vec<u64>,
         /// Expired-request counter increments collected since the previous update.
         pub num_kv_expired_reqs: Vec<u64>,
+        /// Late notification counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_notifications_after_expiry: Vec<u64>,
     }
 
     /// Mooncake connector transfer telemetry.
@@ -246,7 +251,6 @@ pub mod kv_connector {
     /// Original Python definition: `MooncakeKVConnectorStats` in
     /// `vllm/distributed/kv_transfer/kv_connector/v1/mooncake/stats.py`.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
     pub struct MooncakeTransferStats {
         /// Time spent transferring each successful request.
         pub transfer_duration: Vec<f64>,
@@ -304,7 +308,6 @@ pub mod kv_connector {
 
     /// One Mooncake store operation sample.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
     pub struct MooncakeRecord {
         pub duration_seconds: f64,
         pub num_keys: u64,
@@ -341,6 +344,11 @@ pub mod kv_connector {
     ///
     /// Variants are tried in order. `Multi` accepts any map, so every
     /// connector payload with its own variant must come before it.
+    ///
+    /// The typed payloads ignore unknown fields: Python adds counters to them
+    /// over time, and a strict decode would drop every metric of that
+    /// connector, and of its `MultiConnector` siblings, until Rust caught up.
+    /// The variants stay distinct through the fields each one requires.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(untagged)]
     pub enum KvConnectorStats {
@@ -394,7 +402,10 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedTokensBySource, KvFetchReqsByStage, PrefixCacheStats, SchedulerStats};
+    use super::{
+        CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
+        SchedulerStats,
+    };
 
     #[test]
     fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
@@ -417,6 +428,41 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+    }
+
+    #[test]
+    fn kv_connector_stats_ignore_unknown_fields() {
+        let decode = |payload: serde_json::Value| -> KvConnectorStats {
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap()
+        };
+        let nixl = serde_json::json!({
+            "transfer_duration": [0.5], "post_duration": [0.1], "bytes_transferred": [4096],
+            "num_descriptors": [2], "num_failed_transfers": [], "num_failed_notifications": [],
+            "num_kv_expired_reqs": [], "num_future_counter": [1]
+        });
+        let mooncake_transfer = serde_json::json!({
+            "transfer_duration": [0.5], "bytes_transferred": [4096], "num_descriptors": [2],
+            "num_failed_transfers": [1], "num_failed_recvs": [], "num_kv_expired_reqs": [],
+            "num_future_counter": [1]
+        });
+
+        assert!(matches!(
+            decode(nixl.clone()),
+            KvConnectorStats::Nixl(stats) if stats.bytes_transferred == [4096]
+        ));
+        assert!(matches!(
+            decode(mooncake_transfer.clone()),
+            KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+        ));
+        // A newer child payload must not drop its siblings.
+        assert!(matches!(
+            decode(serde_json::json!({
+                "NixlConnector": nixl,
+                "MooncakeConnector": mooncake_transfer,
+            })),
+            KvConnectorStats::Multi(stats)
+                if stats.nixl.is_some() && stats.mooncake_transfer.is_some()
+        ));
     }
 
     #[test]
