@@ -1126,6 +1126,37 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
 
 
 @pytest.mark.parametrize(
+    ("graph_mode", "decode_sizes", "should_raise"),
+    [
+        (CUDAGraphMode.FULL_AND_PIECEWISE, [], True),
+        (CUDAGraphMode.FULL_DECODE_ONLY, [], True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, [1, 2], False),
+        (CUDAGraphMode.FULL, [], False),
+    ],
+)
+def test_adaptive_verification_requires_decode_cudagraphs(
+    graph_mode, decode_sizes, should_raise
+):
+    """AV profiles step costs by replaying decode graphs, so an instance that
+    drops them must fail at config time, not at startup."""
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        lora_config=None,
+        compilation_config=CompilationConfig(
+            cudagraph_mode=graph_mode,
+            decode_cudagraph_capture_request_sizes=decode_sizes,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="needs decode CUDA graphs"):
+            VllmConfig._validate_adaptive_verification(config)
+    else:
+        VllmConfig._validate_adaptive_verification(config)
+
+
+@pytest.mark.parametrize(
     ("model_config", "expected"),
     [
         (

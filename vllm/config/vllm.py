@@ -3343,6 +3343,22 @@ class VllmConfig:
                 "adaptive verification."
             )
 
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        decode_sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
+        if (
+            decode_sizes is not None
+            and not decode_sizes
+            and cudagraph_mode.separate_routine()
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        ):
+            # Its step costs are profiled by replaying the decode graphs.
+            raise ValueError(
+                "Adaptive verification needs decode CUDA graphs, but "
+                "decode_cudagraph_capture_request_sizes is empty. Capture decode "
+                "graphs, or disable adaptive verification (e.g. on a prefill-only "
+                "kv_producer instance, which never verifies drafts)."
+            )
+
         if self.parallel_config.pipeline_parallel_size > 1:
             # Cost curves and confidences currently only exist on the last PP rank;
             # earlier ranks would diverge on the trimmed batch shape.
