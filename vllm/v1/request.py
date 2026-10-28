@@ -183,7 +183,7 @@ class Request:
         self.spec_token_ids: list[int] = []
         # Grammar-invalid draft tokens trimmed from spec_token_ids (sync
         # scheduling).
-        self.num_invalid_spec_tokens = 0
+        self.num_trimmed_spec_tokens = 0
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 

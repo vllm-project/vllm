@@ -2838,11 +2838,13 @@ def test_per_request_spec_decode_verified_without_adaptive_verification():
     assert payload["per_step_verified"] == [3]
 
 
-def _run_spec_verify_steps(scheduler, rounds):
+def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     """Drive prefill + one draft/verify step per round for a single request.
 
     ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
-    step each. Returns the request.
+    step each. ``num_invalid_per_round`` optionally injects the grammar-invalid
+    draft count structured-output decoding would trim before scheduling.
+    Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
     scheduler.add_request(req)
@@ -2861,8 +2863,10 @@ def _run_spec_verify_steps(scheduler, rounds):
 
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
-    for spec, out in rounds:
+    for i, (spec, out) in enumerate(rounds):
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
+        if num_invalid_per_round is not None and num_invalid_per_round[i]:
+            req.num_trimmed_spec_tokens = num_invalid_per_round[i]
         output = scheduler.schedule()
         scheduler.update_from_output(output, _mk_output([out]))
     return req
@@ -2889,78 +2893,24 @@ def test_per_request_spec_decode_detailed_records_per_step():
     assert payload["num_spec_steps"] == 3
 
 
-class _PrefixGrammar:
-    def __init__(self, num_valid: int) -> None:
-        self.num_valid = num_valid
-
-    def validate_tokens(self, tokens: list[int]) -> list[int]:
-        return tokens[: self.num_valid]
-
-    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
-        return True
-
-    def is_terminated(self) -> bool:
-        return False
-
-
-@pytest.mark.parametrize("num_valid, av_budget", [(1, None), (0, None), (1, 1)])
-def test_spec_decode_counts_grammar_invalid_drafts_as_proposed(
-    num_valid: int, av_budget: int | None
-):
-    # Sync scheduling keeps only the valid draft tokens plus the first invalid
-    # one, which rejection sampling rejects. The trimmed draft tokens still
-    # count as drafted, while the ngram -1 padding does not. Adaptive
-    # verification can further shrink the verified draft tokens.
+def test_per_request_spec_decode_counts_invalid_drafts():
+    # Grammar-invalid draft tokens trimmed by sync structured output decoding
+    # still count as drafted, but not as verified.
     scheduler = create_scheduler(
-        num_speculative_tokens=4, per_request_spec_decode_metrics="summary"
+        num_speculative_tokens=3,
+        per_request_spec_decode_metrics="summary",
     )
-    request = _decode_ready_request(scheduler)
-    req_id = request.request_id
-    request.structured_output_request = SimpleNamespace(
-        grammar=_PrefixGrammar(num_valid), reasoning_ended=True
+    # One verify step: 2 scheduled + 1 grammar-invalid, output accepts 2.
+    req = _run_spec_verify_steps(
+        scheduler,
+        [([1, 2], [1, 2, 5])],
+        num_invalid_per_round=[1],
     )
-    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, -1]]))
-    output = scheduler.schedule()
-    num_scheduled = num_valid + 1
-    assert output.scheduled_spec_decode_tokens[req_id] == [1, 2, 3][:num_scheduled]
-    num_verified = num_scheduled if av_budget is None else av_budget
-    num_accepted = min(num_valid, num_verified)
-    accepted_and_bonus = [*range(1, num_accepted + 1), 9]
-    engine_outputs = scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=[req_id],
-            req_id_to_index={req_id: 0},
-            sampled_token_ids=[accepted_and_bonus],
-            num_verified_tokens_per_req=(None if av_budget is None else [av_budget]),
-        ),
-    )
-
-    # Only the scheduled draft tokens were verified.
-    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
-    assert stats.num_draft_tokens == 3
-    assert stats.num_verified_tokens == num_verified
-    assert stats.num_accepted_tokens == num_accepted
-    payload = request.spec_decode_metrics.to_dict()
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["num_draft_tokens"] == 3
-    assert payload["num_verified_tokens"] == num_verified
-    assert payload["num_spec_steps"] == 1
-
-
-def test_update_draft_token_ids_in_output_excludes_padding_from_proposed():
-    # Async scheduling keeps the scheduled draft slots, but the ngram -1
-    # padding is not counted as proposed.
-    scheduler = create_scheduler(num_speculative_tokens=4)
-    request = _decode_ready_request(scheduler)
-    req_id = request.request_id
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={req_id: [0, 0, 0, 0]}
-    )
-    scheduler.update_draft_token_ids_in_output(
-        DraftTokenIds([req_id], [[10, 11, -1, -1]]), scheduler_output
-    )
-    assert scheduler_output.scheduled_spec_decode_tokens[req_id] == [10, 11, -1, -1]
-    assert scheduler_output.num_proposed_spec_tokens == {req_id: 2}
+    assert payload["num_verified_tokens"] == 2
+    assert payload["num_accepted_draft_tokens"] == 2
+    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
 
 
 def test_per_request_spec_decode_acceptance_disabled_by_default():
@@ -8422,25 +8372,6 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
-
-
-def _decode_ready_request(scheduler):
-    """Add one request and advance it out of prefill into decode."""
-    request = create_requests(num_requests=1, num_tokens=1)[0]
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-            sampled_token_ids=[[0]],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-    return request
 
 
 def test_diffusion_canvas_width_defaults_to_the_served_canvas():

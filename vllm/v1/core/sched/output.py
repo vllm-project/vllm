@@ -283,10 +283,8 @@ class SchedulerOutput:
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
-    # Draft tokens proposed within the scheduled window, including
-    # grammar-invalid ones and excluding padding. Set only when it differs from
-    # len(scheduled_spec_decode_tokens[req_id]).
-    num_proposed_spec_tokens: dict[str, int] | None = None
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None

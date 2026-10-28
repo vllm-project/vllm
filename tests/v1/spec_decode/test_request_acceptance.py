@@ -18,7 +18,9 @@ from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
 def _metrics(pairs, num_spec_tokens=3, detailed=False):
     s = RequestSpecDecodeMetrics.new(num_spec_tokens)
     for k, j in pairs:
-        s.observe(num_draft_tokens=k, num_accepted=j, detailed=detailed)
+        s.observe(
+            num_draft_tokens=k, num_accepted=j, num_verified_tokens=k, detailed=detailed
+        )
     return s
 
 
@@ -104,8 +106,8 @@ def test_observe_records_proposed_and_accepted_independently():
     # grammar-invalidated-draft subtraction happens in the scheduler before
     # observe() -- see test_per_request_spec_decode_subtracts_invalid_drafts.)
     s = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    s.observe(num_draft_tokens=2, num_accepted=1)
-    s.observe(num_draft_tokens=3, num_accepted=1)
+    s.observe(num_draft_tokens=2, num_accepted=1, num_verified_tokens=2)
+    s.observe(num_draft_tokens=3, num_accepted=1, num_verified_tokens=3)
     d = s.to_dict()
     assert d["acceptance_histogram"] == [0, 2, 0, 0]  # both steps accepted 1
     assert d["num_draft_tokens"] == 5  # proposed summed independently: 2 + 3

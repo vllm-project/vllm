@@ -25,14 +25,18 @@ from vllm.v1.spec_decode.metrics import (
 from vllm.v1.utils import compute_iteration_details
 
 
+@pytest.mark.parametrize("adaptive_verification", [True, False])
 @pytest.mark.parametrize(
     "verified_lengths, expected_per_pos",
-    [([3, 0, None], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
+    [([3, 0, 0], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
 )
-def test_verified_counter_differs_from_proposals(verified_lengths, expected_per_pos):
+def test_adaptive_verified_budget_counter_differs_from_proposals(
+    adaptive_verification, verified_lengths, expected_per_pos
+):
     registry = CollectorRegistry()
     config = SpeculativeConfig(
         method="ngram",  # no weights needed
+        enable_adaptive_verification=adaptive_verification,
         num_speculative_tokens=5,
     )
     prom = SpecDecodingProm(
@@ -73,7 +77,7 @@ def test_verified_counter_differs_from_proposals(verified_lengths, expected_per_
         )
 
 
-def test_verified_tokens_logging():
+def test_adaptive_verified_budget_logging():
     stats = SpecDecodingStats.new(num_spec_tokens=5)
     stats.observe_draft_stats_per_req(
         num_draft_tokens=5, num_accepted_tokens=2, num_verified_tokens=3

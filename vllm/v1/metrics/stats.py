@@ -395,11 +395,9 @@ class RequestSpecDecodeMetrics:
         self,
         num_draft_tokens: int,
         num_accepted: int,
+        num_verified_tokens: int,
         detailed: bool = False,
-        num_verified_tokens: int | None = None,
     ) -> None:
-        if num_verified_tokens is None:
-            num_verified_tokens = num_draft_tokens
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_verified_tokens += num_verified_tokens

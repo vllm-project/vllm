@@ -46,15 +46,14 @@ class SpecDecodingStats:
         self,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_verified_tokens: int | None = None,
+        num_verified_tokens: int,
     ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
-        if num_verified_tokens is not None:
-            self.num_verified_tokens += num_verified_tokens
-            for i in range(num_verified_tokens):
-                self.num_verified_tokens_per_pos[i] += 1
+        self.num_verified_tokens += num_verified_tokens
+        for i in range(num_verified_tokens):
+            self.num_verified_tokens_per_pos[i] += 1
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -214,15 +213,6 @@ class SpecDecodingProm:
 
       vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
       vllm:spec_decode_num_drafts_total[$interval]
-
-    The mean verified draft width is:
-
-      rate(vllm:spec_decode_num_verified_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts_total[$interval])
-
-    The verified count is the number of draft tokens the target model ran a
-    forward pass on. It excludes bonus tokens and can be smaller than the
-    proposed draft count (adaptive verification, sync structured outputs).
     """
 
     _counter_cls = prometheus_client.Counter
