@@ -350,6 +350,8 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlPullConnector(NixlBaseConnector):
     """Pull-based (READ) NIXL KV transfer connector."""
 
+    connector_worker: NixlPullConnectorWorker | None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
