@@ -1,0 +1,16 @@
+group: Dependency Updates
+depends_on:
+  - image-build-cpu
+steps:
+- label: ":computer: (CPU) Dependency Cooldown"
+  key: dependency-cooldown
+  timeout_in_minutes: 10
+  device: cpu-small
+  source_file_dependencies:
+    - .buildkite/test_areas/dependencies.yaml
+    - .github/dependabot.yml
+    - .github/workflows/refresh-compiled-requirements.yml
+    - tools/refresh_compiled_requirements.py
+    - tests/tools/test_refresh_compiled_requirements.py
+  commands:
+    - pytest -v -s tools/test_refresh_compiled_requirements.py

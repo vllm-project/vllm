@@ -6,6 +6,7 @@ Reads each ``pip-compile`` hook in ``.pre-commit-config.yaml`` and reruns it
 with ``--upgrade``, then once more without ``--upgrade``. The second pass
 keeps the upgraded pins and hashes and rewrites the header to the pre-commit
 command, so CI's compile hooks do not touch the files again.
+Both passes share a seven-day upload cutoff, including archive hashes.
 Handwritten requirements, build pins, and connector pins are unchanged;
 Dependabot security updates cover those source manifests separately.
 The hooks generate SHA-256 hashes for published package archives. uv verifies
@@ -16,8 +17,10 @@ are outside these locks.
 must not float transitive pins.
 """
 
+import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -25,6 +28,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PRE_COMMIT = ROOT / ".pre-commit-config.yaml"
 UV_REPO = "https://github.com/astral-sh/uv-pre-commit"
+COOLDOWN_DAYS = 7
 EXPECTED_HOOKS = {
     "pip-compile",
     "pip-compile-rocm",
@@ -48,9 +52,14 @@ def compile_hooks() -> list[tuple[str, list[str]]]:
     return hooks
 
 
-def run(args: list[str]) -> None:
+def run(args: list[str], cutoff: str) -> None:
     print("+", " ".join(args), flush=True)
-    subprocess.run(args, cwd=ROOT, check=True)
+    subprocess.run(
+        args,
+        cwd=ROOT,
+        check=True,
+        env={**os.environ, "UV_EXCLUDE_NEWER": cutoff},
+    )
 
 
 def main() -> None:
@@ -66,8 +75,12 @@ def main() -> None:
             sys.exit(f"{name} already passes --upgrade; refusing to double it")
         if "--generate-hashes" not in args:
             sys.exit(f"{name} must pass --generate-hashes")
-        run(["uv", "pip", "compile", *args, "--upgrade"])
-        run(["uv", "pip", "compile", *args])
+
+    cutoff = (datetime.now(UTC) - timedelta(days=COOLDOWN_DAYS)).isoformat()
+    print(f"{COOLDOWN_DAYS}-day cooldown: excluding uploads after {cutoff}", flush=True)
+    for _name, args in hooks:
+        run(["uv", "pip", "compile", *args, "--upgrade"], cutoff)
+        run(["uv", "pip", "compile", *args], cutoff)
 
 
 if __name__ == "__main__":

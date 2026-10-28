@@ -30,7 +30,7 @@ jobs:
           enable-cache: false
       - name: Upgrade compiled requirement locks
         run: >-
-          uv run --no-project --with pyyaml --python 3.12
+          uv run --no-project --exclude-newer '7 days' --with pyyaml --python 3.12
           python tools/refresh_compiled_requirements.py
       - name: Prepare review artifact
         env:
@@ -60,6 +60,8 @@ jobs:
             echo 'Publishing is disabled. Review the patch and open a PR manually.'
             echo 'This artifact refreshes five compiled locks within their source constraints.'
             echo 'Package versions and SHA-256 archive hashes are pinned together.'
+            echo 'Python dependency archives have a seven-day cooldown in both compile passes.'
+            echo 'Cooldown reduces exposure to fresh releases; review package sources and provenance before approval.'
             echo 'uv verifies these hashes on download; separate build/source installs and excluded ROCm packages are outside these locks.'
             echo 'Handwritten requirements, build pins, and connector pins are not upgraded here.'
             echo 'Dependabot security updates cover source manifests; incompatible or unpatched alerts still need manual fixes.'
@@ -157,6 +159,7 @@ jobs:
           ## Summary
           - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade, pinning versions and SHA-256 archive hashes.
           - Only regular-file modifications to these five locks passed publisher validation.
+          - Both compile passes applied a seven-day archive-upload cooldown.
 
           ## Test plan
           - [ ] Review dependency changes before merging.
