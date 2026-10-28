@@ -225,8 +225,12 @@ def _vllm_config(
         language_model_only=True,
         enforce_eager=True,
     )
+    # Config-only: "mp" skips the executor's local GPU count check.
     parallel_config = ParallelConfig(
-        tensor_parallel_size=tp, enable_expert_parallel=True, **parallel
+        tensor_parallel_size=tp,
+        enable_expert_parallel=True,
+        distributed_executor_backend="mp",
+        **parallel,
     )
     speculative_config = None
     if draft is not None:
