@@ -428,16 +428,6 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_cow_copies = []
         return pending_copies
 
-    def get_pending_boundary_state_offloads(
-        self, request_id: str
-    ) -> list[tuple[int, int, int]]:
-        """Read finish-time sources without consuming another connector's offers."""
-        return [
-            (group_id, block.block_id, tokens)
-            for req_id, group_id, block, tokens in self._pending_boundary_state_offloads
-            if req_id == request_id
-        ]
-
     def take_pending_boundary_state_offloads(
         self,
     ) -> list[tuple[str, int, KVCacheBlock, int]]:

@@ -617,7 +617,6 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
         self.use_lookahead_block_hashes = False
-        self._finished_boundary_offloads: dict[str, list[tuple[int, int, int]]] = {}
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -2233,12 +2232,6 @@ class OffloadingConnectorScheduler:
             assert any_job.is_store or any_job.is_sync_load
             self._current_batch_jobs_to_flush.update(jobs_to_flush)
 
-        # Install finish-time fences before detecting blocks reused this step.
-        finished_store_jobs = self._build_aligned_boundary_store_jobs(
-            self._finished_boundary_offloads
-        )
-        self._finished_boundary_offloads.clear()
-
         # Flush jobs that contain re-allocated blocks.
         if (
             self._block_id_to_pending_jobs
@@ -2257,7 +2250,7 @@ class OffloadingConnectorScheduler:
         normal_store_jobs = self._build_store_jobs(scheduler_output)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=finished_store_jobs | partial_store_jobs | normal_store_jobs,
+            store_jobs=partial_store_jobs | normal_store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
 
@@ -2299,7 +2292,7 @@ class OffloadingConnectorScheduler:
         A cache reset fence also keeps it stepping: the flush must reach the
         workers and their reports come back before on_reset_flushed().
         """
-        if self._jobs or self._reset_fence or self._finished_boundary_offloads:
+        if self._jobs or self._reset_fence:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2425,7 +2418,6 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        boundary_state_offloads: Sequence[tuple[int, int, int]] = (),
     ) -> tuple[bool, dict[str, Any] | None]:
         """Called when a request has finished, before its blocks are freed.
 
@@ -2462,15 +2454,6 @@ class OffloadingConnectorScheduler:
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
-        if boundary_state_offloads:
-            completed_tokens = request.num_computed_tokens - (
-                request.num_in_flight_tokens - request.num_stale_output_tokens
-            )
-            self._finished_boundary_offloads[request.request_id] = [
-                entry
-                for entry in dict.fromkeys(boundary_state_offloads)
-                if entry[2] <= completed_tokens
-            ]
 
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
@@ -2525,7 +2508,6 @@ class OffloadingConnectorScheduler:
             self._reset_cache()
 
     def _reset_cache(self) -> None:
-        self._finished_boundary_offloads.clear()
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 

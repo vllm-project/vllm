@@ -290,14 +290,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         assert self.connector_scheduler is not None
-        boundary_state_offloads = (
-            self._kv_cache_manager.get_boundary_state_offloads(request.request_id)
-            if self.num_hash_lookahead_tokens and self._kv_cache_manager is not None
-            else []
-        )
-        self.connector_scheduler.register_finished_lookahead_save(
-            request, block_ids, boundary_state_offloads
-        )
+        self.connector_scheduler.register_finished_lookahead_save(request, block_ids)
         return False, None
 
     def register_finished_partial_tail(

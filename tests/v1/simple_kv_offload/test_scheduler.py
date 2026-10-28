@@ -295,7 +295,7 @@ def test_lookahead_store_retries_block_when_hash_becomes_available(finish):
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_lookahead, prompt_len, boundary",
-    [(1, 32, 32), (1, 44, 40), (5, 43, 36), (5, 44, 32)],
+    [(1, 44, 40), (5, 43, 36), (5, 44, 32)],
 )
 def test_lookahead_mamba_partial_tail_survives_finish(
     num_lookahead, prompt_len, boundary
@@ -305,7 +305,7 @@ def test_lookahead_mamba_partial_tail_survives_finish(
     config.scheduler_config.async_scheduling = False
     config.cache_config.prefix_match_unit = 4
     config.cache_config.mamba_cache_mode = "align"
-    config.cache_config.prefix_cache_retention_interval = 16 if prompt_len == 32 else 0
+    config.cache_config.prefix_cache_retention_interval = 0
     assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
     kv_config = _make_kv_cache_config(32)
@@ -328,7 +328,7 @@ def test_lookahead_mamba_partial_tail_survives_finish(
         )
     )
     kv_config.cache_hit_alignment_tokens = 4
-    kv_config.prefix_cache_retention_interval = 16 if prompt_len == 32 else 0
+    kv_config.prefix_cache_retention_interval = 0
     engine = create_scheduler(
         config, num_blocks=32, kv_cache_config=kv_config, hash_block_size=4
     )
@@ -366,19 +366,16 @@ def test_lookahead_mamba_partial_tail_survives_finish(
     assert final.store_event >= 0
     simulate_store_completion(sched, final.store_event)
     assert all(b.ref_cnt == 0 for b in engine.kv_cache_manager.block_pool.blocks)
-    query_tokens = (
-        list(req.all_token_ids) + [100] if prompt_len == 32 else list(range(prompt_len))
-    )
     query = Request(
         "partial-reload",
-        query_tokens,
+        list(range(prompt_len)),
         SamplingParams(max_tokens=1),
         None,
         block_hasher=req._block_hasher,
     )
     assert engine.kv_cache_manager.get_computed_blocks(query)[1] == boundary
     assert sched.get_num_new_matched_tokens(query, 0) == (boundary, True)
-    changed = query_tokens.copy()
+    changed = list(range(prompt_len))
     changed[boundary] = 100
     divergent = Request(
         "partial-diverged",
