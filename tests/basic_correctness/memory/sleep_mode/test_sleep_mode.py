@@ -5,6 +5,7 @@ import asyncio
 import math
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -21,6 +22,125 @@ from ....utils import (
     multi_gpu_test,
     requires_fp8,
 )
+
+
+def _r3_capture_state(worker):
+    runner = worker.model_runner
+    connector = runner.aux_output_connector
+    capturer = connector._capturer
+    callbacks, sinks = {}, {}
+    for module in runner.model.modules():
+        for target in (module, getattr(module, "router", None)):
+            callback = getattr(target, "capture_fn", None)
+            if callback is not None:
+                assert callback.func.__self__ is capturer
+                callbacks[id(callback)] = True
+        sink = getattr(getattr(module, "routed_experts", None), "routing_sink", None)
+        if sink is not None:
+            assert sink.capture_fn.func.__self__ is capturer
+            sinks[id(sink)] = sink.buffer.data_ptr()
+    assert len(callbacks) + len(sinks) == capturer.shape_per_token[0]
+    assert connector._store is not None or worker.rank != 0
+    return (
+        id(connector),
+        id(capturer),
+        capturer.device_buffer.data_ptr(),
+        callbacks,
+        sinks,
+    )
+
+
+def _profile_r3_again(worker):
+    before = _r3_capture_state(worker)
+    worker.model_runner.profile_run()
+    assert _r3_capture_state(worker) == before
+
+
+def _has_r3_graphs(worker):
+    return bool(worker.model_runner.cudagraph_manager.graphs)
+
+
+@pytest.mark.parametrize(
+    "eager,tp,kv_bytes",
+    [
+        pytest.param(True, 1, None, id="eager-auto-kv"),
+        pytest.param(False, 1, None, id="graph-auto-kv"),
+        pytest.param(True, 1, 64 << 20, id="eager-explicit-kv"),
+        pytest.param(False, 2, None, marks=multi_gpu_marks(num_gpus=2), id="graph-tp2"),
+    ],
+)
+@create_new_process_for_each_test()
+def test_routed_experts_capture_survives_sleep_and_reload(
+    monkeypatch, tmp_path, eager, tp, kv_bytes
+):
+    """R3 buffers and callbacks survive profiling, sleep/wake and weight reload."""
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(0)
+    config = Qwen3MoeConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        moe_intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    Qwen3MoeForCausalLM(config).save_pretrained(tmp_path)
+    llm = LLM(
+        str(tmp_path),
+        skip_tokenizer_init=True,
+        enable_sleep_mode=True,
+        enable_return_routed_experts=True,
+        enforce_eager=eager,
+        tensor_parallel_size=tp,
+        max_model_len=64,
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        gpu_memory_utilization=0.3,
+        kv_cache_memory_bytes=kv_bytes,
+        compilation_config={
+            "mode": 0,
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [1, 2, 4, 8],
+        },
+    )
+    state = llm.collective_rpc(_r3_capture_state)
+    llm.collective_rpc(_profile_r3_again)
+    if not eager:
+        assert all(llm.collective_rpc(_has_r3_graphs))
+    prompt = {"prompt_token_ids": [1, 2, 3, 4]}
+    params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+    expected = None
+    for phase in ("initial", "wake", "reload"):
+        if phase == "wake":
+            llm.sleep(level=1)
+            llm.wake_up()
+        elif phase == "reload":
+            llm.collective_rpc("reload_weights")
+        output = llm.generate(prompt, params)[0].outputs[0]
+        routes = output.routed_experts
+        assert routes is not None
+        assert routes.shape == (7, 2, 2)
+        assert routes.dtype == np.uint8
+        assert np.all(routes < 4)
+        assert np.all(routes[..., 0] != routes[..., 1])
+        if expected is None:
+            expected = (output.token_ids, routes.copy())
+        else:
+            assert output.token_ids == expected[0]
+            np.testing.assert_array_equal(routes, expected[1])
+        assert llm.collective_rpc(_r3_capture_state) == state
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

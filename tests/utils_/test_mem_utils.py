@@ -89,57 +89,6 @@ def test_memory_profiling():
     lib.cudaFree(handle2)
 
 
-def test_resident_allocation_before_profiling_is_charged_to_non_kv_cache(monkeypatch):
-    """Memory made resident before the profiling window (such as the R3
-    capturer and its monolithic sinks) must shrink the KV-cache budget, and it
-    must be charged exactly once."""
-    gib = 1 << 30
-    weights = 2 * gib
-    r3_bytes = 64 * (1 << 20)
-    activation = 512 * (1 << 20)
-    total = 8 * gib
-    state = {"free": total, "peak": 0, "allocated": 0}
-
-    def fake_measure(snapshot):
-        snapshot.free_memory = state["free"]
-        snapshot.total_memory = total
-        snapshot.torch_peak = state["peak"]
-        snapshot.torch_allocated = state["allocated"]
-        snapshot.torch_memory = state["allocated"]
-        snapshot.non_torch_memory = 0
-        snapshot.timestamp = 0.0
-
-    monkeypatch.setattr(MemorySnapshot, "measure", fake_measure)
-    monkeypatch.setattr("torch.accelerator.empty_cache", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "torch.accelerator.reset_peak_memory_stats", lambda *a, **k: None
-    )
-
-    baseline = MemorySnapshot(
-        device="cpu", auto_measure=False, free_memory=total, total_memory=total
-    )
-
-    # Model weights and the R3 buffers are resident before profiling starts.
-    state["free"] -= weights
-    state["allocated"] += weights
-    state["free"] -= r3_bytes
-    state["allocated"] += r3_bytes
-
-    with memory_profiling(baseline_snapshot=baseline, weights_memory=weights) as result:
-        # A transient activation peak, freed again before the snapshot.
-        state["peak"] = state["allocated"] + activation
-
-    assert result.total_consumed == weights + r3_bytes
-    assert result.transient_peak_headroom == activation
-    assert result.non_kv_cache_memory == weights + r3_bytes + activation
-
-    requested_memory = 6 * gib
-    assert (
-        requested_memory - result.non_kv_cache_memory
-        == requested_memory - weights - r3_bytes - activation
-    )
-
-
 def test_memory_snapshot_uses_psutil_on_integrated_gpu():
     """On integrated (UMA) GPUs, free_memory should come from psutil."""
     mock_cuda_free = 40 * 1024**3

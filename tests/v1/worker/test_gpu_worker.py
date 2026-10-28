@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -125,7 +126,6 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     loading_threads = []
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(weight_transfer_config=None),
-        use_v2_model_runner=False,
         model_runner=SimpleNamespace(
             load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
         ),
@@ -353,6 +353,22 @@ def test_startup_plan_apply_gate(plan_env):
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
 
 
+def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 50 * GiB_bytes)
+    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    path = startup_plan._plan_path(fingerprint)
+    with open(path) as f:
+        plan = json.load(f)
+    plan["schema"] = 1
+    with open(path, "w") as f:
+        json.dump(plan, f)
+
+    maybe_apply_startup_plan(worker)
+
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch
@@ -519,147 +535,3 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
-
-
-class _RecordingConnector:
-    def __init__(self, events: list[str], init_error: Exception | None = None):
-        self._events = events
-        self._init_error = init_error
-
-    def initialize_routed_experts_capturer(self, model):
-        self._events.append("init_capturer")
-        if self._init_error is not None:
-            raise self._init_error
-
-    def close(self):
-        self._events.append("connector_close")
-
-
-def _make_r3_load_model_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    connector,
-    *,
-    events: list[str],
-    use_v2_model_runner: bool = True,
-    r3_enabled: bool = True,
-    existing_connector=None,
-):
-    class WeightsPool:
-        def __enter__(self):
-            events.append("weights_pool_enter")
-
-        def __exit__(self, *exc):
-            events.append("weights_pool_exit")
-
-    runner = SimpleNamespace(
-        load_model=lambda **kwargs: events.append("load_model"),
-        get_model=lambda: object(),
-        aux_output_connector=existing_connector,
-    )
-    worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            weight_transfer_config=None,
-            aux_output_config=SimpleNamespace(enabled=r3_enabled),
-        ),
-        use_v2_model_runner=use_v2_model_runner,
-        model_runner=runner,
-        _maybe_get_memory_pool_context=lambda tag: WeightsPool(),
-        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
-    )
-    monkeypatch.setattr(gpu_worker, "get_aux_output_connector", lambda cfg: connector)
-    monkeypatch.setattr(
-        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
-    )
-    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
-    monkeypatch.setattr(gpu_worker, "set_torch_threads_for_runtime", lambda: None)
-    return runner, worker
-
-
-@pytest.mark.parametrize(
-    ("use_v2_model_runner", "r3_enabled"),
-    [(True, True), (True, False), (False, True)],
-)
-def test_load_model_initializes_connector_after_weights_pool(
-    monkeypatch: pytest.MonkeyPatch, use_v2_model_runner: bool, r3_enabled: bool
-):
-    """The connector owns capture, so it must be created after the weights pool
-    exits but before determine_available_memory() profiles non-KV memory."""
-    events: list[str] = []
-    connector = _RecordingConnector(events)
-    runner, worker = _make_r3_load_model_worker(
-        monkeypatch,
-        connector,
-        events=events,
-        use_v2_model_runner=use_v2_model_runner,
-        r3_enabled=r3_enabled,
-    )
-
-    gpu_worker.Worker.load_model(worker)
-
-    expected = ["weights_pool_enter", "load_model", "weights_pool_exit"]
-    if use_v2_model_runner and r3_enabled:
-        expected.append("init_capturer")
-        assert runner.aux_output_connector is connector
-    else:
-        assert runner.aux_output_connector is None
-    assert events == expected
-
-
-def test_load_model_rejects_second_connector_initialization(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[str] = []
-    existing = object()
-    runner, worker = _make_r3_load_model_worker(
-        monkeypatch,
-        _RecordingConnector(events),
-        events=events,
-        existing_connector=existing,
-    )
-
-    with pytest.raises(RuntimeError, match="already initialized"):
-        gpu_worker.Worker.load_model(worker)
-
-    # Rejected before any weight reload or pool entry.
-    assert events == []
-    assert runner.aux_output_connector is existing
-
-
-def test_load_model_closes_connector_when_capture_init_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[str] = []
-    connector = _RecordingConnector(events, init_error=ValueError("no router"))
-    runner, worker = _make_r3_load_model_worker(monkeypatch, connector, events=events)
-
-    with pytest.raises(ValueError, match="no router"):
-        gpu_worker.Worker.load_model(worker)
-
-    assert events == [
-        "weights_pool_enter",
-        "load_model",
-        "weights_pool_exit",
-        "init_capturer",
-        "connector_close",
-    ]
-    assert runner.aux_output_connector is None
-
-
-def test_load_model_keeps_capture_error_when_connector_close_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[str] = []
-
-    class CloseFails(_RecordingConnector):
-        def close(self):
-            super().close()
-            raise RuntimeError("close failed")
-
-    connector = CloseFails(events, init_error=ValueError("no router"))
-    runner, worker = _make_r3_load_model_worker(monkeypatch, connector, events=events)
-
-    with pytest.raises(ValueError, match="no router"):
-        gpu_worker.Worker.load_model(worker)
-
-    assert events[-2:] == ["init_capturer", "connector_close"]
-    assert runner.aux_output_connector is None

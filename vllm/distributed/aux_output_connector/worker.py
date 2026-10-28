@@ -28,7 +28,6 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -38,8 +37,6 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
-
-logger = init_logger(__name__)
 
 
 @dataclass
@@ -84,7 +81,7 @@ class PendingAuxOutput:
 
 
 class AuxOutputWorkerConnector:
-    """Own capture, snapshots, request tails, and backend resources."""
+    """Own capture, request tails, and backend resources on the output worker."""
 
     def __init__(
         self,
@@ -146,7 +143,6 @@ class AuxOutputWorkerConnector:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         if self._buffer is None or self._step_metadata is None:
             return None
-        assert self._capturer is not None
 
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]

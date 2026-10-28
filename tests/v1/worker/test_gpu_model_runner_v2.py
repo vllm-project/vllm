@@ -75,12 +75,12 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 @pytest.mark.parametrize(
     "enabled,expected_events",
     [
-        (True, ["allocate", "bind", "dummy_run"]),
-        (False, ["dummy_run"]),
+        (True, ["allocate", "bind", "dummy_run", "dummy_run"]),
+        (False, ["dummy_run", "dummy_run"]),
     ],
     ids=["aux-output-enabled", "aux-output-disabled"],
 )
-def test_profile_run_creates_aux_output_connector_before_forward(
+def test_profile_run_reuses_aux_output_connector_before_forward(
     monkeypatch, enabled, expected_events
 ):
     events = []
@@ -107,6 +107,8 @@ def test_profile_run_creates_aux_output_connector_before_forward(
 
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", allocate)
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    constructor = Mock(wraps=aux_output_worker.AuxOutputWorkerConnector)
+    monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = vllm_config
@@ -120,13 +122,93 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     monkeypatch.setattr(runner, "_dummy_run", dummy_run)
 
     runner.profile_run()
+    connector = runner.aux_output_connector
+    runner.profile_run()
 
     assert events == expected_events
-    connector = runner.aux_output_connector
+    assert runner.aux_output_connector is connector
     if enabled:
         assert connector is not None and connector._capturer is capturer
+        constructor.assert_called_once_with(model=model, vllm_config=vllm_config)
+        assert connector._store is None and connector._buffer is None
     else:
         assert connector is None
+        constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "is_profiling,prepared", [(True, True), (False, True), (False, False)]
+)
+def test_initialize_kv_cache_defers_aux_output_storage(
+    monkeypatch, is_profiling, prepared
+):
+    """Profiling keeps capture only; real KV init reuses it or creates a fallback."""
+    connector = Mock()
+    factory = Mock(return_value=connector)
+    monkeypatch.setattr(model_runner_module, "get_aux_output_connector", factory)
+    for name in (
+        "BlockTables",
+        "maybe_build_ubatch_runner",
+        "initialize_mamba_ssu_backend",
+        "ModelCudaGraphManager",
+        "check_attention_cp_compatibility",
+    ):
+        monkeypatch.setattr(model_runner_module, name, Mock())
+    monkeypatch.setattr(
+        model_runner_module, "init_attn_backend", Mock(return_value=([], Mock(), []))
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "maybe_create_adaptive_verification_manager",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(model_runner_module, "has_compiled_submodule", lambda _: False)
+    monkeypatch.setattr(model_runner_module, "init_kv_cache", Mock(return_value={}))
+    monkeypatch.setattr(model_runner_module, "get_kv_connector", Mock())
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=True), mamba_config=None
+    )
+    runner.parallel_config = ParallelConfig()
+    runner.max_model_len = 8
+    runner.is_encoder_decoder = False
+    runner.speculator = None
+    runner.model = torch.nn.Module()
+    runner.model_state = Mock()
+    runner.model_state.get_additional_cg_support.return_value = ()
+    runner.jit_warmup_registry = SimpleNamespace(activate=contextlib.nullcontext)
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = 1
+    runner.max_num_tokens = 8
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.pcp_manager = None
+    runner.req_states = []
+    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    runner.vocab_size = 16
+    runner.batch_sharder = None
+    runner.cache_config = SimpleNamespace(
+        use_replayssm=False, kv_sharing_fast_prefill=False
+    )
+    runner.compilation_config = Mock()
+    runner.compilation_config.static_forward_context = {}
+    runner.decode_query_len = 1
+    runner.lora_capture_cases = []
+    runner.aux_output_connector = connector if prepared else None
+    kv_config = KVCacheConfig(num_blocks=2, kv_cache_tensors=[], kv_cache_groups=[])
+
+    runner.initialize_kv_cache(kv_config, is_profiling=is_profiling)
+
+    if is_profiling:
+        connector.bind_kv_cache.assert_not_called()
+        assert runner.aux_output_connector is connector
+    else:
+        connector.bind_kv_cache.assert_called_once_with(kv_config)
+        assert runner.aux_output_connector is connector
+    if prepared:
+        factory.assert_not_called()
+    else:
+        factory.assert_called_once_with(runner.model, runner.vllm_config)
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):

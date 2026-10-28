@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import types
-import weakref
-from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -170,7 +166,7 @@ def test_public_binding_binds_target_model_router(monkeypatch):
     calls = []
     capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
 
-    unbind = bind_routed_experts_capturer(
+    bind_routed_experts_capturer(
         types.SimpleNamespace(modules=lambda: [target_module]), capturer
     )
 
@@ -178,8 +174,6 @@ def test_public_binding_binds_target_model_router(monkeypatch):
     topk_ids = torch.tensor([[5, 6]])
     target_module.router.capture_fn(topk_ids)
     assert calls == [(7, topk_ids)]
-    unbind()
-    assert target_module.router.capture_fn is None
 
 
 def test_public_binding_supports_direct_capture_source():
@@ -199,170 +193,6 @@ def test_public_binding_supports_direct_capture_source():
     topk_ids = torch.tensor([[1, 2]])
     source.capture_fn(topk_ids)
     assert calls == [(3, topk_ids)]
-
-
-class _LifecycleCaptureSource(torch.nn.Module):
-    def __init__(self, layer_id: int = 0):
-        super().__init__()
-        self.layer_id = layer_id
-        self.capture_fn = None
-
-    def forward(self, topk_ids):
-        if self.capture_fn is not None:
-            self.capture_fn(topk_ids)
-
-
-def _capture_context(num_tokens: int):
-    return patch(
-        f"{_REC_MODULE}.get_forward_context",
-        return_value=_forward_context(
-            batch_descriptor=BatchDescriptor(num_tokens=num_tokens)
-        ),
-    )
-
-
-def _bind_sources(capturer: RoutedExpertsCapturer, *sources: torch.nn.Module):
-    return bind_routed_experts_capturer(torch.nn.ModuleList(sources), capturer)
-
-
-def test_unbind_releases_capture_after_forward_without_attention():
-    source = _LifecycleCaptureSource()
-    capturer = _capturer_with_buffer()
-    buffer_ref = weakref.ref(capturer.device_buffer)
-    unbind = bind_routed_experts_capturer(source, capturer)
-    topk_ids = torch.tensor([[1, 2], [2, 3]], dtype=torch.int32)
-    with _capture_context(num_tokens=2):
-        source(topk_ids)
-    torch.testing.assert_close(capturer.device_buffer[:2, 0], topk_ids)
-
-    unbind()
-    unbind()
-    assert source.capture_fn is None
-    del capturer
-    gc.collect()
-    assert buffer_ref() is None
-
-
-def test_unbind_preserves_replacement_callback():
-    source = _LifecycleCaptureSource()
-    capturer = _capturer_with_buffer()
-    unbind = bind_routed_experts_capturer(source, capturer)
-    captured: list[torch.Tensor] = []
-    source.capture_fn = captured.append
-    unbind()
-    source(torch.tensor([[1, 2]]))
-    assert len(captured) == 1
-    torch.testing.assert_close(captured[0], torch.tensor([[1, 2]]))
-
-
-def test_unbind_restores_preexisting_callback():
-    source = _LifecycleCaptureSource()
-    captured: list[torch.Tensor] = []
-    source.capture_fn = captured.append
-    unbind = bind_routed_experts_capturer(source, _capturer_with_buffer())
-    unbind()
-    source(torch.tensor([[1, 2]]))
-    assert len(captured) == 1
-
-
-def _make_rejecting_source(mode: str):
-    class RejectSource(torch.nn.Module):
-        layer_id = 1
-
-        @property
-        def capture_fn(self):
-            return None
-
-        @capture_fn.setter
-        def capture_fn(self, value):
-            raise ValueError("capture binding rejected")
-
-    class MutateThenReject(torch.nn.Module):
-        layer_id = 1
-
-        def __init__(self):
-            super().__init__()
-            self._capture_fn = None
-
-        @property
-        def capture_fn(self):
-            return self._capture_fn
-
-        @capture_fn.setter
-        def capture_fn(self, value):
-            self._capture_fn = value
-            raise ValueError("capture binding rejected")
-
-    class RestoreFails(torch.nn.Module):
-        layer_id = 1
-
-        def __init__(self):
-            super().__init__()
-            self._capture_fn = None
-
-        @property
-        def capture_fn(self):
-            return self._capture_fn
-
-        @capture_fn.setter
-        def capture_fn(self, value):
-            if value is None:
-                raise RuntimeError("restore failed")
-            self._capture_fn = value
-            raise ValueError("capture binding rejected")
-
-    return {
-        "reject": RejectSource,
-        "mutate": MutateThenReject,
-        "restore_fails": RestoreFails,
-    }[mode]()
-
-
-@pytest.mark.parametrize("mode", ["reject", "mutate", "restore_fails"])
-def test_binding_rollback_preserves_original_error(mode):
-    source = _LifecycleCaptureSource()
-    captured: list[torch.Tensor] = []
-    source.capture_fn = captured.append
-    rejected = _make_rejecting_source(mode)
-
-    with pytest.raises(ValueError, match="capture binding rejected"):
-        _bind_sources(_capturer_with_buffer(), source, rejected)
-
-    source(torch.tensor([[1, 2]]))
-    assert len(captured) == 1
-    if mode == "mutate":
-        assert rejected._capture_fn is None
-    elif mode == "restore_fails":
-        # The restore setter raised before clearing the installed callback;
-        # the original binding error must still be the one observed.
-        assert rejected._capture_fn is not None
-
-
-def test_multilayer_binding_captures_each_layer():
-    sources = [_LifecycleCaptureSource(layer_id=i) for i in range(3)]
-    capturer = _capturer_with_buffer()
-    unbind = _bind_sources(capturer, *sources)
-    ids = torch.tensor([[1, 2]], dtype=torch.int32)
-    with _capture_context(num_tokens=1):
-        for source in sources:
-            source(ids)
-    for layer_id in range(3):
-        torch.testing.assert_close(capturer.device_buffer[0, layer_id], ids[0])
-    unbind()
-
-
-def test_rebind_after_unbind_uses_the_new_capturer():
-    source = _LifecycleCaptureSource()
-    capturer_a = _capturer_with_buffer()
-    bind_routed_experts_capturer(source, capturer_a)()
-    capturer_b = _capturer_with_buffer()
-    unbind_b = bind_routed_experts_capturer(source, capturer_b)
-    ids = torch.tensor([[1, 2]], dtype=torch.int32)
-    with _capture_context(num_tokens=1):
-        source(ids)
-    torch.testing.assert_close(capturer_b.device_buffer[0, 0], ids[0])
-    assert (capturer_a.device_buffer == -1).all()
-    unbind_b()
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -416,32 +246,27 @@ class _MonolithicMoE:
 
 def _bind_monolithic(
     monkeypatch, experts: _ToyMonolithicExperts, capture
-) -> tuple[_MonolithicMoE, Callable[[], None]]:
+) -> _MonolithicMoE:
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
     layer = _MonolithicMoE(experts)
-    unbind = bind_routed_experts_capturer(
+    bind_routed_experts_capturer(
         SimpleNamespace(modules=lambda: [layer]), SimpleNamespace(capture=capture)
     )
-    return layer, unbind
+    return layer
 
 
 def test_public_binding_gives_monolithic_layers_a_sink(monkeypatch):
     """A monolithic kernel routes internally, so binding gives the layer, which
     outlives kernel rebuilds, a sink that captures under its layer id."""
     calls = []
-    layer, unbind = _bind_monolithic(
+    layer = _bind_monolithic(
         monkeypatch, _ToyMonolithicExperts(), lambda *args: calls.append(args)
     )
     ids = torch.tensor([[1, 2]])
     layer.routed_experts.routing_sink.capture_fn(ids)
     assert calls == [(_MonolithicMoE.layer_id, ids)]
-    buffer_ref = weakref.ref(layer.routed_experts.routing_sink.buffer)
-    unbind()
-    unbind()
-    assert layer.routed_experts.routing_sink is None
-    assert buffer_ref() is None
 
 
 def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
@@ -870,6 +695,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()])
     )
 
+    assert connector._store is None and connector._buffer is None
     constructor.assert_called_once_with(
         max_num_batched_tokens=32,
         vllm_config=config,
@@ -901,7 +727,8 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    buffer_constructor = Mock()
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", buffer_constructor)
 
     config = SimpleNamespace(
         aux_output_config=SimpleNamespace(max_bytes=None),
@@ -914,6 +741,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         vllm_config=config, model=Mock()
     )
     store_constructor.assert_not_called()
+    buffer_constructor.assert_not_called()
 
     connector.bind_kv_cache(
         SimpleNamespace(

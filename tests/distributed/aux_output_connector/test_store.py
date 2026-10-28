@@ -194,8 +194,6 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
-    worker._capturer = None
-    worker._unbind_capturer = None
     worker._store = store
     worker._buffer = RoutedExpertsBuffer(
         _DTYPE,

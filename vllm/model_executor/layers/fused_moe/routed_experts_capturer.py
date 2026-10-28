@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -183,30 +183,19 @@ class RoutedExpertsSink:
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
-) -> Callable[[], None]:
-    """Attach routed-experts capture callbacks and return an idempotent cleanup.
-
-    The caller must ensure the model has no active R3 binding; nested bindings
-    of two capturers are not supported. Sinks are allocated before any model
-    attribute is modified.
-    """
+) -> None:
+    """Attach capture callbacks to the target model's MoE routers."""
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEExpertsMonolithic,
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-    bindings: list[tuple[Any, str, Any, Any]] = []
+    num_bound = 0
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
-            bindings.append(
-                (
-                    module,
-                    "capture_fn",
-                    getattr(module, "capture_fn", None),
-                    partial(capturer.capture, module.layer_id),
-                )
-            )
+            module.capture_fn = partial(capturer.capture, module.layer_id)
+            num_bound += 1
             continue
         if not isinstance(module, MoERunner):
             continue
@@ -224,56 +213,18 @@ def bind_routed_experts_capturer(
                     "Routed-experts capture is not supported with monolithic "
                     f"MoE kernel {type(fused_experts).__name__}."
                 )
-            routed_experts = module.routed_experts
-            routing_sink = getattr(routed_experts, "routing_sink", None)
-            bindings.append(
-                (
-                    routed_experts,
-                    "routing_sink",
-                    routing_sink,
-                    RoutedExpertsSink(fused_experts.moe_config, capture_fn),
-                )
+            module.routed_experts.routing_sink = RoutedExpertsSink(
+                fused_experts.moe_config, capture_fn
             )
+            num_bound += 1
         elif isinstance(module.router, BaseRouter):
-            bindings.append(
-                (module.router, "capture_fn", module.router.capture_fn, capture_fn)
-            )
+            module.router.set_capture_fn(capture_fn)
+            num_bound += 1
         else:
             raise ValueError(
                 "Routed-experts capture is not supported with router "
                 f"{type(module.router).__name__}."
             )
 
-    if not bindings:
+    if num_bound == 0:
         raise ValueError("No supported MoE router found for routed-experts capture.")
-
-    def restore_bindings() -> None:
-        for target, attr, previous, installed in reversed(bindings):
-            try:
-                if getattr(target, attr, None) is not installed:
-                    continue
-                if isinstance(target, BaseRouter):
-                    target.set_capture_fn(previous)
-                else:
-                    setattr(target, attr, previous)
-            except Exception:
-                # Teardown must not mask the binding error that triggered it.
-                logger.warning(
-                    "Failed to restore %s on %s during routed-experts capture "
-                    "teardown.",
-                    attr,
-                    type(target).__name__,
-                    exc_info=True,
-                )
-        bindings.clear()
-
-    try:
-        for target, attr, _, installed in bindings:
-            if isinstance(target, BaseRouter):
-                target.set_capture_fn(installed)
-            else:
-                setattr(target, attr, installed)
-    except BaseException:
-        restore_bindings()
-        raise
-    return restore_bindings
