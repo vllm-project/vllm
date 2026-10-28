@@ -193,8 +193,13 @@ def is_moe_layer_gptq_quantized(prefix: str, quantized_layers: list[str]) -> boo
     if not expert_parents:
         return True
 
+    # The runtime prefix can also be the parent of the experts module, e.g.
+    # DBRX's `...ffn` with checkpoint names `...ffn.experts.*`.
     return any(
-        prefix == parent or prefix.endswith(f".{parent}") for parent in expert_parents
+        prefix == parent
+        or prefix.endswith(f".{parent}")
+        or parent.startswith(f"{prefix}.")
+        for parent in expert_parents
     )
 
 

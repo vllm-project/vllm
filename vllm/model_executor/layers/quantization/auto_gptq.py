@@ -239,7 +239,10 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if not is_moe_layer_gptq_quantized(
+            # Negative `dynamic` rules are checked here so that they also apply
+            # to the WNA16 fallback below, which ROCm always takes.
+            excluded = get_dynamic_override(self, layer_name=prefix) is False
+            if excluded or not is_moe_layer_gptq_quantized(
                 prefix, self.modules_in_block_to_quantize
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
