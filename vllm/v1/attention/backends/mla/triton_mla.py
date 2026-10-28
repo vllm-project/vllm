@@ -27,7 +27,10 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    get_kv_cache_spec_sliding_window,
+    is_quantized_kv_cache,
+)
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -51,19 +54,27 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 def _reserve_attn_logits_workspace(
-    vllm_config: VllmConfig, max_decode_rows: int, q_num_heads: int, kv_lora_rank: int
+    vllm_config: VllmConfig,
+    max_decode_rows: int,
+    q_num_heads: int,
+    kv_lora_rank: int,
+    sliding_window: int | None = None,
 ) -> None:
     """Pre-size the shared workspace for the decode split-KV attn logits.
 
-    Reserving at the worst case (max_model_len -> max num_kv_splits,
+    Reserving at the worst case (max KV length -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
     ``get_simultaneous`` in ``forward_mqa`` never has to grow the buffer at
-    runtime (which would raise once the workspace is locked).
+    runtime (which would raise once the workspace is locked). Like
+    ``forward_mqa``, the KV length is clamped to the layer's sliding window.
     """
     if not is_workspace_manager_initialized():
         return
+    max_kv_len = vllm_config.model_config.max_model_len
+    if sliding_window is not None:
+        max_kv_len = min(max_kv_len, sliding_window)
     max_splits = _compute_num_kv_splits(
-        vllm_config.model_config.max_model_len,
+        max_kv_len,
         current_platform.num_compute_units(),
     )
     current_workspace_manager().get_simultaneous(
@@ -90,6 +101,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
             self.num_heads * self.dcp_world_size,
             self.mla_dims.kv_lora_rank,
+            get_kv_cache_spec_sliding_window(kv_cache_spec),
         )
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
@@ -251,6 +263,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             * max_decode_query_len(vllm_config),
             self.num_heads * self.dcp_world_size,
             self.kv_lora_rank,
+            self.decode_sliding_window,
         )
 
     def forward_mha(self, *args, **kwargs) -> None:
