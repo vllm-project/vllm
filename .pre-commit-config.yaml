@@ -74,6 +74,7 @@ repos:
         --no-emit-package, cupy-cuda12x,
         # nvidia packages (unsuffixed / unified naming)
         --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cccl,
         --no-emit-package, nvidia-cuda-cupti,
         --no-emit-package, nvidia-cuda-nvrtc,
         --no-emit-package, nvidia-cuda-runtime,
