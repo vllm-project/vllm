@@ -324,69 +324,33 @@ except Exception as e:
 
 ## Fault tolerance and scale-down recovery
 
-Fault tolerance is opt-in. Enable it with `--enable-fault-tolerance`,
-`--enable-expert-parallel`, and an FT-capable `--all2all-backend`
-(`nixl_ep` or `deepep_low_latency`). It requires the v2 model runner
-(`VLLM_USE_V2_MODEL_RUNNER=1`), a single API server per engine, and no prefill
-context parallelism. MoE speculative draft models are currently unsupported.
-An external orchestrator must detect faults and coordinate recovery across all
-participating engines; enabling fault tolerance alone does not remove failed
-ranks automatically.
+Fault tolerance lets vLLM recover from certain distributed engine failures without
+restarting the entire deployment. An external orchestrator detects failures and
+coordinates recovery across the engines.
 
-For scale-down, also enable `--enable-eplb` and configure
-`--eplb-config.num_redundant_experts` with enough redundant slots that every
-logical expert still fits on surviving EP ranks after the planned removal.
-Recovery reloads all experts in affected MoE layers from the original checkpoint,
-then reapplies weight processing (including quantization and repacking). Keep
-that checkpoint accessible on every survivor and budget recovery time for I/O
-and temporary checkpoint-format layer storage.
+To enable it, use `--enable-fault-tolerance` and `--enable-expert-parallel` with
+an FT-capable all-to-all backend (`nixl_ep` or `deepep_low_latency`). Fault
+tolerance requires the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
 
-### Migrating recovery controllers
+For scale-down recovery, also enable `--enable-eplb` and configure enough
+redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
+logical experts on the surviving ranks. The original checkpoint must remain
+accessible to survivors so they can reload expert weights.
 
-The recovery endpoints are now `POST /v1/fault_tolerance/apply` and
-`GET /v1/fault_tolerance/status`. Replace the old `/fault_tolerance/apply` URL,
-which is no longer registered. Every apply request must include a nonempty
-string `request_id`; omission returns HTTP 400. Generate one new ID per recovery
-round and send **the same ID** to every participating engine. Do not reuse an ID
-for a later round. The apply endpoint returns HTTP 202 on acceptance; this does
-not indicate successful recovery.
+### Coordinating recovery
 
-For a recoverable fault where every worker remains alive, dispatch `retry` to
-all engines in the round:
+Send recovery instructions to `POST /v1/fault_tolerance/apply`, then poll
+`GET /v1/fault_tolerance/status` on each participating engine. Use a new,
+nonempty `request_id` for each recovery round and send the same ID to every
+engine in that round. An HTTP 202 response means the instruction was accepted;
+wait until all participating engines report `healthy` before resuming traffic.
 
-```bash
-round_id=$(uuidgen)
-for engine in http://engine-0:8000 http://engine-1:8000; do
-  curl --fail-with-body "$engine/v1/fault_tolerance/apply" \
-    -H 'Content-Type: application/json' \
-    -d "{\"instruction\":\"retry\",\"params\":{},\"request_id\":\"$round_id\"}"
-done
-```
+Use `retry` when all workers are still alive. To remove a failed DP rank, stop
+routing traffic to it and send `scale_down` to every surviving engine once they
+report `unhealthy`. Include the original rank IDs in `removed_dp_ranks`. If the
+removed rank hosted the DP store, also provide a reachable surviving
+`dp_master_ip` and a free `dp_store_port`.
 
-### Removing a failed DP rank
-
-Stop routing requests to the failed engine. Once survivors report `unhealthy`,
-send `scale_down` to **every surviving engine** with identical parameters and a
-shared new `request_id`. Do not send recovery to a `dead` engine: its workers
-cannot recover in place. Rank IDs refer to the original DP topology.
-
-This example removes original DP rank 0 from a three-engine deployment. When
-removing the store master, choose a reachable surviving master's address and a
-free port for the replacement DP store; use the same values on every survivor.
-
-```bash
-round_id=$(uuidgen)
-for engine in http://engine-1:8000 http://engine-2:8000; do
-  curl --fail-with-body "$engine/v1/fault_tolerance/apply" \
-    -H 'Content-Type: application/json' \
-    -d "{\"instruction\":\"scale_down\",\"request_id\":\"$round_id\",\"params\":{\"removed_dp_ranks\":[0],\"dp_master_ip\":\"engine-1\",\"dp_store_port\":29550}}"
-done
-```
-
-Poll `GET /v1/fault_tolerance/status` on every survivor and inspect its `engines`
-entries for recovery completion or failure. Resume routing only when all
-survivors report `healthy`; acceptance alone is insufficient. Configure
-`--fault-tolerance-config '{"engine_recovery_timeout_sec": 120}'` to allow enough
-time for orchestration and recovery. Scale-down masks removed ranks and fixes
-expert placement; EPLB rebalancing remains suppressed afterward. It does not
-restart removed engines or restore the original capacity.
+Scale-down restores service with fewer ranks; it does not restart the removed
+engines or restore their capacity. The previous `/fault_tolerance/apply`
+endpoint is no longer registered.
