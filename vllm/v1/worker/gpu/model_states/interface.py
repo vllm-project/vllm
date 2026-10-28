@@ -140,8 +140,10 @@ class ModelState(ABC):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture the CUDA graphs this state runs inside the model's forward."""
+        """Capture the CUDA graphs this state runs inside the model's forward,
+        on ``stream``: the model graphs' capture stream."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
