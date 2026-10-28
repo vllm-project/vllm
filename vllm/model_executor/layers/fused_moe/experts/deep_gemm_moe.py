@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -13,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
+    deepgemm_ep_ordered_unpermute_and_reduce,
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
 )
@@ -153,6 +157,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         assert not quant_config.per_out_ch_quant
 
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+
         # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
         # FP8 (silu) configs leave these None, reproducing plain silu.
         self.gemm1_alpha = (
@@ -444,6 +449,20 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         )
 
 
+def _fp4_bi_parallel_supported(parallel: FusedMoEParallelConfig) -> bool:
+    return (
+        parallel.tp_size == parallel.pcp_size == parallel.sp_size == 1
+        and not parallel.enable_eplb
+        and (
+            parallel.ep_size == parallel.dp_size == 1
+            or (
+                parallel.dp_size == parallel.ep_size
+                and parallel.use_ag_rs_all2all_kernels
+            )
+        )
+    )
+
+
 class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation for FP4 weights.
 
@@ -466,6 +485,38 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
+        if envs.VLLM_BATCH_INVARIANT:
+            parallel = moe_config.moe_parallel_config
+            if not current_platform.is_device_capability_family(100):
+                raise RuntimeError("MXFP4 BI execution requires SM100-family GPUs")
+            if not _fp4_bi_parallel_supported(parallel):
+                raise RuntimeError(
+                    "MXFP4 BI requires TP=PCP=SP=1 and DP=EP with AG/RS, without EPLB"
+                )
+            if (
+                moe_config.activation != MoEActivation.SILU
+                or moe_config.in_dtype != torch.bfloat16
+            ):
+                raise RuntimeError("MXFP4 BI execution requires BF16 SwiGLU")
+            if quant_config.w1_bias is not None or quant_config.w2_bias is not None:
+                raise RuntimeError("MXFP4 BI execution does not support expert biases")
+            if quant_config.gemm1_alpha not in (
+                None,
+                1.0,
+            ) or quant_config.gemm1_beta not in (None, 0.0):
+                raise RuntimeError("MXFP4 BI execution requires plain SwiGLU")
+            if DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0:
+                raise RuntimeError("MXFP4 BI execution requires UE8M0 scales")
+            if any(
+                dim % self._ACT_BLOCK_K
+                for dim in (moe_config.hidden_dim, moe_config.intermediate_size)
+            ):
+                raise RuntimeError("MXFP4 BI K dimensions must be divisible by 128")
+            if self.gemm1_clamp_limit is not None and (
+                not math.isfinite(self.gemm1_clamp_limit) or self.gemm1_clamp_limit <= 0
+            ):
+                raise RuntimeError("MXFP4 BI clamp must be finite and positive")
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -478,6 +529,10 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability_family(120)
         )
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return current_platform.is_device_capability_family(100)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -495,6 +550,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        if envs.VLLM_BATCH_INVARIANT:
+            return activation == MoEActivation.SILU
         # SILU has fused gate+mul+quant kernels; SWIGLUSTEP/SITU take the
         # general path (activation applied via self.activation, which forwards
         # the situ betas, then FP8 requant).
@@ -506,6 +563,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        if envs.VLLM_BATCH_INVARIANT:
+            return _fp4_bi_parallel_supported(moe_parallel_config)
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
@@ -626,6 +685,12 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         # packed FP4 (E, N, K//2).
         K = a1q.size(1)
 
+        if envs.VLLM_BATCH_INVARIANT:
+            if apply_router_weight_on_input or topk_weights.dtype != torch.float32:
+                raise RuntimeError("MXFP4 BI requires FP32 scores after FC2")
+            if activation != MoEActivation.SILU or output.dtype != torch.bfloat16:
+                raise RuntimeError("MXFP4 BI requires BF16 SwiGLU output")
+
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
@@ -641,7 +706,11 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         a1q_perm = _resize_cache(
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
         )
-        use_psum_layout = current_platform.is_device_capability_family(100)
+        # The BI permutation emits per-row expert ids, not prefix sums.
+        use_psum_layout = (
+            current_platform.is_device_capability_family(100)
+            and not envs.VLLM_BATCH_INVARIANT
+        )
         a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
             aq=a1q,
             aq_scale=a1q_scale,
@@ -660,6 +729,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             # FC1: FP8 activations x FP4 weights
             # DeepGEMM 2.4.2 requires FP4-packed weights as int8 (kPackedFP4).
             mm1_out = _resize_cache(workspace2, (M_sum, N))
+            if envs.VLLM_BATCH_INVARIANT:
+                mm1_out.zero_()
             m_grouped_fp8_fp4_gemm_nt_contiguous(
                 (a1q, a1q_scale),
                 (w1.view(torch.int8), self.w1_scale),
@@ -698,11 +769,37 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        deepgemm_unpermute_and_reduce(
-            a=mm2_out,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            inv_perm=inv_perm,
-            expert_map=expert_map,
-            output=output,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            if self.moe_config.ep_size > 1:
+                if expert_map is None:
+                    raise RuntimeError("MXFP4 BI EP requires an ownership map")
+                deepgemm_ep_ordered_unpermute_and_reduce(
+                    mm2_out, topk_ids, topk_weights, inv_perm, expert_map, output
+                )
+            else:
+                from vllm.model_executor.kernels.batch_invariant import (
+                    gather_expert_slots,
+                    ordered_topk_combine,
+                )
+
+                identity = torch.arange(
+                    local_num_experts, device=output.device, dtype=torch.int32
+                )
+                slots = gather_expert_slots(mm2_out, topk_ids, inv_perm, identity)
+                ordered_topk_combine(
+                    slots,
+                    topk_weights,
+                    output.dtype,
+                    routes=topk_ids,
+                    global_num_experts=local_num_experts,
+                    output=output,
+                )
+        else:
+            deepgemm_unpermute_and_reduce(
+                a=mm2_out,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                inv_perm=inv_perm,
+                expert_map=expert_map,
+                output=output,
+            )

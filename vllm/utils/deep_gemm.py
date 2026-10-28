@@ -444,7 +444,9 @@ def get_theoretical_mk_alignment_for_contiguous_layout(
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(
             expected_m, num_groups
         )
-    except TypeError:
+    except (TypeError, RuntimeError):
+        # Older DeepGEMM builds take per-group expected_m only (the torch op
+        # binding raises RuntimeError rather than TypeError on extra args).
         per_group_m = None if expected_m is None else cdiv(expected_m, num_groups)
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(per_group_m)
 
