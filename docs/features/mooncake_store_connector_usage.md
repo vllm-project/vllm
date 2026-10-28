@@ -276,16 +276,12 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ### Arrival-time lookup with MultiConnector
 
-Arrival-time lookup also works when MooncakeStoreConnector is a child of
-MultiConnector, including nested MultiConnector configurations. Set
-`lookup_async` and `lookup_prefetch_limit` in each Mooncake child's
-`kv_connector_extra_config`. Each child has its own in-flight limit and TTL;
-limits are not shared across children. The existing first-hit selection policy
-and GPU allocation/load path are unchanged. Earlier queries may do extra work
-for requests that later abort or hit fully in local GPU cache.
-Rejected requests and discarded streaming updates cancel lookup work that has
-not started. An RPC already in progress may finish; engine shutdown interrupts
-pending replies and closes the scheduler-side lookup client.
+For flat or nested MultiConnector, set `lookup_async` and
+`lookup_prefetch_limit` in each Mooncake child's `kv_connector_extra_config`.
+Each child has its own limit and TTL; selection still uses the first hit.
+Early queries can be wasted on later aborts or full local hits. Rejected requests
+and discarded streaming updates cancel queued queries; running RPCs may finish.
+Shutdown interrupts pending replies and closes scheduler lookup clients.
 
 ### kv_connector_extra_config
 

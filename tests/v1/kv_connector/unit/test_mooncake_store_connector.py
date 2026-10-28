@@ -1083,6 +1083,21 @@ def test_multi_store_shutdown_closes_scheduler_clients():
             assert store.connector_scheduler.client.prefetch(48, []) is None
 
 
+@pytest.mark.parametrize("cache_limit", [0, 16])
+def test_preschedule_respects_request_cache_read_limit(cache_limit):
+    with _multi_store_lookup() as (connector, _, sockets, *_):
+        request = Request(
+            "bounded",
+            [1] * 48,
+            SamplingParams(prompt_logprobs=1, prompt_logprob_start=cache_limit),
+            None,
+        )
+        request.block_hashes = [b"h0", b"h1", b"h2"]
+        assert request.skip_reading_external_kv
+        assert connector.on_preschedule_request(request) is None
+        assert all(sock.send_multipart.call_count == 0 for sock in sockets)
+
+
 @pytest.mark.parametrize("limit", [None, 0, 1])
 def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
     client, sock = _make_lookup_client(

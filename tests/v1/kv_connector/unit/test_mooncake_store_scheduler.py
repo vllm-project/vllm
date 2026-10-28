@@ -958,7 +958,7 @@ def _make_admission_request(request_id="req-0"):
         request_id=request_id,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
-        skip_reading_prefix_cache=False,
+        skip_reading_external_kv=False,
         kv_preschedule_handle=None,
     )
 
@@ -976,7 +976,7 @@ def test_admission_lookup_skips_ineligible_requests(option):
     elif option == "disabled":
         scheduler.enable_lookup = False
     elif option == "skip_cache":
-        request.skip_reading_prefix_cache = True
+        request.skip_reading_external_kv = True
     elif option == "short":
         request.num_tokens = 12
     else:

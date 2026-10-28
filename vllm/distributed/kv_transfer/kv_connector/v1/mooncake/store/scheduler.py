@@ -220,7 +220,7 @@ class MooncakeStoreScheduler:
         if (
             not self.enable_lookup
             or not self.lookup_async
-            or request.skip_reading_prefix_cache
+            or request.skip_reading_external_kv
             or request.num_tokens < self._lookup_align()
             or not request.block_hashes
         ):
