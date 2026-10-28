@@ -267,9 +267,9 @@ def test_chunks_served_to_a_peer_leave_the_primary_tier_first():
 
     reader_ctx = ReqContext(req_id="reader")
     manager.on_new_request(reader_ctx)
-    manager.prepare_load(keys[:1], reader_ctx)
+    manager.prepare_load(keys[1:2], reader_ctx)
 
-    # A peer reads chunks 1 and 2; chunk 1 has a local reader and stays put.
+    # A peer reads chunks 1 and 2; chunk 2 has a local reader and stays put.
     parent = manager._tier_parents[tier]
     serve_ctx = ReqContext(req_id="peer")
     parent.on_new_request(serve_ctx)
@@ -277,12 +277,12 @@ def test_chunks_served_to_a_peer_leave_the_primary_tier_first():
     job = parent.create_store_job(keys[:2], serve_ctx)
     assert parent.demote(job.keys) == 1
     parent.on_request_finished(serve_ctx)
-    manager.complete_load(keys[:1], reader_ctx)
+    manager.complete_load(keys[1:2], reader_ctx)
 
-    # The serve job still holds chunk 2, so it can't go yet.
+    # The serve job still holds chunk 1, so it can't go yet.
     assert evicted_by_storing(4) == to_keys([3])
     finish_tier_jobs([job])
-    assert evicted_by_storing(5) == to_keys([2])
+    assert evicted_by_storing(5) == to_keys([1])  # LRU alone would evict 2
 
 
 class TestExampleSecondaryTierManager:

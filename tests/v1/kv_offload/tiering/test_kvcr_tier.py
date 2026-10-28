@@ -482,6 +482,7 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     assert tier.lookup(OffloadKey(b"k0"), ReqContext(req_id="req")) is expected
 
 
+@pytest.mark.parametrize("demote_served_chunks", [False, True])
 @pytest.mark.parametrize(
     ("job_keys", "chunk_ids", "success"),
     [
@@ -493,11 +494,11 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
 )
 def test_kvcr_tier_serves_primary_pin_request(
-    monkeypatch, job_keys, chunk_ids, success
+    monkeypatch, job_keys, chunk_ids, success, demote_served_chunks
 ):
     """Validate pin jobs and hold accepted hits until KVCR releases the pin."""
     kvcr = RecordingKVCR()
-    tier = _make_tier(monkeypatch, kvcr)
+    tier = _make_tier(monkeypatch, kvcr, demote_served_chunks=demote_served_chunks)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
     lifecycle: list[str] = []
@@ -519,6 +520,10 @@ def test_kvcr_tier_serves_primary_pin_request(
                 req_context=req_context,
             )
 
+        def demote(self, served_keys):
+            lifecycle.append(f"demote:{len(served_keys)}")
+            return len(served_keys)
+
         def on_request_finished(self, req_context):
             lifecycle.append("finished")
 
@@ -530,7 +535,8 @@ def test_kvcr_tier_serves_primary_pin_request(
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request
-    assert lifecycle == ["new", "finished"]
+    demoted = ["demote:2"] if success and demote_served_chunks else []
+    assert lifecycle == ["new", *demoted, "finished"]
     if not success:
         assert result is None
         assert list(tier.get_finished_jobs()) == [JobResult(11, False)]
@@ -557,57 +563,6 @@ def test_kvcr_tier_serves_primary_pin_request(
 
     assert polls == 1
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
-
-
-@pytest.mark.parametrize("demote_served_chunks", [False, True])
-def test_kvcr_tier_demotes_served_chunks_when_enabled(
-    monkeypatch, demote_served_chunks
-):
-    """Demote the primary copies of served chunks only when configured to."""
-    kvcr = RecordingKVCR()
-    tier = _make_tier(monkeypatch, kvcr, demote_served_chunks=demote_served_chunks)
-    keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
-    hit_keys = (keys[0], keys[2])
-    calls: list[tuple[str, tuple[OffloadKey, ...]]] = []
-
-    class Parent:
-        def on_new_request(self, req_context):
-            calls.append(("new", ()))
-            return SimpleNamespace()
-
-        def lookup(self, key, req_context):
-            return LookupResult.HIT if key in hit_keys else LookupResult.MISS
-
-        def create_store_job(self, requested_keys, req_context):
-            calls.append(("pin", tuple(requested_keys)))
-            return TransferJob(
-                job_id=7,
-                keys=requested_keys,
-                chunk_ids=np.arange(len(requested_keys)),
-                is_promotion=False,
-                req_context=req_context,
-            )
-
-        def demote(self, served_keys):
-            calls.append(("demote", tuple(served_keys)))
-            return len(served_keys)
-
-        def on_request_finished(self, req_context):
-            calls.append(("finished", ()))
-
-    bindings = kvcr.constructor_bindings
-    assert bindings is not None
-    bindings.request_pin(keys)
-    tier.serve_external_requests(Parent())
-
-    [(_, result)] = bindings.poll_pin_results()
-    assert result is not None
-    served = tuple(OffloadKey(bytes(key)) for key in hit_keys)
-    expected = [("new", ()), ("pin", served)]
-    if demote_served_chunks:
-        expected.append(("demote", served))
-    expected.append(("finished", ()))
-    assert calls == expected
 
 
 def test_kvcr_telemetry_is_opt_in_and_namespaced_at_vllm_boundary(monkeypatch):
