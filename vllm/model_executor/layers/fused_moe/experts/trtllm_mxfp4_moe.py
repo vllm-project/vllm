@@ -285,9 +285,14 @@ class TrtLlmMxfp4ExpertsMonolithic(
 class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
     """Modular base version of the MXFP4 TRTLLM kernel (just the experts).
     Wraps flashinfer.trtllm_fp4_block_scale_routed_moe().
-    The subclasses for this are split because only the mxfp4+mxfp8 experts support
-    PaddedStandard format.
+
+    The TRTLLM-Gen kernel skips padding rows (topk_ids == -1), so every
+    subclass consumes the padded contiguous layout DeepEP v2 produces.
     """
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def __init__(
         self,
@@ -500,7 +505,3 @@ class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
             (kMxfp4Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.PaddedStandard
