@@ -133,6 +133,25 @@ def test_decode_and_prefill_take_the_triton_route(latent: int):
         )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_other_dtypes_forward_skip_scale_to_the_base_update(
+    monkeypatch, kv_cache_dtype
+):
+    """MLAAttention.update_kv_cache passes skip_scale as a 7th positional arg."""
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
+
+    captured = []
+    monkeypatch.setattr(
+        sparse_mod.SparseMLACommonImpl,
+        "do_kv_cache_update",
+        lambda self, *args: captured.append(args),
+    )
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    args = (None, None, None, None, kv_cache_dtype, None, True)
+    impl.do_kv_cache_update(*args)
+    assert captured == [args]
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="_forward_mla imports vllm.platforms.rocm, which queries the GPU",

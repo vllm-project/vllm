@@ -896,10 +896,17 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         if kv_cache_dtype != "mxfp4_mla":
             return super().do_kv_cache_update(
-                kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+                skip_scale,
             )
         if kv_cache.numel() == 0:
             return
