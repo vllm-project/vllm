@@ -279,7 +279,343 @@ strategy_overrides:
         - "--enable-sleep-mode"
       env: {}
 
+# Tuned presets (InferenceX AgentX lanes); see SCHEMA.md "presets".
 presets:
+  b200_agentx_tp:
+    label: "AgentX TP8"
+    hardware: b200
+    strategy: single_node_tp
+    tp: 8
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 on one 8-GPU B200 node with DSpark (six draft tokens), FlashInfer sparse MLA and a fixed 50 GiB KV cache per GPU; no host KV offload."
+    source: { label: "InferenceX #4554", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4554", key: "dsv4-fp4-b200-vllm-agentic-mtp", revision: 2c044c3 }
+    image: "vllm/vllm-openai:nightly-8e2beaa3bff595577a069d49d96bde9074294ec2@sha256:3207cb99c0f59b92f7d47a74da8c6eb5467565d811a4f8d9df51df5188f59c70"
+    select:
+      features: { spec_decoding: dspark }
+    # The lane's FlashInfer sparse MLA attention config replaces the builder's
+    # standalone MXFP4 indexer flag; DSpark drafts six tokens, not seven; the pinned
+    # image predates --disable-flashinfer-autotune, so keep the --no-enable form.
+    remove_args: ["--attention_config.indexer_kv_dtype=mxfp4", "--disable-flashinfer-autotune"]
+    args:
+      - "--no-enable-flashinfer-autotune"
+      - "--max-model-len"
+      - "1048576"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--numa-bind"
+      - "--enable-cumem-allocator"
+      - "--disable-uvicorn-access-log"
+      - "--no-disable-hybrid-kv-cache-manager"
+      - "--attention-config"
+      - '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 6 }
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_FLOAT32_MATMUL_PRECISION: "high"
+      TORCH_CUDA_ARCH_LIST: "10.0"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_RPC_TIMEOUT: "600000"
+    # --max-num-seqs equals the concurrency. Graphs capture every decode batch of up to
+    # that many sequences (target plus six drafts each) and mixed batches of 100-500 tokens.
+    points:
+      c1:
+        label: "1"
+        concurrency: 1
+        args:
+          - "--max-num-seqs"
+          - "1"
+          - "--kv-cache-memory-bytes"
+          - "53687091200"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[7,100,200,300,400,500]}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      c4:
+        label: "4 (low latency)"
+        concurrency: 4
+        image: "vllm/vllm-openai@sha256:d428631bb917a33d22308265d1b8be91522f862bf9fd133bee62dde3313664ae"
+        args:
+          - "--max-num-seqs"
+          - "4"
+          - "--kv-cache-memory-bytes"
+          - "42949672960"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[7,14,21,28,100,200,300,400,500,640,800,1024,1280,1600,2048,2560,3200,4096,5120,6400,8192,10240,12800,16384],"max_cudagraph_capture_size":16384}'
+          - "--sparse-indexer-topk-backend"
+          - "deep_select"
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      c6:
+        label: "6"
+        concurrency: 6
+        args:
+          - "--max-num-seqs"
+          - "6"
+          - "--kv-cache-memory-bytes"
+          - "53687091200"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[7,14,21,28,35,42,100,200,300,400,500]}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      c10:
+        label: "10"
+        concurrency: 10
+        image: "vllm/vllm-openai@sha256:d428631bb917a33d22308265d1b8be91522f862bf9fd133bee62dde3313664ae"
+        args:
+          - "--max-num-seqs"
+          - "10"
+          - "--kv-cache-memory-bytes"
+          - "53687091200"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,100,200,300,400,500]}'
+          - "--prefix-cache-retention-interval"
+          - "32768"
+          - "--prefill-schedule-interval"
+          - "64"
+        json_args:
+          "--attention-config": { indexer_tp_shard_min_rows: 4096 }
+      c14:
+        label: "14"
+        concurrency: 14
+        args:
+          - "--max-num-seqs"
+          - "14"
+          - "--kv-cache-memory-bytes"
+          - "53687091200"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,100,200,300,400,500]}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+    runbook: |
+      The TP8 points of the B200 AgentX lane (`dsv4-fp4-b200-vllm-agentic-mtp` and its low-concurrency
+      companion, [SemiAnalysisAI/InferenceX#4554](https://github.com/SemiAnalysisAI/InferenceX/pull/4554)) serve the
+      0813 checkpoint with DSpark (six draft tokens) as one aggregated vLLM worker on one 8-GPU B200 node: TP8, no
+      expert parallelism, no host KV offload. Each GPU holds a fixed 50 GiB KV cache and `--max-num-seqs` equals the
+      concurrency.
+
+      Concurrency 4 is the low-latency variant: a 40 GiB KV cache, the `deep_select` sparse indexer top-k backend and
+      graph capture up to 16384 tokens. Concurrency 10 sets `--prefix-cache-retention-interval 32768` and
+      `--prefill-schedule-interval 64`, shards the indexer at 4096 rows (`indexer_tp_shard_min_rows`) and leaves
+      `VLLM_DSV4_MEGA_FP8_COMBINE` unset. Concurrency 4 and 10 were measured on a second pinned image, shown on
+      those points.
+
+      Left out of the command: the lane also exported `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`, which vLLM removed in
+      v0.30.0 ([vllm#55353](https://github.com/vllm-project/vllm/pull/55353)) in favour of the flag above, so it had
+      no effect on the image it ran on; and `--served-model-name`, which the builder replaces with the checkpoint ID.
+      The throughput points in InferenceX swap block verification for synthetic rejection at a committed
+      acceptance length so every point is measured at the same acceptance rate; the command does not set it.
+
+  b200_agentx_dep:
+    label: "AgentX DEP"
+    hardware: b200
+    strategy: single_node_dep
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Data-parallel ranks with expert parallelism and a Simple CPU KV tier behind a consistent-hash vLLM Router: DEP8 for concurrency 64 to 192, TP4 x DP2 at 32 and TP2 x DP4 at 48 and 64."
+    source: { label: "InferenceX #4554", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4554", key: "dsv4-fp4-b200-vllm-agentic-mtp", revision: 2c044c3 }
+    image: "vllm/vllm-openai:nightly-8e2beaa3bff595577a069d49d96bde9074294ec2@sha256:3207cb99c0f59b92f7d47a74da8c6eb5467565d811a4f8d9df51df5188f59c70"
+    select:
+      kv_offload: simple
+      features: { spec_decoding: dspark }
+    remove_args: ["--attention_config.indexer_kv_dtype=mxfp4"]
+    args:
+      - "--max-model-len"
+      - "1048576"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--numa-bind"
+      - "--enable-cumem-allocator"
+      - "--disable-uvicorn-access-log"
+      - "--enable-ep-weight-filter"
+      - "--no-disable-hybrid-kv-cache-manager"
+      - "--no-enable-flashinfer-autotune"
+      - "--prefill-schedule-interval"
+      - "16"
+      - "--long-prefill-token-threshold"
+      - "512"
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--attention-config"
+      - '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 6 }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 241500000000, enable_cross_layers_blocks: "true", lazy_offload: false } }
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_FLOAT32_MATMUL_PRECISION: "high"
+      TORCH_CUDA_ARCH_LIST: "10.0"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_RPC_TIMEOUT: "600000"
+      PYTORCH_ALLOC_CONF: "expandable_segments:True"
+      PYTHONHASHSEED: "42"
+    # --max-num-seqs is per DP rank; --max-num-batched-tokens is an 8192-token prefill budget
+    # plus seven verification slots per sequence; graphs capture decode batches of 7 to 7 x seqs.
+    points:
+      dep8_c64:
+        label: "64 (DEP8)"
+        concurrency: 64
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "8"
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8304"
+          - "--kv-cache-memory-bytes"
+          - "37580963840"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112],"mode":0}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      dep8_c96:
+        label: "96 (DEP8)"
+        concurrency: 96
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "8"
+          - "--max-num-seqs"
+          - "24"
+          - "--max-num-batched-tokens"
+          - "8360"
+          - "--kv-cache-memory-bytes"
+          - "33285996544"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168],"mode":0}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      dep8_c128:
+        label: "128 (DEP8)"
+        concurrency: 128
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "8"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "8416"
+          - "--kv-cache-memory-bytes"
+          - "33285996544"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224],"mode":0}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      dep8_c160:
+        label: "160 (DEP8)"
+        concurrency: 160
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "8"
+          - "--max-num-seqs"
+          - "40"
+          - "--max-num-batched-tokens"
+          - "8472"
+          - "--kv-cache-memory-bytes"
+          - "32212254720"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224,231,238,245,252,259,266,273,280],"mode":0}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      dep8_c192:
+        label: "192 (DEP8)"
+        concurrency: 192
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "8"
+          - "--max-num-seqs"
+          - "48"
+          - "--max-num-batched-tokens"
+          - "8528"
+          - "--kv-cache-memory-bytes"
+          - "32212254720"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224,231,238,245,252,259,266,273,280,287,294,301,308,315,322,329,336],"mode":0}'
+        env:
+          VLLM_DSV4_MEGA_FP8_COMBINE: "1"
+      tp4dp2_c32:
+        label: "32 (TP4 x DP2)"
+        concurrency: 32
+        args:
+          - "--tensor-parallel-size"
+          - "4"
+          - "--data-parallel-size"
+          - "2"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "8416"
+          - "--kv-cache-memory-bytes"
+          - "51539607552"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224],"mode":0}'
+      tp2dp4_c48:
+        label: "48 (TP2 x DP4)"
+        concurrency: 48
+        image: "vllm/vllm-openai@sha256:d428631bb917a33d22308265d1b8be91522f862bf9fd133bee62dde3313664ae"
+        args:
+          - "--tensor-parallel-size"
+          - "2"
+          - "--data-parallel-size"
+          - "4"
+          - "--max-num-seqs"
+          - "24"
+          - "--max-num-batched-tokens"
+          - "8360"
+          - "--kv-cache-memory-bytes"
+          - "37580963840"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168],"mode":0}'
+      tp2dp4_c64:
+        label: "64 (TP2 x DP4)"
+        concurrency: 64
+        image: "vllm/vllm-openai@sha256:d428631bb917a33d22308265d1b8be91522f862bf9fd133bee62dde3313664ae"
+        args:
+          - "--tensor-parallel-size"
+          - "2"
+          - "--data-parallel-size"
+          - "4"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "8416"
+          - "--kv-cache-memory-bytes"
+          - "37580963840"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224],"mode":0}'
+    runbook: |
+      The data-parallel points of the B200 AgentX lane (`dsv4-fp4-b200-vllm-agentic-mtp` and its low-concurrency
+      companion, [SemiAnalysisAI/InferenceX#4554](https://github.com/SemiAnalysisAI/InferenceX/pull/4554)) serve the
+      0813 checkpoint with DSpark (six draft tokens) as one engine on one 8-GPU B200 node: DEP8 (TP1 x DP8) for
+      concurrency 64 to 192, TP4 x DP2 at 32 and TP2 x DP4 at 48 and 64, all with expert parallelism and the Simple
+      CPU KV tier. Each rank gets 241.5 GB of host memory (1932 GB across the node), so size it to the machine.
+      `--max-num-seqs` is per DP rank, and `--max-num-batched-tokens` is an 8192-token prefill budget plus seven
+      verification slots per sequence. The TP4 x DP2 and TP2 x DP4 points leave `VLLM_DSV4_MEGA_FP8_COMBINE` unset.
+      TP2 x DP4 was measured on a second pinned image, shown on those points.
+
+      The lane fronts the server with vLLM Router 0.1.14 (`--policy consistent_hash`, `--intra-node-data-parallel-size`
+      equal to the server's DP size, as on the router tab), plus `--request-timeout-secs 14400` so long agentic
+      requests outlive the default and `--disable-retries` so a failed request is not replayed. Clients send a stable
+      per-conversation `X-Session-ID` so the router keeps a conversation on the rank that holds its prefix.
+
+      Left out of the command: `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` (removed in vLLM v0.30.0,
+      [vllm#55353](https://github.com/vllm-project/vllm/pull/55353), so it had no effect), `--served-model-name`
+      (the builder replaces it with the checkpoint ID) and the router's Prometheus port. The throughput points in
+      InferenceX swap block verification for synthetic rejection at a committed acceptance length so every point is
+      measured at the same acceptance rate; the command does not set it.
+
   mi355x_agentx_tp:
     label: "AgentX TP8 + monokernel"
     hardware: mi355x
