@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import ClassVar, cast
 
 import torch
@@ -52,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     get_kv_quant_mode,
 )
 from vllm.v1.worker.workspace import (
@@ -60,7 +62,10 @@ from vllm.v1.worker.workspace import (
 )
 
 from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
-from . import model
+from . import (
+    model,
+    mxfp4_qsa_dtype,  # noqa: F401  (registers mxfp4_qsa in workers)
+)
 from .indexer_qsa import QSAIndexer
 from .ops.mxfp4_kv import record_bytes, store_mxfp4_qsa
 
@@ -114,7 +119,8 @@ _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "octave_k3v3",
     "octave_k3v3_compact",
 )
-_QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
+# mxfp4_qsa is registered at runtime (mxfp4_qsa_dtype.py), so not a CacheDType.
+_QSA_CACHE_DTYPES: tuple[str, ...] = (
     "auto",
     "bfloat16",
     "fp8",
@@ -139,7 +145,9 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     # over this cache, so its fp8 probe does not apply (see
     # supports_combination below).
     # octave_*: packed 3-bit slots handled by the Octave kernels.
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = list(_QSA_CACHE_DTYPES)
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = cast(
+        list[CacheDType], list(_QSA_CACHE_DTYPES)
+    )
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -176,6 +184,10 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        if spec.kv_quant_mode == KVQuantMode.CUSTOM:
+            # mxfp4_qsa, the only CUSTOM dtype here: one K+V record per
+            # (token, head). The hybrid page alignment sizes the page from this.
+            return replace(spec, state_content_bytes=record_bytes(spec.head_size))
         from vllm.v1.attention.backends.rocm_octave_attn import (
             RocmOctaveAttentionBackend,
         )

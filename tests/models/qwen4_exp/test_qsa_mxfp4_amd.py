@@ -273,3 +273,93 @@ def test_sparse_attention_matches_dequantized_reference(
         q, keys, values, logical_indices, block_table, token_to_req
     )
     torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+def test_rocm_platform_registers_the_dtype_before_config_validation(monkeypatch):
+    """``--kv-cache-dtype mxfp4_qsa`` passes CacheConfig through the handler."""
+    from vllm.config.cache import CacheConfig, get_kv_cache_dtype_handler
+    from vllm.platforms.rocm import RocmPlatform
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+
+    monkeypatch.setenv("GPU_PINNED_MIN_XFER_SIZE", "0")
+    RocmPlatform.pre_register_and_update()
+
+    assert get_kv_cache_dtype_handler("mxfp4_qsa") is not None
+    assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4_qsa"] is torch.uint8
+    assert get_kv_quant_mode("mxfp4_qsa") == KVQuantMode.CUSTOM
+    assert CacheConfig(block_size=16, cache_dtype="mxfp4_qsa").cache_dtype == (
+        "mxfp4_qsa"
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["mxfp4_qsa", "auto"])
+def test_hybrid_block_size_matches_the_layer_page(monkeypatch, kv_cache_dtype):
+    """The platform sizes the hybrid block from the record the layer publishes.
+
+    The KV grouping rejects the config when the padded mamba state differs from
+    the real QSA page.
+    """
+    import contextlib
+    import types
+
+    import vllm.config.vllm as vllm_config_mod
+    import vllm.models.qwen4_exp.amd.model  # noqa: F401  (qsa's import order)
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.models.qwen4_exp.amd.qsa import (
+        Qwen4ExpQSAAttention,
+        Qwen4ExpQSAFlashAttentionBackend,
+    )
+    from vllm.platforms.interface import Platform
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+
+    num_kv_heads = 2
+    mamba_page = 1_000_003  # not a multiple of either page, so it gets padded
+    model_cls = types.SimpleNamespace(
+        get_mamba_specs_from_config=lambda _: [
+            types.SimpleNamespace(page_size_bytes=mamba_page)
+        ]
+    )
+    monkeypatch.setattr(
+        ModelRegistry, "resolve_model_cls", lambda *a, **k: (model_cls, None)
+    )
+    monkeypatch.setattr(
+        vllm_config_mod, "set_current_vllm_config", lambda _: contextlib.nullcontext()
+    )
+    backend = Qwen4ExpQSAFlashAttentionBackend
+    monkeypatch.setattr(Platform, "_find_non_ssm_backends", lambda _: [backend])
+    cache = types.SimpleNamespace(
+        cache_dtype=kv_cache_dtype,
+        block_size=16,
+        mamba_block_size=None,
+        mamba_cache_mode="none",
+        mamba_page_size_padded=None,
+        kv_cache_dtype_skip_layers=None,
+    )
+    config = types.SimpleNamespace(
+        cache_config=cache,
+        parallel_config=None,
+        model_config=types.SimpleNamespace(
+            dtype=torch.bfloat16,
+            use_mla=False,
+            architecture="HybridForTest",
+            get_num_kv_heads=lambda _: num_kv_heads,
+            get_head_size=lambda: HEAD_DIM,
+        ),
+    )
+
+    Platform._align_hybrid_block_size(config, backend)
+
+    layer = types.SimpleNamespace(
+        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_torch_dtype=(
+            torch.bfloat16
+            if kv_cache_dtype == "auto"
+            else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+        ),
+        num_kv_heads=num_kv_heads,
+        head_dim=HEAD_DIM,
+    )
+    layer_page = Qwen4ExpQSAAttention.get_kv_cache_spec(layer, config).page_size_bytes
+    assert layer_page >= mamba_page
+    assert cache.mamba_page_size_padded == layer_page
