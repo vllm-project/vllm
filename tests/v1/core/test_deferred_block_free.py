@@ -546,10 +546,9 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
 
 
-def _setup_async_load_that_must_wait(must_wait: bool):
+def _setup_async_load(defer_async_loads: bool):
     """Schedule a running request's prefill and one in-flight decode, then
-    admit a request whose KV an async connector load fills; the connector
-    reports whether that load must wait for the in-flight steps.
+    admit a request whose KV an async connector load fills.
 
     Returns (scheduler, importer, outputs, update_state_after_alloc mock).
     """
@@ -559,6 +558,7 @@ def _setup_async_load_that_must_wait(must_wait: bool):
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
     )
     scheduler.defer_block_free = True
+    scheduler.defer_async_loads = defer_async_loads
     _, out0, out1 = _setup_request_with_inflight_step(scheduler)
 
     importer = create_requests(
@@ -573,9 +573,6 @@ def _setup_async_load_that_must_wait(must_wait: bool):
             "get_num_new_matched_tokens",
             return_value=(2 * scheduler.block_size, True),
         ),
-        patch.object(
-            connector, "load_must_wait_for_in_flight_steps", return_value=must_wait
-        ),
         patch.object(connector, "update_state_after_alloc") as registered,
     ):
         out2 = scheduler.schedule()
@@ -583,14 +580,12 @@ def _setup_async_load_that_must_wait(must_wait: bool):
     return scheduler, importer, [out0, out1, out2], registered
 
 
-def test_async_load_that_must_wait_registers_after_inflight_step():
-    """An async connector load isn't ordered against the in-flight step, so a
-    load the connector says that step may conflict with is registered only
-    once the step is processed.
+def test_deferred_async_load_registers_after_inflight_step():
+    """HiSparse keeps reading a released page until the pool reuses it, and an
+    async connector load isn't ordered against the in-flight step, so the load
+    is registered only once that step is processed.
     """
-    scheduler, importer, outputs, registered = _setup_async_load_that_must_wait(
-        must_wait=True
-    )
+    scheduler, importer, outputs, registered = _setup_async_load(defer_async_loads=True)
     out0, out1, _ = outputs
     registered.assert_not_called()
 
@@ -606,18 +601,17 @@ def test_async_load_that_must_wait_registers_after_inflight_step():
     assert registered.call_args.args[0] is importer
 
 
-def test_async_load_that_need_not_wait_registers_immediately():
-    scheduler, importer, _, registered = _setup_async_load_that_must_wait(
-        must_wait=False
-    )
+def test_async_load_registers_immediately_without_deferral():
+    scheduler, importer, _, registered = _setup_async_load(defer_async_loads=False)
     registered.assert_called_once()
 
 
-def test_abort_held_async_load_frees_after_inflight_step():
-    """No load was posted for a held request, so nothing will report it done;
-    its blocks are freed once the step that may still read them is processed.
+def test_abort_deferred_async_load_frees_after_inflight_step():
+    """No load was posted for a deferred request, so nothing will report it
+    done; its blocks are freed once the step that may still read them is
+    processed.
     """
-    scheduler, importer, outputs, _ = _setup_async_load_that_must_wait(must_wait=True)
+    scheduler, importer, outputs, _ = _setup_async_load(defer_async_loads=True)
     pool = scheduler.kv_cache_manager.block_pool
     num_free_held = pool.get_num_free_blocks()
 

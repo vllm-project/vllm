@@ -448,14 +448,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         connector = self._connectors[self._requests_to_connector[request.request_id]]
         return connector.get_loaded_kv_cache_group_ids(request)
 
-    def load_must_wait_for_in_flight_steps(
-        self, request: "Request", group_ids: tuple[int, ...]
-    ) -> bool:
-        return any(
-            c.load_must_wait_for_in_flight_steps(request, group_ids)
-            for c in self._connectors
-        )
-
     def get_num_new_matched_tokens(
         self,
         request: "Request",

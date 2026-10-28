@@ -167,6 +167,7 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
+        self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
         # KVConnectorBase_V1.requires_kv_delivery.
         self.requires_kv_delivery = False
@@ -192,6 +193,12 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
+            # HiSparse keeps reading a released page until the pool reuses it,
+            # so a load into a reused page must also wait for in-flight steps.
+            self.defer_async_loads = (
+                self.defer_block_free
+                and kv_cache_config.hisparse_host_num_blocks is not None
+            )
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
 
@@ -465,7 +472,7 @@ class Scheduler(SchedulerInterface):
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
         # Request id -> (fence_seq, num_external_tokens): async KV loads started
         # once processed_step_seq >= fence_seq.
-        self.held_async_loads: dict[str, tuple[int, int]] = {}
+        self.deferred_loads: dict[str, tuple[int, int]] = {}
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -1457,17 +1464,14 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    hold_load = (
+                    defer_load = (
                         load_kv_async
+                        and self.defer_async_loads
                         and self.sched_step_seq > self.processed_step_seq
-                        and self.connector.load_must_wait_for_in_flight_steps(
-                            request,
-                            self.connector.get_loaded_kv_cache_group_ids(request),
-                        )
                     )
-                    if hold_load:
+                    if defer_load:
                         request.last_sched_seq = self.sched_step_seq
-                        self.held_async_loads[request_id] = (
+                        self.deferred_loads[request_id] = (
                             self.sched_step_seq,
                             num_external_computed_tokens,
                         )
@@ -1494,7 +1498,7 @@ class Scheduler(SchedulerInterface):
                                 )
                                 if connector_prefix_cache_hits
                                 and not preempted
-                                and not hold_load
+                                and not defer_load
                                 else None
                             ),
                         )
@@ -2274,7 +2278,7 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
             self._drain_deferred_frees()
-            self._start_held_async_loads()
+            self._drain_deferred_loads()
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -3007,9 +3011,9 @@ class Scheduler(SchedulerInterface):
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                held = self.held_async_loads.pop(request.request_id, None)
+                # A deferred load never started, so it will not report done.
                 delay_free_blocks = (
-                    held is None
+                    self.deferred_loads.pop(request.request_id, None) is None
                     and request.request_id not in self.finished_recving_kv_req_ids
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
@@ -3095,20 +3099,6 @@ class Scheduler(SchedulerInterface):
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
-    def _start_held_async_loads(self) -> None:
-        if not self.held_async_loads:
-            return
-        assert self.connector is not None
-        for request_id, (fence_seq, num_tokens) in list(self.held_async_loads.items()):
-            if fence_seq > self.processed_step_seq:
-                break
-            del self.held_async_loads[request_id]
-            self.connector.update_state_after_alloc(
-                self.requests[request_id],
-                self.kv_cache_manager.get_blocks(request_id),
-                num_tokens,
-            )
-
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
 
@@ -3123,6 +3113,19 @@ class Scheduler(SchedulerInterface):
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
             self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+
+    def _drain_deferred_loads(self) -> None:
+        """Start deferred async loads whose fence step has completed."""
+        for request_id, (fence, num_tokens) in list(self.deferred_loads.items()):
+            if fence > self.processed_step_seq:
+                break
+            del self.deferred_loads[request_id]
+            assert self.connector is not None
+            self.connector.update_state_after_alloc(
+                self.requests[request_id],
+                self.kv_cache_manager.get_blocks(request_id),
+                num_tokens,
+            )
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
