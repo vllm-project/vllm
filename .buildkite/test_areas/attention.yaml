@@ -9,7 +9,7 @@ steps:
   device: h100
   source_file_dependencies:
     - vllm/config/attention.py
-    - vllm/model_executor/layers/unlimited_ocr2.py
+    - vllm/model_executor/layers/dash_attention.py
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention

@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.unlimited_ocr2 import (
+from vllm.model_executor.layers.dash_attention import (
     dash_attention,
     page_coordinates,
     route_blocks,
@@ -110,7 +110,7 @@ def test_paged_decode_large_physical_cache_offsets(backend):
 
 
 def _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache):
-    from vllm.v1.attention.ops.unlimited_ocr2 import (
+    from vllm.v1.attention.ops.dash_attention import (
         cache_dash_prefill,
         paged_dash_decode,
     )
@@ -350,8 +350,8 @@ def test_flash_prefill_preserves_route_priors_and_gqa(backend, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("main", [False, True])
 def test_decode_rope_preserves_long_position_rounding(dtype, main):
-    from vllm.model_executor.layers.unlimited_ocr2 import page_rope
-    from vllm.v1.attention.ops.unlimited_ocr2 import decode_page_rope
+    from vllm.model_executor.layers.dash_attention import page_rope
+    from vllm.v1.attention.ops.dash_attention import decode_page_rope
 
     torch.manual_seed(81)
     coords = torch.tensor(
@@ -371,8 +371,8 @@ def test_decode_rope_preserves_long_position_rounding(dtype, main):
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(backend):
     """Chunks can end before an image, inside it, or at the instruction tail."""
-    from vllm.model_executor.layers.unlimited_ocr2 import prompt_page_positions
-    from vllm.v1.attention.ops.unlimited_ocr2 import (
+    from vllm.model_executor.layers.dash_attention import prompt_page_positions
+    from vllm.v1.attention.ops.dash_attention import (
         paged_dash_decode,
         paged_dash_prefill,
     )

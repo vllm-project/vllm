@@ -293,7 +293,7 @@ class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
     supports_mrope = True
 
     def get_mrope_input_positions(self, input_tokens, mm_features):
-        from vllm.model_executor.layers.unlimited_ocr2 import prompt_page_positions
+        from vllm.model_executor.layers.dash_attention import prompt_page_positions
 
         return prompt_page_positions(
             input_tokens, self.text_config.sparse_attention_config
@@ -327,8 +327,10 @@ class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
             )
 
         from vllm.forward_context import get_forward_context
-
-        from .unlimited_ocr2 import PAGE_POSITIONS_KEY, TOKEN_ROLES_KEY
+        from vllm.model_executor.layers.dash_attention import (
+            PAGE_POSITIONS_KEY,
+            TOKEN_ROLES_KEY,
+        )
 
         context = get_forward_context()
         if context.attn_metadata is not None and input_ids is None:

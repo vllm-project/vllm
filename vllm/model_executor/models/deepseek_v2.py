@@ -1287,9 +1287,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         if use_mha:
             attn_cls = DeepseekAttention
             if getattr(config, "unlimited_ocr2", False):
-                from .unlimited_ocr2 import UnlimitedOCR2Attention
+                from vllm.model_executor.layers.dash_attention import DASHAttention
 
-                attn_cls = UnlimitedOCR2Attention
+                attn_cls = DASHAttention
         elif model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:

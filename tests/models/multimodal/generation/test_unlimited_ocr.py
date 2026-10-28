@@ -21,7 +21,7 @@ def _dash_backends(model):
     return [
         getattr(module, "dash_backend", "TRITON_ATTN")
         for module in model.modules()
-        if type(module).__name__ == "UnlimitedOCR2Attention"
+        if type(module).__name__ == "DASHAttention"
     ]
 
 
