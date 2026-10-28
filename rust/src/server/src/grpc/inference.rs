@@ -259,6 +259,8 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             kv_transfer_params: collected.kv_transfer_params.map(Box::new),
             ec_transfer_params: collected.ec_transfer_params.map(Box::new),
             sampling_mask: collected.sampling_mask,
+            spec_decode_metrics: collected.spec_decode_metrics,
+            timestamps: collected.timestamps,
         };
 
         let outputs = convert::to_sequence_output(

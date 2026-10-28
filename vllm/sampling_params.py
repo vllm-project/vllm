@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
 import numpy as np
@@ -23,6 +23,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -354,9 +357,13 @@ class SamplingParams(
     """Token IDs to score per causal prompt row: an integer array of shape
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
-    prompt_logprob_start + i + 1, so the last prompt row is excluded."""
+    prompt_logprob_start + i + 1, so the last prompt row is excluded.
+    See docs/training/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
-    """First causal prompt row to score; defaults to the first row."""
+    """First causal prompt row to score with prompt_logprobs and
+    prompt_logprob_token_ids; defaults to the first row. Earlier prompt
+    positions get None prompt logprobs. Set skip_reading_prefix_cache=False to
+    reuse local cached rows before it."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -1031,18 +1038,21 @@ class SamplingParams(
                 )
             # In-vocab IDs fit int32, like the runner's other token ID buffers.
             self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)
-            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+
+        if self.prompt_logprob_start is not None:
+            if ids is None and self.prompt_logprobs is None:
+                raise VLLMValidationError(
+                    "prompt_logprob_start requires prompt_logprobs or "
+                    "prompt_logprob_token_ids.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
+            if self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
                 )
-        elif self.prompt_logprob_start is not None:
-            raise VLLMValidationError(
-                "prompt_logprob_start requires prompt_logprob_token_ids.",
-                parameter="prompt_logprob_start",
-                value=self.prompt_logprob_start,
-            )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""
@@ -1503,10 +1513,42 @@ class BeamSearchParams(
     ignore_eos: bool = False
     temperature: float = 0.0
     length_penalty: float = 1.0
+    """Exponent on the number of generated tokens (including a final EOS) that
+    normalizes a beam's cumulative log-probability when ranking beams, as in
+    Transformers. Values above 0 favor longer beams, below 0 shorter ones."""
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True
     watermarking: bool | None = None
+    allowed_token_ids: list[int] | None = None
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+
+    def configure_logprobs(
+        self, sampling_params: SamplingParams, config: "VllmConfig"
+    ) -> None:
+        ids = self.allowed_token_ids
+        if ids is None:
+            return
+        if not ids:
+            raise ValueError("Beam search allowed_token_ids must not be empty")
+        if self.structured_outputs is not None:
+            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            raise ValueError(
+                "Beam allowlists with structured outputs are not supported"
+            )
+        if config.speculative_config is not None:
+            # Rejection sampling does not yet fully support exact-ID logprobs.
+            raise ValueError(
+                "Beam allowlists with speculative decoding are not supported"
+            )
+        if config.model_config.is_diffusion:
+            # The diffusion sampler does not consume logprob_token_ids.
+            raise ValueError("Beam allowlists with diffusion models are not supported")
+        if not config.use_v2_model_runner:
+            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
+            raise ValueError("Beam allowlists require the V2 model runner")
+        # Score the original distribution without applying a sampling mask.
+        sampling_params.logprobs = None
+        sampling_params.logprob_token_ids = ids
