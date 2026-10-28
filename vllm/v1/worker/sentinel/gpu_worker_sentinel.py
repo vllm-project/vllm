@@ -26,6 +26,7 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.utils.network_utils import get_ip
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.sentinel.eplb_redistribute import (
@@ -178,11 +179,17 @@ class WorkerSentinel:
             tp_group = get_tp_group()
             # Pipeline-stage recovery ports: each stage owns a distinct TP group.
             pp_rank = get_pp_group().rank_in_group
+            # Rendezvous on the TP leader host: later pipeline stages can live
+            # on a different node from the deployment-wide master address.
+            host_key = f"ft_tp_host_{round_key}_{dp_group_rank}_{pp_rank}"
+            if tp_group.rank_in_group == 0:
+                store.set(host_key, get_ip())
+            tp_host = store.get(host_key).decode()
             _reinit_cpu_group(
                 tp_group,
                 store,
                 f"ft_tp_port_{round_key}_{dp_group_rank}_{pp_rank}",
-                self.worker.parallel_config.master_addr,
+                tp_host,
                 tp_group.rank_in_group,
                 tp_group.world_size,
                 timeout=self.worker.parallel_config.cpu_distributed_timeout,

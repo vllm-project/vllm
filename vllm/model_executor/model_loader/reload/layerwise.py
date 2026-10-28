@@ -277,7 +277,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
-        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
+        elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
