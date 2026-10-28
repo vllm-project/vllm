@@ -54,6 +54,7 @@ class UniProcExecutor(Executor):
         """Initialize the worker and load the model."""
         kv_config = self.vllm_config.kv_transfer_config
         self.early_kv_recv = bool(kv_config and kv_config.enable_early_recv)
+        self.is_failed = False
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
@@ -152,13 +153,17 @@ class UniProcExecutor(Executor):
             return None
         # The worker runs on this thread: poll its connector right before
         # schedule().
-        with torch.inference_mode():
-            return get_kv_transfer_group().poll_finished_recving()
+        try:
+            with torch.inference_mode():
+                return get_kv_transfer_group().poll_finished_recving()
+        except Exception:
+            # Match mp: partial receive post-processing cannot be retried.
+            self.is_failed = True
+            raise
 
     def check_health(self) -> None:
-        # UniProcExecutor will always be healthy as long as
-        # it's running.
-        return
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:
