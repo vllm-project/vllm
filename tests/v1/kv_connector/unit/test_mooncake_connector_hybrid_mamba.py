@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import msgspec
+import numpy as np
 import pytest
 import torch
 
@@ -311,7 +312,12 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_uses_non_overlapping_physical_pages():
+@pytest.mark.parametrize(
+    "block_offsets",
+    [(0,), (1, 0), (2, 1, 0, 3, 4)],
+    ids=["single", "descending", "descending-prefix-ascending-tail"],
+)
+async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
@@ -373,11 +379,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
 
     local_logical_block = 2
     remote_logical_block = 5
+    num_kernel_blocks = len(block_offsets) * ratio
     transfer_id = "xfer-physical-attention-pages"
     send_meta = SendBlockMeta(
         p_req_id="p-physical-attention-pages",
         transfer_id=transfer_id,
-        local_block_ids=[[local_logical_block], []],
+        local_block_ids=[
+            [local_logical_block + offset for offset in block_offsets],
+            [],
+        ],
         ready=asyncio.Event(),
     )
     xfer_meta = MooncakeXferMetadata(
@@ -388,7 +398,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         req_blocks={
             "d-physical-attention-pages": (
                 transfer_id,
-                [[remote_logical_block], []],
+                [[remote_logical_block + offset for offset in block_offsets], []],
             )
         },
         kv_caches_base_addr=[],
@@ -417,16 +427,14 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     assert dst_ptrs == [
         remote_base_addr + remote_logical_block * ratio * physical_page_bytes
     ]
-    assert lengths == [ratio * physical_page_bytes]
+    assert lengths == [num_kernel_blocks * physical_page_bytes]
 
     def split_contiguous_blocks(src_ids, dst_ids):
-        return [[block_id] for block_id in src_ids], [
-            [block_id] for block_id in dst_ids
-        ]
+        return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
 
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-        "mooncake_connector.group_concurrent_contiguous",
+        "mooncake_connector._contiguous_runs",
         side_effect=split_contiguous_blocks,
     ):
         (
@@ -445,17 +453,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     expected_src_ptrs = [
         fa_cache.data_ptr()
         + (local_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     expected_dst_ptrs = [
         remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     assert err_reqs == []
     assert err_msg is None
     assert src_ptrs == expected_src_ptrs
     assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * ratio
+    assert lengths == [physical_page_bytes] * num_kernel_blocks
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])

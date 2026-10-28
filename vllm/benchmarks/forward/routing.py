@@ -59,6 +59,8 @@ def _moe_layers(model: torch.nn.Module) -> list[tuple[torch.nn.Module, GateLinea
     layers: dict[GateLinear, torch.nn.Module] = {}
     for module in model.modules():
         gate = getattr(module, "gate", None)
+        if not isinstance(gate, GateLinear):
+            gate = getattr(module, "router", None)
         if not isinstance(gate, GateLinear) or gate in layers:
             continue
         if _top_k(module) is not None:
@@ -121,6 +123,8 @@ class BalancedRouting:
             bias = getattr(gate, "e_score_correction_bias", None)
             if bias is None:
                 bias = getattr(module, "e_score_correction_bias", None)
+            if bias is None:
+                bias = getattr(module, "expert_bias", None)
             if isinstance(bias, torch.Tensor):
                 self._biases.append((bias, bias.detach().clone()))
                 bias.data.zero_()
@@ -205,10 +209,15 @@ def install_routing(
         return mode, None
     parallel = runner.parallel_config
     ep_size = (
-        parallel.data_parallel_size * parallel.tensor_parallel_size
+        parallel.data_parallel_size
+        * parallel.tensor_parallel_size
+        * parallel.prefill_context_parallel_size
         if parallel.enable_expert_parallel
         else 1
     )
+    # Without EP, MoE gathers PCP rows, including replicated decode queries.
+    if not parallel.enable_expert_parallel:
+        num_tokens *= parallel.prefill_context_parallel_size
     try:
         routing = BalancedRouting(
             runner.model,
