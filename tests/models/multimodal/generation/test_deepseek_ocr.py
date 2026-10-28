@@ -21,7 +21,6 @@ from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
 
 
 class TestDeepseekOCREncodeLocalFeaturesGuard:
-
     def test_ocr2_empty_patches_returns_none(self):
         """Zero-element tensor → skip local encoding (non-tiled image)."""
         empty = torch.empty(0, 3, 224, 224)
