@@ -94,28 +94,12 @@ class ModernBertAttention(nn.Module):
             prefix=f"{prefix}.Wqkv",
         )
 
-        if layer_types := getattr(config, "layer_types", None):
-            # Transformers v5
-            layer_type = layer_types[layer_id]
-            rope_parameters = config.rope_parameters[layer_type]
-            sliding_window: int | None = None
-            if layer_type == "sliding_attention":
-                # Treats the local attention boundary as inclusive
-                sliding_window = config.sliding_window + 1
-        else:
-            # Transformers v4
-            sliding_window = None
-            if layer_id % config.global_attn_every_n_layers != 0:
-                # ModernBertConfig does not expose sliding_window
-                sliding_window = config.local_attention // 2
-                rope_theta = (
-                    config.local_rope_theta
-                    if config.local_rope_theta is not None
-                    else config.global_rope_theta
-                )
-            else:
-                rope_theta = config.global_rope_theta
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        layer_type = config.layer_types[layer_id]
+        rope_parameters = config.rope_parameters[layer_type]
+        sliding_window: int | None = None
+        if layer_type == "sliding_attention":
+            # Treats the local attention boundary as inclusive
+            sliding_window = config.sliding_window + 1
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
