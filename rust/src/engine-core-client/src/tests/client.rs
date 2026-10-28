@@ -1602,18 +1602,38 @@ async fn call_utility_waits_for_all_engines_before_returning_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_utility_call_unregisters_waiter() {
+async fn cancelled_utility_call_still_collects_the_reply() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
     let (received_tx, received_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel::<()>();
     let (_shutdown, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
         vec![0x00, 0x00],
-        |dealer, _push| {
+        |dealer, push| {
             Box::pin(async move {
-                let _utility = recv_engine_message(dealer).await;
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]);
+                let call_id = payload.as_array().expect("utility payload array")[1]
+                    .as_u64()
+                    .expect("call_id");
                 let _ = received_tx.send(());
+                cancelled_rx.await.unwrap();
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: call_id.into(),
+                            failure_message: None,
+                            result: Some(utility_result_value(true)),
+                        },
+                    }
+                    .into(),
+                )
+                .await;
                 std::future::pending::<()>().await;
             })
         },
@@ -1637,10 +1657,18 @@ async fn cancelled_utility_call_unregisters_waiter() {
         tokio::spawn(async move { call_client.call_utility::<bool, _>("add_lora", ()).await });
 
     received_rx.await.unwrap();
-    assert_eq!(client.pending_utility_call_count(), 1);
     call.abort();
     assert!(call.await.unwrap_err().is_cancelled());
-    assert_eq!(client.pending_utility_call_count(), 0);
+    // The call keeps waiting for the engine after its caller is gone.
+    assert_eq!(client.pending_utility_call_count(), 1);
+    cancelled_tx.send(()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while client.pending_utility_call_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reply resolves the waiter");
 
     engine_task.abort();
     let client = std::sync::Arc::try_unwrap(client)

@@ -262,7 +262,7 @@ impl ClientInner {
 
     /// Call a typed utility method on every engine. See
     /// [`crate::EngineCoreClient::call_utility`].
-    pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
+    pub async fn call_utility<T, A>(self: &Arc<Self>, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
@@ -274,44 +274,60 @@ impl ClientInner {
             "sending utility request"
         );
 
-        /// Removes utility waiters if a call future is cancelled before completion.
-        struct UtilityCallGuard<'a> {
-            inner: &'a ClientInner,
-            call_ids: Vec<u64>,
-        }
-
-        impl Drop for UtilityCallGuard<'_> {
-            fn drop(&mut self) {
-                self.inner.unregister_utility_calls(self.call_ids.drain(..));
-            }
-        }
-
-        let mut call_guard = UtilityCallGuard {
-            inner: self,
-            call_ids: Vec::with_capacity(self.engine_ids.len()),
-        };
-
-        let mut prepared_calls = Vec::with_capacity(self.engine_ids.len());
-        for engine_id in &self.engine_ids {
+        let mut call_ids = Vec::with_capacity(self.engine_ids.len());
+        let mut calls = Vec::with_capacity(self.engine_ids.len());
+        let prepared = self.engine_ids.iter().try_for_each(|engine_id| {
             let (call_id, rx) = self.allocate_and_register_utility_call()?;
-            call_guard.call_ids.push(call_id);
+            call_ids.push(call_id);
             let request = EngineCoreUtilityRequest::new(self.client_index, call_id, method, &args)?;
-            prepared_calls.push((engine_id, call_id, rx, request));
+            let payload = Bytes::from(encode_msgpack(&request)?);
+            calls.push((engine_id.clone(), call_id, rx, payload));
+            Ok(())
+        });
+        if let Err(error) = prepared {
+            self.unregister_utility_calls(call_ids);
+            return Err(error);
         }
 
-        let outcomes = join_all(prepared_calls.into_iter().map(
-            |(engine_id, call_id, rx, request)| async move {
-                self.send_to_engine(engine_id, EngineCoreRequestType::Utility, &request).await?;
-                rx.await
-                    .map_err(|_| Error::UtilityCallClosed {
-                        method: method.to_string(),
+        // The engines execute a sent request whatever happens to the caller,
+        // so the call runs to completion in a task of its own on this client's
+        // runtime, and dropping this future only stops waiting for it.
+        let inner = self.clone();
+        let method_name = method.to_string();
+        let call = self.handle.spawn(async move {
+            let outputs = join_all(calls.into_iter().map(|(engine_id, call_id, rx, payload)| {
+                let mut input_send = inner.input_send.clone();
+                let method_name = &method_name;
+                async move {
+                    transport::send_message(
+                        &mut input_send,
+                        &engine_id,
+                        EngineCoreRequestType::Utility.to_frame(),
+                        payload,
+                        Vec::new(),
+                    )
+                    .await?;
+                    rx.await.map_err(|_| Error::UtilityCallClosed {
+                        method: method_name.clone(),
                         call_id,
-                    })??
-                    .into_typed_result(method)
-            },
-        ))
-        .await;
-        outcomes.into_iter().collect()
+                    })?
+                }
+            }))
+            .await;
+            // A request that failed to send leaves its waiter without a reply.
+            inner.unregister_utility_calls(call_ids);
+            outputs
+        });
+        let outputs = match call.await {
+            Ok(outputs) => outputs,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => {
+                return Err(client_closed!(
+                    "engine-core client shut down during utility call `{method}`"
+                ));
+            }
+        };
+        outputs.into_iter().map(|output| output?.into_typed_result(method)).collect()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a

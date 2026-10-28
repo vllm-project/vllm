@@ -714,6 +714,10 @@ impl EngineCoreClient {
     /// Callers should pass utility arguments using Rust tuple semantics so the
     /// encoded payload matches Python's `(client_index, call_id,
     /// method_name, args)` contract: `()`, `(arg,)`, `(arg1, arg2)`, etc.
+    ///
+    /// Once its requests are prepared, the call is not cancellable: dropping
+    /// the returned future stops waiting, but the requests are still sent and
+    /// their replies collected.
     pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
