@@ -10,6 +10,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import threading
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
 
@@ -658,25 +659,28 @@ class TestTieringOffloadingManager:
         )
 
     def _promote_with_deferred_release(
-        self, monkeypatch, chunks, successful_indices=()
-    ) -> list[int]:
-        """Promote ``chunks`` from tier1 into a failure with defer_release.
+        self, monkeypatch, chunks, successful_indices=(), preset=False
+    ) -> list[threading.Event]:
+        """Promote ``chunks`` from tier1 into a failure with a deferred release.
 
-        Returns the job ids the tier reported, for releasing later.
+        Returns the events the tier reported; setting one releases its job.
         """
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
-        job_ids: list[int] = []
+        events: list[threading.Event] = []
 
         def submit_deferring(job_metadata: TransferJob) -> None:
-            job_ids.append(job_metadata.job_id)
+            event = threading.Event()
+            if preset:
+                event.set()
+            events.append(event)
             self.secondary_tier1.completed_jobs.append(
                 JobResult(
                     job_id=job_metadata.job_id,
                     success=False,
                     successful_keys=tuple(chunks[i] for i in successful_indices)
                     or None,
-                    defer_release=True,
+                    deferred_release=event,
                 )
             )
 
@@ -685,27 +689,25 @@ class TestTieringOffloadingManager:
             assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
         self._simulate_on_schedule_end()
         self._simulate_on_schedule_end()
-        return job_ids
+        return events
 
-    def _release(self, monkeypatch, job_ids: list[int]) -> None:
-        monkeypatch.setattr(
-            self.secondary_tier1, "get_deferred_releases", lambda: list(job_ids)
-        )
+    def _release(self, events: list[threading.Event]) -> None:
+        for event in events:
+            event.set()
         self.manager._process_finished_jobs()
-        monkeypatch.setattr(self.secondary_tier1, "get_deferred_releases", lambda: [])
 
     def test_deferred_release_misses_but_holds_chunks_until_released(
         self, manager_setup, monkeypatch
     ):
-        """defer_release fails the keys at once but keeps their chunks out of
-        the pool until get_deferred_releases() lists the job."""
+        """A deferred release fails the keys at once but keeps their chunks out
+        of the pool until the tier sets the event."""
         self._start_request()
         chunks = to_keys(range(2))
         free_before = self.primary_tier._get_num_free_chunks()
 
-        job_ids = self._promote_with_deferred_release(monkeypatch, chunks)
+        events = self._promote_with_deferred_release(monkeypatch, chunks)
 
-        assert len(job_ids) == 1
+        assert len(events) == 1
         assert [self.primary_tier.lookup(c, _CTX) for c in chunks] == [
             LookupResult.MISS,
             LookupResult.MISS,
@@ -713,6 +715,8 @@ class TestTieringOffloadingManager:
         assert self.primary_tier.num_deferred_release_chunks == 2
         assert self.primary_tier._get_num_free_chunks() == free_before - 2
         assert self.manager.has_pending_work()
+        self.manager._process_finished_jobs()
+        assert self.primary_tier.num_deferred_release_chunks == 2
         reduced = self.manager.get_stats().reduce()
         label = self.manager._metrics.tier_label(0)
         assert (
@@ -721,7 +725,7 @@ class TestTieringOffloadingManager:
         hold = TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD
         assert not has_histogram_count(reduced, hold)
 
-        self._release(monkeypatch, job_ids)
+        self._release(events)
 
         reduced = self.manager.get_stats().reduce()
         assert reduced[histogram_count_key(hold, label)] == 1
@@ -738,15 +742,15 @@ class TestTieringOffloadingManager:
         different chunk the late writer cannot touch."""
         self._start_request()
         chunk = to_keys([7])
-        job_ids = self._promote_with_deferred_release(monkeypatch, chunk)
-        (held,) = self.manager._deferred_releases[job_ids[0]][1]
+        events = self._promote_with_deferred_release(monkeypatch, chunk)
+        ((held,),) = (d.chunk_ids for d in self.manager._deferred_releases.values())
 
         output = self.primary_tier.prepare_write(chunk, _CTX)
         assert output is not None
         assert list(output.store_spec.chunk_ids) != [held]
         self.primary_tier.complete_write(chunk, _CTX, True)
 
-        self._release(monkeypatch, job_ids)
+        self._release(events)
         assert self.primary_tier.lookup(chunk[0], _CTX) is LookupResult.HIT
 
     def test_deferred_release_partial_failure_holds_only_failed_chunks(
@@ -754,36 +758,20 @@ class TestTieringOffloadingManager:
     ):
         self._start_request()
         chunks = to_keys(range(3))
-        job_ids = self._promote_with_deferred_release(
+        events = self._promote_with_deferred_release(
             monkeypatch, chunks, successful_indices=(0,)
         )
 
         assert self.primary_tier.lookup(chunks[0], _CTX) is LookupResult.HIT
         assert self.primary_tier.num_deferred_release_chunks == 2
-        self._release(monkeypatch, job_ids)
+        self._release(events)
         assert self.primary_tier.num_deferred_release_chunks == 0
 
-    def test_deferred_release_in_same_round_as_result(self, manager_setup, monkeypatch):
-        """A tier may report the result and its release in one poll round."""
+    def test_deferred_release_already_set_with_result(self, manager_setup, monkeypatch):
+        """An event already set when its result is reported releases in the
+        same poll round."""
         self._start_request()
-        chunks = to_keys(range(2))
-        released: list[int] = []
-        monkeypatch.setattr(
-            self.secondary_tier1,
-            "get_deferred_releases",
-            lambda: [released.pop()] if released else [],
-        )
-        original = self.secondary_tier1.get_finished_jobs
-
-        def finished_then_release():
-            results = list(original())
-            released.extend(r.job_id for r in results if r.defer_release)
-            return results
-
-        monkeypatch.setattr(
-            self.secondary_tier1, "get_finished_jobs", finished_then_release
-        )
-        self._promote_with_deferred_release(monkeypatch, chunks)
+        self._promote_with_deferred_release(monkeypatch, to_keys(range(2)), preset=True)
         assert self.primary_tier.num_deferred_release_chunks == 0
         assert not self.manager._deferred_releases
 
@@ -799,33 +787,13 @@ class TestTieringOffloadingManager:
         with pytest.raises(AssertionError, match="is not a pending write"):
             self.primary_tier.defer_write_release(to_keys([6]))
 
-    def test_deferred_release_of_unknown_job_asserts(self, manager_setup, monkeypatch):
-        monkeypatch.setattr(
-            self.secondary_tier1, "get_deferred_releases", lambda: [999]
-        )
-        with pytest.raises(AssertionError, match="was never deferred"):
-            self.manager._process_finished_jobs()
-
     def test_reset_after_deferred_release_succeeds(self, manager_setup, monkeypatch):
         """drain_jobs() completing the deferred release lets reset_cache proceed."""
         self._start_request()
-        job_ids = self._promote_with_deferred_release(monkeypatch, to_keys(range(2)))
+        events = self._promote_with_deferred_release(monkeypatch, to_keys(range(2)))
         monkeypatch.setattr(
-            self.secondary_tier1,
-            "drain_jobs",
-            lambda: monkeypatch.setattr(
-                self.secondary_tier1, "get_deferred_releases", lambda: job_ids.copy()
-            ),
+            self.secondary_tier1, "drain_jobs", lambda: [e.set() for e in events]
         )
-        original = self.manager._process_finished_jobs
-
-        def process_once(*args, **kwargs):
-            original(*args, **kwargs)
-            monkeypatch.setattr(
-                self.secondary_tier1, "get_deferred_releases", lambda: []
-            )
-
-        monkeypatch.setattr(self.manager, "_process_finished_jobs", process_once)
         self.manager.reset_cache()
         assert self.primary_tier.num_deferred_release_chunks == 0
 

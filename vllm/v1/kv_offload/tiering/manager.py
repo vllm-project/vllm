@@ -112,6 +112,7 @@ class JobMetadata(NamedTuple):
 
 
 class _DeferredRelease(NamedTuple):
+    event: threading.Event
     tier_idx: int
     chunk_ids: list[int]
     deferred_at: float
@@ -308,7 +309,7 @@ class TieringOffloadingManager(OffloadingManager):
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
         # Finished promotions whose failed chunks await release until the tier
-        # lists them in get_deferred_releases().
+        # sets their JobResult.deferred_release event.
         self._deferred_releases: dict[JobId, _DeferredRelease] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
@@ -552,10 +553,11 @@ class TieringOffloadingManager(OffloadingManager):
                 True,
             )
         if not failed_keys:
-            assert not completed_job.defer_release
-        elif completed_job.defer_release:
+            assert completed_job.deferred_release is None
+        elif completed_job.deferred_release is not None:
             chunk_ids = self.primary_tier.defer_write_release(failed_keys)
             self._deferred_releases[completed_job.job_id] = _DeferredRelease(
+                event=completed_job.deferred_release,
                 tier_idx=job_metadata.tier_idx,
                 chunk_ids=chunk_ids,
                 deferred_at=time.monotonic(),
@@ -604,7 +606,9 @@ class TieringOffloadingManager(OffloadingManager):
                     f" but belongs to tier #{job_metadata.tier_idx}"
                 )
                 transfer_job = job_metadata.transfer_job
-                assert transfer_job.is_promotion or not completed_job.defer_release
+                assert (
+                    transfer_job.is_promotion or completed_job.deferred_release is None
+                )
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
@@ -618,24 +622,22 @@ class TieringOffloadingManager(OffloadingManager):
                         transfer_job.keys, transfer_job.req_context
                     )
                     self._update_backpressure(tier, job_metadata, completed_job)
-            # After the results, so a release reported in the same round as
-            # its defer_release result finds the job.
-            for job_id in tier.get_deferred_releases():
-                deferred = self._deferred_releases.pop(job_id, None)
-                assert deferred is not None, (
-                    f"Deferred release of job_id {job_id} from tier #{i}"
-                    f" ({tier.tier_type}) was never deferred"
-                )
-                assert deferred.tier_idx == i, (
-                    f"Deferred release of job_id {job_id} reported by tier #{i}"
-                    f" but was deferred by tier #{deferred.tier_idx}"
-                )
-                self.primary_tier.release_deferred_write(deferred.chunk_ids)
-                self._metrics.on_deferred_release_done(
-                    i,
-                    len(deferred.chunk_ids),
-                    time.monotonic() - deferred.deferred_at,
-                )
+            if self._deferred_releases:
+                self._complete_deferred_releases(i)
+
+    def _complete_deferred_releases(self, tier_idx: int) -> None:
+        released = [
+            job_id
+            for job_id, deferred in self._deferred_releases.items()
+            if deferred.tier_idx == tier_idx and deferred.event.is_set()
+        ]
+        now = time.monotonic()
+        for job_id in released:
+            deferred = self._deferred_releases.pop(job_id)
+            self.primary_tier.release_deferred_write(deferred.chunk_ids)
+            self._metrics.on_deferred_release_done(
+                tier_idx, len(deferred.chunk_ids), now - deferred.deferred_at
+            )
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int

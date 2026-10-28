@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -95,11 +96,13 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
-    # Only applicable to failed promotion jobs. True means the tier's I/O may
+    # Only applicable to failed promotion jobs. Set when the tier's I/O may
     # still write into the primary chunks of the failed keys: the manager fails
     # those keys now but defers releasing their chunks to the free pool until
-    # the tier lists this job_id in get_deferred_releases().
-    defer_release: bool = False
+    # the tier sets the event. The tier may set it from any thread, once its
+    # I/O can no longer touch those chunks; the manager applies the release on
+    # its own polling path.
+    deferred_release: threading.Event | None = None
 
 
 class ParentManager(ABC):
@@ -297,28 +300,6 @@ class SecondaryTierManager(ABC):
         """
         pass
 
-    def get_deferred_releases(self) -> Iterable[JobId]:
-        """Return jobs whose deferred release can now complete.
-
-        Lists each job reported with ``JobResult.defer_release=True`` exactly
-        once, once the tier's I/O can no longer touch its primary chunks. The
-        framework then returns those chunks to the free pool. Tiers that never
-        defer a release need not override this.
-
-        Ordering: a job may be listed only after its ``defer_release`` result
-        has been returned by ``get_finished_jobs()`` (an earlier call, or the
-        same polling round, which the framework processes first). Listing it
-        before its result trips the framework's unknown-job assert. A tier
-        whose confirmation can outrun its timeout (e.g. an early abort ack
-        racing the failure it acknowledges) must buffer the release until the
-        result has been reported.
-
-        Polled rather than delivered by callback so that releases are applied
-        on the framework's own polling path, under the manager lock, and never
-        on a tier's I/O or network thread.
-        """
-        return ()
-
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.
 
@@ -414,9 +395,9 @@ class SecondaryTierManager(ABC):
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
 
-        Likewise, every job reported with ``defer_release=True`` must appear in
-        `get_deferred_releases()` before this returns, so the tier must bound
-        how long it can defer a release.
+        Likewise, every ``JobResult.deferred_release`` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 
