@@ -14,6 +14,7 @@ from vllm.platforms import current_platform
 # The NVIDIA branch is the static default that type-checkers see; the ROCm
 # branch overrides it at runtime (kept type-compatible via type: ignore).
 if TYPE_CHECKING or not current_platform.is_rocm():
+    from .nvidia import warmup  # noqa: F401
     from .nvidia.model import (
         MiniMaxM3SparseForCausalLM,
         MiniMaxM3SparseForConditionalGeneration,

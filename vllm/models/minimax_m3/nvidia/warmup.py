@@ -7,6 +7,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.attention_warmup import (
     mixed_batch_attention_warmup,
 )
+from vllm.model_executor.warmup.model_warmup import register_model_warmup
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@register_model_warmup("full")
 @instrument(span_name="MiniMax M3 MSA warmup")
 def minimax_m3_msa_warmup(worker: "Worker") -> None:
     sparse_module = next(

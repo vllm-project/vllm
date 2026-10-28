@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.model_warmup import register_model_warmup
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@register_model_warmup("jit")
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs."""
