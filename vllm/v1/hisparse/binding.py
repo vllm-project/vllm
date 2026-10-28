@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -37,6 +38,7 @@ from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -66,8 +68,20 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
+    indexer_names = [
+        name
+        for name, spec in mla_specs.items()
+        if spec.cache_role is SparseCacheRole.INDEXER
+    ]
+    indexer_block_size = _largest_exact_kernel_block_size(
+        block_size,
+        [attn_layers[name].get_attn_backend() for name in indexer_names],
+        [mla_specs[name] for name in indexer_names],
+    )
     resized_specs: dict[str, KVCacheSpec] = {
-        name: spec.copy_with_new_block_size(block_size)
+        name: spec.copy_with_new_block_size(
+            indexer_block_size if name in indexer_names else block_size
+        )
         for name, spec in mla_specs.items()
     }
     groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
@@ -81,6 +95,25 @@ def resolve_hisparse_specs(
             if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
             for layer_name in group.layer_names
         }
+    )
+
+
+def _largest_exact_kernel_block_size(
+    block_size: int,
+    backends: list[type["AttentionBackend"]],
+    specs: list[MLAAttentionSpec],
+) -> int:
+    """Largest exact kernel page all backends accept, as a multiple of block_size."""
+    sizes: set[int] | None = None
+    for backend, spec in zip(backends, specs, strict=True):
+        exact = {
+            size
+            for size in backend.get_supported_kernel_block_sizes(spec)
+            if isinstance(size, int)
+        }
+        sizes = exact if sizes is None else sizes & exact
+    return max(
+        (size for size in sizes or () if size % block_size == 0), default=block_size
     )
 
 

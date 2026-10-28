@@ -73,13 +73,10 @@ def get_hisparse_kv_cache_groups(
 
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
-    mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
-    assert mla_group_spec is not None
-    mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
     regular_groups = (
         get_kv_cache_groups(vllm_config, other_specs) if other_specs else []
     )
-    return _lay_out_hisparse_groups(vllm_config, [mla_group, *regular_groups])
+    return _lay_out_hisparse_groups(vllm_config, mla_specs, regular_groups)
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
@@ -90,20 +87,15 @@ def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
 
 
 def _partition_hisparse_specs(
-    groups: list[KVCacheGroupSpec],
+    specs: dict[str, KVCacheSpec],
 ) -> tuple[dict[str, MLAAttentionSpec], dict[str, MLAAttentionSpec]]:
-    group_spec = groups[0].kv_cache_spec
-    if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-        raise ValueError("HiSparse requires uniform sparse-MLA cache specs.")
-
-    specs = group_spec.kv_cache_specs
     if any(
         isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
         for spec in specs.values()
     ):
         raise ValueError("HiSparse does not support DeepSeek V4.")
     if not all(isinstance(spec, MLAAttentionSpec) for spec in specs.values()):
-        raise ValueError("HiSparse requires its first cache group to contain MLA only.")
+        raise ValueError("HiSparse requires MLA cache specs.")
 
     source_specs = {
         name: spec
@@ -123,15 +115,17 @@ def _partition_hisparse_specs(
 
 
 def _lay_out_hisparse_groups(
-    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+    vllm_config: VllmConfig,
+    mla_specs: dict[str, KVCacheSpec],
+    regular_groups: list[KVCacheGroupSpec],
 ) -> list[KVCacheGroupSpec]:
-    source_specs, indexer_specs = _partition_hisparse_specs(groups)
-    block_sizes = {
-        spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
-    }
+    source_specs, indexer_specs = _partition_hisparse_specs(mla_specs)
+    block_sizes = {spec.block_size for spec in source_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one resolved GPU block size.")
     gpu_block_size = block_sizes.pop()
+    if len({spec.block_size for spec in indexer_specs.values()}) != 1:
+        raise ValueError("HiSparse requires one indexer block size.")
 
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config,
@@ -155,7 +149,6 @@ def _lay_out_hisparse_groups(
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
-    regular_groups = groups[1:]
     hot_group_page_limit = max(
         [
             sum(spec.page_size_bytes for spec in indexer_specs.values()),
