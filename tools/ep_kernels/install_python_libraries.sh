@@ -10,7 +10,7 @@ set -ex
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 # Pinned in full: an abbreviated hash is not a ref, so a consumer that
 # fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"a56d6156febcd9976e55adc85b5155bfac9f28f8"}
 
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
@@ -184,17 +184,14 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
-    # DeepEP GIN barrier data-visibility fix (temporary until upstream ships a fix):
-    # the world-team barrier signals completion on context 0 only while data puts ride
-    # contexts 1..N (RDMA) and NVLink TMA stores (same-node peers), so the completion
-    # signal can overtake in-flight data and receivers read stale raw-buffer rows
-    # (silent dispatch corruption -> combine illegal memory accesses).
-    # The patch is pinned to DeepEP d4f41e4e; skip loudly on any other ref.
+    # Upstream supplies the NVLink fence, but completion still signals only QP 0.
+    # Cover every context carrying RDMA puts until upstream provides that ordering.
+    # Apply only to the pinned source revision; skip loudly on any other ref.
     if [[ "$name" == "DeepEP" ]]; then
         local deepep_head
         deepep_head=$(git rev-parse HEAD)
-        if [[ "$deepep_head" != d4f41e4e* ]]; then
-            echo "WARNING: Skipping DeepEP GIN barrier data-visibility patch: HEAD is $deepep_head, expected d4f41e4e." >&2
+        if [[ "$deepep_head" != a56d6156febcd9976e55adc85b5155bfac9f28f8 ]]; then
+            echo "WARNING: Skipping DeepEP GIN barrier data-visibility patch: HEAD is $deepep_head, expected a56d6156febcd9976e55adc85b5155bfac9f28f8." >&2
         elif patch --batch --force --reverse --dry-run -p1 \
             < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch" > /dev/null 2>&1; then
             echo "DeepEP GIN barrier data-visibility patch is already applied."
@@ -249,6 +246,20 @@ do_build() {
         fi
         cuda_driver_stub_dir=$(dirname "$cuda_driver_stub")
         export LIBRARY_PATH="${cuda_driver_stub_dir}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+        # DeepEP 2.1 links NCCL by SONAME, so pip installs need a search path.
+        local nccl_root_dir=${EP_NCCL_ROOT_DIR:-${NCCL_DIR:-}}
+        if [[ -z "$nccl_root_dir" ]]; then
+            local nccl_location
+            nccl_location=$(uv pip show "${UV_PIP_TARGET[@]}" "$NCCL_PACKAGE" \
+                2>/dev/null | sed -n 's/^Location: //p')
+            if [[ -z "$nccl_location" ]]; then
+                echo "Cannot locate $NCCL_PACKAGE; set EP_NCCL_ROOT_DIR to the NCCL installation." >&2
+                exit 1
+            fi
+            nccl_root_dir="${nccl_location}/nvidia/nccl"
+        fi
+        export LIBRARY_PATH="${nccl_root_dir}/lib:$LIBRARY_PATH"
     fi
 
     if [ "$MODE" = "install" ]; then

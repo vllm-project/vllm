@@ -493,7 +493,7 @@ WORKDIR /workspace
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 COPY tools/ep_kernels/patches /tmp/patches
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=d4f41e4e93
+ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \

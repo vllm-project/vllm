@@ -17,10 +17,13 @@ Before using EP, you need to install the necessary dependencies. We are actively
     NCCL, so you must upgrade it before building or running DeepEP. See the
     [EP kernels guide](../../tools/ep_kernels) for instructions.
 
+Builds using NCCL < 2.31 require the same NCCL version at runtime. Rebuild
+DeepEP after changing that version.
+
 ### DeepEP GIN barrier patch diagnostics
 
 `tools/ep_kernels/install_python_libraries.sh` automatically applies the GIN
-barrier visibility patch to pinned DeepEP `d4f41e4e`. It reports when the patch
+barrier visibility patch to pinned DeepEP 2.1 (`a56d6156`). It reports when the patch
 is already applied, warns when another DeepEP revision causes it to skip the
 patch, and aborts the build if application fails. A skip warning means this
 vendored fix was not applied; check that your chosen DeepEP revision contains
