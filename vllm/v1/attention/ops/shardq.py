@@ -64,12 +64,13 @@ def fold_split(query_start_loc: np.ndarray, world: int) -> list[np.ndarray]:
     out = []
     for rank in range(world):
         mirror = pieces - 1 - rank
-        ranges = [np.empty(0, np.int64)]
-        for b in bounds:
-            ranges.append(np.arange(b[rank], b[rank + 1]))
-            ranges.append(np.arange(b[mirror], b[mirror + 1]))
         # Ascending: a request's mirror piece follows its front piece.
-        out.append(np.concatenate(ranges).astype(np.int64))
+        piece_starts = bounds[:, [rank, mirror]].ravel()
+        piece_lens = bounds[:, [rank + 1, mirror + 1]].ravel() - piece_starts
+        offsets = np.repeat(
+            piece_starts - np.cumsum(piece_lens) + piece_lens, piece_lens
+        )
+        out.append((offsets + np.arange(offsets.size)).astype(np.int64))
     return out
 
 

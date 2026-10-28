@@ -129,9 +129,10 @@ class AttentionConfig:
     KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
     sharded by head."""
 
-    sparse_mla_shard_q_min_tokens: int = Field(default=8192, ge=1)
-    """Minimum number of prefill tokens in a step for `sparse_mla_shard_q` to
-    apply."""
+    sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
+    """Minimum number of tokens after a step's decodes (requests of at most
+    1 + num_speculative_tokens tokens) for `sparse_mla_shard_q` to apply. Below
+    it the all-to-all exchanges can cost more than they save."""
 
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
