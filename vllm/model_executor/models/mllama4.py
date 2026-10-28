@@ -275,9 +275,11 @@ class Llama4VisionAttention(nn.Module):
                 prefix=f"{prefix}.qkv_proj",
             )
             # q/k/v arrive as separate checkpoint tensors (possibly in
-            # different load_weights calls): write each into its rows.
-            for param in (self.qkv_proj.weight, self.qkv_proj.bias):
-                param.weight_loader = self._load_qkv_shard
+            # different load_weights calls): write each into its rows. This
+            # covers per-row quantization scales as well as weight and bias.
+            for param in self.qkv_proj.parameters():
+                if param.dim() > 0:
+                    param.weight_loader = self._load_qkv_shard
             self.o_proj = ReplicatedLinear(
                 self.num_heads * self.head_dim,
                 self.embed_dim,
@@ -322,6 +324,8 @@ class Llama4VisionAttention(nn.Module):
         self, param: torch.Tensor, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
         offset = {"q": 0, "k": self.q_size, "v": self.q_size + self.kv_size}[shard_id]
+        # Scales may have one row per block of output rows.
+        offset = offset * param.shape[0] // (self.q_size + 2 * self.kv_size)
         param.data.narrow(0, offset, loaded_weight.shape[0]).copy_(loaded_weight)
 
     def forward(
