@@ -25,7 +25,6 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
-
 # Use a small model that doesn't require authentication for fast tests
 MODEL = "facebook/opt-125m"
 
