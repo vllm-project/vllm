@@ -46,7 +46,11 @@ class UBatchState(NamedTuple):
     forward_contexts: list[ForwardContext]
 
 
-def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
+def create_ubatch_slices(
+    input_batch: InputBatch,
+    num_ubatches: int,
+    cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
     Splitting at the midpoint of the DP-padded token count leaves the trailing
@@ -54,6 +58,10 @@ def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSl
     request slice onto the last request leaves it holding that request with
     zero query tokens -- the shape a straddling request already takes -- so it
     stays well-formed with no work to do, like a dummy run.
+
+    FULL graphs are uniform decodes, so each microbatch instead keeps the
+    request rows its graph region was captured with, padding included. A
+    microbatch entirely inside the padding then runs as padding rows.
     """
     _, ubatch_slices = maybe_create_ubatch_slices(
         True,
@@ -63,6 +71,21 @@ def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSl
         num_ubatches,
     )
     assert ubatch_slices is not None
+    if cg_mode == CUDAGraphMode.FULL:
+        tokens_per_req = (
+            input_batch.num_tokens_after_padding // input_batch.num_reqs_after_padding
+        )
+        assert all(s.token_slice.start % tokens_per_req == 0 for s in ubatch_slices)
+        return [
+            UBatchSlice(
+                slice(
+                    s.token_slice.start // tokens_per_req,
+                    s.token_slice.stop // tokens_per_req,
+                ),
+                s.token_slice,
+            )
+            for s in ubatch_slices
+        ]
     return [
         UBatchSlice(
             slice(
@@ -189,6 +212,13 @@ def _slice_input_batch(
         input_ids=input_batch.input_ids[tok_start:tok_stop],
         positions=input_batch.positions[tok_start:tok_stop],
         is_padding=input_batch.is_padding[tok_start:tok_stop],
+        # A microbatch of only FULL graph padding has no query lengths to
+        # bound; give it the captured uniform length.
+        max_query_len=(
+            input_batch.max_query_len
+            if num_reqs
+            else num_tokens_padded // num_reqs_padded
+        ),
         prompt_lens=(
             None
             if input_batch.prompt_lens is None
@@ -348,7 +378,7 @@ class UBatchRunner:
         FULL uses padded sizes; `for_capture` refreshes metadata from dummy
         block tables.
         """
-        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches, cg_mode)
 
         attn_metadata = []
         slot_mappings_by_layer = []
