@@ -44,6 +44,7 @@ repos:
   hooks:
     - id: pip-compile
       args: [
+        --generate-hashes,
         requirements/test/cuda.in,
         -c, requirements/cuda.txt,
         -o, requirements/test/cuda.txt,
@@ -57,6 +58,7 @@ repos:
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
+        --generate-hashes,
         requirements/test/rocm.in,
         -c, requirements/rocm.txt,
         -o, requirements/test/rocm.txt,
@@ -126,6 +128,7 @@ repos:
       alias: pip-compile-xpu
       name: pip-compile-xpu
       args: [
+        --generate-hashes,
         requirements/test/xpu.in,
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
@@ -138,6 +141,7 @@ repos:
       alias: pip-compile-cpu
       name: pip-compile-cpu
       args: [
+        --generate-hashes,
         requirements/test/cuda.in,
         -o, requirements/test/cpu.txt,
         --index-strategy, unsafe-best-match,
@@ -151,6 +155,7 @@ repos:
       alias: pip-compile-docs
       name: pip-compile-docs
       args: [
+        --generate-hashes,
         requirements/docs.in,
         -o, requirements/docs.txt,
         --python-platform, x86_64-manylinux_2_28,
@@ -164,6 +169,12 @@ repos:
     files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
+  - id: check-github-actions-pins
+    name: Check GitHub Actions use immutable references
+    language: python
+    entry: python tools/pre_commit/check_github_actions_pins.py
+    files: ^(\.github/workflows/.*\.ya?ml|.*/action\.ya?ml)$
+    additional_dependencies: [PyYAML, regex]
   - id: format-torch-nightly-test
     name: reformat test/nightly-torch.txt to be in sync with test/cuda.in
     language: python
