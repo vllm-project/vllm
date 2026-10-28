@@ -288,7 +288,9 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
 def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
     """Packed MLA/indexer groups must retain 64 compressed rows per page."""
     kernel_block_size = select_common_block_size(
-        256, [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend]
+        256,
+        # indexer backend has no impl class
+        [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend],  # type: ignore[type-abstract]
     )
     spec = MLAAttentionSpec(
         block_size=256,
@@ -311,7 +313,9 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
     assert isinstance(block_size, int)
     assert (
         select_common_block_size(
-            block_size, [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend]
+            block_size,
+            # indexer backend has no impl class
+            [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend],  # type: ignore[type-abstract]
         )
         == block_size
     )
@@ -445,6 +449,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
 
 def test_index_conversion_warmup_uses_physical_block_stride():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(
             max_model_len=1024,

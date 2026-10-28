@@ -25,6 +25,20 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class PCPBatchMetadata:
+    """Per-step metadata of a PCP rank-local batch."""
+
+    # Unpadded token count before PCP partitioning. Under adaptive verification,
+    # this can be smaller than the sum of global_query_lens_np.
+    global_num_tokens: int
+    # [num_reqs], aligned with local request segments; requests may repeat.
+    global_query_lens_np: np.ndarray
+    global_seq_lens_cpu_upper_bound_np: np.ndarray
+    # [num_reqs_after_padding], set only under PCP+DCP.
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -56,6 +70,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        moe_gathers_tokens: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -69,11 +84,16 @@ class PCPManager:
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
-        self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
+        # Padding mask over the PCP-gathered rows the MoE routes (rank-major).
+        self._moe_is_padding = (
+            torch.ones(max_num_tokens * pcp_world_size, dtype=torch.bool, device=device)
+            if moe_gathers_tokens and max_num_tokens is not None
+            else None
+        )
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
@@ -81,6 +101,18 @@ class PCPManager:
             if max_num_local_reqs is not None and max_num_tokens is not None
             else None
         )
+        self._max_num_local_reqs = max_num_local_reqs
+        self._max_num_tokens = max_num_tokens
+        self.set_block_tables(block_tables)
+
+    def set_block_tables(self, block_tables: BlockTables | None) -> None:
+        """Attach the KV block tables, which only exist after KV cache init."""
+        self._block_tables = block_tables
+        if block_tables is not None:
+            self.cp_interleave = block_tables.cp_interleave
+        max_num_local_reqs = self._max_num_local_reqs
+        max_num_tokens = self._max_num_tokens
+        device, pcp_world_size = self.device, self.pcp_world_size
         self._local_block_tables: tuple[torch.Tensor, ...] | None
         self._local_block_table_ptrs: torch.Tensor | None
         if block_tables is not None and max_num_local_reqs is not None:
@@ -171,10 +203,12 @@ class PCPManager:
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
+            and getattr(model_config.hf_text_config, "model_type", None)
+            not in ("deepseek_v32", "glm_moe_dsa")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
+                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -593,6 +627,12 @@ class PCPManager:
             input_buffers.positions[:num_local_tokens_padded].masked_fill_(
                 is_padding, 0
             )
+        if self._moe_is_padding is not None:
+            rows = np.arange(num_local_tokens_padded)
+            gathered = rows >= np.array(per_rank_num_tokens)[:, None]
+            is_padding = async_tensor_h2d(
+                gathered.ravel(), out=self._moe_is_padding[: gathered.size]
+            )
 
         total_num_logits = num_local_reqs if num_local_tokens > 0 else 0
         if total_num_logits > 0:
@@ -664,7 +704,16 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
-            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            pcp=PCPBatchMetadata(
+                global_num_tokens=global_batch.num_tokens,
+                global_query_lens_np=num_scheduled_tokens[
+                    local_to_global_batch_req_idx_np
+                ],
+                global_seq_lens_cpu_upper_bound_np=global_batch.seq_lens_cpu_upper_bound.numpy()[
+                    local_to_global_batch_req_idx_np
+                ],
+                dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            ),
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
@@ -683,7 +732,9 @@ class PCPManager:
         )
         return self._local_batch
 
-    def prepare_inputs_to_capture(self, input_batch: InputBatch) -> InputBatch:
+    def prepare_inputs_for_capture_or_profile(
+        self, input_batch: InputBatch
+    ) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
@@ -692,8 +743,8 @@ class PCPManager:
             input_batch,
             input_ids=input_buffers.input_ids[:num_tokens].copy_(input_batch.input_ids),
             positions=input_buffers.positions[:num_tokens].copy_(input_batch.positions),
-            is_padding=input_buffers.is_padding[:num_tokens].copy_(
-                input_batch.is_padding
+            is_padding=self.moe_is_padding(
+                input_buffers.is_padding[:num_tokens].copy_(input_batch.is_padding)
             ),
             query_start_loc=input_buffers.query_start_loc[: num_reqs + 1].copy_(
                 input_batch.query_start_loc
@@ -701,6 +752,15 @@ class PCPManager:
             seq_lens=input_buffers.seq_lens[:num_reqs].copy_(input_batch.seq_lens),
         )
         return input_batch
+
+    def moe_is_padding(self, is_padding: torch.Tensor) -> torch.Tensor:
+        """Expand a capture/dummy padding mask, identical on every PCP rank, to
+        the rows the MoE routes."""
+        if self._moe_is_padding is None:
+            return is_padding
+        out = self._moe_is_padding[: self.pcp_world_size * is_padding.shape[0]]
+        out.view(self.pcp_world_size, -1).copy_(is_padding)
+        return out
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         assert self._local_block_tables is not None
@@ -777,9 +837,13 @@ class PCPManager:
         return gathered[self._hidden_restore_idx]
 
     def get_draft_input_buffers(
-        self, input_buffers: InputBuffers
-    ) -> InputBatch | InputBuffers:
-        return self.draft_prefill_batch or input_buffers
+        self, input_buffers: InputBuffers, num_tokens: int
+    ) -> tuple[InputBatch | InputBuffers, torch.Tensor]:
+        """Return draft inputs and their MoE routing padding mask."""
+        batch = self.draft_prefill_batch
+        if batch is not None:
+            return batch, batch.is_padding
+        return input_buffers, self.moe_is_padding(input_buffers.is_padding[:num_tokens])
 
     def prepare_draft_prefill(
         self, input_batch: InputBatch, input_ids: torch.Tensor
@@ -815,6 +879,25 @@ class PCPManager:
         self.draft_prefill_batch = None
         return last_hidden_states, hidden_states
 
+    def sync_drafts(
+        self,
+        draft_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+    ) -> None:
+        """Broadcast PCP rank 0's drafts and draft logits.
+
+        Replicated drafts are not bitwise identical across PCP ranks, but every
+        rank must verify the same proposal and distribution.
+        """
+        pcp_group = get_pcp_group()
+        pcp_group.broadcast(draft_tokens, src=0)
+        if draft_logits is not None:
+            # Draft logits are indexed by persistent request slots.
+            logits = draft_logits[idx_mapping]
+            pcp_group.broadcast(logits, src=0)
+            draft_logits[idx_mapping] = logits
+
     def restore_for_sampling(
         self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None
     ) -> tuple[torch.Tensor, list[torch.Tensor] | None, InputBatch]:
@@ -831,7 +914,7 @@ def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-    block_tables: BlockTables,
+    block_tables: BlockTables | None = None,
     cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
@@ -856,4 +939,6 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
+        moe_gathers_tokens=not parallel_config.enable_expert_parallel,
     )
