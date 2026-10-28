@@ -543,54 +543,57 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
     monkeypatch: pytest.MonkeyPatch, connector_pool
 ):
     """Under the extensible cache the connector is created at the final extend.
-    It is asked for a custom memory pool before it registers the KV cache, as on
+    It is asked for a custom memory pool before the cache is committed, as on
     the standard path, and one it provides cannot back a driver-mapped cache."""
-    from vllm.v1.worker.gpu_worker import Worker
+    from vllm.v1.worker import extensible_kv_cache
 
     log: list[str] = []
+
+    class Committed(Exception):
+        pass
 
     def get_mem_pool_context():
         log.append("get_mem_pool_context")
         return connector_pool
 
+    def commit(num_blocks, **kwargs):
+        log.append(f"commit:{num_blocks}")
+        raise Committed
+
     monkeypatch.setattr(
-        gpu_worker,
+        extensible_kv_cache,
         "ensure_kv_transfer_initialized",
-        lambda config, kv_cache_config: log.append("ensure_kv_transfer"),
+        lambda config, kv_cache_config: log.append(
+            f"ensure_kv_transfer:{kv_cache_config.num_blocks}"
+        ),
     )
-    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: True)
     monkeypatch.setattr(
-        gpu_worker,
+        extensible_kv_cache,
         "get_kv_transfer_group",
         lambda: SimpleNamespace(get_mem_pool_context=get_mem_pool_context),
     )
-    monkeypatch.setattr(
-        gpu_worker,
-        "extend_kv_cache",
-        lambda runner, num_blocks: log.append(f"extend:{num_blocks}"),
-    )
     runner = SimpleNamespace(
         extensible_kv_cache=SimpleNamespace(
-            committed_kv_cache_tensors=lambda config, layout, num_blocks: []
-        )
-    )
-    worker = SimpleNamespace(
-        _kv_cache_config=SimpleNamespace(num_blocks=16, kv_cache_tensors=[]),
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: None, num_gpu_blocks=16
+            committed_kv_cache_tensors=lambda config, layout, num_blocks: [],
+            num_committed_blocks=4,
+            commit=commit,
         ),
-        vllm_config=None,
-        _v2_model_runner=lambda: runner,
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
+        vllm_config=SimpleNamespace(kv_transfer_config=object()),
     )
+    kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])
 
     if connector_pool is None:
-        Worker.extend_kv_cache(worker, 8)
-        assert log == ["ensure_kv_transfer", "get_mem_pool_context", "extend:8"]
-        assert worker.cache_config.num_gpu_blocks == 8
+        with pytest.raises(Committed):
+            extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
+        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context", "commit:8"]
     else:
         with pytest.raises(ValueError, match="own memory pool"):
-            Worker.extend_kv_cache(worker, 8)
-        assert log == ["ensure_kv_transfer", "get_mem_pool_context"]
+            extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
+        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context"]
+    # The engine's config is left as planned.
+    assert kv_cache_config.num_blocks == 16
 
 
 GiB = GiB_bytes

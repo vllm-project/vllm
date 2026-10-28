@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache backing allocation that grows after warmup."""
 
+import copy
+import gc
 from bisect import bisect_right
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,11 +13,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
+from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.utils.extensible_tensor import (
     ExtensibleTensor,
     granule_aligned_blocks,
@@ -33,6 +37,7 @@ from vllm.v1.worker.gpu.kv_connector import get_kv_connector
 from vllm.v1.worker.utils import layer_kernel_block_size, layer_spec_for_tensor
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -338,15 +343,39 @@ def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
         kv_cache.commit(num_blocks)
 
 
-def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
+def extend_kv_cache(
+    runner: "GPUModelRunner", kv_cache_config: KVCacheConfig, num_blocks: int
+) -> None:
     """Commit the final size once post-warmup memory is known.
 
     Afterwards the runner matches one that allocated num_blocks up front:
     views are rebuilt over the committed bytes (same addresses) and the KV
-    connector is created against final memory.
+    connector is created against final memory. kv_cache_config is the
+    engine's config the cache was allocated from.
     """
     kv_cache = runner.extensible_kv_cache
     assert kv_cache is not None
+    kv_cache_config = copy.copy(kv_cache_config)
+    kv_cache_config.num_blocks = num_blocks
+    # Connectors that derive geometry from the config must see the committed
+    # storages the rebuilt views will have.
+    kv_cache_config.kv_cache_tensors = kv_cache.committed_kv_cache_tensors(
+        kv_cache_config,
+        runner.cache_config.get_resolved_kv_cache_layout(),
+        num_blocks,
+    )
+    ensure_kv_transfer_initialized(runner.vllm_config, kv_cache_config)
+    # Config resolution rejects `custom_mem_pool`; a connector that wants the
+    # KV cache in its own pool some other way cannot have it either.
+    if (
+        has_kv_transfer_group()
+        and get_kv_transfer_group().get_mem_pool_context() is not None
+    ):
+        raise ValueError(
+            "The KV connector allocates the KV cache from its own memory pool, "
+            "which the extensible KV cache cannot use. Disable it with "
+            "--no-enable-extensible-kv-cache."
+        )
     if num_blocks < kv_cache.num_committed_blocks:
         # Warmup committed more than the measured budget fits (its transient
         # peak exceeded the reserve); the contents are warmup garbage.
@@ -425,6 +454,58 @@ def measure_kv_cache_bytes(
     available = min(requested_memory - non_kv_used, headroom - margin)
     available -= transient_peak_bytes
     return max(available, 0)
+
+
+def measure_kv_cache_blocks(
+    kv_cache: ExtensibleKVCache,
+    vllm_config: "VllmConfig",
+    device: torch.device,
+    *,
+    init_free_memory: int,
+    requested_memory: int,
+) -> int:
+    """Size an extensible KV cache from the memory free after warmup.
+
+    Keeps free the larger of the profiled peak and warmup's allocated (not
+    reserved) transient peak. Torch's cache is emptied first: its blocks may
+    not fit the large workspaces the first real steps allocate.
+    """
+    torch.accelerator.synchronize()
+    gc.collect()
+    stats = torch.accelerator.memory_stats(device)
+    warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
+        "allocated_bytes.all.current", 0
+    )
+    torch.accelerator.empty_cache()
+    free_memory, _ = torch.accelerator.get_memory_info(device)
+    transient_peak = max(kv_cache.reserved_headroom_bytes, warmup_peak)
+    available = measure_kv_cache_bytes(
+        init_free_memory=init_free_memory,
+        free_memory=free_memory,
+        committed_bytes=kv_cache.physical_bytes,
+        requested_memory=requested_memory,
+        transient_peak_bytes=transient_peak,
+    )
+    available = reserve_mm_ipc_gpu_memory(
+        available,
+        vllm_config.model_config.multimodal_config,
+        getattr(vllm_config.parallel_config, "_api_process_count", 1),
+    )
+    num_blocks = kv_cache.blocks_within(
+        available, aligned=vllm_config.kv_transfer_config is not None
+    )
+    logger.info(
+        "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "
+        "%s GiB kept for transient activations; %d KV cache blocks (%s GiB) "
+        "fit within the requested %s GiB.",
+        format_gib(free_memory),
+        format_gib(kv_cache.physical_bytes),
+        format_gib(transient_peak),
+        num_blocks,
+        format_gib(num_blocks * kv_cache.bytes_per_block),
+        format_gib(requested_memory),
+    )
+    return num_blocks
 
 
 # A layerwise weight update holds a layer's checkpoint-format copy while weight

@@ -81,12 +81,11 @@ def _warmup_block_counter(
     model_runner: GPUModelRunner,
 ) -> Callable[[int, KVCacheSpec], int]:
     """Bind `_reserved_block_count` to `model_runner`'s reservation policy."""
-    num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
+    vllm_config = model_runner.vllm_config
+    num_lookahead_tokens = vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
-    dcp_world_size = (
-        model_runner.vllm_config.parallel_config.decode_context_parallel_size
-    )
+    dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
 
     def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
         return _reserved_block_count(
@@ -307,6 +306,45 @@ def run_context_prefill_warmup(
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
+
+
+def run_kv_cache_sizing_warmup(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
+    """Run the steps an extensible KV cache measures its transient reserve on.
+
+    These size rather than compile, so they run without JIT warmup.
+    """
+    if model_runner.is_encoder_decoder:
+        return
+    # Profiling ran the full token budget without attention. Run it as a real
+    # step so the measured peak covers the largest prefill the scheduler can
+    # issue: one request of up to the model length, the rest of the budget in
+    # a second, capped to what a block table row can hold.
+    scheduler_config = model_runner.scheduler_config
+    run_mixed_prefill_decode_warmup(
+        model_runner,
+        worker_execute_model,
+        worker_sample_tokens,
+        min(scheduler_config.max_num_batched_tokens, model_runner.max_model_len),
+    )
+    if model_runner.model_config.use_mla:
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLACommonMetadataBuilder,
+        )
+
+        # Fill one chunked-context workspace, so the measured peak covers
+        # up-projecting a prefix cache hit's context.
+        workspace_size = (
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                model_runner.vllm_config
+            )
+        )
+        run_context_prefill_warmup(
+            model_runner, worker_execute_model, worker_sample_tokens, workspace_size
+        )
 
 
 @torch.inference_mode()
