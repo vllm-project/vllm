@@ -79,6 +79,9 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    # Hash-routing table, owned by the gate.
+    hash_indices_table: torch.Tensor | None = None
+
     def __init__(
         self,
         layer_name: str,
@@ -107,6 +110,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -152,6 +156,8 @@ class RoutedExperts(PluggableLayer):
         # Set by bind_routed_experts_capturer for monolithic kernels.
         self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        # The gate owns this Parameter: keep it out of this module's parameters.
+        object.__setattr__(self, "hash_indices_table", hash_indices_table)
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
         self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
@@ -719,6 +725,24 @@ class RoutedExperts(PluggableLayer):
 
         quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
+        num_global_experts = (
+            self.moe_config.num_experts
+            + self.expert_map_manager.num_fused_shared_experts
+        )
+        # `num_experts` counts logical and redundant experts; fused shared
+        # slots are appended after them.
+        # Expert substitution checkpoints name retained experts by their
+        # logical ID, which is not bounded by the number of allocated slots.
+        expert_substitution = getattr(self, "expert_substitution", None)
+        if expert_substitution is not None:
+            num_global_experts = (
+                expert_substitution.num_logical_experts
+                + self.expert_map_manager.num_fused_shared_experts
+            )
+        assert global_expert_id < num_global_experts, (
+            f"Expert id {global_expert_id} is out of range for "
+            f"{self.layer_name}; expected < {num_global_experts}"
+        )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
@@ -1324,6 +1348,13 @@ class RoutedExperts(PluggableLayer):
             )
 
         weights = list(self.named_parameters())
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor

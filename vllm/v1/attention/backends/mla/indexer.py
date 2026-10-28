@@ -70,13 +70,16 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.platforms.rocm import get_cdna_version
 
-        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
-        # would silently keep their FP8 one.
+        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
+        # DSA models would silently keep their FP8 one.
         model_config = vllm_config.model_config
-        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+        if model_config is None or model_config.hf_config.model_type not in (
+            "deepseek_v4",
+            "deepseek_v41",
+        ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                "DeepSeek-V4.1-Flash."
+                "DeepSeek-V4 and DeepSeek-V4.1."
             )
         if get_cdna_version() != 4:
             raise ValueError(
@@ -205,19 +208,16 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
-
-
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
+    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -1584,6 +1584,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,

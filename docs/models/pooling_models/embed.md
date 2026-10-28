@@ -45,6 +45,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | `GteModel` | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. | | |
 | `GteNewModel` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. | | |
 | `JinaEmbeddingsV5Model`<sup>C</sup> | Qwen3-decoder or EuroBERT-encoder backbone with task-specific LoRA adapters | `jinaai/jina-embeddings-v5-text-small`, `jinaai/jina-embeddings-v5-text-nano` (see note) | ✅︎ | ✅︎ |
+| `Lfm2BidirectionalModel` | LFM2.5 dense embedding | `LiquidAI/LFM2.5-Embedding-350M` | | |
 | `LlamaBidirectionalModel`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-embed-1b-v2`, etc. | ✅︎ | ✅︎ |
 | `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
 | `ModernBertModel` | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. | ✅︎ | |
