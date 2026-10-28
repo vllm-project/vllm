@@ -65,8 +65,12 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -97,6 +101,7 @@ from vllm.models.muse_spark.common.layers import (  # noqa: F401 re-exported
     materialize_residual_path_constants,
     norm_then_gated_residual,
 )
+from vllm.models.muse_spark.common.moe import drop_gate_up_stacking
 from vllm.models.muse_spark.common.ops.fused_qk_norm_rope_kv import (
     fused_qk_norm_rope_kv_insert,
     supports_fused_kv_insert,
@@ -106,6 +111,9 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     supports_norm_residual_norm,
 )
 from vllm.models.muse_spark.common.ops.fused_routing import fused_musespark1x_routing
+from vllm.models.muse_spark.common.quant_config import (
+    align_compressed_tensors_quant_config,
+)
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
@@ -449,19 +457,29 @@ class MuseSpark1xMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
+        # compressed-tensors exports quantize the projections too; NVFP4 ones
+        # keep them BF16.
+        projection_quant_config = (
+            quant_config if isinstance(quant_config, CompressedTensorsConfig) else None
+        )
         self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
             bias=False,
-            quant_config=None,
+            quant_config=projection_quant_config,
             prefix=f"{prefix}.pooler",
         )
         self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=None,
+            quant_config=projection_quant_config,
             prefix=f"{prefix}.unpooler",
+        )
+        # The sharded projections GEMM the BF16 weight directly.
+        quantized_projections = not all(
+            isinstance(layer.quant_method, UnquantizedLinearMethod)
+            for layer in (self.pooler, self.unpooler)
         )
 
         # Aux streams have hung on ROCm.
@@ -510,6 +528,7 @@ class MuseSpark1xMoE(nn.Module):
             and not self.use_sequence_parallel_moe
             and parallel_config.data_parallel_size == 1
             and not envs.VLLM_BATCH_INVARIANT
+            and not quantized_projections
         )
         tep_default = (
             replicated_tokens
@@ -1513,6 +1532,8 @@ class MuseSpark1xDecoderLayer(nn.Module):
 # Runs uncompiled under breakable cudagraphs; drop LlamaModel's torch.compile.
 @ignore_torch_compile
 class MuseSpark1xModel(LlamaModel):
+    hf_to_vllm_mapper = drop_gate_up_stacking(LlamaModel.hf_to_vllm_mapper)
+
     def __init__(
         self,
         *,
@@ -1765,8 +1786,11 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSpark1xDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         ModelOptNvFp4Config,
+        CompressedTensorsConfig,
     )
-    supported_quantization_description = "NVFP4 (modelopt_fp4)"
+    supported_quantization_description = (
+        "NVFP4 (modelopt_fp4) or compressed-tensors (FP8 dense, MXFP4 experts)"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1798,6 +1822,8 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 "got quantization "
                 f"{vllm_config.quant_config.get_name()!r}."
             )
+        if isinstance(vllm_config.quant_config, CompressedTensorsConfig):
+            align_compressed_tensors_quant_config(vllm_config.quant_config)
         if layer_type is None:
             layer_type = self.decoder_layer_cls
 

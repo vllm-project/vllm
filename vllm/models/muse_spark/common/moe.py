@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Platform-neutral MuseSpark1x MoE pieces: routing, config, expert loading."""
 
+import re
 from collections.abc import Iterable
 
 import torch
@@ -13,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.muse_spark.common.ops.fused_routing import (
     fused_musespark1x_routing,
 )
@@ -130,13 +132,60 @@ class MuseSparkMoEConfig(FusedMoEConfig):
         return num_tokens > 0
 
 
+_PER_EXPERT_WEIGHT_NAME = re.compile(r"^\d+\.(gate_proj|up_proj|down_proj)\.")
+
+
+def is_per_expert_weight_name(name: str) -> bool:
+    """Whether a RoutedExperts-relative name addresses a single expert."""
+    return _PER_EXPERT_WEIGHT_NAME.match(name) is not None
+
+
+def drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
+    """Keep per-expert ``gate_proj``/``up_proj`` names unstacked.
+
+    ``LlamaModel``'s mapper stacks any ``.gate_proj``/``.up_proj`` substring
+    into ``.gate_up_proj``, which would turn a per-expert (Quark or
+    compressed-tensors) tensor into a bogus fused ``gate_up_proj`` tensor that
+    ``RoutedExperts`` then chunks in half.
+    """
+    return WeightsMapper(
+        orig_to_new_renaming=base.orig_to_new_renaming,
+        orig_to_new_regex=base.orig_to_new_regex,
+        orig_to_new_substr=base.orig_to_new_substr,
+        orig_to_new_stacked={
+            source: target
+            for source, target in base.orig_to_new_stacked.items()
+            if source not in (".gate_proj", ".up_proj")
+        },
+        orig_to_new_prefix=base.orig_to_new_prefix,
+        orig_to_new_suffix=base.orig_to_new_suffix,
+    )
+
+
 class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
     """RoutedExperts that load the consolidated (all-experts-stacked) tensors.
 
-    Vendor subclasses supply ``_get_quant_method``.
+    Per-expert tensors (Quark and compressed-tensors exports) take the generic
+    ``RoutedExperts`` path. Vendor subclasses supply ``_get_quant_method``.
     """
 
     def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        consolidated: list[tuple[str, torch.Tensor]] = []
+        per_expert: list[tuple[str, torch.Tensor]] = []
+        for name, tensor in weights:
+            if not is_per_expert_weight_name(name):
+                consolidated.append((name, tensor))
+            elif not name.endswith(".weight_shape"):
+                # compressed-tensors metadata with no vLLM parameter.
+                per_expert.append((name, tensor))
+        if consolidated:
+            yield from self._load_consolidated_weights(consolidated)
+        if per_expert:
+            yield from super().load_weights(per_expert)
+
+    def _load_consolidated_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         for name, tensor in weights:
@@ -197,5 +246,7 @@ __all__ = [
     "MuseSpark1xRouter",
     "MuseSparkConsolidatedRoutedExperts",
     "MuseSparkMoEConfig",
+    "drop_gate_up_stacking",
+    "is_per_expert_weight_name",
     "needs_pre_norm_all_reduce",
 ]

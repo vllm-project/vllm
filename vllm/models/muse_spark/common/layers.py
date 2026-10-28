@@ -13,6 +13,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.parameter import BlockQuantScaleParameter
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import fused_rmsnorm_fwd
 
 
@@ -398,6 +399,17 @@ class MuseSpark1xQKVOGateParallelLinear(ColumnParallelLinear):
                 f"{self.prefix}: unknown shard id {loaded_shard_id!r} for the "
                 "fused QKV+O-gate projection."
             )
+        if isinstance(param, BlockQuantScaleParameter):
+            # Block scales hold one row per block_n weight rows.
+            block_n = self.weight_block_size[0]
+            if shard_offset % block_n or shard_size % block_n:
+                raise ValueError(
+                    f"{self.prefix}: the {loaded_shard_id!r} shard "
+                    f"(offset={shard_offset}, size={shard_size}) is not "
+                    f"aligned to the FP8 block size {block_n}."
+                )
+            shard_offset //= block_n
+            shard_size //= block_n
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
         param_shard = param.data.narrow(0, shard_offset, shard_size)

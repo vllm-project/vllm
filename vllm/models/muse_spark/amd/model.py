@@ -51,7 +51,11 @@ from vllm.models.muse_spark.common.layers import (
     materialize_residual_path_constants,
     norm_then_gated_residual,
 )
-from vllm.models.muse_spark.common.moe import MuseSpark1xRouter, MuseSparkMoEConfig
+from vllm.models.muse_spark.common.moe import (
+    MuseSpark1xRouter,
+    MuseSparkMoEConfig,
+    drop_gate_up_stacking,
+)
 from vllm.models.muse_spark.common.ops.fused_qk_norm_rope_kv import (
     supports_fused_kv_insert,
 )
@@ -863,26 +867,10 @@ class MuseSpark1xDecoderLayer(nn.Module):
         )
 
 
-def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
-    """Keep Quark's per-expert gate/up names unstacked for ``RoutedExperts``."""
-    return WeightsMapper(
-        orig_to_new_renaming=base.orig_to_new_renaming,
-        orig_to_new_regex=base.orig_to_new_regex,
-        orig_to_new_substr=base.orig_to_new_substr,
-        orig_to_new_stacked={
-            source: target
-            for source, target in base.orig_to_new_stacked.items()
-            if source not in (".gate_proj", ".up_proj")
-        },
-        orig_to_new_prefix=base.orig_to_new_prefix,
-        orig_to_new_suffix=base.orig_to_new_suffix,
-    )
-
-
 # Runs uncompiled under breakable cudagraphs; drop LlamaModel's torch.compile.
 @ignore_torch_compile
 class MuseSpark1xModel(LlamaModel):
-    hf_to_vllm_mapper = _drop_gate_up_stacking(LlamaModel.hf_to_vllm_mapper)
+    hf_to_vllm_mapper = drop_gate_up_stacking(LlamaModel.hf_to_vllm_mapper)
 
     def __init__(
         self,
