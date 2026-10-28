@@ -472,9 +472,17 @@ def select_fp8_moe_backend(
             ]
             and not allow_vllm_cutlass
         ):
-            raise ValueError(
-                "vLLM CUTLASS FP8 MoE backend is disabled for this configuration."
+            # Mirror the sibling backends in this function: report the actual
+            # rejection reason via _make_log_unsupported instead of a
+            # reason-free "disabled for this configuration" message. cutlass
+            # is a legal moe_backend value, so the user is owed the reason.
+            reason = (
+                "the vLLM CUTLASS FP8 MoE kernels are only enabled for "
+                "per-channel weight + per-token activation (PTPC) FP8 or "
+                "compressed-tensors w8a8 FP8, not the requested quantization "
+                "scheme"
             )
+            raise ValueError(_make_log_unsupported(requested_backend, reason))
 
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
