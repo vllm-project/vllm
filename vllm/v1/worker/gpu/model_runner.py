@@ -1277,7 +1277,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
+                req_index,
+                new_req_data.block_ids,
+                overwrite=True,
+                null_heads=new_req_data.block_id_null_heads,
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 

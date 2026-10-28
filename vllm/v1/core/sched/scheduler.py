@@ -378,6 +378,9 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.ship_null_heads_as_counts = self.use_v2_model_runner and (
+            self.connector is None or self.connector.supports_null_head_block_ids
+        )
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -1616,15 +1619,22 @@ class Scheduler(SchedulerInterface):
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
+            new_reqs_data = []
+            for req in scheduled_new_reqs:
+                new_blocks = req_to_new_blocks[req.request_id]
+                if self.ship_null_heads_as_counts:
+                    block_ids, null_heads = new_blocks.get_block_ids_after_null_head()
+                else:
+                    block_ids, null_heads = new_blocks.get_block_ids(), None
+                new_reqs_data.append(
+                    NewRequestData.from_request(
+                        req,
+                        block_ids,
+                        req._all_token_ids,
+                        uses_mrope=self.model_uses_mrope,
+                        block_id_null_heads=null_heads,
+                    )
                 )
-                for req in scheduled_new_reqs
-            ]
         else:
             new_reqs_data = [
                 NewRequestData.from_request(
