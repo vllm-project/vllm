@@ -413,20 +413,17 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 ## Early receive reporting
 
 Set `"enable_early_recv": true` in the decoder's `--kv-transfer-config` to report
-completed NIXL pulls before the next step output. Disabled by default; benchmark
-latency and polling overhead on your workload before enabling it.
+completed NIXL pulls before the next step output. Disabled by default.
 
 Supported: `uni` or single-node `mp`, with synchronous or asynchronous scheduling,
 TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
-All ranks must finish receiving before the request can run. Earlier scheduling is
-best effort. Transfer failures retain the configured recovery policy; unexpected
-poll or notification-channel errors are fatal. With `mp`, the worker monitor
-wakes even a paused engine; `uni` polls directly on the engine thread.
-Workers sleep between polls and yield to queued RPCs; the wait can add up to one
-polling interval (0.2 ms, subject to OS scheduling) before handling a new RPC.
-Receive post-processing stays on the worker's current stream, before subsequent
-forward submissions. Transfer latency may be observed earlier; statistics still
-reach the engine through ordinary step outputs.
+All ranks must finish receiving before admission; KV pressure may still delay it.
+Transfer failures use the configured recovery policy. Unexpected poll/channel
+errors are fatal; the `mp` monitor wakes even a paused engine.
+Workers yield to queued RPCs and sleep between polls, adding up to 0.2 ms plus OS
+scheduling delay to a new RPC. Benchmark latency and CPU overhead before enabling.
+Post-processing uses the worker's current stream before the next forward.
+Transfer latency may be observed earlier; metrics use ordinary step outputs.
 
 ## Metrics Reference
 
