@@ -68,6 +68,34 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def _view_in_place(
+    old_param: torch.Tensor, new_tensor: torch.Tensor
+) -> torch.Tensor | None:
+    """Under direct reload, a view of ``old_param``'s storage shaped like
+    ``new_tensor`` when it fits there, so the address survives a layout change.
+    None when it does not fit or ``new_tensor`` already lives in that storage."""
+    from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+
+    if (
+        not direct_reload_enabled()
+        or new_tensor.device != old_param.device
+        or old_param.is_meta
+    ):
+        return None
+    shape, stride = tuple(new_tensor.shape), new_tensor.stride()
+    if any(st == 0 and s > 1 for s, st in zip(shape, stride)):
+        return None  # overlapping (expanded) layout: cannot be written in place
+    storage = old_param.untyped_storage()
+    if new_tensor.untyped_storage().data_ptr() == storage.data_ptr():
+        return None  # e.g. a transposed view of the same storage: rebind keeps it
+    itemsize = new_tensor.element_size()
+    offset = old_param.storage_offset() * old_param.element_size()
+    if offset % itemsize or offset + _extent(new_tensor) * itemsize > storage.nbytes():
+        return None
+    view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
+    return view.set_(storage, offset // itemsize, shape, stride)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -131,6 +159,10 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
+        elif (view := _view_in_place(old_param, new_tensor)) is not None:
+            # direct reload: keep the address, write into the existing storage
+            view.copy_(new_tensor)
+            old_param.data = view
         else:
             old_param.data = new_tensor
         for attr_name, attr in new_tensor_attrs.items():
