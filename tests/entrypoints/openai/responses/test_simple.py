@@ -3,7 +3,7 @@
 
 import pytest
 import pytest_asyncio
-from openai import OpenAI
+from openai import AsyncOpenAI, BadRequestError, OpenAI
 
 from tests.utils import RemoteOpenAIServer
 
@@ -251,6 +251,21 @@ async def test_max_tokens(client: OpenAI, model_name: str):
     assert response is not None
     assert response.status == "incomplete"
     assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_min_tokens_validation(client: AsyncOpenAI, model_name: str):
+    with pytest.raises(
+        BadRequestError,
+        match="min_tokens must be less than or equal to max_tokens=1, got 2",
+    ):
+        await client.responses.create(
+            model=model_name,
+            input="Hello",
+            max_output_tokens=1,
+            extra_body={"min_tokens": 2},
+        )
 
 
 @pytest.mark.asyncio
