@@ -41,10 +41,12 @@ def case_to_test(pp_size: int, tp_size: int) -> ArgsTest:
         max_num_seqs=8,  # force multiple PP batches
         gpu_memory_utilization=0.8,
         engine_kwargs={
+            # The handoff race only exists with deferred (async) sampling.
+            "async_scheduling": True,
             "structured_outputs_config": {
                 "backend": "xgrammar",
                 "disable_any_whitespace": True,
-            }
+            },
         },
     )
 
@@ -53,9 +55,6 @@ def case_to_test(pp_size: int, tp_size: int) -> ArgsTest:
 @pytest.mark.parametrize(
     "args",
     [
-        # (2026-10-13) The cases below pass, but are commented out to speed up CI.
-        # pytest.param(case_to_test(pp_size=1, tp_size=1), id="pp1-tp1"),
-        # pytest.param(case_to_test(pp_size=1, tp_size=2), id="pp1-tp2"),
         pytest.param(case_to_test(pp_size=2, tp_size=1), id="pp2-tp1"),
     ],
 )

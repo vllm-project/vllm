@@ -34,7 +34,7 @@ def _get_draft_toks(handler: DraftTokensHandler) -> dict[str, list[int]]:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_draft_tokens_follow_request_lifecycle() -> None:
-    handler = DraftTokensHandler(max_num_reqs=8, device=torch.device("cuda"))
+    handler = DraftTokensHandler(torch.device("cuda"))
 
     # The worker samples two structured-output requests
     _set_draft_toks(
