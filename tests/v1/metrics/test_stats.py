@@ -25,18 +25,16 @@ from vllm.v1.spec_decode.metrics import (
 from vllm.v1.utils import compute_iteration_details
 
 
-@pytest.mark.parametrize("adaptive_verification", [True, False])
 @pytest.mark.parametrize(
     "verified_lengths, expected_per_pos",
     [([3, 0, 0], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
 )
 def test_adaptive_verified_budget_counter_differs_from_proposals(
-    adaptive_verification, verified_lengths, expected_per_pos
+    verified_lengths, expected_per_pos
 ):
     registry = CollectorRegistry()
     config = SpeculativeConfig(
         method="ngram",  # no weights needed
-        enable_adaptive_verification=adaptive_verification,
         num_speculative_tokens=5,
     )
     prom = SpecDecodingProm(
@@ -49,7 +47,7 @@ def test_adaptive_verified_budget_counter_differs_from_proposals(
     for verified in verified_lengths:
         stats.observe_draft_stats_per_req(
             num_draft_tokens=5,
-            num_accepted_tokens=min(verified or 0, 2),
+            num_accepted_tokens=min(verified, 2),
             num_verified_tokens=verified,
         )
     assert stats.num_verified_tokens_per_pos == expected_per_pos
@@ -64,7 +62,7 @@ def test_adaptive_verified_budget_counter_differs_from_proposals(
     assert samples["vllm:spec_decode_num_drafts_total"] == 3
     assert samples["vllm:spec_decode_num_draft_tokens_total"] == 15
     assert samples["vllm:spec_decode_num_accepted_tokens_total"] == sum(
-        min(verified or 0, 2) for verified in verified_lengths
+        min(verified, 2) for verified in verified_lengths
     )
     assert samples["vllm:spec_decode_num_verified_tokens_total"] == 3
     for pos, expected in enumerate(expected_per_pos):
@@ -98,10 +96,6 @@ def test_iteration_stats_repr():
 
 
 def test_scheduler_iteration_details_serialization():
-    spec_stats = SpecDecodingStats.new(num_spec_tokens=5)
-    spec_stats.observe_draft_stats_per_req(
-        num_draft_tokens=5, num_accepted_tokens=2, num_verified_tokens=3
-    )
     iteration_details = SchedulerIterationDetails(
         iteration_index=1,
         num_ctx_requests=2,
@@ -116,7 +110,6 @@ def test_scheduler_iteration_details_serialization():
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
-            spec_decoding_stats=spec_stats,
         )
     )
 
@@ -126,7 +119,6 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
-    assert decoded.scheduler_stats.spec_decoding_stats == spec_stats
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

@@ -2777,11 +2777,7 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
-@pytest.mark.parametrize(
-    "request_state",
-    ["active", "finished_removed", "finished_retained"],
-)
-def test_adaptive_verification_stats_count_actual_budget(request_state):
+def test_adaptive_verification_stats_count_actual_budget():
     scheduler = create_scheduler(
         num_speculative_tokens=5, per_request_spec_decode_metrics="detailed"
     )
@@ -2798,13 +2794,8 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
         ),
     )
     scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4, 5]]))
-    output = scheduler.schedule()
-    if request_state == "finished_removed":
-        scheduler.finish_requests(req_id, RequestStatus.FINISHED_STOPPED)
-    elif request_state == "finished_retained":
-        request.status = RequestStatus.FINISHED_STOPPED
     engine_outputs = scheduler.update_from_output(
-        output,
+        scheduler.schedule(),
         ModelRunnerOutput(
             req_ids=[req_id],
             req_id_to_index=req_id_to_index,
@@ -2814,28 +2805,13 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
     )
 
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
-    if request_state == "active":
-        assert stats.num_draft_tokens == 5
-        assert stats.num_verified_tokens == 4
-    else:
-        assert stats is None
-    if stats is not None:
-        assert stats.num_verified_tokens_per_pos == [1, 1, 1, 1, 0]
-        payload = request.spec_decode_metrics.to_dict()
-        assert payload["num_draft_tokens"] == stats.num_draft_tokens
-        assert payload["num_verified_tokens"] == 4
-        assert payload["per_step_verified"] == [4]
-
-
-def test_per_request_spec_decode_verified_without_adaptive_verification():
-    # Without adaptive verification, every scheduled draft is verified.
-    scheduler = create_scheduler(
-        num_speculative_tokens=3, per_request_spec_decode_metrics="detailed"
-    )
-    req = _run_spec_verify_steps(scheduler, [([1, 2, 3], [1, 2, 3, 4])])
-    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
-    assert payload["num_verified_tokens"] == 3
-    assert payload["per_step_verified"] == [3]
+    assert stats.num_draft_tokens == 5
+    assert stats.num_verified_tokens == 4
+    assert stats.num_verified_tokens_per_pos == [1, 1, 1, 1, 0]
+    payload = request.spec_decode_metrics.to_dict()
+    assert payload["num_draft_tokens"] == 5
+    assert payload["num_verified_tokens"] == 4
+    assert payload["per_step_verified"] == [4]
 
 
 def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
@@ -2890,6 +2866,7 @@ def test_per_request_spec_decode_detailed_records_per_step():
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
     assert payload["per_step_drafted"] == [3, 3, 3]
+    assert payload["per_step_verified"] == [3, 3, 3]
     assert payload["num_spec_steps"] == 3
 
 

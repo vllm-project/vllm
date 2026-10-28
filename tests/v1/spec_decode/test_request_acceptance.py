@@ -62,7 +62,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "num_accepted_draft_tokens": 9,
         "num_draft_tokens": 15,
         "num_spec_tokens": 3,
-        "num_verified_tokens": 15,  # defaults to the drafted count
+        "num_verified_tokens": 15,
     }
 
 
@@ -103,8 +103,8 @@ def test_empty_metrics_do_not_divide_by_zero():
 def test_observe_records_proposed_and_accepted_independently():
     # observe() takes proposed and accepted as independent inputs: the histogram
     # is keyed by accepted, num_draft_tokens sums the proposed as given. (The
-    # grammar-invalidated-draft subtraction happens in the scheduler before
-    # observe() -- see test_per_request_spec_decode_subtracts_invalid_drafts.)
+    # scheduler counts grammar-invalid drafts before observe() -- see
+    # test_per_request_spec_decode_counts_invalid_drafts.)
     s = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
     s.observe(num_draft_tokens=2, num_accepted=1, num_verified_tokens=2)
     s.observe(num_draft_tokens=3, num_accepted=1, num_verified_tokens=3)

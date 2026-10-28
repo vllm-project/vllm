@@ -428,14 +428,14 @@ impl SchedulerMetrics {
         let spec_decode_num_verified_tokens = Family::default();
         registry.register(
             "vllm:spec_decode_num_verified_tokens",
-            "Draft tokens actually verified by the target.",
+            "Number of draft tokens verified by the target.",
             spec_decode_num_verified_tokens.clone(),
         );
 
         let spec_decode_num_verified_tokens_per_pos = Family::default();
         registry.register(
             "vllm:spec_decode_num_verified_tokens_per_pos",
-            "Draft tokens actually verified per draft position.",
+            "Verified draft tokens per draft position.",
             spec_decode_num_verified_tokens_per_pos.clone(),
         );
 

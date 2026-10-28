@@ -2338,18 +2338,17 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
-                # Proposed draft tokens include those trimmed by the grammar
-                # before scheduling, and exclude async padding slots.
-                num_proposed = num_draft_tokens + request.num_trimmed_spec_tokens
+                # Verified draft tokens exclude async padding slots. Proposed
+                # draft tokens also include those trimmed by the grammar
+                # before scheduling.
+                num_verified = num_draft_tokens
                 if scheduler_output.num_invalid_spec_tokens:
-                    num_proposed -= scheduler_output.num_invalid_spec_tokens.get(
+                    num_verified -= scheduler_output.num_invalid_spec_tokens.get(
                         req_id, 0
                     )
-                num_verified = (
-                    num_verified_tokens[req_index]
-                    if num_verified_tokens is not None
-                    else min(num_draft_tokens, num_proposed)
-                )
+                num_proposed = num_verified + request.num_trimmed_spec_tokens
+                if num_verified_tokens is not None:
+                    num_verified = num_verified_tokens[req_index]
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_proposed,
