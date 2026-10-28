@@ -12,10 +12,11 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark and standalone draft models). The per-position acceptance estimates come from one of two sources:
+Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark and standalone draft models). Verification lengths are selected using the following sources:
 
 - **Confidence head**: DSpark checkpoints that ship a trained confidence head use its predictions directly.
 - **Online acceptance estimator**: every other drafter predicts acceptance from its draft logits with a small logistic model, recalibrated during serving against the target's verification results.
+- **Length head**: AdaFlash DFlash checkpoints predict a verification length directly. They use the same variable-length verification backend, with lengths supplied by the trained head instead of the confidence-based budget policy.
 
 ## Usage
 
@@ -50,10 +51,51 @@ vllm serve MiMo-V2.5-Pro-FP4-DFlash \
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
 
+### AdaFlash
+
+The released AdaFlash Qwen3-8B drafter includes an adaptive length head:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+  --attention-backend TRITON_ATTN \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "AdaFlash/Qwen3-8B-AdaFlash",
+    "num_speculative_tokens": 15,
+    "enable_adaptive_verification": true
+  }'
+```
+
+The checkpoint declares `dflash_config.use_thresh_head_two_model=true` and
+`dflash_config.thresh_head_direct_len=true`. vLLM loads the head with the draft
+backbone and evaluates it on the complete block of normalized hidden states,
+including the anchor. Its predicted ratio is multiplied by the block size,
+rounded and clamped to `[1, block_size]`. The anchor accounts for one verification
+position, so a block size of 16 requires 15 speculative tokens, and the head can
+select zero through 15 drafts for each request.
+
+This path reuses the adaptive verification batch compaction, attention metadata,
+KV cache and rejection sampler. It does not run the confidence-based cost-model
+policy or the online acceptance estimator. The CPU waits for the current head
+lengths before selecting the next verification shape; stale lengths cannot bound
+that batch safely. Scheduler capacities and the rejection sampler's logits budget
+can further shorten the selected prefixes.
+
+With `enable_adaptive_verification=false`, the head weights are still loaded, and
+the drafter uses fixed-length DFlash verification. Other DFlash and DSpark
+checkpoints retain their existing acceptance-based policy.
+
+Speculative decoding statistics retain their existing scheduled-draft counting
+semantics; the reported draft count is not the head's selected verification length.
+
+On Ampere GPUs, FlashAttention 2 does not support the variable-length decode
+CUDA graphs required by adaptive verification. Select a supported backend such
+as `TRITON_ATTN`, as shown above.
+
 ## Requirements and limitations
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
-- Full cudagraphs are required: step costs are profiled from captured graphs, so `--enforce-eager` is rejected at startup.
+- Full cudagraphs are required by this backend, so `--enforce-eager` is rejected at startup. Acceptance-based policies also profile step costs from the captured graphs; the direct-length AdaFlash policy does not need this cost profile.
 - Not supported with LoRA (the per-token LoRA mapping is built from CPU-side boundaries) or pipeline parallelism (cost curves and confidences exist only on the last rank).
 - Without a confidence head, `use_local_argmax_reduction` is rejected. The estimator needs the full draft logits, which local argmax reduction never materializes.
 

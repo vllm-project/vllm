@@ -735,6 +735,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
+            use_draft_lengths=getattr(self.speculator, "draft_token_lengths", None)
+            is not None,
         )
 
         self.block_tables = BlockTables(
@@ -2358,9 +2360,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_tokens[:, num_spec_tokens:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
+                draft_lengths = getattr(self.speculator, "draft_token_lengths", None)
+                if draft_lengths is not None:
+                    self.adaptive_verification.record_draft_lengths(
+                        draft_lengths, input_batch.idx_mapping
+                    )
+                else:
+                    self.adaptive_verification.record_confidences(
+                        self.speculator.draft_token_confidence_probs, input_batch
+                    )
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

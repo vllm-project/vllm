@@ -225,6 +225,8 @@ class AdmittedDraftCounts:
 
 
 class AdaptiveVerificationManager:
+    use_draft_lengths = False
+
     def __init__(
         self,
         req_states: "RequestState",
@@ -232,11 +234,22 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
+        use_draft_lengths: bool = False,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
         self._copy_stream = torch.cuda.Stream(device)
+        self.use_draft_lengths = use_draft_lengths
+        self._draft_lengths: CpuGpuBuffer | None = None
+        self._lengths_pending = False
+        if use_draft_lengths:
+            self._draft_lengths = CpuGpuBuffer(
+                req_states.max_num_reqs, dtype=torch.int32, device=device
+            )
+            self._draft_lengths.gpu.fill_(self.num_speculative_steps)
+            self._draft_lengths.np.fill(self.num_speculative_steps)
+            self._lengths_ready = torch.cuda.Event(blocking=True)
 
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the
@@ -291,6 +304,8 @@ class AdaptiveVerificationManager:
 
     def warmup_budget_kernel(self) -> None:
         """JIT the draft-budget kernel so the first binding step doesn't compile."""
+        if self.use_draft_lengths:
+            return
         capacities = self._batch_draft_capacity[:1].fill_(self.num_speculative_steps)
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=capacities.device)
         assign_draft_token_budget(
@@ -298,6 +313,14 @@ class AdaptiveVerificationManager:
         )
 
     def add_request(self, req_idx: int) -> None:
+        if self.use_draft_lengths:
+            self._wait_for_draft_lengths()
+            assert self._draft_lengths is not None
+            self._draft_lengths.np[req_idx] = self.num_speculative_steps
+            self._draft_lengths.gpu[req_idx : req_idx + 1].fill_(
+                self.num_speculative_steps
+            )
+            return
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
@@ -307,6 +330,8 @@ class AdaptiveVerificationManager:
 
         Run these inside StepTimingCollector.collect(), then hand the block's
         timings to set_initial_cost_curves."""
+        if self.use_draft_lengths:
+            return
         max_num_tokens = self.req_states.max_num_batched_tokens
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
@@ -327,6 +352,9 @@ class AdaptiveVerificationManager:
                 }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
+        if self.use_draft_lengths:
+            return
+
         def median_curve(
             points: Iterable[tuple[int, float]],
         ) -> list[tuple[int, float]]:
@@ -370,6 +398,26 @@ class AdaptiveVerificationManager:
         )
         logger.debug("DSpark cost tables: %s", self.cost_tables)
 
+    def _wait_for_draft_lengths(self) -> None:
+        if self._lengths_pending:
+            with gpu_sync_allowed():
+                self._lengths_ready.synchronize()
+            self._lengths_pending = False
+
+    def record_draft_lengths(
+        self, draft_lengths: torch.Tensor, idx_mapping: torch.Tensor
+    ) -> None:
+        """Stage exact lengths before choosing the next verification shape."""
+        self._wait_for_draft_lengths()
+        assert self._draft_lengths is not None
+        self._draft_lengths.gpu[idx_mapping] = draft_lengths[: idx_mapping.shape[0]]
+        current_stream = torch.cuda.current_stream(self.req_states.device)
+        self._copy_stream.wait_stream(current_stream)
+        with stream(self._copy_stream, current_stream):
+            self._draft_lengths.copy_to_cpu()
+            self._lengths_ready.record()
+        self._lengths_pending = True
+
     def record_confidences(
         self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
     ) -> None:
@@ -406,7 +454,6 @@ class AdaptiveVerificationManager:
         Stashes the chosen budget in ``_batch_budget`` for the compaction and
         reallocation that follow in the same step.
         """
-        assert self.cost_tables is not None
         req_ids = list(num_tokens_per_req)
         num_reqs = len(req_ids)
         scheduled_tokens = np.fromiter(
@@ -423,6 +470,23 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=num_reqs,
         )
+        if self.use_draft_lengths:
+            self._wait_for_draft_lengths()
+            assert self._draft_lengths is not None
+            lengths = np.minimum(scheduled_drafts, self._draft_lengths.np[slots])
+            budget = max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens)
+            # Keep the compacted logits in one rejection-sampler chunk.
+            available = np.maximum(budget - (np.cumsum(lengths) - lengths), 0)
+            lengths = np.minimum(lengths, available)
+            draft_budget = int(lengths.sum())
+            self._batch_budget = (
+                dict(zip(req_ids, map(int, lengths), strict=True)),
+                dict(zip(req_ids, map(int, num_non_draft_tokens), strict=True)),
+                draft_budget,
+            )
+            return int(num_non_draft_tokens.sum()) + draft_budget
+
+        assert self.cost_tables is not None
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
@@ -562,8 +626,10 @@ class AdaptiveVerificationManager:
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
 
         admitted_drafts = None
-        if self._copy_admitted_drafts_to_host and (
-            0 < draft_budget < int(scheduled_drafts.sum())
+        if (
+            self._copy_admitted_drafts_to_host
+            and draft_budget > 0
+            and (self.use_draft_lengths or draft_budget < int(scheduled_drafts.sum()))
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
             current_stream = torch.cuda.current_stream(self.req_states.device)
@@ -594,6 +660,7 @@ def maybe_create_adaptive_verification_manager(
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
     copy_admitted_drafts_to_host: bool = False,
+    use_draft_lengths: bool = False,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
@@ -643,4 +710,5 @@ def maybe_create_adaptive_verification_manager(
         num_bonus_tokens,
         max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
+        use_draft_lengths=use_draft_lengths,
     )
