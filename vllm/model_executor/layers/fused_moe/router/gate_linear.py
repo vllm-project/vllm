@@ -107,7 +107,6 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
         self.is_hopper = is_hopper
-        # 4 = gfx950, 5 = gfx1250; 0 off ROCm.
         self.cdna_version = cdna_version
 
         # A quantized gate exposes no plain ``weight``, so every specialized
