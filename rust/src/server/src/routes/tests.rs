@@ -61,6 +61,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
+    strip_root_path, with_root_path,
 };
 use crate::config::{
     ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
@@ -2042,6 +2043,65 @@ async fn api_key_auth_rejects_missing_token_on_guarded_route() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     assert_eq!(json, json!({ "error": "Unauthorized" }));
+}
+
+/// The root path is stripped up to a path segment boundary, like Starlette's
+/// `get_route_path`, keeping the query.
+#[test]
+fn strip_root_path_keeps_query_and_segment_boundary() {
+    let rewritten = [
+        "/llm/v1/models?limit=1",
+        "/llm/v1/models",
+        "/llm",
+        "/llmx/v1/models",
+        "/v1/models",
+    ]
+    .map(|uri| {
+        let request = Request::builder().uri(uri).body(Body::empty()).expect("build request");
+        strip_root_path(request, "/llm").uri().to_string()
+    });
+    expect_test::expect![[r#"
+        [
+            "/v1/models?limit=1",
+            "/v1/models",
+            "/",
+            "/llmx/v1/models",
+            "/v1/models",
+        ]
+    "#]]
+    .assert_debug_eq(&rewritten);
+}
+
+/// Like FastAPI's `root_path`, routes are served both under the prefix and at
+/// their bare paths, and API-key auth guards the prefixed paths too. The
+/// prefix only matches up to a path segment boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_serves_routes_under_prefix_and_at_bare_paths() {
+    let (app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let mut app = with_root_path(app, "/llm".to_string());
+
+    for (uri, authorization, expected) in [
+        ("/v1/models", Some("Bearer secret"), StatusCode::OK),
+        ("/llm/v1/models", Some("Bearer secret"), StatusCode::OK),
+        ("/llm/v1/models", None, StatusCode::UNAUTHORIZED),
+        (
+            "/llmx/v1/models",
+            Some("Bearer secret"),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/llm", Some("Bearer secret"), StatusCode::NOT_FOUND),
+    ] {
+        let mut request = Request::builder().uri(uri);
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let response = app
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), expected, "{uri} {authorization:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -260,6 +260,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -1376,13 +1377,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--root-path",
-        "/prefix",
+        "--uvicorn-log-level",
+        "debug",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
+        error: invalid value 'debug' for '--uvicorn-log-level <UVICORN_LOG_LEVEL>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -1570,6 +1571,7 @@ fn frontend_args_accept_json() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                 },
@@ -2001,14 +2003,14 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - root_path
+        - uvicorn_log_level
 
         Remove these arguments to continue.
 
@@ -2028,16 +2030,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - root_path
+        - uvicorn_log_level
 
         Remove these arguments to continue.
 
@@ -2491,6 +2493,7 @@ fn serve_args_accept_handshake_aliases() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -2650,6 +2653,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 allow_credentials: false,
             },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
@@ -2764,6 +2768,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 allow_credentials: false,
             },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
@@ -2846,6 +2851,35 @@ fn frontend_config_trusts_request_chat_template_from_args_json() {
         panic!("expected frontend args");
     };
     assert!(args.into_config().trust_request_chat_template);
+}
+
+#[test]
+fn root_path_reaches_config_from_serve_args_and_args_json() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--root-path", "/llm"])
+        .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.root_path.as_deref(), Some("/llm"));
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/llm"}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.into_config().root_path.as_deref(), Some("/llm"));
 }
 
 #[test]
@@ -2966,6 +3000,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 allow_credentials: false,
             },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(

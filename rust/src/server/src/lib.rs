@@ -228,7 +228,10 @@ where
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
-    let app = extend_router(build_router(state.clone()));
+    let mut app = extend_router(build_router(state.clone()));
+    if let Some(root_path) = config.root_path.clone() {
+        app = routes::with_root_path(app, root_path);
+    }
 
     info!(model, "starting vLLM server");
 

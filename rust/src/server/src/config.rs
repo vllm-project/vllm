@@ -336,6 +336,9 @@ pub struct Config {
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
     /// listener.
     pub tls: Option<TlsConfig>,
+    /// Path prefix (`--root-path`) under which every route is also served,
+    /// for a server behind a path-based routing proxy. Never empty.
+    pub root_path: Option<String>,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
