@@ -433,9 +433,12 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=4)
-def test_scale_down_removes_dead_rank_and_recovers():
-    """scale_down removes a dead DP rank; survivors keep serving with a smaller
-    DP group.
+@pytest.mark.parametrize("quantization", [None, "fp8_per_tensor"])
+def test_scale_down_removes_dead_rank_and_recovers(quantization):
+    """Runtime-format expert reload preserves serving accuracy after scale-down.
+
+    Survivors keep serving with a smaller DP group, including processed FP8
+    weights whose checkpoint layout differs from their runtime layout.
 
     SIGKILLing rank 0's worker leaves its EngineCore DEAD while the other ranks
     detect the peer fault and go UNHEALTHY. The orchestrator then sends
@@ -453,6 +456,8 @@ def test_scale_down_removes_dead_rank_and_recovers():
         "--eplb-config.num_redundant_experts",
         str(NUM_REDUNDANT_EXPERTS),
     ]
+    if quantization is not None:
+        eplb_args.extend(["--quantization", quantization])
     dp_size = 4
     victim_rank = 0
     with _ft_manager(eplb_args, dp_size=dp_size) as servers:

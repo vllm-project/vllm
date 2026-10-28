@@ -321,3 +321,72 @@ except Exception as e:
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
 - **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+
+## Fault tolerance and scale-down recovery
+
+Fault tolerance is opt-in. Enable it with `--enable-fault-tolerance`,
+`--enable-expert-parallel`, and an FT-capable `--all2all-backend`
+(`nixl_ep` or `deepep_low_latency`). It requires the v2 model runner
+(`VLLM_USE_V2_MODEL_RUNNER=1`), a single API server per engine, and no prefill
+context parallelism. MoE speculative draft models are currently unsupported.
+An external orchestrator must detect faults and coordinate recovery across all
+participating engines; enabling fault tolerance alone does not remove failed
+ranks automatically.
+
+For scale-down, also enable `--enable-eplb` and configure
+`--eplb-config.num_redundant_experts` with enough redundant slots that every
+logical expert still fits on surviving EP ranks after the planned removal.
+Recovery reloads all experts in affected MoE layers from the original checkpoint,
+then reapplies weight processing (including quantization and repacking). Keep
+that checkpoint accessible on every survivor and budget recovery time for I/O
+and temporary checkpoint-format layer storage.
+
+### Migrating recovery controllers
+
+The recovery endpoints are now `POST /v1/fault_tolerance/apply` and
+`GET /v1/fault_tolerance/status`. Replace the old `/fault_tolerance/apply` URL,
+which is no longer registered. Every apply request must include a nonempty
+string `request_id`; omission returns HTTP 400. Generate one new ID per recovery
+round and send **the same ID** to every participating engine. Do not reuse an ID
+for a later round. The apply endpoint returns HTTP 202 on acceptance; this does
+not indicate successful recovery.
+
+For a recoverable fault where every worker remains alive, dispatch `retry` to
+all engines in the round:
+
+```bash
+round_id=$(uuidgen)
+for engine in http://engine-0:8000 http://engine-1:8000; do
+  curl --fail-with-body "$engine/v1/fault_tolerance/apply" \
+    -H 'Content-Type: application/json' \
+    -d "{\"instruction\":\"retry\",\"params\":{},\"request_id\":\"$round_id\"}"
+done
+```
+
+### Removing a failed DP rank
+
+Stop routing requests to the failed engine. Once survivors report `unhealthy`,
+send `scale_down` to **every surviving engine** with identical parameters and a
+shared new `request_id`. Do not send recovery to a `dead` engine: its workers
+cannot recover in place. Rank IDs refer to the original DP topology.
+
+This example removes original DP rank 0 from a three-engine deployment. When
+removing the store master, choose a reachable surviving master's address and a
+free port for the replacement DP store; use the same values on every survivor.
+
+```bash
+round_id=$(uuidgen)
+for engine in http://engine-1:8000 http://engine-2:8000; do
+  curl --fail-with-body "$engine/v1/fault_tolerance/apply" \
+    -H 'Content-Type: application/json' \
+    -d "{\"instruction\":\"scale_down\",\"request_id\":\"$round_id\",\"params\":{\"removed_dp_ranks\":[0],\"dp_master_ip\":\"engine-1\",\"dp_store_port\":29550}}"
+done
+```
+
+Poll `GET /v1/fault_tolerance/status` on every survivor and inspect its `engines`
+entries for recovery completion or failure. Resume routing only when all
+survivors report `healthy`; acceptance alone is insufficient. Configure
+`--fault-tolerance-config '{"engine_recovery_timeout_sec": 120}'` to allow enough
+time for orchestration and recovery. Scale-down masks removed ranks and fixes
+expert placement; EPLB rebalancing remains suppressed afterward. It does not
+restart removed engines or restore the original capacity.

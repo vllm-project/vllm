@@ -174,7 +174,7 @@ def reload_experts_from_disk(
     vllm_config: VllmConfig,
     reload_set: set[tuple[int, int]],
 ) -> None:
-    """Reload specific (moe_layer_idx, logical_expert) weights from disk.
+    """Reload complete MoE layers affected by expert reassignment from disk.
 
     Args:
         model: The model whose FusedMoE layers receive the reloaded weights.
@@ -187,6 +187,10 @@ def reload_experts_from_disk(
         return
 
     from vllm.model_executor.model_loader import get_model_loader
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+    )
 
     moe_layers = list(model.moe_layers)
     prefix_renames = getattr(
@@ -200,58 +204,40 @@ def reload_experts_from_disk(
                 return orig + prefix[len(new) :]
         return prefix
 
-    # Two checkpoint layouts:
-    # - per-expert: '<layer>.<expert_id>.<proj>' — reload only reassigned experts.
-    # - fused: '<layer>.<proj>' (one tensor holding all experts) — reload the
-    #   whole tensor. The weight loader writes each expert through the rebuilt
-    #   expert map, so every local slot receives its new logical expert's data.
-    expert_prefixes = {f"{ckpt_prefix(i)}{e}.": (i, e) for i, e in reload_set}
-    fused_prefixes = {ckpt_prefix(i): i for i, _ in reload_set}
-
+    # Runtime-format expert reload: processing can merge scales or repack weights.
+    # Reload every expert in an affected layer so finalization never consumes
+    # uninitialized checkpoint storage for unchanged local experts.
+    layer_indices = sorted({i for i, _ in reload_set})
+    prefixes = tuple(ckpt_prefix(i) for i in layer_indices)
+    layers = [
+        getattr(moe_layers[i], "routed_experts", moe_layers[i]) for i in layer_indices
+    ]
     loader = get_model_loader(vllm_config.load_config)
-
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
-
-    matched: set[tuple[int, int]] = set()
-    fused_matched: set[int] = set()
-
-    def match_per_expert(name: str) -> tuple[int, int] | None:
-        for prefix, pair in expert_prefixes.items():
-            if name.startswith(prefix):
-                return pair
-        return None
-
-    def match_fused(name: str) -> int | None:
-        for prefix, layer_idx in fused_prefixes.items():
-            if name.startswith(prefix) and not name[len(prefix)].isdigit():
-                return layer_idx
-        return None
+    matched: set[int] = set()
 
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
-            if (pair := match_per_expert(name)) is not None:
-                matched.add(pair)
-                yield name, tensor
-            elif (layer_idx := match_fused(name)) is not None:
-                fused_matched.add(layer_idx)
-                yield name, tensor
+            for layer_idx, prefix in zip(layer_indices, prefixes):
+                if name.startswith(prefix):
+                    matched.add(layer_idx)
+                    yield name, tensor
+                    break
+
+    for layer in layers:
+        initialize_layerwise_reload(layer)
 
     logger.info("[FT] Reloading %d (layer, expert) pair(s) from disk.", len(reload_set))
 
     loaded = model.load_weights(filtered_iter())
 
-    unmatched = [
-        pair
-        for pair in reload_set
-        if pair not in matched and pair[0] not in fused_matched
-    ]
+    unmatched = set(layer_indices) - matched
     if unmatched:
         raise RuntimeError(
-            f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
-            f"checkpoint weight, e.g. {unmatched[:5]}. The model's expert "
-            f"weights use a layout that follows neither "
-            f"'<layer_name>.<expert_id>.' nor fused '<layer_name>.<proj>'."
+            f"[FT] MoE layers {sorted(unmatched)} had no matching checkpoint weights."
         )
+    for layer in layers:
+        finalize_layerwise_reload(layer, vllm_config.model_config)
 
     logger.info(
         "[FT] Expert weight reload complete: loaded=%d tensors.",

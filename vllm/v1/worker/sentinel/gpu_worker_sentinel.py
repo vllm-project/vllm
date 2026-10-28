@@ -11,6 +11,7 @@ from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     get_eplb_group,
+    get_pp_group,
     get_tp_group,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
@@ -90,6 +91,15 @@ class WorkerSentinel:
                 f"Fault tolerance requires an FT-capable all2all backend "
                 f"(one of {sorted(FT_BACKEND_SET)}), but got '{all2all_backend}'."
             )
+        # Recover registered draft experts: until draft reload is supported,
+        # reject MoE drafts before serving rather than leaving stale EP mappings.
+        spec_config = worker.vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.draft_model_config is not None
+            and spec_config.draft_model_config.is_moe
+        ):
+            raise ValueError("Fault tolerance does not support MoE draft models yet.")
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("Fault tolerance does not support PCP yet.")
         if not worker.vllm_config.use_v2_model_runner:
@@ -167,10 +177,12 @@ class WorkerSentinel:
             # The per-step TP barrier (dp_utils) leaves the group in a
             # timed-out state on fault; rebuild it for a clean slate.
             tp_group = get_tp_group()
+            # Pipeline-stage recovery ports: each stage owns a distinct TP group.
+            pp_rank = get_pp_group().rank_in_group
             _reinit_cpu_group(
                 tp_group,
                 store,
-                f"ft_tp_port_{round_key}_{dp_group_rank}",
+                f"ft_tp_port_{round_key}_{dp_group_rank}_{pp_rank}",
                 self.worker.parallel_config.master_addr,
                 tp_group.rank_in_group,
                 tp_group.world_size,
@@ -215,6 +227,8 @@ class WorkerSentinel:
     ) -> None:
         """Reinit the EP/EPLB Gloo groups and refresh the EPLB
         communicator's cpu_group reference."""
+        # Pipeline-stage recovery ports: EP/EPLB leaders must not share keys.
+        pp_rank = get_pp_group().rank_in_group
         for key_suffix, get_group in [
             ("ep", get_ep_group),
             ("eplb", get_eplb_group),
@@ -223,7 +237,7 @@ class WorkerSentinel:
             _reinit_cpu_group(
                 group,
                 store,
-                f"ft_{key_suffix}_port_{round_key}",
+                f"ft_{key_suffix}_port_{round_key}_{pp_rank}",
                 master_ip,
                 group.rank_in_group,
                 group.world_size,
