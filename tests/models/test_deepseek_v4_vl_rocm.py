@@ -199,6 +199,22 @@ def test_rocm_wo_a_keeps_row_major_weights(holder: str, default_vllm_config) -> 
 
 
 @pytest.mark.parametrize("holder", ["quant_method", "scheme"])
+def test_rocm_fused_shared_expert_keeps_checkpoint_layout(
+    holder: str, default_vllm_config
+) -> None:
+    # The fused MoE copies the shared expert's weights after this step.
+    layer = _preshuffled_fp8_linear(holder)
+    layer.skip_weight_relayout = True
+    original = layer.weight.detach().clone()
+    getattr(layer, holder).fp8_linear.process_weights_after_loading(layer)
+
+    assert not getattr(layer, "aiter_bpreshuffled", False)
+    torch.testing.assert_close(
+        layer.weight.view(torch.uint8), original.view(torch.uint8)
+    )
+
+
+@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
 def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
     holder: str, monkeypatch: pytest.MonkeyPatch, default_vllm_config
 ) -> None:
