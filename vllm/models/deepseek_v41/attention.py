@@ -97,9 +97,12 @@ logger = init_logger(__name__)
 _SHARD_FUSED_WQA_WKV_MIN_TOKENS = 2048
 
 # From this many tokens, eager steps build the padded interleaved Q with
-# _pad_interleaved_q instead of in the fused KV-insert op. Kept equal to the
-# op's NUM_TOKEN_CUTOFF, where it switches to its reduced-grid kernel.
-_Q_PAD_COPY_MIN_TOKENS = 1024
+# _pad_interleaved_q instead of in the fused KV-insert op. Set from a
+# 64-16384-token sweep on B300: by GPU time alone the copy wins from about
+# 256 tokens, but it costs one extra eager launch, and with that launch gap
+# fully exposed the crossover moves to about 2048. This value keeps the
+# large-step win without betting on launch overlap.
+_Q_PAD_COPY_MIN_TOKENS = 2048
 
 
 @triton.jit
