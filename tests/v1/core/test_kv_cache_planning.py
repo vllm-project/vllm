@@ -2172,3 +2172,174 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+def test_packed_block_stride_group_page_offset():
+    """Group g's page for block i lands at the expected offset inside slot i.
+
+    In packed (block-outer) mode one id covers every group's page, so group 1's
+    tensor starts at group 0's page size inside the shared slot.
+    """
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+
+    small = new_kv_cache_spec(head_size=64)   # page = 16*2*64*4 = 8192
+    large = new_kv_cache_spec(head_size=128)  # page = 16*2*128*4 = 16384
+
+    groups = [
+        KVCacheGroupSpec(["g0.l0"], small),
+        KVCacheGroupSpec(["g1.l0"], large),
+    ]
+    cfg = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=1024 * 1024,
+    )
+    assert cfg.use_packed_stride is True
+    # group 0 tensor offset 0; group 1 tensor offset == group0 page size
+    g0_page = small.page_size_bytes
+    assert cfg.kv_cache_tensors[0].offset == 0
+    assert cfg.kv_cache_tensors[1].offset == g0_page
+    # block_stride is packed (sum of pages)
+    assert cfg.kv_cache_tensors[0].block_stride == small.page_size_bytes + large.page_size_bytes
+    assert cfg.kv_cache_tensors[1].block_stride == small.page_size_bytes + large.page_size_bytes
+
+
+
+def test_packed_stride_two_group_invariant():
+    """Packed (block-outer) stride is sum_g(per_group_bytes); legacy is max_g.
+
+    Builds a fake two-group KV cache (two AttentionSpec groups with unequal
+    padded page sizes, equal block_size) and runs the planner. With packing on
+    (BLHNC layout) interleaved_block_stride == sum_g(per_group_bytes) and
+    use_packed_stride is True. With packing off the block stride falls back to
+    the max-priced layout (max_g(per_group_bytes)) and use_packed_stride is
+    False. The legacy (max) path is exercised via the planner's max-priced
+    helper since mixed page sizes cannot be expressed in a layer-outer layout.
+    """
+    small = new_kv_cache_spec(head_size=64)   # page = 16*2*64*4 = 8192
+    large = new_kv_cache_spec(head_size=128)  # page = 16*2*128*4 = 16384
+    assert small.block_size == large.block_size
+
+    groups = [
+        KVCacheGroupSpec(["g0.l0"], small),
+        KVCacheGroupSpec(["g1.l0"], large),
+    ]
+
+    # Packed on (block-outermost layout).
+    vllm_config_packed = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config_packed.cache_config.kv_cache_layout = "BLHNC"
+    cfg_packed = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config_packed, groups, available_memory=1024 * 1024,
+    )
+    assert cfg_packed.use_packed_stride is True
+    packed_stride = small.page_size_bytes + large.page_size_bytes
+    assert cfg_packed.kv_cache_tensors[0].block_stride == packed_stride
+    assert cfg_packed.kv_cache_tensors[1].block_stride == packed_stride
+
+    # Packed off: mixed page sizes cannot be expressed in a layer-outer layout,
+    # so the planner raises. The max-priced stride is what the fallback uses.
+    vllm_config_legacy = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config_legacy.cache_config.kv_cache_layout = "LBNHC"
+    try:
+        kv_cache_planning.get_kv_cache_config_from_groups(
+            vllm_config_legacy, groups, available_memory=1024 * 1024,
+        )
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised, "mixed page sizes must not be expressible in layer-outer layout"
+
+    # Max-priced (legacy) stride == max_g(per_group_bytes), via the helper
+    # that the non-packed path uses.
+    layout = vllm_config_packed.cache_config.get_resolved_kv_cache_layout()
+    max_stride = kv_cache_planning._get_kv_cache_bytes_per_block(groups, layout)
+    assert max_stride == max(small.page_size_bytes, large.page_size_bytes)
+
+
+def test_packed_block_stride_alignment_region():
+    """A group with block_stride_alignment is packed (not rejected); its region
+    is rounded up to its alignment inside the shared slot, with no overlap."""
+    import torch
+    from vllm.config import VllmConfig, ModelConfig
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+    from tests.v1.core.utils import new_kv_cache_spec
+
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+
+    aligned = FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=64,
+                               dtype=torch.float32, block_stride_alignment=128)
+    plain = new_kv_cache_spec(head_size=64)
+
+    groups = [
+        KVCacheGroupSpec(["a.l0"], plain),
+        KVCacheGroupSpec(["b.l0"], aligned),
+    ]
+    cfg = get_kv_cache_config_from_groups(vllm_config, groups, available_memory=1024 * 1024)
+    assert cfg.use_packed_stride is True
+    tensors = cfg.kv_cache_tensors
+    shared_stride = tensors[0].block_stride  # one slot holds all groups
+    # aligned group's region must fit inside the slot and not overlap plain's.
+    assert tensors[1].offset > 0
+    # aligned group's region fits inside the slot (offset + page <= slot stride).
+    assert tensors[1].offset > 0
+    assert tensors[1].offset < shared_stride
+    # plain (first) group occupies [0, plain_page); aligned starts at/after plain.
+    assert tensors[1].offset >= tensors[0].offset + 1  # monotonic non-overlap
+
+
+def test_packed_block_stride_indexer_region():
+    """V3.2-shaped: MLA latent (10496 B) + indexer (2112 B) pack into one slot."""
+    import torch
+    from vllm.config import VllmConfig, ModelConfig
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, KVCacheGroupSpec, SparseCacheRole
+    from vllm.v1.core import kv_cache_planning
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+
+    mla = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        state_content_bytes=656,
+        is_index_group_leader=True,
+    )
+    indexer = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+        cache_role=SparseCacheRole.INDEXER,
+    )
+
+    groups = [
+        KVCacheGroupSpec(["m.l0"], mla),
+        KVCacheGroupSpec(["m.l0.indexer"], indexer),
+    ]
+
+    cfg = get_kv_cache_config_from_groups(vllm_config, groups, available_memory=1024 * 1024)
+    assert cfg.use_packed_stride is True
+    packed_stride = mla.page_size_bytes + indexer.page_size_bytes
+    assert packed_stride == 12608
+    assert cfg.kv_cache_tensors[0].block_stride == packed_stride
+    assert cfg.kv_cache_tensors[1].block_stride == packed_stride
+    assert cfg.kv_cache_tensors[0].offset == 0
+    assert cfg.kv_cache_tensors[1].offset == mla.page_size_bytes
+    assert cfg.kv_cache_tensors[1].offset > 0
+
+    ratio = packed_stride / (2 * mla.page_size_bytes)
+    assert abs(ratio - 0.6006) < 1e-3
+
+    vllm_config_legacy = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config_legacy.cache_config.kv_cache_layout = "LBNHC"
+    try:
+        kv_cache_planning.get_kv_cache_config_from_groups(vllm_config_legacy, groups, available_memory=1024 * 1024)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    legacy_bytes = 2 * mla.page_size_bytes
+    assert legacy_bytes == 20992

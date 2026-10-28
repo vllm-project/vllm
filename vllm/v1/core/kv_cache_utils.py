@@ -1082,6 +1082,10 @@ def get_max_concurrency_for_kv_cache_config(
         )
         if group.host_resident:
             host_blocks_per_request += required
+        elif kv_cache_config.use_packed_stride:
+            # Packed: one id covers all groups; count once (groups share bpr).
+            if num_blocks_per_request == 0:
+                num_blocks_per_request = required
         else:
             num_blocks_per_request += required
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
