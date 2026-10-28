@@ -80,8 +80,8 @@ def _launch_config(
     if num_experts < 64:
         return 1, 1024, 4, 1
     # 256 < E <= 512 was swept with every call streaming its weights from HBM
-    # (E=384, K=5120, 48 distinct weight copies); a second stage hides the
-    # load latency of the K loop.
+    # (E=384 and 512, K=5120, 48 distinct weight copies); a second stage hides
+    # the load latency of the K loop.
     if 256 < num_experts <= 512:
         if num_tokens <= 2:
             return 1, 1024, 4, 2
