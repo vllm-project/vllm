@@ -22,13 +22,12 @@ class _LanguageModel(nn.Module):
 
 
 class _OpenPanguVL(OpenPanguVLForConditionalGeneration):
+    language_model: _LanguageModel
+
     def __init__(self, hidden_size: int) -> None:
         nn.Module.__init__(self)
         self.config = SimpleNamespace(image_token_id=41, video_token_id=42)
         self.language_model = _LanguageModel(hidden_size)
-
-    def get_language_model(self) -> _LanguageModel:
-        return self.language_model
 
 
 @pytest.mark.parametrize("device_type", ["cpu", "cuda"])
@@ -40,7 +39,7 @@ def test_get_input_embeddings_merges_image_and_video_embeddings(
 
     device = torch.device(device_type)
     hidden_size = 4
-    model = _OpenPanguVL(hidden_size).to(device)
+    model = _OpenPanguVL(hidden_size).to(device)  # type: ignore[abstract]
     input_ids = torch.tensor([7, 41, 41, 8, 42, 9], device=device)
     multimodal_embeddings = (
         torch.full((2, hidden_size), -1.0, device=device),

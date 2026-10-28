@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    Gemma4ProcessingInfo,
 )
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -98,6 +99,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
 
     num_soft_tokens = processor.info._compute_num_soft_tokens(
         image_width=image_width,
@@ -190,6 +192,7 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
     image = PILImage.new("RGB", (1000, 1000), color="white")
     image_size = image.size
     mm_items = processor.info.parse_mm_data({"image": image})
@@ -278,7 +281,7 @@ def test_video_cache_is_independent_of_image_kwargs(
 
     def process(mm_kwargs, cache):
         return processor(
-            hf_processor.image_token + hf_processor.video_token,
+            getattr(hf_processor, "image_token") + getattr(hf_processor, "video_token"),  # noqa: B009
             mm_items,
             mm_uuid_items={"video": [video_uuid]},
             hf_processor_mm_kwargs=mm_kwargs,
@@ -397,7 +400,7 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
 
 
 def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
-    model = object.__new__(Gemma4ForConditionalGeneration)
+    model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
     vision_config = SimpleNamespace(
         patch_size=16, pooling_kernel_size=3, default_output_length=280
     )

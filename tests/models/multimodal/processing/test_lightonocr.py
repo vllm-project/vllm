@@ -35,16 +35,17 @@ def test_lightonocr_image_embeddings_preserve_lengths_and_values(
         for i, size in enumerate(feature_sizes)
     ]
     image_input = torch.stack(embeddings) if tensor_input else embeddings
-    prompt = " ".join([hf_processor.image_token] * len(embeddings))
+    prompt = " ".join([getattr(hf_processor, "image_token")] * len(embeddings))  # noqa: B009
     if prompt_as_tokens:
         prompt = ctx.get_tokenizer().encode(prompt)
 
     items = processor.info.parse_mm_data({"image": image_input})
     processed = processor(prompt, mm_items=items)
 
-    assert processed["prompt_token_ids"].count(hf_processor.image_token_id) == sum(
-        feature_sizes
-    )
+    assert processed["prompt_token_ids"].count(
+        getattr(hf_processor, "image_token_id")  # noqa: B009
+    ) == sum(feature_sizes)
     assert [p.length for p in processed["mm_placeholders"]["image"]] == feature_sizes
     for item, expected in zip(processed["mm_kwargs"]["image"], embeddings):
+        assert item is not None
         torch.testing.assert_close(item.get_data()["image_embeds"], expected)

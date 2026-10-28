@@ -50,7 +50,7 @@ def _get_hf_prefill_hidden(hf_model: HfRunner, image: Any):
     inputs = hf_model.get_inputs([PROMPT], images=[image])[0]
     with torch.no_grad():
         outputs = hf_model.model.model(
-            **hf_model.wrap_device(inputs),
+            **hf_model.wrap_device(dict(inputs)),
             use_cache=False,
         )
     return outputs.last_hidden_state[0].detach().float().cpu()

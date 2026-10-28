@@ -5,6 +5,7 @@
 import pytest
 from transformers import SmolVLMConfig
 
+from vllm.model_executor.models.smolvlm import SmolVLMProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
@@ -40,6 +41,7 @@ def test_processor_override(
         limit_mm_per_prompt={"image": num_imgs},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, SmolVLMProcessingInfo)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass
@@ -70,7 +72,9 @@ def test_processor_override(
         processor=hf_processor,
         mm_kwargs=hf_processor_mm_kwargs,
     )
-    assert num_patches == expected_toks_per_img // hf_processor.image_seq_len
+    assert num_patches == expected_toks_per_img // getattr(  # noqa: B009
+        hf_processor, "image_seq_len"
+    )
 
     hf_processed_inputs = hf_processor(
         text=prompt,

@@ -87,11 +87,15 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
         seq_len=128,
         mm_counts={"image": 0, "video": 1},
         mm_options=MultiModalDummyOptions(
-            video=VideoDummyOptions(num_frames=num_frames_override)
+            video=VideoDummyOptions(
+                num_frames=num_frames_override, count=999, width=None, height=None
+            )
         ),
     )
 
-    video, _metadata = data["video"][0]
+    videos = data["video"]
+    assert isinstance(videos, list)
+    video, _metadata = videos[0]
     assert video.shape[0] == expected_frames
 
 

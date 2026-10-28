@@ -136,7 +136,7 @@ def test_processor_override(
 
     # Ensure we have the right number of placeholders per num_crops size
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    image_token_id = hf_processor.image_token_id
+    image_token_id = getattr(hf_processor, "image_token_id")  # noqa: B009
     video_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     grid_t, _, _ = processed_inputs["mm_kwargs"].get_data()["video_grid_thw"][0]
 

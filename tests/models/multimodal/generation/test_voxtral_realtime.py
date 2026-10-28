@@ -138,7 +138,7 @@ async def async_engine(request):
 def _build_inputs(
     audio_assets: list[AudioAsset], tokenizer: MistralTokenizer
 ) -> tuple[list[dict], list[SamplingParams]]:
-    audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
+    audio_config = getattr(tokenizer.instruct_tokenizer.tokenizer, "audio")  # noqa: B009
     inputs = []
     sampling_params = []
     for audio_asset in audio_assets:

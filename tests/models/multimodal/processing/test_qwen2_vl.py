@@ -341,9 +341,13 @@ def test_processor_override(
 
     # Ensure we have the right number of placeholders per num_crops size
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
+    image_token_id = tokenizer.convert_tokens_to_ids(
+        getattr(hf_processor, "image_token")  # noqa: B009
+    )
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values"].shape
+    pixel_values = processed_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    pixel_shape = pixel_values.shape
 
     assert img_tok_count == expected_toks_per_img * num_imgs
     assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
@@ -371,6 +375,7 @@ def test_get_image_size_with_most_features(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
 
     hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
     merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
@@ -391,7 +396,9 @@ def test_get_image_size_with_most_features(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=mm_processor_kwargs,
         )
-        grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"].tolist()
+        image_grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"]
+        assert isinstance(image_grid_thw, torch.Tensor)
+        grid_thw = image_grid_thw.tolist()
         t, h, w = grid_thw[0]
         tokens = (t * h * w) // (merge_size**2)
         assert tokens < max_tokens
@@ -422,7 +429,9 @@ def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
     for fps in (1.0, 30.0):
         mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
         processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
-        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        item = processed["mm_kwargs"]["video"][0]
+        assert item is not None
+        spg = item.get_data()["second_per_grid_ts"]
         assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
 
 
@@ -458,6 +467,7 @@ def test_mm_device_do_normalize(
     pixel_values_with_normalize = processed_inputs_with_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
+    assert isinstance(pixel_values_with_normalize, torch.Tensor)
     dtype = pixel_values_with_normalize.dtype
 
     processed_inputs_without_normalize = processor(
@@ -468,6 +478,7 @@ def test_mm_device_do_normalize(
     pixel_values_without_normalize = processed_inputs_without_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
+    assert isinstance(pixel_values_without_normalize, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     input_norm = build_mm_input_norm(ctx.model_config).to(device)

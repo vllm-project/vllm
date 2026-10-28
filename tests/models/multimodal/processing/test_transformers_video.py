@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 import pytest
+import torch
 from transformers import Qwen3VLVideoProcessor
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.multimodal import MultiModalProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
@@ -94,7 +96,7 @@ def test_video_multimodal_processor(model_id):
     assert result["prompt_token_ids"] == hf_inputs["input_ids"][0].tolist()
 
     (placeholder,) = result["mm_placeholders"]["video"]
-    (num_video_tokens,) = hf_processor._get_num_multimodal_tokens(
+    (num_video_tokens,) = getattr(hf_processor, "_get_num_multimodal_tokens")(  # noqa: B009
         video_sizes=[frames.shape[:3]]
     )["num_video_tokens"]
     assert placeholder.get_num_embeds() == num_video_tokens
@@ -103,9 +105,14 @@ def test_video_multimodal_processor(model_id):
     )
 
     (item,) = result["mm_kwargs"]["video"]
-    rows = item["pixel_values_videos"].data.shape[0]
+    assert item is not None
+    pixel_values_videos = item["pixel_values_videos"].data
+    assert isinstance(pixel_values_videos, torch.Tensor)
+    rows = pixel_values_videos.shape[0]
     if "video_grid_thw" in item:
-        assert rows == int(item["num_video_patches"].data)
+        num_video_patches = item["num_video_patches"].data
+        assert isinstance(num_video_patches, torch.Tensor)
+        assert rows == int(num_video_patches)
     else:
         assert rows == len(frames)
 
@@ -168,6 +175,8 @@ def test_video_fields_not_claimed_by_image():
 
     (image_item,) = result["mm_kwargs"]["image"]
     (video_item,) = result["mm_kwargs"]["video"]
+    assert image_item is not None
+    assert video_item is not None
     assert {"pixel_values", "image_grid_thw"} <= set(image_item.keys())
     assert {"pixel_values_videos", "video_grid_thw"} <= set(video_item.keys())
     assert len(result["mm_placeholders"]["image"]) == 1
@@ -179,6 +188,7 @@ def test_repeated_video_hits_the_processor_cache():
     model_config = ModelConfig(
         model="Qwen/Qwen3-VL-2B-Instruct", model_impl="transformers"
     )
+    assert model_config.multimodal_config is not None
     model_config.multimodal_config.mm_processor_cache_gb = 4
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     cache = MultiModalProcessorOnlyCache(model_config)
@@ -222,7 +232,13 @@ def test_merged_token_fields_split_per_video():
     )
 
     items = result["mm_kwargs"]["video"]
-    assert [len(item["video_compression_mask"].data) for item in items] == [128, 64]
+    assert all(item is not None for item in items)
+    assert [
+        len(item["video_compression_mask"].data) for item in items if item is not None
+    ] == [
+        128,
+        64,
+    ]
 
 
 def test_video_sampled_by_processor():
@@ -262,6 +278,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
         ModelConfig(model=model_id, model_impl="transformers")
     )
     info = mm_processor.info
+    assert isinstance(info, MultiModalProcessingInfo)
     seq_len = info.ctx.model_config.max_model_len
 
     result = mm_processor.get_dummy_mm_inputs({"video": 1})
@@ -271,7 +288,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
     assert placeholder.get_num_embeds() == max_tokens
     # Shrinking the dummy frames must never cost tokens
     num_frames = info.get_num_frames_with_most_features(seq_len, {"video": 1})
-    (huge_frame_tokens,) = info.get_hf_processor()._get_num_multimodal_tokens(
-        video_sizes=[[num_frames, 10_000, 10_000]]
-    )["num_video_tokens"]
+    (huge_frame_tokens,) = getattr(  # noqa: B009
+        info.get_hf_processor(), "_get_num_multimodal_tokens"
+    )(video_sizes=[[num_frames, 10_000, 10_000]])["num_video_tokens"]
     assert max_tokens >= huge_frame_tokens

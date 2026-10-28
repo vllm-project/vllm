@@ -9,6 +9,8 @@ import textwrap
 import pytest
 import torch
 
+from vllm.multimodal.video import EmbeddingGemma2VideoBackend
+
 MODEL = os.environ.get("EG2_MODEL_PATH")
 needs_model = pytest.mark.skipif(not MODEL, reason="EG2_MODEL_PATH not set")
 TEXT_COS, MM_COS = 0.999, 0.999
@@ -348,6 +350,7 @@ def test_video_loader_real_video(vllm_runner, st_model):
 
     video_path = "/projects/gemma4-vllm/videos/test_intel.mp4"
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     with open(video_path, "rb") as f:
         data = f.read()
 
@@ -396,6 +399,7 @@ def test_video_loader_duplicate_expansion_e2e(vllm_runner, st_model):
     from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     # 4s clip at 0.5 fps = 2 unique frames
     lowfps_path = "/tmp/test_lowfps_05.mp4"
     _ensure_synthetic_video(lowfps_path, duration=4.0, fps=0.5, width=64, height=48)
@@ -436,6 +440,7 @@ def test_video_loader_indices():
     )
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     hf_proc = EmbeddingGemma2VideoProcessor()
 
     # Case 1: clip shorter than 32s (e.g. 5s @ 24fps = 120 frames)
@@ -521,6 +526,7 @@ def test_video_loader_duplicate_expansion():
     )
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     hf_proc = EmbeddingGemma2VideoProcessor()
 
     # 4s clip @ 0.5fps = 2 frames total. Requested target fps = 1.0 -> 4 frames.

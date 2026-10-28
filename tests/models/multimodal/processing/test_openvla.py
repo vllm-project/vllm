@@ -164,8 +164,10 @@ def test_openvla_image_processor_outputs_pixel_values() -> None:
 
     output = processor(images=image)
 
-    assert output["pixel_values"].shape == (1, 6, 224, 224)
-    assert output["pixel_values"].dtype == torch.float32
+    pixel_values = output["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    assert pixel_values.shape == (1, 6, 224, 224)
+    assert pixel_values.dtype == torch.float32
 
 
 def test_openvla_processing_info_token_counts() -> None:
@@ -196,6 +198,7 @@ def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
     ] == [(1, 1)]
     assert content.full == [32000] * 256
 
+    assert callable(content.is_embed)
     is_embed = content.is_embed(content.full)
     assert is_embed.dtype == torch.bool
     assert is_embed.tolist() == [True] * 256

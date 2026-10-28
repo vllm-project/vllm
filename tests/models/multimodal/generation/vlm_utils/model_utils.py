@@ -22,6 +22,7 @@ from transformers import (
     GenerationMixin,
 )
 from transformers.masking_utils import create_causal_mask
+from transformers.utils import ModelOutput
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
@@ -105,7 +106,9 @@ def _llava_vllm_to_hf_output(
     hf_output_str = output_str[1:] if output_str[0] == " " else output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -137,7 +140,9 @@ def llava_onevision_vllm_to_hf_output(
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -179,7 +184,9 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> Runner
     hf_output_str = output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -286,7 +293,9 @@ def gemma3_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOut
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -572,11 +581,10 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Prepare attention mask
         attention_mask = create_causal_mask(
             config=self.config,
-            input_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             position_ids=position_ids,
-            cache_position=cache_position,
         )
 
         # Initialize and collect hidden states
@@ -800,7 +808,7 @@ def _internvl_generate(
     input_ids: torch.FloatTensor,
     attention_mask: torch.LongTensor | None = None,
     **generate_kwargs,
-) -> torch.LongTensor:
+) -> torch.Tensor | ModelOutput:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
     target_dtype = next(self.parameters()).dtype
@@ -828,7 +836,7 @@ def _internvl_generate(
     if not isinstance(self.language_model, GenerationMixin):
         pytest.skip("HF impl is not compatible with current transformers")
 
-    outputs = self.language_model.generate(
+    outputs = getattr(self.language_model, "generate")(  # noqa: B009
         **forward_kwargs,
         **generate_kwargs,
     )
@@ -1207,7 +1215,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
         return output
 
     hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
-    hf_model.model.generate = patched_generate  # type: ignore[method-assign]
+    hf_model.model.generate = patched_generate
     return hf_model
 
 

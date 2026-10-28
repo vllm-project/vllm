@@ -34,7 +34,7 @@ class VitCudagraphTestConfig:
 
 def params_with_marks(
     configs: dict[str, VitCudagraphTestConfig],
-) -> list[pytest.param]:
+) -> list[object]:
     return [
         pytest.param(model_id, marks=cfg.marks) for model_id, cfg in configs.items()
     ]
@@ -520,6 +520,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
             "baby_reading": config.video_prompt,  # type: ignore[typeddict-item]
         }
     )
+    sampled_vids: list
     if config.needs_video_metadata:
         sampled_vids = [
             sample_frames_with_video_metadata(
@@ -576,7 +577,7 @@ def _check_eonly_encoder_outputs(worker, batches):
         for batch in batches:
             kwargs = {key: value.to(runner.device) for key, value in batch.items()}
             actual = manager.execute(kwargs)
-            expected = runner.model.embed_multimodal(**kwargs)
+            expected = getattr(runner.model, "embed_multimodal")(**kwargs)  # noqa: B009
             assert len(actual) == len(expected)
             for output, reference in zip(actual, expected):
                 assert torch.isfinite(output).all()

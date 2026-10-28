@@ -34,6 +34,11 @@ from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.sequence import IntermediateTensors
 
 
+def _uninitialized_model() -> MossAudioModel:
+    # Each test sets only the fields needed by the method under test.
+    return object.__new__(MossAudioModel)  # type: ignore[type-abstract]
+
+
 class _Tokenizer:
     def encode(self, text, **kwargs):
         return [ord(char) for char in text]
@@ -294,7 +299,7 @@ def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
 def test_moss_audio_supports_language_model_lora_only():
     assert supports_lora(MossAudioModel)
 
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
     assert isinstance(model, SupportsLoRA)
 
     mapping = model.get_mm_mapping()
@@ -304,7 +309,7 @@ def test_moss_audio_supports_language_model_lora_only():
 
 
 def test_moss_audio_error_paths():
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
     with pytest.raises(ValueError, match="DeepStack audio token count mismatch"):
         model._cache_deepstack_input_embeds(
             inputs_embeds=torch.zeros(4, 8),
@@ -328,17 +333,17 @@ def test_moss_audio_validates_tp_config():
     vllm_config.model_config.hf_config.adapter_hidden_size = 7
 
     with pytest.raises(ValueError, match="adapter_hidden_size"):
-        MossAudioModel(vllm_config=vllm_config)
+        MossAudioModel(vllm_config=vllm_config)  # type: ignore[abstract]
 
     vllm_config = _vllm_config(tensor_parallel_size=2)
     vllm_config.model_config.hf_config.audio_config.d_model = 6
     vllm_config.model_config.hf_config.audio_config.encoder_attention_heads = 3
     with pytest.raises(ValueError, match="encoder_attention_heads"):
-        MossAudioModel(vllm_config=vllm_config)
+        MossAudioModel(vllm_config=vllm_config)  # type: ignore[abstract]
 
 
 def test_moss_audio_rejects_audio_data_list_seqlen_count_mismatch():
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
 
     with pytest.raises(ValueError, match="audio_data batch size"):
         model._parse_and_validate_audio_input(
@@ -349,7 +354,7 @@ def test_moss_audio_rejects_audio_data_list_seqlen_count_mismatch():
 
 @pytest.mark.parametrize("deepstack_scales", [(), (7, 11)])
 def test_moss_audio_embed_multimodal_packs_by_audio(deepstack_scales):
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
     model.audio_encoder = _FakeAudioEncoder(len(deepstack_scales))
     model.audio_adapter = lambda hidden_states: hidden_states * 5
     model.deepstack_audio_merger_list = [
@@ -395,7 +400,7 @@ def test_moss_audio_embed_input_ids_caches_packed_deepstack():
         def embed_input_ids(self, input_ids):
             return torch.zeros(input_ids.shape[0], 8)
 
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
     model.language_model = _FakeLanguageModel()
     model.deepstack_audio_merger_list = [object(), object()]
     model.deepstack_input_embeds = None
@@ -442,7 +447,7 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
             return torch.ones(1, 1)
 
         _patch_pp_group(monkeypatch, first=first)
-        model = object.__new__(MossAudioModel)
+        model = _uninitialized_model()
         torch.nn.Module.__init__(model)
         model.language_model = fake_lm
         cached = IntermediateTensors({"deepstack_input_embeds_0": torch.ones(3, 8)})
@@ -476,7 +481,7 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
         return torch.ones(1, 1)
 
     _patch_pp_group(monkeypatch, first=False)
-    model = object.__new__(MossAudioModel)
+    model = _uninitialized_model()
     torch.nn.Module.__init__(model)
     model.language_model = fake_lm_non_first_rank
     model.deepstack_input_embeds = IntermediateTensors({})
@@ -509,7 +514,7 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
         model.start_layer, model.end_layer = 0, num_layers
         model.layers = torch.nn.ModuleList([AddOne() for _ in range(num_layers)])
         model.norm = lambda hidden_states, residual: (hidden_states, residual)
-        model._maybe_add_hidden_state = lambda aux, *args: aux
+        monkeypatch.setattr(model, "_maybe_add_hidden_state", lambda aux, *args: aux)
         model.deepstack_inject_layer_indices = (
             range(0) if deepstack_layers is None else deepstack_layers
         )
@@ -561,7 +566,7 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
             }
         )
     )
-    language_model = object.__new__(MossQwen3ForCausalLM)
+    language_model = object.__new__(MossQwen3ForCausalLM)  # type: ignore[type-abstract]
     torch.nn.Module.__init__(language_model)
     language_model.model = inner_model
     language_model.config = SimpleNamespace(hidden_size=4)
@@ -639,7 +644,7 @@ def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):
     assert all(hasattr(attention, name) for name in ("q_proj", "k_proj", "v_proj"))
     assert hasattr(attention, "out_proj")
     assert not hasattr(attention, "qkv")
-    assert attention.k_proj.bias is None
+    assert getattr(attention, "k_proj").bias is None  # noqa: B009
 
     weight_names = [
         "layers.0.self_attn.q_proj.weight",
