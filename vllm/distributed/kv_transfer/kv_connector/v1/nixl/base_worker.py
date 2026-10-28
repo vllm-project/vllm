@@ -553,9 +553,6 @@ class NixlBaseConnectorWorker:
                 f"Engine {engine_id} advertised KV region metadata of different "
                 "lengths."
             )
-        if self._has_mamba:
-            # Mamba layers register sub-regions alike on both sides.
-            return _RegionPairs.by_index(num_regions)
         if len(nixl_agent_meta.region_members) != num_regions:
             raise RuntimeError(
                 f"Engine {engine_id} did not advertise the layers of its KV regions."
@@ -616,7 +613,7 @@ class NixlBaseConnectorWorker:
                     f"KV region {remote} of engine {engine_id} pairs with local "
                     "regions of different block lengths."
                 )
-        return _RegionPairs(
+        pairs = _RegionPairs(
             remote=[position[remote] for remote, _, _ in triples],
             local=[local for _, local, _ in triples],
             group=[group for _, _, group in triples],
@@ -624,6 +621,30 @@ class NixlBaseConnectorWorker:
             partner=partner,
             groups_match=groups_match,
         )
+        if self._has_mamba:
+            self._check_mamba_pairs(pairs, remote_groups, engine_id)
+        return pairs
+
+    def _check_mamba_pairs(
+        self,
+        pairs: _RegionPairs,
+        remote_groups: list[int] | None,
+        engine_id: EngineId,
+    ) -> None:
+        """Mamba descriptors index the peer's regions by local region index
+        (``_ssm_region_indices``, ``_group_region_indices``), so its regions
+        must pair one to one, in order, and belong to the same cache groups.
+        """
+        identity = list(range(self.num_regions))
+        if (
+            pairs.remote_regions != identity
+            or pairs.remote != pairs.local
+            or (remote_groups is not None and remote_groups != self.region_group_ids)
+        ):
+            raise NotImplementedError(
+                f"Engine {engine_id} lays out its Mamba/SSM hybrid KV regions or "
+                "cache groups differently; use the same KV cache layout on P and D."
+            )
 
     @staticmethod
     def _select_remote_regions(
@@ -918,7 +939,8 @@ class NixlBaseConnectorWorker:
                     "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                     "for PP + HMA."
                 )
-            # Mamba/SSM hybrids pair regions by index, which a PP stage cannot.
+            # Mamba/SSM hybrids need regions that pair one to one, which a PP
+            # stage's cannot.
             if self._has_mamba:
                 raise NotImplementedError(
                     "NixlPushConnector does not support pipeline_parallel_size > 1 "
@@ -1064,8 +1086,7 @@ class NixlBaseConnectorWorker:
         # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
         # block row of a shared allocation.
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
-        # The layers of each region (all but Mamba layouts), which pair regions
-        # with a peer's.
+        # The layers of each region, which pair regions with a peer's.
         self.region_members = []
         self._regions_by_layer = {}
         self._packed_member_layouts: dict[str, tuple[int, int]] = {}
@@ -1606,8 +1627,6 @@ class NixlBaseConnectorWorker:
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
 
-        # Mamba layers span several regions and pair by index instead.
-        track_region_layers = not self._has_mamba
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
 
@@ -1814,11 +1833,10 @@ class NixlBaseConnectorWorker:
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
 
-                if track_region_layers:
-                    if region_index == len(region_layers):
-                        region_layers.append([layer_name])
-                    else:
-                        region_layers[region_index].append(layer_name)
+                if region_index == len(region_layers):
+                    region_layers.append([layer_name])
+                else:
+                    region_layers[region_index].append(layer_name)
 
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:
@@ -2967,7 +2985,7 @@ class NixlBaseConnectorWorker:
         if nixl_agent_meta.region_group_ids is not None:
             assert len(nixl_agent_meta.region_group_ids) == num_remote_regions
         if self._has_mamba and nixl_agent_meta.region_names is not None:
-            # Mamba regions pair by index (see _pair_regions).
+            # Mamba regions pair one to one (see _check_mamba_pairs).
             assert nixl_agent_meta.region_names == [
                 self.region_names[r] for r in local_regions
             ], "NIXL transfer regions must name the same model caches in the same order"

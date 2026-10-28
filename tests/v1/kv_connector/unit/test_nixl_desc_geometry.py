@@ -806,6 +806,7 @@ def _make_remote_meta(
         ssm_sizes=remote_ssm_sizes,
         attn_backend_name=worker.backend_name,
         physical_blocks_per_logical_kv_block=remote_ppl,
+        region_members=worker.region_members,
     )
 
 
