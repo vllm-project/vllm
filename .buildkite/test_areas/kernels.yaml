@@ -122,6 +122,7 @@ steps:
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -130,12 +131,13 @@ steps:
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
-    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/test_top_k_per_row.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 60
@@ -620,6 +622,7 @@ steps:
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   num_devices: 1
