@@ -69,28 +69,39 @@ def _rocm_fp32_router_gemm_kernel(
 
 def _launch_config(
     num_experts: int, num_tokens: int, bf16_weight: bool
-) -> tuple[int, int, int]:
-    """Return (BLOCK_M, BLOCK_K, num_warps), swept on MI355 for M<=32.
+) -> tuple[int, int, int, int]:
+    """Return (BLOCK_M, BLOCK_K, num_warps, num_stages), swept on MI355 for M<=32.
 
     One program computes BLOCK_M tokens for one expert, so narrow routers keep
     BLOCK_M=1 to fill the GPU and wide routers grow BLOCK_M to reuse weights.
     """
     if bf16_weight:
-        return (1 if num_tokens <= 4 else 2), 1024, 2
+        return (1 if num_tokens <= 4 else 2), 1024, 2, 1
     if num_experts < 64:
-        return 1, 1024, 4
+        return 1, 1024, 4, 1
+    # 256 < E <= 512 was swept with every call streaming its weights from HBM
+    # (E=384, K=5120, 48 distinct weight copies); a second stage hides the
+    # load latency of the K loop.
+    if 256 < num_experts <= 512:
+        if num_tokens <= 2:
+            return 1, 1024, 4, 2
+        if num_tokens <= 4:
+            return 2, 2048, 4, 2
+        if num_tokens <= 16:
+            return (4 if num_tokens <= 8 else 8), 1024, 4, 2
+        return 16, 512, 8, 2
     wide = num_experts > 256
     if num_tokens <= 2:
-        return 1, 512, 2
+        return 1, 512, 2, 1
     if num_tokens <= 4:
-        return (2, 1024, 2) if wide else (2, 2048, 4)
+        return ((2, 1024, 2) if wide else (2, 2048, 4)) + (1,)
     if num_tokens <= 8:
-        return (4, 512, 2) if wide else (4, 1024, 4)
+        return ((4, 512, 2) if wide else (4, 1024, 4)) + (1,)
     if num_tokens <= 16:
-        return (8, 512, 2) if wide else (4, 1024, 4)
+        return ((8, 512, 2) if wide else (4, 1024, 4)) + (1,)
     if num_experts >= 768:
-        return 16, 256, 2
-    return (8, 256, 2) if wide else (4, 512, 2)
+        return 16, 256, 2, 1
+    return ((8, 256, 2) if wide else (4, 512, 2)) + (1,)
 
 
 def can_use_rocm_fp32_router_gemm(
@@ -154,7 +165,7 @@ def rocm_fp32_router_gemm(
     if num_tokens == 0:
         return output
 
-    block_m, block_k, num_warps = _launch_config(
+    block_m, block_k, num_warps, num_stages = _launch_config(
         num_experts, num_tokens, router_weight.dtype == torch.bfloat16
     )
     block_k = min(block_k, triton.next_power_of_2(hidden_size))
@@ -170,6 +181,6 @@ def rocm_fp32_router_gemm(
         BLOCK_K=block_k,
         EVEN_K=hidden_size % block_k == 0,
         num_warps=num_warps,
-        num_stages=1,
+        num_stages=num_stages,
     )
     return output
