@@ -26,6 +26,7 @@ use vllm_chat::{
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
     DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
+use vllm_engine_core_client::mock_engine::DEFAULT_MOCK_MAX_MODEL_LEN;
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
@@ -40,6 +41,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -1718,6 +1720,44 @@ async fn render_list_models_reports_configured_max_model_len() {
             "configured: {configured:?}"
         );
     }
+}
+
+/// Like Python's `TokenizeParams` check, a requested output budget above the
+/// context window is a 400, while one that fits the window is accepted.
+#[tokio::test]
+async fn render_rejects_max_tokens_above_max_model_len() {
+    let mut app = test_render_app_with_max_model_len(Some(64));
+
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 65,
+            }),
+        ),
+        (
+            "/v1/completions/render",
+            json!({"model": "render-model", "prompt": "hello", "max_tokens": 65}),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        errors.push(json.to_string());
+    }
+    expect_test::expect![[r#"
+        {"error":{"message":"max_completion_tokens=65 cannot be greater than max_model_len=64. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
+        {"error":{"message":"max_tokens=65 cannot be greater than max_model_len=64. Please request fewer output tokens.","type":"BadRequestError","param":"max_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions/render",
+        json!({"model": "render-model", "prompt": "hello", "max_tokens": 64}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4714,6 +4754,83 @@ async fn non_stream_completions_return_json_response() {
         assert!(
             object.contains_key(key) && object[key].is_null(),
             "expected explicit null `{key}`: {json}"
+        );
+    }
+}
+
+/// With `--enable-prompt-tokens-details`, chat and completions report the
+/// prompt tokens newly written to the prefix cache next to the cached ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn prompt_tokens_details_report_created_cache_tokens() {
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        ("/v1/completions", json!({"prompt": "hello"})),
+    ];
+    for (uri, mut request) in cases {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    // Prefill stats ride only on the first output; the counts
+                    // must survive the later decode output.
+                    outputs: vec![
+                        EngineCoreOutput {
+                            prefill_stats: Some(Box::new(PrefillStats {
+                                num_prompt_tokens: 5,
+                                num_cached_tokens: 2,
+                                num_local_cached_tokens: 2,
+                                num_cache_creation_tokens: 3,
+                                ..Default::default()
+                            })),
+                            ..request_output(request_id, vec![b'h' as u32], None)
+                        },
+                        request_output(
+                            request_id,
+                            vec![b'i' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                        ),
+                    ],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_prompt_tokens_details: true,
+                    ..Default::default()
+                },
+            ),
+        ));
+        request["model"] = json!("model");
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(
+            json["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 2, "created_cache_tokens": 3}),
+            "{uri}"
         );
     }
 }
@@ -8801,6 +8918,48 @@ async fn tokenize_allows_prompts_at_or_above_max_model_len() {
     assert_eq!(chat_status, StatusCode::OK);
     assert!(chat_json["count"].as_u64().expect("count") > 4);
     assert_eq!(chat_json["max_model_len"], 4);
+}
+
+/// Like Python's `TokenizeParams` check, chat and completions reject a
+/// requested output budget above the context window before submitting. The
+/// mock engine answers the first request, so a submitted one returns 200.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_and_completions_reject_max_tokens_above_max_model_len() {
+    let (mut app, _engine_task) = test_app_with_engine_handle().await;
+    let max_tokens = DEFAULT_MOCK_MAX_MODEL_LEN + 1;
+
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": max_tokens,
+            }),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": max_tokens,
+            }),
+        ),
+        (
+            "/v1/completions",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "max_tokens": max_tokens}),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {json}");
+        errors.push(json.to_string());
+    }
+    expect_test::expect![[r#"
+        {"error":{"message":"max_completion_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
+        {"error":{"message":"max_completion_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
+        {"error":{"message":"max_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
