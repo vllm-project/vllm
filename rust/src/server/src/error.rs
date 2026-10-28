@@ -21,6 +21,8 @@ pub enum ApiError {
     },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
+    /// A resource other than the model, such as a LoRA adapter, does not exist.
+    NotFound { message: String },
     /// The requested response ID does not exist in this frontend. Every
     /// response ID is unknown because the frontend has no response store.
     ResponseNotFound { response_id: String },
@@ -39,7 +41,7 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
-            Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ResponseNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -62,6 +64,7 @@ impl ApiError {
                 format!("The model `{model}` does not exist."),
                 Some("model".to_string()),
             ),
+            Self::NotFound { message } => ("NotFoundError", message.clone(), None),
             Self::ResponseNotFound { response_id } => (
                 "NotFoundError",
                 format!("Response with id '{response_id}' not found."),
@@ -150,6 +153,7 @@ mod tests {
         let errors = [
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
             ApiError::model_not_found("missing"),
+            ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
             ApiError::server_error("Internal server error"),
@@ -162,6 +166,7 @@ mod tests {
         expect![[r#"
             {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
             {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
             {"error":{"message":"Internal server error","type":"InternalServerError","param":null,"code":500}}
