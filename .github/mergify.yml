@@ -757,16 +757,13 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      # Multi-tiered KV offloading path (KVCR tiering, incl. the NIXL p2p
-      # data layer).
-      - files~=^vllm/v1/kv_offload/
-      - files~=^tests/v1/kv_offload/
-      - files=docs/features/kv_offloading_usage.md
-      # NIXL KV connector and its shared utils.
-      - files~=^vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-      - files=vllm/distributed/nixl_utils.py
-      - files~=^tests/v1/kv_connector/.*nixl
-      - files~=^docs/features/nixl_connector_.*\.md
+      # Any NIXL-named file: KV connector and shared utils, NIXL EP
+      # dispatch, EC-transfer NIXL data, the offload p2p data layer,
+      # tests, docs, examples.
+      - files~=(?i)nixl
+      # KV offloading paths (multi-tiered KVCR tiering and simple), plus
+      # their tests and docs.
+      - files~=kv_offload
       - title~=(?i)nixl
   actions:
     label:
