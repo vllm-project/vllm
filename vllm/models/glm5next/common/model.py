@@ -99,6 +99,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
 from ..nvidia.specialized_decode.runtime import specialized_decode_config
+from ..quant_config import bf16_projection_quant_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
@@ -502,7 +503,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=cache_config,
-                quant_config=None,  # MLA projections are BF16 in checkpoint
+                # MLA projections load as BF16 (FP8 checkpoints are dequantized
+                # at load); only explicit online quantization may apply to them.
+                quant_config=bf16_projection_quant_config(quant_config),
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
