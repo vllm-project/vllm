@@ -598,14 +598,48 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 83.
+        from vllm.platforms import current_platform
+
         compilation_config = vllm_config.compilation_config
-        # Only override when the user has not set either of
-        # cudagraph_capture_sizes or max_cudagraph_capture_size.
-        if (
-            compilation_config.cudagraph_capture_sizes is None
-            and compilation_config.max_cudagraph_capture_size is None
+        use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Only override when the user has not set any capture size, and not on
+        # SM100 with model runner V2, whose defaults are already wider.
+        if all(
+            getattr(compilation_config, name) is None
+            for name in (
+                "cudagraph_capture_sizes",
+                "max_cudagraph_capture_size",
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            )
+        ) and not (
+            use_v2_model_runner and current_platform.is_device_capability_family(100)
         ):
-            compilation_config.max_cudagraph_capture_size = 1024
+            if use_v2_model_runner:
+                # Cover every target decode query length as the legacy 1024-token cap
+                # does. Data parallelism turns dynamic speculative decoding off later.
+                query_lens = (
+                    vllm_config.get_decode_cudagraph_query_lens(
+                        vllm_config.uniform_decode_query_len
+                    )
+                    if vllm_config.parallel_config.data_parallel_size == 1
+                    else [vllm_config.uniform_decode_query_len]
+                )
+                # The token sizes the legacy 1024-token cap captures.
+                max_tokens = min(
+                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
+                )
+                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                    {s for s in sizes if s < max_tokens} | {max_tokens}
+                )
+                compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
+                    query_lens
+                )
+            else:
+                compilation_config.max_cudagraph_capture_size = 1024
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )

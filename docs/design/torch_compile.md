@@ -262,6 +262,24 @@ vllm serve meta-llama/Llama-3.2-1B \
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
 
+With model runner V2, `cudagraph_capture_sizes` and `max_cudagraph_capture_size` are deprecated. Two independent pairs set the graphs instead, and setting one never changes the other:
+
+- `prefill_cudagraph_capture_token_sizes` and `max_prefill_cudagraph_capture_tokens`, in **tokens**: graphs for batches with a prefill, and for any batch whose requests have different query lengths.
+- `decode_cudagraph_capture_request_sizes` and `max_decode_cudagraph_capture_requests`, in **requests**: FULL graphs for uniform decode batches, whose requests all have the same query length `q` (1 + `num_speculative_tokens` for the target model; K or K + 1 for DSpark, DFlash and multi-module MTP drafters). A graph of `n` requests holds `n * q` tokens.
+
+On SM100, `max_decode_cudagraph_capture_tokens` (default 4096) also bounds each uniform decode graph at `n * q` tokens, so a large `num_speculative_tokens` at high concurrency, which is slower there than a small one, does not spend KV cache memory on the widest decode graphs. Wider decode batches take the prefill graphs.
+
+One-token draft decodes (the EAGLE, EAGLE3 and MTP draft steps after the first) take the default request-count grid up to `max_num_seqs`, whatever the decode request sizes are (`[]` still turns them off): their graphs are small, and an eager draft step costs its host launch time.
+
+With adaptive verification, the target model's decode batches mix query lengths, so they take token-keyed graphs. Those graphs reach `max_decode_cudagraph_capture_requests * (1 + num_speculative_tokens)` tokens: only the decode cap counts for them, read as a token budget, and the decode request sizes then set only the draft decode graphs.
+
+Set either a list or a cap; a cap captures the default grid of sizes up to it. Larger caps and longer lists capture more and wider graphs, which take memory from the KV cache and lengthen startup. Decode graphs no wider than the widest prefill graph mostly reuse its memory in the shared graph pool. For example, a prefill instance of a disaggregated deployment can skip decode graphs:
+
+```bash
+vllm serve meta-llama/Llama-3.2-1B \
+  --compilation-config '{"decode_cudagraph_capture_request_sizes": []}'
+```
+
 ### Full Cudagraph capture
 
 It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models or MOEs. See [CUDA Graphs](cuda_graphs.md) for more details.
