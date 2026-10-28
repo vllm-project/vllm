@@ -9693,7 +9693,7 @@ async fn access_log_records_each_response_like_uvicorn() {
     .assert_debug_eq(&lines);
 }
 
-/// `--disable-uvicorn-access-log` removes the access log.
+/// `--disable-access-log` removes the access log.
 #[tokio::test]
 #[serial]
 async fn access_log_disabled_logs_nothing() {

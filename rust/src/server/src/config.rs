@@ -118,7 +118,7 @@ impl OutputLogging {
 /// HTTP access log settings, like the uvicorn access log of Python's server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccessLogConfig {
-    /// Whether to log one line per HTTP response (`--disable-uvicorn-access-log`
+    /// Whether to log one line per HTTP response (`--disable-access-log`
     /// turns it off).
     pub enabled: bool,
     /// Request paths whose responses are not logged, matched exactly against

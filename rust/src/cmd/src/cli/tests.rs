@@ -253,7 +253,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             ],
                         ),
                         allow_credentials: false,
-                        disable_uvicorn_access_log: false,
+                        disable_access_log: false,
                         disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
@@ -1032,6 +1032,22 @@ fn frontend_args_json_passes_access_log_flags_into_config() {
 }
 
 #[test]
+fn serve_disable_access_log_accepts_python_flag_name() {
+    let enabled_for = |flag: &str| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+        config.access_log.enabled
+    };
+
+    assert!(!enabled_for("--disable-access-log"));
+    assert!(!enabled_for("--disable-uvicorn-access-log"));
+    assert!(enabled_for("--disable-access-log=false"));
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1609,7 +1625,7 @@ fn frontend_args_accept_json() {
                             ],
                         ),
                         allow_credentials: false,
-                        disable_uvicorn_access_log: false,
+                        disable_access_log: false,
                         disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
@@ -2532,7 +2548,7 @@ fn serve_args_accept_handshake_aliases() {
                             ],
                         ),
                         allow_credentials: false,
-                        disable_uvicorn_access_log: false,
+                        disable_access_log: false,
                         disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,

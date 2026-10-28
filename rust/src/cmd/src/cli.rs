@@ -574,21 +574,19 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
-    /// Disable uvicorn access log.
+    /// Disable the per-response HTTP access log.
     #[arg(
         long,
-        visible_alias = "no-disable-uvicorn-access-log",
+        visible_alias = "disable-uvicorn-access-log",
         default_missing_value = "true",
         num_args = 0..=1
     )]
-    #[serde(default)]
-    pub disable_uvicorn_access_log: bool,
+    #[serde(default, alias = "disable_uvicorn_access_log")]
+    pub disable_access_log: bool,
 
-    /// Comma-separated list of endpoint paths to exclude from uvicorn access
-    /// logs. This is useful to reduce log noise from high-frequency endpoints
-    /// like health checks. Example: "/health,/metrics,/ping".
-    /// When set, access logs for requests to these paths will be suppressed
-    /// while keeping logs for other endpoints.
+    /// Comma-separated request paths whose responses the HTTP access log
+    /// skips, such as "/health,/metrics" for frequent probes. Paths match
+    /// exactly, without the query string.
     #[arg(long)]
     #[serde(default)]
     pub disable_access_log_for_endpoints: Option<String>,
@@ -909,7 +907,7 @@ impl SharedRuntimeArgs {
 
     fn access_log_config(&self) -> AccessLogConfig {
         AccessLogConfig {
-            enabled: !self.disable_uvicorn_access_log,
+            enabled: !self.disable_access_log,
             excluded_paths: (self.disable_access_log_for_endpoints.iter())
                 .flat_map(|paths| paths.split(','))
                 .map(str::trim)
