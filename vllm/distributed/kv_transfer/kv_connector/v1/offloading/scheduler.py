@@ -169,6 +169,26 @@ class SchedulerOffloadConfig(NamedTuple):
     # KV bytes per token on one worker, summed over the offloaded groups.
     kv_bytes_per_token: int = 0
 
+    # Per group, the tokens past a partial-tail boundary whose hash keys the
+    # group's partial-tail block. Non-zero only for EAGLE groups.
+    eagle_proof_margins: tuple[int, ...] = ()
+
+    @property
+    def partial_tail_block_size(self) -> int:
+        if not self.supports_partial_tail:
+            return 0
+        return self.kv_group_configs[0].tokens_per_block
+
+    @property
+    def max_eagle_proof_margin(self) -> int:
+        return max(self.eagle_proof_margins, default=0)
+
+    def partial_tail_key_tokens(self, config_idx: int, boundary: int) -> int:
+        """Token position whose hash keys a group's partial-tail block."""
+        if not self.eagle_proof_margins:
+            return boundary
+        return boundary + self.eagle_proof_margins[config_idx]
+
     @classmethod
     def from_spec(
         cls,
@@ -292,6 +312,29 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.parallel_config.decode_context_parallel_size == 1
         )
 
+        # Core's prefix cache matches an EAGLE group this many tokens past a
+        # hit and then drops them. A partial tail stores and looks up EAGLE
+        # groups at that proof position, with the margin rule of the core
+        # coordinator.
+        eagle_proof_margins: tuple[int, ...] = ()
+        if supports_partial_tail:
+            partial_tail_block_size = kv_group_configs[0].tokens_per_block
+            alignment = kv_cache_config.cache_hit_alignment_tokens
+            partial_hash_hits = (
+                alignment is not None and alignment < partial_tail_block_size
+            )
+            eagle_proof_margins = tuple(
+                eagle_proof_margin(
+                    partial_tail_block_size,
+                    spec.tokens_per_hash,
+                    partial_hash_hits
+                    and config.manager_cls.supports_fine_grained_hash_lookup,
+                )
+                if config.is_eagle_group and not config.requires_cow_source
+                else 0
+                for config in kv_group_configs
+            )
+
         if retention_interval is not None:
             if retention_interval < 0:
                 raise ValueError(
@@ -328,6 +371,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 // g.tokens_per_block
                 for g in spec.config.groups
             ),
+            eagle_proof_margins=eagle_proof_margins,
         )
 
 
@@ -633,34 +677,6 @@ class OffloadingConnectorScheduler:
         self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
-        )
-        self._partial_tail_block_size = (
-            self.config.kv_group_configs[0].tokens_per_block
-            if self.config.supports_partial_tail
-            else 0
-        )
-        # Core's prefix cache matches an EAGLE group this many tokens past a
-        # hit and then drops them. A partial tail stores and looks up EAGLE
-        # groups at that proof position, with the margin rule of the core
-        # coordinator.
-        alignment = kv_cache_config.cache_hit_alignment_tokens
-        partial_hash_hits = (
-            alignment is not None and alignment < self._partial_tail_block_size
-        )
-        self._eagle_proof_margins: dict[int, int] = {
-            config.group_idx: eagle_proof_margin(
-                self._partial_tail_block_size,
-                self.config.tokens_per_hash,
-                partial_hash_hits
-                and config.manager_cls.supports_fine_grained_hash_lookup,
-            )
-            for config in self.config.kv_group_configs
-            if self.config.supports_partial_tail
-            and config.is_eagle_group
-            and not config.requires_cow_source
-        }
-        self._max_eagle_proof_margin = max(
-            self._eagle_proof_margins.values(), default=0
         )
         self._cow_source_groups = frozenset(
             config.group_idx
@@ -1118,19 +1134,19 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
+        max_eagle_proof_margin = self.config.max_eagle_proof_margin
         # A partial tail carries its own EAGLE proof, so it may also lie in
         # the block after the chunk that the complete-chunk lookup pops.
-        num_search_blocks = 2 if self._max_eagle_proof_margin else 1
-        block_end = complete_boundary + (
-            num_search_blocks * self._partial_tail_block_size
-        )
+        num_search_blocks = 2 if max_eagle_proof_margin else 1
+        block_size = self.config.partial_tail_block_size
+        block_end = complete_boundary + num_search_blocks * block_size
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
-        if self._max_eagle_proof_margin:
+        if max_eagle_proof_margin:
             # The proof key needs a hash of this request past the boundary.
             max_boundary = min(
                 max_boundary,
                 len(req_status.req.block_hashes) * tokens_per_hash
-                - self._max_eagle_proof_margin,
+                - max_eagle_proof_margin,
             )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -1147,7 +1163,6 @@ class OffloadingConnectorScheduler:
         # block's complete chunk. Look it up once, and only if it is needed.
         # Partial tails use one block per chunk, so a block index is a chunk
         # index.
-        block_size = self._partial_tail_block_size
         bridge_chunk_idx = complete_boundary // block_size
         bridge_boundary = (bridge_chunk_idx + 1) * block_size
         # Bridge keys that the complete-chunk lookup did not confirm.
@@ -1191,12 +1206,6 @@ class OffloadingConnectorScheduler:
             return None
         return complete_hit
 
-    def _partial_tail_key_tokens(
-        self, group_config: GroupOffloadConfig, boundary: int
-    ) -> int:
-        """Token position whose hash keys a group's partial-tail block."""
-        return boundary + self._eagle_proof_margins.get(group_config.group_idx, 0)
-
     def _lookup_partial_tail(
         self,
         req_status: RequestOffloadState,
@@ -1215,8 +1224,8 @@ class OffloadingConnectorScheduler:
         req_context = req_status.req_context
         pending = bridge_pending
         boundary_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
-        for group_config in self.config.kv_group_configs:
-            key_tokens = self._partial_tail_key_tokens(group_config, boundary)
+        for config_idx, group_config in enumerate(self.config.kv_group_configs):
+            key_tokens = self.config.partial_tail_key_tokens(config_idx, boundary)
             key = self._make_boundary_key(
                 req, group_config.group_idx, key_tokens, req_context
             )
@@ -1426,9 +1435,8 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
-        for group_config, group_state in zip(
-            self.config.kv_group_configs,
-            req_status.group_states,
+        for config_idx, (group_config, group_state) in enumerate(
+            zip(self.config.kv_group_configs, req_status.group_states)
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
             tokens_per_block = group_config.tokens_per_block
@@ -1477,8 +1485,8 @@ class OffloadingConnectorScheduler:
                         self._make_boundary_key(
                             request,
                             group_config.group_idx,
-                            self._partial_tail_key_tokens(
-                                group_config, partial_tail_boundary
+                            self.config.partial_tail_key_tokens(
+                                config_idx, partial_tail_boundary
                             ),
                             req_status.req_context,
                         )
@@ -1679,17 +1687,17 @@ class OffloadingConnectorScheduler:
         if not self.config.supports_partial_tail:
             return store_jobs
 
+        partial_tail_block_size = self.config.partial_tail_block_size
+        max_eagle_proof_margin = self.config.max_eagle_proof_margin
         for req_id, entries in handoffs.items():
             entries = [
-                entry
-                for entry in entries
-                if entry[2] % self._partial_tail_block_size != 0
+                entry for entry in entries if entry[2] % partial_tail_block_size != 0
             ]
             if not entries:
                 continue
             req_status = self._req_status.get(req_id)
             assert req_status is not None
-            if self._max_eagle_proof_margin and not req_status.loaded_from_offload:
+            if max_eagle_proof_margin and not req_status.loaded_from_offload:
                 # Requests that did not load from the offload tier keep their
                 # EAGLE tail in the GPU prefix cache; skip the store.
                 continue
@@ -1711,7 +1719,7 @@ class OffloadingConnectorScheduler:
             assert boundary % self.config.tokens_per_hash == 0
             assert boundary <= max_boundary
 
-            if self._max_eagle_proof_margin:
+            if max_eagle_proof_margin:
                 # The CoW hand-off arrives on the step that computes the prompt
                 # tokens past the boundary, and it is not offered again. Workers
                 # submit a store at the next step's start, after this step's
@@ -1721,15 +1729,15 @@ class OffloadingConnectorScheduler:
                     + scheduler_output.num_scheduled_tokens.get(req_id, 0),
                     req.num_prompt_tokens,
                 )
-                if boundary + self._max_eagle_proof_margin > prompt_tokens_after_step:
+                if boundary + max_eagle_proof_margin > prompt_tokens_after_step:
                     # The EAGLE proof is not computed by the end of this step.
                     continue
 
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
-            assert boundary % self._partial_tail_block_size != 0
-            block_idx = boundary // self._partial_tail_block_size
+            assert boundary % partial_tail_block_size != 0
+            block_idx = boundary // partial_tail_block_size
             if any(
                 group.group_idx not in self._cow_source_groups
                 and block_idx >= len(group_states[group.group_idx].block_ids)
@@ -1737,8 +1745,8 @@ class OffloadingConnectorScheduler:
             ):
                 continue
             key_tokens = [
-                self._partial_tail_key_tokens(group, boundary)
-                for group in self.config.kv_group_configs
+                self.config.partial_tail_key_tokens(config_idx, boundary)
+                for config_idx in range(len(self.config.kv_group_configs))
             ]
             keys = [
                 self._make_boundary_key(

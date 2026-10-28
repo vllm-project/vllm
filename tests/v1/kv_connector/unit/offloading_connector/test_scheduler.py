@@ -986,9 +986,8 @@ def test_eagle_proof_margin_follows_core_hit_alignment(
     scheduler = _make_partial_tail_scheduler(
         eagle=True, cache_hit_alignment_tokens=cache_hit_alignment_tokens
     )
-    attention, mamba = scheduler.config.kv_group_configs
-    assert scheduler._partial_tail_key_tokens(attention, 24) == proof_tokens
-    assert scheduler._partial_tail_key_tokens(mamba, 24) == 24
+    assert scheduler.config.partial_tail_key_tokens(0, 24) == proof_tokens
+    assert scheduler.config.partial_tail_key_tokens(1, 24) == 24
 
 
 def test_eagle_partial_tail_store_keys_attention_at_proof():
