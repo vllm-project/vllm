@@ -1,0 +1,12 @@
+{# Image tokens are inserted after BOS by the multimodal processor, so no
+   image placeholder is rendered; a literal one shifts the prompt off the
+   HF reference. Only user text is used by the action-prediction prompt. #}
+{{ bos_token }}{%- for message in messages if message['role'] == 'user' -%}
+    {%- if message['content'] is string -%}
+        {{- message['content'] -}}
+    {%- else -%}
+        {%- for item in message['content'] if item['type'] == 'text' -%}
+            {{- item['text'] -}}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endfor -%}
