@@ -34,7 +34,7 @@ BLOCK_SIZE = 2
 STRIDE = 1 << 20
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def cpu_parallel_state(tmp_path_factory):
     from vllm.distributed import (
         destroy_distributed_environment,

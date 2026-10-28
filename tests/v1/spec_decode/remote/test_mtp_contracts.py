@@ -3,15 +3,23 @@
 """CPU admission and shared-weight checks for standalone MTP model families."""
 
 import copy
+import json
 from functools import cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, PreTrainedConfig, Qwen3Config
 
+from tests.v1.e2e.spec_decode.remote.test_remote_mtp import _separate_mtp_draft
+from tests.v1.e2e.spec_decode.remote.test_remote_mtp import (
+    tiny_ernie_mtp_model as tiny_ernie_mtp_model,
+)
+from tests.v1.e2e.spec_decode.remote.test_remote_mtp import (
+    tiny_hyv3_mtp_model as tiny_hyv3_mtp_model,
+)
 from tests.v1.spec_decode.remote.runtime_fixtures import (
     cpu_parallel_state as cpu_parallel_state,
 )
@@ -30,8 +38,163 @@ MODELS = (
     ("nemotron_h", "NemotronHForCausalLM", "NemotronHMTPModel", 3),
     ("hy_v3", "HYV3ForCausalLM", "HYV3MTPModel", 3),
 )
+NEMOTRON_EMBEDDING_NAMES = (
+    "model.embed_tokens.weight",
+    "model.embeddings.weight",
+    "backbone.embed_tokens.weight",
+    "backbone.embeddings.weight",
+)
 
 pytestmark = pytest.mark.usefixtures("cpu_parallel_state")
+
+
+def _mtp_context_config(
+    source, destination, *, target_length, draft_length=16, draft_max_length=None, k=1
+):
+    from vllm.engine.arg_utils import EngineArgs
+
+    draft_path = _separate_mtp_draft(source, destination)
+    config_path = Path(draft_path) / "config.json"
+    draft_config = json.loads(config_path.read_text())
+    draft_config["max_position_embeddings"] = draft_length
+    config_path.write_text(json.dumps(draft_config))
+    speculative_config = {
+        "method": "mtp",
+        "model": draft_path,
+        "num_speculative_tokens": k,
+    }
+    if draft_max_length is not None:
+        speculative_config["max_model_len"] = draft_max_length
+    return EngineArgs(
+        model=source,
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=target_length,
+        enforce_eager=True,
+        speculative_config=speculative_config,
+    ).create_engine_config()
+
+
+@pytest.mark.parametrize("family,k", [("ernie", 1), ("hyv3", 3)])
+@pytest.mark.parametrize("draft_length,draft_max_length", [(16, None), (128, 16)])
+def test_mtp_public_contract_rejects_short_draft_context(
+    request, tmp_path, family, k, draft_length, draft_max_length
+):
+    """Reject a short native draft before prefill, decode or rollout can run."""
+    source = request.getfixturevalue(f"tiny_{family}_mtp_model")
+    config = _mtp_context_config(
+        source,
+        tmp_path / "short-draft",
+        target_length=64,
+        draft_length=draft_length,
+        draft_max_length=draft_max_length,
+        k=k,
+    )
+    assert config.speculative_config.draft_model_config.max_model_len == 16
+    with pytest.raises(ValueError, match="standalone MTP.*draft.*max_model_len"):
+        create_runtime_contract(config)
+
+
+@pytest.mark.parametrize("prefill_length", [15, 16, 17])
+def test_mtp_admitted_context_keeps_planned_positions_inside_native_rope(
+    request, tmp_path, prefill_length
+):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.model_loader import get_model_loader
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.spec_decode.remote.protocol import SequenceKey
+    from vllm.v1.spec_decode.remote.runtime.kv import DraftBlockPool
+    from vllm.v1.spec_decode.remote.runtime.step import DraftStepPlanner, DraftStepRow
+
+    config = _mtp_context_config(
+        request.getfixturevalue("tiny_ernie_mtp_model"),
+        tmp_path / "short-draft",
+        target_length=16,
+    )
+    create_runtime_contract(config)
+    draft = config.speculative_config.draft_model_config
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cpu"),
+    ):
+        model = get_model_loader(config.load_config).create_model(config, draft)
+    rope = next(iter(model.model.layers.values())).mtp_block.self_attn.rotary_emb
+    assert rope.cos_sin_cache.shape[0] == 16
+    planner = DraftStepPlanner(
+        DraftBlockPool(32, 2),
+        max_num_reqs=1,
+        max_model_len=config.model_config.max_model_len,
+        num_speculative_tokens=1,
+    )
+    key = SequenceKey("context-boundary", 0, 1)
+    assert planner.open(key)
+    plan, failures = planner.plan([DraftStepRow(key, prefill_length, 1)])
+    if prefill_length > 16:
+        assert not plan.rows
+        assert "max_model_len=16" in failures[0][1]
+    else:
+        assert not failures
+        positions = torch.from_numpy(plan.positions)
+        query = torch.zeros(prefill_length, draft.get_hidden_size())
+        actual, _ = rope.forward_native(positions, query, query.clone())
+        assert torch.equal(actual, query)
+        assert positions.tolist() == list(range(prefill_length))
+
+
+@pytest.mark.parametrize("mtp_family", ["hyv3", "ernie"])
+def test_native_mtp_uses_separate_draft_checkpoint_settings(
+    request, tmp_path, mtp_family
+):
+    """Admitted draft metadata must determine the loaded native head's math."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import destroy_model_parallel, initialize_model_parallel
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader import get_model_loader
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    source = request.getfixturevalue(f"tiny_{mtp_family}_mtp_model")
+    draft_path = _separate_mtp_draft(source, tmp_path / "separate-draft")
+    config = EngineArgs(
+        model=source,
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        enforce_eager=True,
+        speculative_config={
+            "method": "mtp",
+            "model": draft_path,
+            "num_speculative_tokens": 1,
+        },
+    ).create_engine_config()
+    target_config = config.model_config.hf_config.to_dict()
+    assert config.speculative_config is not None
+    draft = config.speculative_config.draft_model_config
+    create_runtime_contract(config)
+    loader = get_model_loader(config.load_config)
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cpu"),
+    ):
+        destroy_model_parallel()
+        initialize_model_parallel(backend="gloo")
+        model = loader.create_model(config, draft)
+        loader.load_weights(model, draft)
+        layer = next(iter(model.model.layers.values()))
+        norm = layer.enorm if mtp_family == "hyv3" else layer.mtp_emb_norm
+        inputs = torch.full((1, draft.get_hidden_size()), 0.01, dtype=torch.float32)
+        expected = inputs * torch.rsqrt(
+            inputs.square().mean(-1, keepdim=True) + draft.hf_config.rms_norm_eps
+        )
+        expected = (expected.to(norm.weight.dtype) * norm.weight).to(inputs.dtype)
+        assert torch.equal(norm.forward_native(inputs), expected)
+        assert norm.variance_epsilon == draft.hf_config.rms_norm_eps
+        assert (
+            layer.mtp_block.self_attn.rotary_emb.base
+            == draft.hf_config.rope_parameters["rope_theta"]
+        )
+    assert config.model_config.hf_config.to_dict() == target_config
 
 
 @cache
@@ -214,8 +377,9 @@ def test_glm_dense_mla_contract_rejects_sparse_indexer_variant():
         create_runtime_contract(config)
 
 
+@pytest.mark.parametrize("embedding_name", NEMOTRON_EMBEDDING_NAMES)
 def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, embedding_name
 ):
     import vllm.v1.spec_decode.remote.runtime.weights as weights
 
@@ -226,7 +390,7 @@ def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
     calls = []
 
     save_file(
-        {"backbone.embeddings.weight": embedding, "lm_head.weight": head},
+        {embedding_name: embedding, "lm_head.weight": head},
         tmp_path / "model.safetensors",
     )
 
@@ -246,9 +410,7 @@ def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
     ]
 
 
-@pytest.mark.parametrize(
-    "embedding_name", ["model.embed_tokens.weight", "backbone.embeddings.weight"]
-)
+@pytest.mark.parametrize("embedding_name", NEMOTRON_EMBEDDING_NAMES)
 def test_tied_nemotron_checkpoint_needs_no_separate_head(tmp_path, embedding_name):
     config = _config("nemotron_h", "NemotronHForCausalLM", 3).model_config
     config.model = str(tmp_path)
@@ -256,6 +418,8 @@ def test_tied_nemotron_checkpoint_needs_no_separate_head(tmp_path, embedding_nam
     embedding = torch.randn(32, 16, dtype=torch.bfloat16)
     save_file({embedding_name: embedding}, tmp_path / "model.safetensors")
     shell = materialize_target_shell(config, torch.device("cpu"))
+    assert shell.model.embed_tokens.weight is shell.lm_head.weight
+    torch.testing.assert_close(shell.model.embed_tokens.weight[:32], embedding)
     torch.testing.assert_close(shell.lm_head.weight[:32], embedding)
 
 
@@ -302,16 +466,27 @@ def test_shared_weight_storage_preserves_tying(tmp_path, device, tied, include_h
     )
 
 
-def test_conflicting_nemotron_embedding_aliases_are_rejected(tmp_path):
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize(
+    "embedding_names",
+    [
+        ("model.embed_tokens.weight", "backbone.embeddings.weight"),
+        ("model.embed_tokens.weight", "model.embeddings.weight"),
+        ("backbone.embeddings.weight", "backbone.embed_tokens.weight"),
+    ],
+)
+def test_conflicting_nemotron_embedding_aliases_are_rejected(
+    tmp_path, tied, embedding_names
+):
     config = _config("nemotron_h", "NemotronHForCausalLM", 3).model_config
     config.model = str(tmp_path)
-    save_file(
-        {
-            "model.embed_tokens.weight": torch.zeros(32, 16),
-            "backbone.embeddings.weight": torch.ones(32, 16),
-        },
-        tmp_path / "model.safetensors",
-    )
+    config.hf_config.tie_word_embeddings = tied
+    # Even identical values cannot disambiguate two checkpoint names that map
+    # to the same native embedding parameter.
+    checkpoint = {name: torch.zeros(32, 16) for name in embedding_names}
+    if not tied:
+        checkpoint["lm_head.weight"] = torch.ones(32, 16)
+    save_file(checkpoint, tmp_path / "model.safetensors")
     with pytest.raises(ValueError, match="exactly one embedding weight"):
         materialize_target_shell(config, torch.device("cpu"))
 
@@ -373,3 +548,249 @@ def test_alternate_shared_weights_must_match_the_target_before_loading(
         materialize_target_shell(
             config, torch.device("cpu"), shared_weights_source="other/repo"
         )
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize(
+    "omitted,tracking,packed",
+    [
+        (None, None, False),
+        (None, None, True),
+        ("eh_proj", None, False),
+        ("final_layernorm", None, False),
+        ("self_attn.q_proj", None, False),
+        ("self_attn.qkv_proj", None, True),
+        ("mlp.shared_mlp.gate_proj", None, False),
+        ("mlp.experts.0.gate_proj", None, False),
+        ("mlp.experts.0.down_proj", None, False),
+        ("mlp.experts", None, False),
+        ("eh_proj", False, False),
+    ],
+)
+def test_hyv3_native_load_rejects_uninitialized_mtp_parameters(
+    request, omitted, tracking, packed, tied
+):
+    """Whole missing MTP tensors must not bypass native loader completeness."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import destroy_model_parallel, initialize_model_parallel
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader import get_model_loader
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    source = Path(request.getfixturevalue("tiny_hyv3_mtp_model"))
+    config_path = source / "config.json"
+    hf_config = json.loads(config_path.read_text())
+    hf_config["tie_word_embeddings"] = tied
+    config_path.write_text(json.dumps(hf_config))
+    path = source / "model.safetensors"
+    weights = load_file(path)
+    if tied:
+        del weights["lm_head.weight"]
+    reference = weights.copy()
+    prefix = "model.layers.2."
+    if packed:
+        q, k, v = (
+            weights.pop(prefix + f"self_attn.{part}_proj.weight")
+            for part in ("q", "k", "v")
+        )
+        weights[prefix + "self_attn.qkv_proj.weight"] = torch.cat(
+            (
+                q.reshape(2, 2, 32, 128),
+                k.reshape(2, 1, 32, 128),
+                v.reshape(2, 1, 32, 128),
+            ),
+            dim=1,
+        ).reshape(-1, 128)
+        weights[prefix + "mlp.shared_mlp.gate_and_up_proj.weight"] = torch.cat(
+            [
+                weights.pop(prefix + f"mlp.shared_mlp.{part}_proj.weight")
+                for part in ("up", "gate")
+            ]
+        )
+    if omitted is not None:
+        missing_weights = [
+            name for name in weights if name.startswith(prefix + omitted + ".")
+        ]
+        assert missing_weights
+        for name in missing_weights:
+            del weights[name]
+        if omitted == "self_attn.q_proj":
+            # A duplicate K write must not count as the absent Q component.
+            name = prefix + "self_attn.k_proj.weight"
+            save_file({name: weights[name]}, source / "duplicate.safetensors")
+    save_file(weights, path, metadata={"format": "pt"})
+    config = EngineArgs(
+        model=str(source),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        enforce_eager=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        model_loader_extra_config={"enable_weights_track": tracking},
+    ).create_engine_config()
+    assert config.speculative_config is not None
+    draft = config.speculative_config.draft_model_config
+    assert draft is not None
+    loader = get_model_loader(config.load_config)
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cpu"),
+    ):
+        destroy_model_parallel()
+        initialize_model_parallel(backend="gloo")
+        model = loader.create_model(config, draft)
+        if omitted is not None and tracking is not False:
+            missing = {
+                "self_attn.q_proj": "qkv_proj",
+                "mlp.shared_mlp.gate_proj": "gate_up_proj",
+                "mlp.experts.0.gate_proj": "w13_weight",
+                "mlp.experts.0.down_proj": "w2_weight",
+            }.get(omitted, omitted)
+            with pytest.raises(
+                ValueError, match=rf"not initialized.*checkpoint.*{missing}"
+            ):
+                loader.load_weights(model, draft)
+        else:
+            if omitted is not None:
+                with torch.no_grad():
+                    model.get_parameter(f"model.layers.2.{omitted}.weight").fill_(-2)
+            loader.load_weights(model, draft)
+            for name in ("eh_proj", "final_layernorm", "enorm", "hnorm"):
+                actual = model.get_parameter(f"model.layers.2.{name}.weight")
+                if name == omitted:
+                    assert torch.equal(actual, torch.full_like(actual, -2))
+                    continue
+                assert torch.equal(actual, weights[f"model.layers.2.{name}.weight"])
+            assert torch.equal(
+                model.get_parameter("model.layers.2.shared_head.head.weight"),
+                weights["model.embed_tokens.weight" if tied else "lm_head.weight"],
+            )
+            for native, checkpoint_parts in (
+                (
+                    "self_attn.qkv_proj.weight",
+                    (
+                        "self_attn.q_proj.weight",
+                        "self_attn.k_proj.weight",
+                        "self_attn.v_proj.weight",
+                    ),
+                ),
+                (
+                    "mlp.shared_mlp.gate_up_proj.weight",
+                    (
+                        "mlp.shared_mlp.gate_proj.weight",
+                        "mlp.shared_mlp.up_proj.weight",
+                    ),
+                ),
+            ):
+                assert torch.equal(
+                    model.get_parameter(prefix + "mtp_block." + native),
+                    torch.cat([reference[prefix + name] for name in checkpoint_parts]),
+                )
+            for native, parts in (
+                ("w13_weight", ("gate", "up")),
+                ("w2_weight", ("down",)),
+            ):
+                assert torch.equal(
+                    model.get_parameter(
+                        prefix + "mtp_block.mlp.experts.routed_experts." + native
+                    ),
+                    torch.stack(
+                        [
+                            torch.cat(
+                                [
+                                    reference[
+                                        prefix
+                                        + f"mlp.experts.{expert}.{part}_proj.weight"
+                                    ]
+                                    for part in parts
+                                ]
+                            )
+                            for expert in range(4)
+                        ]
+                    ),
+                )
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("mode", ["target_shared", "standalone", "missing_fusion"])
+def test_hyv3_draft_only_checkpoint_preserves_target_shared_parameters(
+    tmp_path, request, tied, mode
+):
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import destroy_model_parallel, initialize_model_parallel
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader import get_model_loader
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.spec_decode.remote.runtime.weights import materialize_target_shell
+
+    target = Path(request.getfixturevalue("tiny_hyv3_mtp_model"))
+    metadata = json.loads((target / "config.json").read_text())
+    metadata["tie_word_embeddings"] = tied
+    (target / "config.json").write_text(json.dumps(metadata))
+    draft_path = tmp_path / "draft-only"
+    draft_path.mkdir()
+    (draft_path / "config.json").write_text(json.dumps(metadata))
+    weights = load_file(target / "model.safetensors")
+    if tied:
+        del weights["lm_head.weight"]
+        save_file(weights, target / "model.safetensors", metadata={"format": "pt"})
+    draft_weights = {
+        name: weight
+        for name, weight in weights.items()
+        if name.startswith("model.layers.2.")
+    }
+    if mode == "missing_fusion":
+        del draft_weights["model.layers.2.eh_proj.weight"]
+    save_file(
+        draft_weights, draft_path / "model.safetensors", metadata={"format": "pt"}
+    )
+    config = EngineArgs(
+        model=str(target),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        enforce_eager=True,
+        speculative_config={
+            "method": "mtp",
+            "model": str(draft_path),
+            "num_speculative_tokens": 1,
+        },
+    ).create_engine_config()
+    assert config.speculative_config is not None
+    draft = config.speculative_config.draft_model_config
+    assert draft is not None
+    if mode == "standalone":
+        config.speculative_config = None
+    loader = get_model_loader(config.load_config)
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cpu"),
+    ):
+        destroy_model_parallel()
+        initialize_model_parallel(backend="gloo")
+        model = loader.create_model(config, draft)
+        if mode != "target_shared":
+            missing = "embed_tokens" if mode == "standalone" else "eh_proj"
+            with pytest.raises(
+                ValueError, match=rf"not initialized.*checkpoint.*{missing}"
+            ):
+                loader.load_weights(model, draft)
+        else:
+            loader.load_weights(model, draft)
+            assert torch.equal(
+                model.get_parameter("model.layers.2.eh_proj.weight"),
+                weights["model.layers.2.eh_proj.weight"],
+            )
+            target_shell = materialize_target_shell(
+                config.model_config, torch.device("cpu")
+            )
+            assert torch.equal(
+                target_shell.model.embed_tokens.weight[:128],
+                weights["model.embed_tokens.weight"],
+            )
+            assert torch.equal(
+                target_shell.lm_head.weight[:128],
+                weights["model.embed_tokens.weight" if tied else "lm_head.weight"],
+            )

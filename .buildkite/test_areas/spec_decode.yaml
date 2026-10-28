@@ -191,6 +191,8 @@ steps:
   device: h200_35gb
   source_file_dependencies:
     - vllm/config/speculative.py
+    - vllm/model_executor/models/ernie_mtp.py
+    - vllm/model_executor/models/hy_v3_mtp.py
     - vllm/v1/spec_decode/remote/
     - vllm/v1/worker/gpu/
     - tests/v1/e2e/spec_decode/remote/

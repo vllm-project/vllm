@@ -65,9 +65,11 @@ own-KV adapter. Its native local path is unaffected.
 
 The standalone process loads the target embedding and LM head without loading
 its transformer layers. Automatic checkpoint downloads use the resolved target
-revision. Nemotron's native `backbone.embeddings.weight` name is recognized;
-ambiguous aliases, incompatible shapes and quantized embedding/head tensors are
-rejected instead of being interpreted as ordinary floating-point weights.
+revision. Nemotron embedding names follow its native loader: `model` or
+`backbone` prefixes with `embeddings` or `embed_tokens`. Exactly one matching
+tensor must be present. Ambiguous aliases, incompatible shapes and quantized
+embedding/head tensors are rejected instead of being interpreted as ordinary
+floating-point weights.
 
 Remote checkpoint identity uses a resolved immutable Hugging Face commit, or
 SHA-256 digests of local checkpoint artifacts and shard indexes. Local directories
