@@ -327,6 +327,20 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self._detailed_iters = profiler_config.torch_profiler_detailed_iterations
+        self._detailed_steps_remaining = 0
+        if self._detailed_iters > 0:
+            self._detailed_profiler_kwargs = dict(
+                self._profiler_kwargs,
+                record_shapes=True,
+                with_stack=True,
+                on_trace_ready=on_trace_ready
+                or torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir,
+                    worker_name=f"{worker_name}_detailed",
+                    use_gzip=profiler_config.torch_profiler_use_gzip,
+                ),
+            )
         self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
@@ -412,7 +426,15 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
-        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        # step() runs at the start of each iteration, so switch on the call
+        # after the Nth one.
+        self._detailed_steps_remaining = (
+            self._detailed_iters + 1 if self._detailed_iters > 0 else 0
+        )
+        if self._detailed_steps_remaining > 0:
+            self.profiler = torch.profiler.profile(**self._detailed_profiler_kwargs)
+        else:
+            self.profiler = torch.profiler.profile(**self._profiler_kwargs)
         self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
         self.profiler.start()
@@ -452,6 +474,11 @@ class TorchProfilerWrapper(WorkerProfiler):
             False if the step was a warmup step (data discarded).
 
         """
+        if self._detailed_steps_remaining > 0:
+            self._detailed_steps_remaining -= 1
+            if self._detailed_steps_remaining == 0:
+                self._end_detailed_session()
+            return True
         if self._uses_schedule:
             self.profiler.step()
             # Stamp once the schedule leaves WAIT and Kineto is live.
@@ -461,6 +488,22 @@ class TorchProfilerWrapper(WorkerProfiler):
                 self._warmup_steps_remaining -= 1
                 return False
         return True
+
+    def _end_detailed_session(self) -> None:
+        """Save the detailed trace and keep profiling with the configured settings."""
+        try:
+            self.profiler.stop()
+        except Exception as e:
+            logger.warning(
+                "Rank %s: failed to save the detailed profiler trace to %s: %s",
+                self.local_rank,
+                self.profiler_config.torch_profiler_dir,
+                e,
+            )
+        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self._version_metadata_added = False
+        self.profiler.start()
+        self._maybe_add_version_metadata()
 
     @property
     @override

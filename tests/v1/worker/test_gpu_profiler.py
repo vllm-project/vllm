@@ -149,6 +149,88 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
         } == {f"run_{run}"}
 
 
+def test_torch_profiler_detailed_iterations_switch_sessions(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_with_stack=False,
+        torch_profiler_dump_cuda_time_total=False,
+        torch_profiler_detailed_iterations=2,
+    )
+    detailed, timing = MagicMock(), MagicMock()
+
+    with patch(
+        "vllm.profiler.wrapper.torch.profiler.profile", side_effect=[detailed, timing]
+    ) as profile:
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="worker", local_rank=0, activities=["CPU", "CUDA"]
+        )
+        wrapper.start()
+        wrapper.step()
+        wrapper.step()
+        assert profile.call_count == 1
+        wrapper.step()
+        assert profile.call_count == 2
+        wrapper.stop()
+
+    detailed_kwargs = profile.call_args_list[0].kwargs
+    timing_kwargs = profile.call_args_list[1].kwargs
+    assert detailed_kwargs["with_stack"] and detailed_kwargs["record_shapes"]
+    assert not timing_kwargs["with_stack"] and not timing_kwargs["record_shapes"]
+    assert detailed_kwargs["on_trace_ready"] is not timing_kwargs["on_trace_ready"]
+    for profiler in (detailed, timing):
+        profiler.start.assert_called_once_with()
+        profiler.stop.assert_called_once_with()
+
+
+def test_torch_profiler_detailed_save_failure_keeps_profiling(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_with_stack=False,
+        torch_profiler_dump_cuda_time_total=False,
+        torch_profiler_detailed_iterations=2,
+    )
+    detailed, timing = MagicMock(), MagicMock()
+    detailed.stop.side_effect = OSError(122, "Disk quota exceeded")
+
+    with (
+        patch(
+            "vllm.profiler.wrapper.torch.profiler.profile",
+            side_effect=[detailed, timing],
+        ),
+        patch("vllm.profiler.wrapper.logger") as log,
+    ):
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="worker", local_rank=3, activities=["CPU", "CUDA"]
+        )
+        wrapper.start()
+        for _ in range(3):
+            wrapper.step()
+        timing.start.assert_called_once_with()
+        wrapper.stop()
+
+    timing.stop.assert_called_once_with()
+    _, rank, path, error = log.warning.call_args.args
+    assert (rank, path) == (3, str(tmp_path))
+    assert isinstance(error, OSError)
+
+
+def test_torch_profiler_detailed_iterations_require_torch_profiler():
+    with pytest.raises(ValueError, match="only applicable"):
+        ProfilerConfig(torch_profiler_detailed_iterations=2)
+
+
+def test_torch_profiler_detailed_iterations_reject_schedule():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/tmp/mock",
+            torch_profiler_detailed_iterations=2,
+            warmup_iterations=1,
+        )
+
+
 @pytest.mark.parametrize(
     "activities", [["CPU", "CUDA"], ["CUDA"], ["CPU", "XPU"], ["XPU"]]
 )
