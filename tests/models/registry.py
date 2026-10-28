@@ -265,6 +265,24 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV4ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
+    "DomynEdgeForCausalLM": _HfExamplesInfo(
+        "domyn/Domyn-Edge-Base",
+        trust_remote_code=True,
+        extras={"sft": "domyn/Domyn-Edge-SFT"},
+    ),
+    "DoryForCausalLM": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16",
+        use_original_num_layers=True,
+        max_model_len=128,
+        hf_overrides={
+            "num_hidden_layers": 8,
+            "n_input_layers": 2,
+            "n_recurrent_layers": 4,
+            "n_output_layers": 2,
+            "n_recurrent_loops": 2,
+            "layer_types": ["sliding_attention", "mlp"] * 3 + ["full_attention", "mlp"],
+        },
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -619,6 +637,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "jinaai/jina-embeddings-v5-text-small",
         trust_remote_code=True,
     ),
+    "Lfm2BidirectionalModel": _HfExamplesInfo(
+        "LiquidAI/LFM2.5-Embedding-350M",
+    ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
@@ -680,7 +701,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
-    "ColUltraVBertForRetrieval": _HfExamplesInfo("athrael-soju/ColUltraVBERT"),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo(
+        "athrael-soju/ColUltraVBERT",
+        # Later revisions declare the UltraVBertModel architecture instead.
+        revision="509adbab61b71da0484b20f3baf718e15219d761",
+    ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ModernVBertModel": _HfExamplesInfo("ModernVBERT/colmodernvbert-merged"),
     "ColQwen3": _HfExamplesInfo(
@@ -1107,6 +1132,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "Custom processor code is not compatible with Transformers v5."
         },
     ),
+    "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-OCR-1.0",
+        min_transformers_version="5.19.0",
+        is_available_online=False,
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
@@ -1188,7 +1218,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "meta-models/Muse-Glimmer-30B",
     ),
     "MuseSparkForConditionalGeneration": _HfExamplesInfo(
-        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
         is_available_online=False,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
@@ -1563,8 +1593,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "MuseSparkDSparkModel": _HfExamplesInfo(
-        "meta-models/Muse-Spark-1.2-816B-A42B-open",
-        speculative_model="meta-models/Muse-Spark-1.2-816B-A42B-open",
+        "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+        speculative_model="Inferact/Muse-Spark-Open-DSpark",
         is_available_online=False,
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(
