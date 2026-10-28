@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     apply_topk_in_fc1,
     flashinfer_moe_ep_unsupported_reasons,
     is_sm107_device,
+    sm90_weight_format,
     supports_current_device,
     validate_flashinfer_moe_ep_layer,
 )
@@ -138,15 +139,13 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         set the activation and FC1-output quantization (`sm107_nvfp4_epilogue`).
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
-        block_fp8 = (
-            self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
-        )
-        if block_fp8 and layer.apply_router_weight_on_input:
-            # The SM90 FP8 kernel weights the activation before fc2, which is
-            # not equivalent to weighting the expert input.
+        sm90_format = sm90_weight_format(self.quant_config)
+        if sm90_format is not None and layer.apply_router_weight_on_input:
+            # The SM90 kernels weight the activation before fc2, which is not
+            # equivalent to weighting the expert input.
             raise ValueError(
-                f"{self.moe_config.moe_backend} with block-FP8 weights does not "
-                "support apply_router_weight_on_input"
+                f"{self.moe_config.moe_backend} with {sm90_format} weights on "
+                "Hopper does not support apply_router_weight_on_input"
             )
         epilogue = epilogue_from_quant_config(self.quant_config)
         if is_sm107_device():
@@ -184,7 +183,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             ),
-            block_fp8=block_fp8,
+            sm90_format=sm90_format,
         )
         adapter.warmup()
         for name, tensor in zip(names, adapter.kernel_weights()):
@@ -212,9 +211,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     ) -> None:
         if self._adapter is None:
             raise RuntimeError("FlashInfer MoE-EP weights have not been processed")
-        output.copy_(
-            self._adapter(hidden_states, topk_ids.to(torch.int32), topk_weights)
-        )
+        output.copy_(self._adapter(hidden_states, topk_ids, topk_weights))
 
 
 def epilogue_from_quant_config(
