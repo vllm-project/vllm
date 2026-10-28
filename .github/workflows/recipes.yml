@@ -1,8 +1,9 @@
 name: Recipes
 
 # Validate recipe changes against the renderer that publishes them
-# (recipes.vllm.ai). The check logic lives in vllm-project/recipes, pinned to
-# an immutable revision that Dependabot refreshes with other Actions updates.
+# (recipes.vllm.ai). The check logic lives in vllm-project/recipes and tracks
+# its main branch, so a PR is held to the same validation that runs when
+# vllm-project/recipes picks up this directory after merge.
 
 on:
   pull_request:
@@ -21,7 +22,7 @@ jobs:
   validate:
     name: Recipes
     if: github.repository_owner == 'vllm-project'
-    uses: vllm-project/recipes/.github/workflows/validate-recipes.yml@7780d7993b3faf3d21f7817bc6e0c341cbc7b5ec # main
+    uses: vllm-project/recipes/.github/workflows/validate-recipes.yml@main
     with:
       source: vllm
       path: recipes

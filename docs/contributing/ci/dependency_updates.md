@@ -1,51 +1,40 @@
-# Dependency Updates and Hash Pinning
-
-The compiled requirements in `requirements/docs.txt` and
-`requirements/test/{cpu,cuda,rocm,xpu}.txt` pin package versions and SHA-256
-archive hashes. Their pre-commit hooks use `uv pip compile --generate-hashes`;
-run `pre-commit run --all-files` after changing source requirements. These
-hooks preserve existing version pins unless a source change requires a new
-resolution.
-
-uv checks supplied hashes when downloading packages. Read the Docs additionally
-passes `--require-hashes`, so missing hashes also fail its install. A hash
-mismatch requires investigation; do not disable verification to complete an
-install.
-
-## Scheduled updates
+# Automatic Dependency Updates
 
 The **Refresh compiled requirements** workflow runs weekly on Monday at
-07:00 UTC and supports manual dispatch on `main`. It upgrades the five locks
-within their source constraints, then normalizes them with the pre-commit
-commands. Review package versions and hashes together in its patch artifact.
-Automatic publishing is disabled by default; maintainers apply the artifact
-to its recorded base commit and open the update PR manually.
+07:00 UTC and supports manual dispatch on `main`. It upgrades
+`requirements/docs.txt` and `requirements/test/{cpu,cuda,rocm,xpu}.txt` within
+their source constraints, including the corresponding SHA-256 archive hashes.
+It then normalizes each output with its pre-commit command, so ordinary compile
+hooks keep the updated locks unchanged.
 
-Dependabot groups GitHub Actions updates weekly and provides security-only
-updates for handwritten Python requirements, including build and connector
-manifests. Those source changes need the normal compile hooks and compatibility
-checks. Regenerating a lock cannot fix an incompatible exact source pin or an
-advisory without a patched release.
+The updater requires all five pre-commit compile hooks to use
+`--generate-hashes`; it stops if any hook lacks that flag. Hash initialization,
+install verification, and enforcement checks are supplied separately from this
+workflow. The updater itself does not change the compile hooks or initialize
+package hashes on installation.
 
-## Hash coverage
+## Reviewing an update
 
-Archive hashes cover the packages emitted in the five compiled locks. Packages
-excluded from the ROCm lock, separate lint/build/bootstrap installs, and
-source-built wheels are outside that coverage. Hashing a source archive does
-not hash its separate build dependencies. Mixed installs continue to use uv's
-verification of supplied hashes; globally requiring hashes needs complete locks
-for every dependency in the install.
+Automatic publishing is disabled by default. Download the patch artifact and
+its recorded base SHA, check out that base, and apply the patch with
+`git apply --index requirements.patch`. Review package versions and hashes
+together before opening the update PR and running the normal compatibility
+checks. The artifact only contains changes to the five compiled locks.
 
-## GitHub Actions commit pins
+The compile job has read-only repository access and no persisted checkout
+credentials. Enabling automatic publishing later requires configuring the
+repository-scoped GitHub App and deliberately enabling the separate publish
+job. That job validates the artifact before obtaining write credentials and
+accepts only regular-file modifications to the five compiled locks.
 
-External actions and reusable workflows must use a full 40-character commit
-SHA. Keep a version comment beside the SHA to make updates easy to review.
-Dependabot updates those pins in its weekly group. Docker actions must use a
-SHA-256 image digest; local `./` actions use the checked-out repository.
+## Dependabot coverage
 
-The `check-github-actions-pins` pre-commit hook rejects mutable tags, branches,
-and abbreviated commits. To check all workflows directly, run:
+GitHub Actions updates are grouped weekly, as are Rust minor/patch updates.
+Dependabot provides security-only updates for handwritten Python requirements,
+including build and connector manifests; the five compiled outputs are handled
+by the platform-aware refresh workflow instead. Source-manifest updates still
+need the normal compile hooks, compatibility testing, and human review.
 
-```bash
-pre-commit run check-github-actions-pins --all-files
-```
+A compiled lock refresh does not upgrade an incompatible exact source pin or
+fix an advisory without a patched release. It does not upgrade separate build
+or connector pins. These cases still need manual remediation.
