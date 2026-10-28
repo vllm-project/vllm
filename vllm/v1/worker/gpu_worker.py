@@ -447,6 +447,10 @@ class Worker(WorkerBase):
             raise ValueError(
                 "kv_cache_host_pinned is not supported with enable_sleep_mode."
             )
+        if not self.use_v2_model_runner:
+            raise ValueError("kv_cache_host_pinned requires the V2 model runner.")
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            raise ValueError("kv_cache_host_pinned is not supported with HiSparse.")
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
