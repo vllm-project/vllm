@@ -3,9 +3,9 @@ depends_on: []
 steps:
 - label: Zen-CPU-Kernel Tests
   key: zen-cpu-kernel-tests
-  # Reuse the shared CPU image (built by image-build-cpu) as the base for the zen
-  # image, so this waits for that build. run-zen-cpu-test.sh pulls it instead of
-  # recompiling vLLM on the scarce zen5 hardware (with a from-source fallback).
+  # run-zen-cpu-test.sh pulls the prebuilt <repo>:<commit>-zen-cpu image
+  # that zen-cpu-image-build publishes, falling back to a local build
+  # only if the pull misses.
   depends_on:
   - zen-cpu-image-build
   allow_dependency_failure: true
@@ -13,7 +13,9 @@ steps:
   device: zen5
   no_plugin: true
   source_file_dependencies:
+  - setup.py
   - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/hardware_tests/zen.yaml
   - .buildkite/image_build/image_build_zen_cpu.sh
   - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
   - docker/Dockerfile.zen
@@ -54,8 +56,8 @@ steps:
 
 - label: Zen-CPU-Platform-Detection Tests
   key: zen-cpu-platform-detection-tests
-  # Same reuse model as the kernel test: run-zen-cpu-test.sh pulls the shared
-  # image-build-cpu image and layers the zen image on top (from-source fallback).
+  # Same model as the kernel step: run-zen-cpu-test.sh pulls the prebuilt
+  # <repo>:<commit>-zen-cpu image from zen-cpu-image-build (local-build fallback).
   depends_on:
   - zen-cpu-image-build
   allow_dependency_failure: true
@@ -63,7 +65,9 @@ steps:
   device: zen5
   no_plugin: true
   source_file_dependencies:
+  - setup.py
   - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/hardware_tests/zen.yaml
   - .buildkite/image_build/image_build_zen_cpu.sh
   - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
   - docker/Dockerfile.zen
