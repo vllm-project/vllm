@@ -346,6 +346,7 @@ class OnlineAcceptanceEstimator:
         self.num_speculative_steps = num_speculative_steps
         self.device = device
         self._steps_since_refit = 0
+        self._refits = 0
         self._accumulate_block_r = max(256, triton.next_power_of_2(max_num_reqs))
 
         # The learned coefficients used for predicting acceptance.
@@ -434,6 +435,7 @@ class OnlineAcceptanceEstimator:
         # Fit the coefficients to the accumulated statistics gathered over the
         # course of the last REFIT_INTERVAL steps.
         self._refit()
+        self._refits += 1
 
     def warmup(self) -> None:
         """Drop warmup statistics and compile the refit kernel. A refit on
