@@ -58,6 +58,12 @@ pub trait ChatRenderer: Send + Sync {
     /// Render one chat request into the text prompt submitted to the text
     /// backend.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
+
+    /// Whether [`render`](Self::render) renders a request's `chat_template`
+    /// override. Requests carrying one are rejected for other renderers.
+    fn renders_request_chat_template(&self) -> bool {
+        false
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].

@@ -16,7 +16,7 @@ use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
@@ -72,6 +72,10 @@ impl HfChatBackend {
         let response_template = load_response_template(&files)?;
 
         let renderer = options.renderer.resolve(model_type);
+        // Only the HF renderer renders Jinja templates.
+        if renderer != RendererSelection::Hf && options.chat_template.is_some() {
+            return Err(Error::UnsupportedChatTemplateOption { renderer });
+        }
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(
@@ -282,6 +286,15 @@ mod tests {
         config_json: &str,
         tokenizer_config_json: &str,
     ) -> HfChatBackend {
+        load_backend(renderer, config_json, tokenizer_config_json, None).unwrap()
+    }
+
+    fn load_backend(
+        renderer: RendererSelection,
+        config_json: &str,
+        tokenizer_config_json: &str,
+        chat_template: Option<&str>,
+    ) -> crate::Result<HfChatBackend> {
         HfChatBackend::from_resolved_model_files(
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
@@ -294,14 +307,13 @@ mod tests {
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
-                chat_template: None,
+                chat_template: chat_template.map(str::to_string),
                 trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
             test_tokenizer(),
         )
-        .unwrap()
     }
 
     fn render_prompt(
@@ -468,6 +480,43 @@ mod tests {
             prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
             "high"
         );
+    }
+
+    #[tokio::test]
+    async fn only_hf_renderer_accepts_chat_template() {
+        use RendererSelection::Auto;
+
+        const HF_CONFIG: &str = r#"{"model_type":"llama"}"#;
+        const NATIVE_CONFIG: &str = r#"{"model_type":"deepseek_v4"}"#;
+        const TOKENIZER_CONFIG: &str = r#"{"chat_template":"{{ messages[0].content }}"}"#;
+        const TEMPLATE: &str = "{{ messages[0].content }}!";
+
+        load_backend(Auto, HF_CONFIG, TOKENIZER_CONFIG, Some(TEMPLATE)).unwrap();
+        let Err(error) = load_backend(Auto, NATIVE_CONFIG, TOKENIZER_CONFIG, Some(TEMPLATE)) else {
+            panic!("native renderers should reject --chat-template");
+        };
+        expect_test::expect!["--chat-template is not supported by the `deepseek_v4` renderer; use --tokenizer-mode hf to render a Jinja chat template"]
+            .assert_eq(&error.to_report_string());
+
+        let prepare = async |config_json| {
+            let backend = backend_for_selection(Auto, config_json, TOKENIZER_CONFIG);
+            let mut request = request_with_user_text("hello");
+            request.chat_options.chat_template = Some(TEMPLATE.to_string());
+            crate::ChatRequestProcessor::render_only(Arc::new(backend))
+                .prepare_for_tokenization(request)
+                .await
+                .unwrap_err()
+        };
+        // The HF renderer goes on to its trust check.
+        assert!(matches!(
+            prepare(HF_CONFIG).await,
+            crate::Error::UntrustedRequestChatTemplate
+        ));
+        let error = prepare(NATIVE_CONFIG).await;
+        assert!(error.is_request_validation_error());
+        assert_eq!(error.param(), Some("chat_template"));
+        expect_test::expect!["chat_template is not supported by this chat renderer"]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]

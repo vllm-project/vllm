@@ -148,6 +148,7 @@ pub struct RenderArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
     /// Override the model chat template with a file path or inline template.
+    /// Only the `hf` renderer supports it.
     #[arg(long)]
     chat_template: Option<String>,
     /// Default JSON keyword arguments merged into every chat-template render.
@@ -319,7 +320,7 @@ pub struct SharedRuntimeArgs {
     pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
-    /// for the specified model.
+    /// for the specified model. Only the `hf` renderer supports it.
     #[arg(long)]
     #[serde(default)]
     pub chat_template: Option<String>,
