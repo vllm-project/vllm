@@ -617,6 +617,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
         self.use_lookahead_block_hashes = False
+        self._finished_boundary_offloads: dict[str, list[tuple[int, int, int]]] = {}
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -671,9 +672,6 @@ class OffloadingConnectorScheduler:
             and config.is_eagle_group
             and not config.requires_cow_source
         }
-        self._max_eagle_proof_margin = max(
-            self._eagle_proof_margins.values(), default=0
-        )
         self._cow_source_groups = frozenset(
             config.group_idx
             for config in self.config.kv_group_configs
@@ -1144,14 +1142,12 @@ class OffloadingConnectorScheduler:
         block_end = complete_boundary + (
             num_search_blocks * self._partial_tail_block_size
         )
-        max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
-        if self._max_eagle_proof_margin:
-            # The proof key needs a hash of this request past the boundary.
-            max_boundary = min(
-                max_boundary,
-                len(req_status.req.block_hashes) * tokens_per_hash
-                - self._max_eagle_proof_margin,
-            )
+        max_boundary = min(
+            req_status.req.num_prompt_tokens - 1,
+            block_end - 1,
+            len(req_status.req.block_hashes) * tokens_per_hash
+            - self._max_eagle_proof_margin,
+        )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
         if req_status.max_load_tokens is not None:
@@ -1211,11 +1207,23 @@ class OffloadingConnectorScheduler:
             return None
         return complete_hit
 
+    @property
+    def _max_eagle_proof_margin(self) -> int:
+        return (
+            0
+            if self.use_lookahead_block_hashes
+            else max(self._eagle_proof_margins.values(), default=0)
+        )
+
     def _partial_tail_key_tokens(
         self, group_config: GroupOffloadConfig, boundary: int
     ) -> int:
         """Token position whose hash keys a group's partial-tail block."""
-        return boundary + self._eagle_proof_margins.get(group_config.group_idx, 0)
+        return boundary + (
+            0
+            if self.use_lookahead_block_hashes
+            else self._eagle_proof_margins.get(group_config.group_idx, 0)
+        )
 
     def _lookup_partial_tail(
         self,
@@ -1730,6 +1738,11 @@ class OffloadingConnectorScheduler:
             assert boundary > 0
             assert boundary % self.config.tokens_per_hash == 0
             assert boundary <= max_boundary
+            if (
+                boundary + self._max_eagle_proof_margin
+                > len(req.block_hashes) * self.config.tokens_per_hash
+            ):
+                continue
 
             if self._max_eagle_proof_margin:
                 # The CoW hand-off arrives on the step that computes the prompt
@@ -2220,6 +2233,12 @@ class OffloadingConnectorScheduler:
             assert any_job.is_store or any_job.is_sync_load
             self._current_batch_jobs_to_flush.update(jobs_to_flush)
 
+        # Install finish-time fences before detecting blocks reused this step.
+        finished_store_jobs = self._build_aligned_boundary_store_jobs(
+            self._finished_boundary_offloads
+        )
+        self._finished_boundary_offloads.clear()
+
         # Flush jobs that contain re-allocated blocks.
         if (
             self._block_id_to_pending_jobs
@@ -2238,7 +2257,7 @@ class OffloadingConnectorScheduler:
         normal_store_jobs = self._build_store_jobs(scheduler_output)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=partial_store_jobs | normal_store_jobs,
+            store_jobs=finished_store_jobs | partial_store_jobs | normal_store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
 
@@ -2280,7 +2299,7 @@ class OffloadingConnectorScheduler:
         A cache reset fence also keeps it stepping: the flush must reach the
         workers and their reports come back before on_reset_flushed().
         """
-        if self._jobs or self._reset_fence:
+        if self._jobs or self._reset_fence or self._finished_boundary_offloads:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2406,6 +2425,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
+        boundary_state_offloads: Sequence[tuple[int, int, int]] = (),
     ) -> tuple[bool, dict[str, Any] | None]:
         """Called when a request has finished, before its blocks are freed.
 
@@ -2442,6 +2462,15 @@ class OffloadingConnectorScheduler:
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
+        if boundary_state_offloads:
+            completed_tokens = request.num_computed_tokens - (
+                request.num_in_flight_tokens - request.num_stale_output_tokens
+            )
+            self._finished_boundary_offloads[request.request_id] = [
+                entry
+                for entry in dict.fromkeys(boundary_state_offloads)
+                if entry[2] <= completed_tokens
+            ]
 
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
@@ -2496,6 +2525,7 @@ class OffloadingConnectorScheduler:
             self._reset_cache()
 
     def _reset_cache(self) -> None:
+        self._finished_boundary_offloads.clear()
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 

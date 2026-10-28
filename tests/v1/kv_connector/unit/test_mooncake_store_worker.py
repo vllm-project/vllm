@@ -3639,23 +3639,37 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
     assert suffix_event.token_ids == list(range(16, 32))
 
 
-def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
+@pytest.mark.parametrize("lookahead", [0, 5])
+@pytest.mark.cpu_test
+def test_store_sending_thread_kv_events_recover_suffix_after_put_failure(lookahead):
     store = MagicMock()
     store.batch_is_exist.side_effect = ([0], [0, 0])
     store.batch_put_from_multi_buffers.side_effect = ([-1], [256, 256])
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    _run_store_req(thread, _make_event_store_req(16))
+    first = _make_event_store_req(16)
+    first.num_hash_lookahead_tokens = lookahead
+    first.token_ids = list(range(16 + lookahead))
+    _run_store_req(thread, first)
 
     assert thread.get_kv_events() == []
-    assert thread._retry_token_ids["r0"] == (0, list(range(16)))
+    assert thread._retry_token_ids["r0"] == (0, list(range(16 + lookahead)))
 
-    _run_store_req(thread, _make_event_store_req(32, 16))
+    second = _make_event_store_req(32, 16)
+    second.num_hash_lookahead_tokens = lookahead
+    second.token_ids = list(range(16, 32 + lookahead))
+    _run_store_req(thread, second)
 
     retry_event, suffix_event = thread.get_kv_events()
     assert retry_event.token_ids == list(range(16))
     assert suffix_event.token_ids == list(range(16, 32))
+    assert retry_event.lookahead_token_ids == (
+        [list(range(16, 16 + lookahead))] if lookahead else None
+    )
+    assert suffix_event.lookahead_token_ids == (
+        [list(range(32, 32 + lookahead))] if lookahead else None
+    )
     assert thread._retry_token_ids == {}
     assert thread._saved_offset["r0"] == 32
 

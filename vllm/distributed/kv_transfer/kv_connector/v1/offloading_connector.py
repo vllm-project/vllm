@@ -80,6 +80,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().set_num_hash_lookahead_tokens(num_tokens)
         if self.connector_scheduler is not None:
             self.connector_scheduler.use_lookahead_block_hashes = num_tokens > 0
+            self.connector_scheduler._events_tracker.num_hash_lookahead_tokens = (
+                num_tokens
+            )
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -237,7 +240,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request)
+        boundary_state_offloads = (
+            self._kv_cache_manager.get_boundary_state_offloads(request.request_id)
+            if self.num_hash_lookahead_tokens and self._kv_cache_manager is not None
+            else []
+        )
+        return self.connector_scheduler.request_finished(
+            request, boundary_state_offloads
+        )
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None

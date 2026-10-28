@@ -58,6 +58,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     KVCacheBlockCopy,
     get_request_block_hasher,
+    init_none_hash,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
@@ -6097,3 +6098,191 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+def _make_lookahead_hybrid_engine(lookahead=1, eagle=True, num_blocks=32):
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.utils import make_kv_cache_config
+
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        num_speculative_tokens=lookahead,
+        kv_connector_extra_config={
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",
+        },
+    )
+    config.scheduler_config.async_scheduling = False
+    config.cache_config.prefix_match_unit = 4
+    config.cache_config.prefix_cache_retention_interval = 16
+    config.cache_config.mamba_cache_mode = "align"
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    caches = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=True,
+        mamba_cache_mode="align",
+        num_blocks=num_blocks,
+    )
+    caches.cache_hit_alignment_tokens = 4
+    caches.prefix_cache_retention_interval = 16
+    caches.kv_cache_groups[0].is_eagle_group = eagle
+    group = caches.kv_cache_groups[1]
+    group.kv_cache_spec = replace(
+        group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
+    )
+    config.model_config.hf_config.num_nextn_predict_layers = lookahead
+    init_none_hash(sha256)
+    return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
+
+
+@pytest.mark.parametrize("lookahead", [1, 5])
+@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.cpu_test
+def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
+    engine = _make_lookahead_hybrid_engine(lookahead, eagle)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    request = Request(
+        "probe",
+        list(range(44)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    engine.add_request(request)
+    connector.scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert connector.get_num_new_matched_tokens(request, 0) == (
+        min(40, len(request.block_hashes) * 4),
+        True,
+    )
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.cpu_test
+def test_finish_offloads_new_mamba_boundary_before_block_reuse(reuse):
+    engine = _make_lookahead_hybrid_engine(num_blocks=7)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    scheduler = connector.scheduler
+    manager = _as_mock(scheduler.manager)
+    manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(keys)
+    init_none_hash(sha256)
+    request = Request(
+        "finish",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 1),
+    )
+    engine.add_request(request)
+    stored_keys = set()
+    for _ in range(4):
+        step = engine.schedule()
+        for job in step.kv_connector_metadata.store_jobs.values():
+            stored_keys.update(job.dst_spec.offload_keys)
+        final = request.num_computed_tokens == 32
+        if final:
+            boundary_block = engine.kv_cache_manager.get_block_ids(request.request_id)[
+                1
+            ][1]
+        engine.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[32] if final else []],
+            ),
+        )
+        if final:
+            break
+    assert request.is_finished()
+    if reuse:
+        for i in range(4):
+            engine.add_request(
+                Request(
+                    f"next-{i}",
+                    [99 + i] * 64,
+                    SamplingParams(max_tokens=1),
+                    None,
+                    block_hasher=get_request_block_hasher(4, sha256, 1),
+                )
+            )
+    meta = engine.schedule().kv_connector_metadata
+    key = make_offload_key(request.block_hashes[7], 1)
+    jobs = {
+        jid: job
+        for jid, job in meta.store_jobs.items()
+        if key in job.dst_spec.offload_keys
+    }
+    assert len(jobs) == 1
+    jid, job = next(iter(jobs.items()))
+    assert job.src_spec.block_ids.tolist() == [boundary_block]
+    if reuse:
+        assert jid in meta.jobs_to_flush
+    for job in meta.store_jobs.values():
+        stored_keys.update(job.dst_spec.offload_keys)
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={jid: 1 for jid in scheduler._jobs}
+            )
+        )
+    )
+    assert boundary_block not in scheduler._block_id_to_pending_jobs
+    manager.lookup.side_effect = (
+        lambda k, ctx: LookupResult.HIT if k in stored_keys else LookupResult.MISS
+    )
+    query = Request(
+        "reload",
+        list(request.all_token_ids) + [33],
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 1),
+    )
+    connector.on_new_request(query)
+    assert connector.get_num_new_matched_tokens(query, 0)[0] == 32
+
+
+@pytest.mark.parametrize("lookahead", [1, 5])
+@pytest.mark.cpu_test
+def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
+    engine = _make_lookahead_hybrid_engine(lookahead)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    scheduler = connector.scheduler
+    request = Request(
+        "partial-store",
+        list(range(43)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    engine.add_request(request)
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, ctx: generate_store_output(keys)
+    )
+    offered = set()
+    for _ in range(5):
+        step = engine.schedule()
+        for job in step.kv_connector_metadata.store_jobs.values():
+            offered.update(job.dst_spec.offload_keys)
+        if request.is_finished():
+            break
+        final = request.num_computed_tokens == request.num_tokens
+        engine.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[99] if final else []],
+            ),
+        )
+    boundary = 40 if lookahead == 1 else 36
+    assert request.is_finished()
+    assert all(
+        make_offload_key(request.block_hashes[boundary // 4 - 1], g) in offered
+        for g in [0, 1]
+    )

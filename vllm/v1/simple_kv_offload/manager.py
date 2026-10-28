@@ -3,7 +3,7 @@
 """Scheduler-side manager for SimpleCPUOffloadConnector."""
 
 import contextlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -1281,12 +1281,16 @@ class SimpleCPUOffloadScheduler:
         self,
         request: "Request",
         block_ids: tuple[list[int], ...],
+        boundary_state_offloads: Sequence[tuple[int, int, int]] = (),
     ) -> tuple[bool, dict[str, Any] | None]:
-        self._queue_finished_eager_store(request, block_ids)
+        self._queue_finished_eager_store(request, block_ids, boundary_state_offloads)
         return self.request_finished(request, block_ids=[])
 
     def _queue_finished_eager_store(
-        self, request: "Request", block_ids: tuple[list[int], ...]
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        boundary_state_offloads: Sequence[tuple[int, int, int]] = (),
     ) -> None:
         """Queue confirmed eager blocks omitted after a request enters decode."""
         state = self._reqs_to_store.get(request.request_id)
@@ -1308,6 +1312,22 @@ class SimpleCPUOffloadScheduler:
                 # The block's own hashes are registered at completion, so no
                 # capture is needed here; emit the event without a payload, as
                 # the size-mismatch fallback above already does.
+                block_meta.append({})
+        completed_tokens = request.num_computed_tokens - (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        for _, block_id, boundary in boundary_state_offloads:
+            if boundary > completed_tokens or block_id in gpu_ids:
+                continue
+            if len(gpu_ids) >= self.cpu_block_pool.get_num_free_blocks():
+                break
+            if (
+                self._classify_store_candidate(gpu_pool.blocks[block_id])
+                is not _StoreAdmission.READY
+            ):
+                continue
+            gpu_ids.append(block_id)
+            if block_meta is not None:
                 block_meta.append({})
         if not gpu_ids:
             return

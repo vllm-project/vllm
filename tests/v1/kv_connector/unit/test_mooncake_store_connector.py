@@ -3,13 +3,14 @@
 
 import threading
 import time
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from vllm import SamplingParams
-from vllm.config import SpeculativeConfig, set_current_vllm_config
+from vllm.config import KVEventsConfig, SpeculativeConfig, set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -57,7 +58,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from .utils import create_scheduler, create_vllm_config
+from .utils import create_scheduler, create_vllm_config, make_kv_cache_config
 
 
 def _make_vllm_config():
@@ -1484,3 +1485,98 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     second = engine_scheduler.schedule()
     assert second.scheduled_cached_reqs.new_block_ids == [None]
     assert [m.token_len_chunk for m in second.kv_connector_metadata.requests] == [32]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("retention_interval", [0, 16])
+def test_finish_saves_newly_hashed_mamba_boundary(async_scheduling, retention_interval):
+    """Each Store child must pin the final Mamba boundary before request free."""
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        num_speculative_tokens=1,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"}
+                for _ in range(2)
+            ]
+        },
+    )
+    config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    config.cache_config.prefix_match_unit = 4
+    config.cache_config.prefix_cache_retention_interval = retention_interval
+    config.cache_config.mamba_cache_mode = "align"
+    config.speculative_config.method = "mtp"
+    config.speculative_config.draft_model_config = config.model_config
+    kv_config = make_kv_cache_config(
+        block_size=16, mamba_enabled=True, mamba_cache_mode="align", num_blocks=32
+    )
+    kv_config.cache_hit_alignment_tokens = 4
+    kv_config.prefix_cache_retention_interval = retention_interval
+    kv_config.kv_cache_groups[0].is_eagle_group = True
+    mamba_group = kv_config.kv_cache_groups[1]
+    mamba_group.kv_cache_spec = replace(
+        mamba_group.kv_cache_spec,
+        num_speculative_blocks=1,
+        num_prefill_checkpoint_blocks=1,
+    )
+    with patch.object(scheduler, "LookupKeyClient") as lookup:
+        lookup.return_value.lookup.return_value = MooncakeLookupResult(0)
+        engine = create_scheduler(config, kv_cache_config=kv_config, hash_block_size=4)
+    init_none_hash(sha256)
+    request = Request(
+        "finish-boundary",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 1),
+    )
+    engine.add_request(request)
+    pool = engine.kv_cache_manager.block_pool
+    children = engine.connector.sub_connectors
+
+    def complete_saves(metadata):
+        for child, child_meta in zip(children, metadata.metadata):
+            completed = MooncakeStoreWorkerMetadata(
+                completed_saves={m.store_job_id: 1 for m in child_meta.requests}
+            )
+            child.update_connector_output(
+                KVConnectorOutput(kv_connector_worker_meta=completed)
+            )
+
+    for _ in range(4):
+        step = engine.schedule()
+        is_final = request.num_computed_tokens == 32
+        if is_final:
+            state_id = engine.kv_cache_manager.get_block_ids(request.request_id)[1][1]
+        engine.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[32] if is_final else []],
+            ),
+        )
+        complete_saves(step.kv_connector_metadata)
+        if is_final:
+            break
+    assert request.is_finished()
+    assert len(request.block_hashes) == 8
+    assert pool.blocks[state_id].ref_cnt == (len(children) if retention_interval else 0)
+    final = engine.schedule().kv_connector_metadata
+    for child_meta in final.metadata:
+        for meta in child_meta.requests:
+            if meta.token_len_chunk:
+                assert meta.num_hash_lookahead_tokens == 1
+                assert meta.token_ids[-1] == 32
+        puts = [put for meta in child_meta.requests for put in meta.boundary_puts or []]
+        assert puts == ([(1, state_id, 32)] if retention_interval else [])
+    assert engine.kv_cache_manager.take_boundary_state_offloads() == {}
+    complete_saves(final)
+    assert all(block.ref_cnt == 0 for block in pool.blocks)
+    empty = engine.schedule().kv_connector_metadata
+    assert all(not m.requests for m in empty.metadata)

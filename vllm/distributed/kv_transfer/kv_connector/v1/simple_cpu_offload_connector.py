@@ -354,9 +354,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        boundary_state_offloads = (
+            self._kv_cache_manager.get_boundary_state_offloads(request.request_id)
+            if self.num_hash_lookahead_tokens and self._kv_cache_manager is not None
+            else []
+        )
         if self.scheduler_manager is not None:
             return self.scheduler_manager.request_finished_all_groups(
-                request, block_ids
+                request, block_ids, boundary_state_offloads
             )
         return False, None
 

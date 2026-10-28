@@ -877,6 +877,16 @@ class KVCacheManager:
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
+    def get_boundary_state_offloads(
+        self, request_id: str
+    ) -> list[tuple[int, int, int]]:
+        """Read a finishing request's offers before its blocks are freed."""
+        return [
+            entry
+            for mgr in self.coordinator.single_type_managers
+            for entry in mgr.get_pending_boundary_state_offloads(request_id)
+        ]
+
     def take_boundary_state_offloads(
         self,
     ) -> dict[str, list[tuple[int, int, int]]]:

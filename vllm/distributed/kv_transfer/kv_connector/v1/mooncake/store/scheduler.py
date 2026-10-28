@@ -583,6 +583,15 @@ class MooncakeStoreScheduler:
                 continue
             if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+            if self.enable_kv_events and coord.num_hash_lookahead_tokens:
+                request, _ = self._unfinished_requests[req_meta.req_id]
+                req_meta.num_hash_lookahead_tokens = coord.num_hash_lookahead_tokens
+                req_meta.token_ids = list(
+                    request.all_token_ids[
+                        req_meta.token_ids_start : req_meta.token_len_chunk
+                        + coord.num_hash_lookahead_tokens
+                    ]
+                )
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids = [put.block_id for put in req_meta.boundary_puts or []]
@@ -615,6 +624,7 @@ class MooncakeStoreScheduler:
         self,
         request: Request,
         block_ids: tuple[list[int], ...],
+        boundary_state_offloads: Sequence[tuple[int, int, int]] = (),
     ) -> None:
         """Pin and queue KV newly eligible for saving after the final hash update."""
         if self.kv_role == "kv_consumer" and not self.save_decode_cache:
@@ -643,8 +653,19 @@ class MooncakeStoreScheduler:
             block_hashes=request.block_hashes,
             num_prompt_tokens=request.num_prompt_tokens,
         )
-        if req_meta is None:
+        meta = MooncakeStoreConnectorMetadata(set(), set())
+        if req_meta is not None:
+            meta.add_request(req_meta)
+        if self.kv_role != "kv_consumer" and boundary_state_offloads:
+            offloads = [
+                entry
+                for entry in dict.fromkeys(boundary_state_offloads)
+                if entry[2] <= tracker.token_len
+            ]
+            self._handle_boundary_state_offloads({request.request_id: offloads}, meta)
+        if not meta.requests:
             return
+        (req_meta,) = meta.requests
         assert request.request_id not in self._finished_lookahead_metas
         req_meta.block_ids = tuple(
             block_ids[group_id].copy() for group_id in self._store_group_ids

@@ -747,8 +747,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 retry_token_ids = self._get_retry_token_ids(req_meta)
                 if retry_token_ids is not None and event_token_ids is not None:
                     retry_start, retry_ids = retry_token_ids
-                    if retry_start + len(retry_ids) == token_ids_start:
-                        event_token_ids = retry_ids + event_token_ids
+                    if retry_start <= token_ids_start <= retry_start + len(retry_ids):
+                        event_token_ids = (
+                            retry_ids[: token_ids_start - retry_start] + event_token_ids
+                        )
                         token_ids_start = retry_start
 
             if self._should_skip_request(req_id):
@@ -1007,7 +1009,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         event_token_ids[s - token_ids_start : end - token_ids_start]
                         if event_token_ids is not None
                         and token_ids_start <= s
-                        and end <= token_ids_end
+                        and end + req_meta.num_hash_lookahead_tokens <= token_ids_end
                         else []
                     )
                     stored_events.append(
@@ -1023,6 +1025,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 else None
                             ),
                             token_ids=token_ids,
+                            lookahead_token_ids=(
+                                [
+                                    event_token_ids[
+                                        end - token_ids_start : end
+                                        - token_ids_start
+                                        + req_meta.num_hash_lookahead_tokens
+                                    ]
+                                ]
+                                if token_ids
+                                and req_meta.num_hash_lookahead_tokens
+                                and event_token_ids is not None
+                                else None
+                            ),
                             block_size=db.block_size,
                             lora_id=None,
                             medium="cpu",

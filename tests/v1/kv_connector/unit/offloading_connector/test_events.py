@@ -975,3 +975,36 @@ def test_tier_override_wins_over_top_level():
 def test_tier_without_backpressure_stays_unconfigured():
     spec = _build_tiering_spec([{"type": "example"}])
     assert "backpressure" not in spec.secondary_tier_configs[0]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.cpu_test
+def test_events_preserve_lookahead_tokens(partial):
+    from vllm import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+    from vllm.v1.request import Request
+
+    init_none_hash(sha256)
+    tracker = _tracker()
+    tracker.num_hash_lookahead_tokens = 5
+    req = Request(
+        "lookahead",
+        list(range(21)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 5),
+    )
+    group = _group_config(block_size=8, blocks_per_chunk=2, tokens_per_hash=4)
+    end = 12 if partial else 16
+    key = make_offload_key(req.block_hashes[end // 4 - 1], 0)
+    if partial:
+        tracker.record_partial_store(req, group, end, key)
+    else:
+        tracker.record_store(req, group, 0, key)
+    [event] = tracker.take_events([_stored_event([key])])
+    step = 4 if partial else 8
+    assert event.token_ids == list(range(end))
+    assert event.lookahead_token_ids == [
+        list(range(i, i + 5)) for i in range(step, end + 1, step)
+    ]
