@@ -265,6 +265,208 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
     assert torch.equal(full_state, ref_state)
 
 
+def _aiter_kda_decode_runnable() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() >= 4 and rocm_aiter_ops._kda_gluon_decode_importable()
+
+
+@pytest.mark.skipif(
+    not _aiter_kda_decode_runnable(),
+    reason="Needs AITER's Gluon KDA decode kernel (CDNA4+)",
+)
+@torch.inference_mode()
+def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
+    """AITER's single-launch decode kernel runs on plain decode steps only.
+
+    Breakable PIECEWISE graphs replay ``_forward`` against each step's metadata,
+    so the route is chosen there. Capture on an all-decode batch, then replay a
+    mixed step (stock chain) and a decode step (one fused launch); a route fixed
+    in ``forward`` fails one of the two. The reference is a layer built without
+    AITER, with the same weights and caches.
+    """
+    from transformers import Glm5NextTextConfig
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import CUDAGraphMode, set_current_vllm_config
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    # 32 heads: one rank's share of GLM-5.3-Flash's 64 at tensor parallel 2. With
+    # hidden_size = heads * D, o_proj can be the identity, so the layer output is
+    # the normed core output the tolerances below are set for.
+    heads, max_tokens, num_slots = 32, 64, 80
+    hidden_size = heads * D
+    config = Glm5NextTextConfig(
+        hidden_size=hidden_size,
+        linear_num_heads=heads,
+        linear_head_dim=D,
+        linear_lower_bound=LOWER_BOUND,
+    )
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", dtype=torch.bfloat16
+    )
+    layers: dict[str, Glm5NextLinearAttention] = {}
+    try:
+        with (
+            set_current_vllm_config(vllm_config),
+            set_default_torch_dtype(torch.bfloat16),
+            torch.device(device),
+        ):
+            for index, (name, use_aiter) in enumerate((("stock", "0"), ("fused", "1"))):
+                with monkeypatch.context() as env:
+                    env.setenv("VLLM_ROCM_USE_AITER", use_aiter)
+                    rocm_aiter_ops.refresh_env_variables()
+                    layers[name] = Glm5NextLinearAttention(
+                        config, vllm_config, prefix=f"model.layers.{index}.linear_attn"
+                    )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+
+    stock = layers["stock"]
+    for name, param in stock.named_parameters():
+        if name.endswith("conv1d.weight"):
+            param.normal_(0, 0.5)
+        elif name == "A_log":
+            param.copy_(torch.log(15 * torch.rand_like(param) + 1))
+        elif name == "dt_bias":
+            param.normal_(0, 0.1)
+        elif name == "o_norm.weight":
+            param.normal_(1, 0.1)
+        elif name == "o_proj.weight":
+            param.copy_(torch.eye(hidden_size))
+        else:  # Input projections.
+            param.normal_(0, param.shape[1] ** -0.5)
+    layers["fused"].load_state_dict(stock.state_dict())
+    conv_shape, state_shape = stock.get_state_shape()
+    saved_caches = (
+        (0.5 * torch.randn(num_slots, *conv_shape, device=device)).bfloat16(),
+        0.1 * torch.randn(num_slots, *state_shape, device=device),
+    )
+    for layer in layers.values():
+        layer.kv_cache = tuple(cache.clone() for cache in saved_caches)
+
+    def metadata(query_lens: list[int]) -> GDNAttentionMetadata:
+        """One request per entry on slots 1, 2, ..., one-token requests first
+        (the builder counts them as decodes). The state indices are a strided
+        column of the block table, as outside FULL graphs."""
+        num_requests, num_decodes = len(query_lens), query_lens.count(1)
+        block_table = torch.zeros(num_requests, 8, dtype=torch.int32, device=device)
+        block_table[:, 0] = torch.arange(1, num_requests + 1, device=device)
+        cu_seqlens = torch.tensor([0, *query_lens]).cumsum(0, dtype=torch.int32)
+        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+            cu_seqlens, device=device
+        )
+        return GDNAttentionMetadata(
+            num_prefills=num_requests - num_decodes,
+            num_prefill_tokens=sum(query_lens) - num_decodes,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decodes,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=sum(query_lens),
+            has_initial_state=torch.arange(num_requests, device=device) < num_decodes,
+            non_spec_query_start_loc=cu_seqlens.to(device),
+            non_spec_state_indices_tensor=block_table[:, 0],
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
+        )
+
+    def forward_context(step_metadata: GDNAttentionMetadata):
+        return override_forward_context(
+            ForwardContext(
+                {},
+                {layer.prefix: step_metadata for layer in layers.values()},
+                {},
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            )
+        )
+
+    launches: list[int] = []
+    launch = rocm_aiter_ops.kda_fused_recurrent_packed_decode
+
+    def record_launch(**kwargs):
+        launches.append(kwargs["mixed_qkv"].shape[0])
+        return launch(**kwargs)
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "kda_fused_recurrent_packed_decode", record_launch
+    )
+
+    stream = torch.cuda.Stream()
+    positions = torch.zeros(max_tokens, dtype=torch.int64, device=device)
+    graphs = {}
+    for name, layer in layers.items():
+        static_hidden = torch.zeros(
+            max_tokens, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        torch.accelerator.synchronize()
+        with torch.cuda.stream(stream), forward_context(metadata([1] * max_tokens)):
+            layer(static_hidden, positions)  # Warm-up, as before every capture.
+            with BreakableCUDAGraphCapture() as capture:
+                output = layer(static_hidden, positions)
+        stream.synchronize()
+        assert capture.num_eager_breaks == 1  # ``_forward`` alone.
+        graphs[name] = (capture, static_hidden, output)
+
+    def replay(name: str, step_metadata: GDNAttentionMetadata, hidden: torch.Tensor):
+        """The outputs, caches and fused launches of one replay of graph ``name``
+        from the saved caches."""
+        capture, static_hidden, output = graphs[name]
+        launches.clear()
+        with torch.cuda.stream(stream), forward_context(step_metadata):
+            for cache, saved in zip(layers[name].kv_cache, saved_caches):
+                cache.copy_(saved)
+            static_hidden.copy_(hidden)
+            capture.replay()
+        stream.synchronize()
+        num_tokens = step_metadata.num_actual_tokens
+        conv, recurrent = (cache.clone() for cache in layers[name].kv_cache)
+        return output[:num_tokens].clone(), conv, recurrent, launches[:]
+
+    # The fused kernel keeps outputs in fp32 where the stock chain rounds to bf16:
+    # 2 bf16 ulp of the largest value. State rtol is Kimi-K3's spec-decode one, as
+    # one of these 41.9M elements reaches 3.8e-3, past its packed-decode 2e-3.
+    fused_rtol = 2 * torch.finfo(torch.bfloat16).eps
+    fused_state_tol = {"atol": 2e-3, "rtol": 3e-2}
+    # (query lengths, expected fused launches (rows each), output rtol, state tol)
+    steps: list[tuple[list[int], list[int], float, dict[str, float]]] = [
+        ([1, 1, 50], [], 0, {"atol": 0, "rtol": 0}),  # Mixed: stock, bit for bit.
+        ([1, 1, 1], [3], fused_rtol, fused_state_tol),  # Decode: one fused launch.
+    ]
+    for query_lens, expected_launches, rtol, state_tol in steps:
+        step_metadata = metadata(query_lens)
+        hidden = torch.randn(max_tokens, hidden_size, device=device).bfloat16()
+        torch.accelerator.synchronize()
+        stock_out, stock_conv, stock_state, stock_launches = replay(
+            "stock", step_metadata, hidden
+        )
+        fused_out, fused_conv, fused_state, fused_launches = replay(
+            "fused", step_metadata, hidden
+        )
+
+        assert stock_launches == []
+        assert fused_launches == expected_launches, (
+            f"{query_lens}: fused launches (rows each) {fused_launches}"
+        )
+        torch.testing.assert_close(
+            fused_out, stock_out, rtol=rtol, atol=rtol * stock_out.abs().max().item()
+        )
+        torch.testing.assert_close(fused_state, stock_state, **state_tol)
+        torch.testing.assert_close(fused_conv, stock_conv, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("offset", [16, 144, 256])
 @pytest.mark.parametrize("dim_first", [False, True])
 @pytest.mark.parametrize("num_spec", [0, 3])
