@@ -25,6 +25,7 @@ from vllm.v1.watermarking.spec_decode import (
 )
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
+    build_slot_mappings_by_layer,
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -106,6 +107,10 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Draft prefill runs on the target's batch, so it can reuse the target
+    # forward's attention metadata. Otherwise the drafter rebuilds it.
+    can_reuse_target_attn_metadata: bool = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -145,6 +150,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        if vllm_config.parallel_config.use_ubatching:
+            # A microbatched target forward builds only per-microbatch metadata.
+            self.can_reuse_target_attn_metadata = False
 
         self.eplb_state: EplbState | None = None
 
@@ -343,6 +351,41 @@ class DraftModelSpeculator(BaseSpeculator):
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
         self._configure_decode_metadata_update()
+
+    def _build_drafter_attn_metadata(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        for_capture: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+        """Attention metadata and slot mappings for draft prefill on the target
+        batch: the target forward's when reusable, else rebuilt on the draft
+        builders from the block tables and slot mappings the target prepared.
+        Must run before draft decode steps overwrite the slot mappings.
+        """
+        if self.can_reuse_target_attn_metadata:
+            return attn_metadata, slot_mappings
+        block_tables = tuple(
+            block_table[: input_batch.num_reqs_after_padding]
+            for block_table in self.block_tables.input_block_tables
+        )
+        target_slot_mappings = self.block_tables.slot_mappings[
+            :, : input_batch.num_tokens_after_padding
+        ]
+        attn_metadata = self.model_state.prepare_attn(
+            input_batch,
+            cg_mode,
+            block_tables,
+            target_slot_mappings,
+            self.attn_groups,
+            self.kv_cache_config,
+            for_capture=for_capture,
+        )
+        return attn_metadata, build_slot_mappings_by_layer(
+            target_slot_mappings, self.kv_cache_config
+        )
 
     def _configure_decode_metadata_update(self) -> None:
         unsupported_backends = sorted(
@@ -612,6 +655,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
+            max_query_len=num_query_per_req,
             eager=False,
         ), num_batch_tokens
 
