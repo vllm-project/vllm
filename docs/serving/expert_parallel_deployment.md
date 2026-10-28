@@ -160,6 +160,14 @@ load-balanced independently.
 For every registered model, `(num_routed_experts + num_redundant_experts)` must
 be divisible by the EP world size.
 
+For EPLB-backed MoE drafts, configure the draft-specific count with
+`draft_num_redundant_experts` in the speculative config. This applies to
+Eagle, Eagle3, MTP, DFlash, and supported DSpark drafts. When unset, the draft
+uses the target model's `num_redundant_experts`. If that count does not make the
+draft's total expert count divisible by its EP size, config validation reports
+the lowest valid draft count. An explicit value must satisfy the same
+divisibility rule.
+
 ### EPLB Parameters
 
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:

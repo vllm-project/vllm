@@ -90,27 +90,31 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         vllm_config.attention_config.backend,
     )
 
-    draft_vllm_config = replace(
-        vllm_config,
-        parallel_config=_get_dspark_parallel_config(
-            vllm_config.parallel_config,
-            speculative_config.draft_parallel_config.tensor_parallel_size,
-            draft_model_config,
-        ),
-        attention_config=replace(
-            vllm_config.attention_config,
-            use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
-            backend=draft_attention_backend,
-        ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
-        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
+    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(
+        replace(
+            vllm_config,
+            parallel_config=_get_dspark_parallel_config(
+                vllm_config.parallel_config,
+                speculative_config.draft_parallel_config.tensor_parallel_size,
+                draft_model_config,
+            ),
+            attention_config=replace(
+                vllm_config.attention_config,
+                use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
+                backend=draft_attention_backend,
+            ),
+            cache_config=(
+                replace(
+                    vllm_config.cache_config,
+                    cache_dtype=speculative_config.kv_cache_dtype,
+                )
+                if speculative_config.kv_cache_dtype is not None
+                else vllm_config.cache_config
+            ),
+            load_config=get_pp_safe_draft_load_config(
+                get_draft_load_config(vllm_config)
+            ),
+        )
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
