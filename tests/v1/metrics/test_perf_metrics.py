@@ -1025,25 +1025,16 @@ def test_quantization_config_parser_fp8_methods(quant_method):
 
 
 def test_quantization_config_parser_unknown_method():
-    """Test that an unrecognized quant method raises InvalidComponent."""
-
+    # An unrecognized quant method falls back to the model dtype size.
     class MockQuantConfig:
         def get_name(self):
             return "unknown_quant_method"
-
-    hf_config = Qwen3Config(
-        hidden_size=2048,
-        num_attention_heads=16,
-        intermediate_size=8192,
-        num_hidden_layers=1,
-    )
+    hf_config = Qwen3Config(hidden_size=2048, num_attention_heads=16, intermediate_size=8192, num_hidden_layers=1)
     vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
-
-    with pytest.raises(InvalidComponent):
-        AttentionMetrics.get_parser().parse(vllm_config)
-
-    with pytest.raises(InvalidComponent):
-        FfnMetrics.get_parser().parse(vllm_config)
+    attn_result = AttentionMetrics.get_parser().parse(vllm_config)
+    assert attn_result.weight_byte_size == 2
+    ffn_result = FfnMetrics.get_parser().parse(vllm_config)
+    assert ffn_result.weight_byte_size == 2
 
 
 def test_quantized_model_metrics_aggregation():
