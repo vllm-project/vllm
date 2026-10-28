@@ -16,7 +16,9 @@ failed retirement. With PyTorch, Triton and a CUDA GPU installed:
 .venv/bin/python examples/disaggregated/engram_rdma/test_provider_gpu.py
 ```
 
-This test does not perform RDMA. End-to-end reproduction additionally needs a
-public compatible GPU GET provider, table owner, and matching setup; these are
-not yet available. The measured research stack used a legacy DOCA 3.1 runtime
-and is not evidence of current-SDK support.
+This test does not perform RDMA. A separate, explicitly unsupported
+[legacy research snapshot](https://github.com/foraxe/nixl/tree/dd70c9828b52b0d1bc19c30ad8966600a596cfc5/research/vllm_engram_repro)
+contains the matching owner, reader and GPU GET source. It builds with DOCA
+3.1 and has passed a synthetic cross-node READ; a full vLLM 1P1D run using
+that freshly built snapshot remains to be verified. It is not evidence of
+current-SDK support.
