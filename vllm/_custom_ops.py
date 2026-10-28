@@ -122,6 +122,7 @@ def paged_attention_rocm(
     v_scale: torch.Tensor,
     fp8_out_scale: torch.Tensor | None = None,
     mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
+    use_interleaved_v_cache: bool = False,
 ) -> None:
     torch.ops._rocm_C.paged_attention(
         out,
@@ -144,6 +145,7 @@ def paged_attention_rocm(
         v_scale,
         fp8_out_scale,
         mfma_type,
+        use_interleaved_v_cache,
     )
 
 
@@ -335,6 +337,17 @@ def fused_add_rms_norm(
 ) -> None:
     # Note: this func is batch invariant
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def muse_spark_mul_tanh_soft_cap(
+    x: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> torch.Tensor:
+    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    out = torch.empty_like(x, dtype=torch.float32)
+    torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
+    return out
 
 
 def fused_qk_norm_rope(
@@ -870,6 +883,7 @@ def get_cutlass_moe_mm_data(
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
     is_gated: bool = True,
+    sorted_expert_ids: torch.Tensor | None = None,
 ):
     """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -894,6 +908,8 @@ def get_cutlass_moe_mm_data(
                           blockscale_offsets[E]
     - is_gated: Whether the activation is gated (gate + up). When True, the
                 first GEMM N dimension is 2*n; when False, it is n.
+    - sorted_expert_ids: Optional expert ID for each row after sorting, used to
+                         skip expert-offset searches in MXFP4 conversion.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -907,6 +923,7 @@ def get_cutlass_moe_mm_data(
         k,
         blockscale_offsets,
         is_gated,
+        sorted_expert_ids,
     )
 
 
@@ -1723,6 +1740,7 @@ def mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
@@ -1734,6 +1752,9 @@ def mxfp4_experts_quant(
         blockscale_offsets: [n_experts+1] SF row boundaries per expert
         n_experts: number of experts
         topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
         output_scales: E8M0 blockscales in swizzled layout (uint8 view)
@@ -1770,6 +1791,7 @@ def mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
@@ -1782,9 +1804,24 @@ def silu_and_mul_mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
+
+    Args:
+        input_tensor: [m_topk, 2*k] BF16/FP16 gate||up activations
+        expert_offsets: [n_experts+1] token boundaries per expert
+        blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
+        topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
+    Returns:
+        output: [m_topk, k//2] packed E2M1 values (uint8)
+        output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2
@@ -1814,6 +1851,7 @@ def silu_and_mul_mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     output_scales = output_scales.view(torch.uint8)
     return output, output_scales
@@ -2130,6 +2168,29 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         )
 
 
+def mxfp4_w4a8_gemv_rdna3(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    # a: [M, K] fp16/bf16 with 1 <= M <= 8; b_q: [N, K/2] uint8 E2M1;
+    # b_scale: [N, K/32] uint8 E8M0. Returns [M, N] in a.dtype.
+    return torch.ops._rocm_C.mxfp4_w4a8_gemv_rdna3(a, b_q, b_scale)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "mxfp4_w4a8_gemv_rdna3"
+):
+
+    @register_fake("_rocm_C::mxfp4_w4a8_gemv_rdna3")
+    def _mxfp4_w4a8_gemv_rdna3_fake(
+        a: torch.Tensor,
+        b_q: torch.Tensor,
+        b_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty((a.size(0), b_q.size(0)), dtype=a.dtype, device=a.device)
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
@@ -2191,6 +2252,32 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
+    )
+
+
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    scatter_idx: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
         scatter_idx,
     )
 
@@ -2396,6 +2483,11 @@ def grouped_topk(
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA and XPU platforms"
         )
+    if scores.shape[0] == 0:
+        return (
+            scores.new_empty((0, topk), dtype=torch.float32),
+            scores.new_empty((0, topk), dtype=torch.int32),
+        )
     return torch.ops._moe_C.grouped_topk(
         scores,
         num_expert_group,
@@ -2528,6 +2620,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    interleaved_v: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(
         key,
@@ -2538,6 +2631,7 @@ def reshape_and_cache(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        interleaved_v,
     )
 
 
@@ -2560,6 +2654,105 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+    )
+
+
+def fused_qknorm_rope_cache(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    norm_weight_bias: float = 0.0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse per-head RMSNorm, partial NeoX RoPE and KV insertion.
+
+    Norm weights may be FP32 independently of QKV. A zero rotary dimension
+    skips RoPE; norm outputs are rounded to QKV dtype before rotation.
+    """
+    if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
+        raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
+    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
+    v = torch.empty_like(k)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    torch.ops._C.fused_qknorm_rope_cache(
+        q,
+        k,
+        v,
+        qkv,
+        q_weight,
+        k_weight,
+        cos,
+        sin,
+        positions,
+        slot_mapping,
+        key_cache,
+        value_cache,
+        head_dim,
+        num_q_heads,
+        num_kv_heads,
+        rotary_dim // 2,
+        eps,
+        norm_weight_bias,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    return q, k, v
+
+
+def fused_muse_spark_qknorm_rope_kv_insert(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    eps: float,
+    cos_sin_cache: torch.Tensor | None = None,
+    rotary_dim: int = 0,
+    slot_mapping: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    block_size: int = 0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    q_fp8_out: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+) -> None:
+    """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
+
+    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
+    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    """
+    torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
+        qkv,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        eps,
+        cos_sin_cache,
+        rotary_dim,
+        slot_mapping,
+        kv_cache,
+        block_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        q_fp8_out,
+        q_scale,
     )
 
 
@@ -2747,10 +2940,18 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
-    )
+    if current_platform.is_xpu():
+        if skip_scale:
+            raise NotImplementedError("skip_scale is not supported on XPU")
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        )
+    else:
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+        )
 
 
 def concat_and_cache_mla_grouped(
@@ -2976,6 +3177,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     block_table: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
 
@@ -2985,6 +3187,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Per-request token offset into the context to start
+            reading from [num_reqs]; None reads from the first token.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -2993,6 +3197,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table,
         workspace_starts,
         batch_size,
+        seq_starts,
     )
 
 
@@ -3321,6 +3526,13 @@ def weight_packed_linear_cpu(
     return output
 
 
+class CPUActMethod(IntEnum):
+    SILU_AND_MUL = 0
+    SWIGLU = 1
+    GELU_AND_MUL = 2
+    GELU_TANH_AND_MUL = 3
+
+
 class CPUQuantMethod(IntEnum):
     UNQUANT = 0
     INT8_W8A8 = 1
@@ -3367,6 +3579,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
+    act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3387,6 +3600,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
+        act_method,
     )
 
 

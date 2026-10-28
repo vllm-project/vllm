@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 import torch
-import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -33,12 +32,16 @@ class DPSyncState:
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
     uniform_token_count: int | None
+    # Agreed query-length bound. None disables varlen decode graphs.
+    max_query_len: int | None
     # Whether the ranks agreed to run eager. A dispatch reusing this must run
     # eager too; no shape was agreed, so picking a graph per rank would diverge.
     eager: bool
-    # Agreed upper bound on any rank's request count. Holds the padded count when
-    # a FULL descriptor imposed one, else the most any rank scheduled.
+    # Largest real request count scheduled on any rank before graph padding.
     num_reqs: int
+    # Whether every rank's scheduler found that none of its requests can use this
+    # step's drafts, so all ranks skip drafting together.
+    skip_drafts: bool = False
 
 
 def sync_cudagraph_and_dp_padding(
@@ -54,6 +57,7 @@ def sync_cudagraph_and_dp_padding(
     parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
+    allow_skip_drafts: bool = False,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Coordinates the batch descriptor and DP padding across all ranks.
 
@@ -63,18 +67,18 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
-    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
+    tensor[6][dp_rank] = int(allow_skip_drafts)
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
-        dist.all_reduce(tensor, group=group)
+        get_dp_group().cpu_all_reduce_(tensor)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -82,6 +86,8 @@ def sync_cudagraph_and_dp_padding(
     max_query_lens_across_dp = tensor[3]
     allow_ubatching_across_dp = tensor[4]
     num_reqs_across_dp = tensor[5]
+    allow_skip_drafts_across_dp = tensor[6]
+    skip_drafts = bool(torch.all(allow_skip_drafts_across_dp == 1))
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -89,6 +95,11 @@ def sync_cudagraph_and_dp_padding(
         uniform_token_counts_across_dp == synced_uniform_token_count
     ):
         synced_uniform_token_count = None
+
+    # Varlen decode graphs need the same query-length bound on every rank.
+    synced_max_query_len: int | None = None
+    if bool(torch.all(max_query_lens_across_dp != -1)):
+        synced_max_query_len = int(max_query_lens_across_dp.max())
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
@@ -139,17 +150,15 @@ def sync_cudagraph_and_dp_padding(
                 )
             # Refresh the token count to include CUDA graph padding.
             ubatch_num_tokens = ubatch_desc.num_tokens
-            num_reqs = int(num_reqs_across_dp.max())
-            if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
-                assert ubatch_desc.num_reqs is not None
-                num_reqs = ubatch_desc.num_reqs
             return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
                 ),
                 uniform_token_count=synced_uniform_token_count,
+                max_query_len=synced_max_query_len,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
-                num_reqs=num_reqs,
+                num_reqs=int(num_reqs_across_dp.max()),
+                skip_drafts=skip_drafts,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min()))
@@ -166,8 +175,10 @@ def sync_cudagraph_and_dp_padding(
             DPSyncState(
                 num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
+                max_query_len=synced_max_query_len,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
+                skip_drafts=skip_drafts,
             ),
         )
 
@@ -176,12 +187,6 @@ def sync_cudagraph_and_dp_padding(
         "where synced_cg_mode must be NONE across all DP ranks"
     )
     synced_num_tokens = int(num_tokens_across_dp.max())
-
-    # Varlen decode graphs are selected by the query-length bound, so ranks must agree
-    # on it or they pad to different token counts below.
-    synced_max_query_len: int | None = None
-    if bool(torch.all(max_query_lens_across_dp != -1)):
-        synced_max_query_len = int(max_query_lens_across_dp.max())
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
@@ -200,13 +205,10 @@ def sync_cudagraph_and_dp_padding(
     return synced_desc, DPSyncState(
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
+        max_query_len=synced_max_query_len,
         eager=False,
-        num_reqs=(
-            synced_desc.num_reqs
-            if synced_desc.cg_mode == CUDAGraphMode.FULL
-            and synced_desc.num_reqs is not None
-            else int(num_reqs_across_dp.max())
-        ),
+        num_reqs=int(num_reqs_across_dp.max()),
+        skip_drafts=skip_drafts,
     )
 
 
@@ -223,6 +225,7 @@ def dispatch_cg_and_sync_dp(
     parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
+    allow_skip_drafts: bool = False,
     dp_sync_state: DPSyncState | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
@@ -244,7 +247,8 @@ def dispatch_cg_and_sync_dp(
         dp_rank: This rank's index in the DP group.
         max_query_len: Upper bound on per-request query length, for selecting
             varlen decode graphs. None, as for a batch with a prefill, keeps
-            the batch out of graphs that constrain it.
+            the batch out of graphs that constrain it. Reusing a sync replaces
+            this with `dp_sync_state.max_query_len`, including when it is None.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
@@ -254,6 +258,9 @@ def dispatch_cg_and_sync_dp(
             microbatches. Agreed across ranks before it takes effect.
         uniform_decode: Whether this rank's batch is a uniform decode, used
             to pick the microbatching split.
+        allow_skip_drafts: Whether this rank allows skipping drafts, because
+            none of its requests can use this step's drafts. Agreed across ranks
+            (all must allow it) into `DPSyncState.skip_drafts`.
         dp_sync_state: Agreement from a prior dispatch over this same batch, to reuse.
             Must come from a batch with this same padded `num_tokens` and the
             same `uniform_token_count`; `num_reqs` may differ, as neither
@@ -284,7 +291,9 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             dp_sync_state.uniform_token_count if dp_sync_state else uniform_token_count,
             num_active_loras=num_active_loras,
-            max_query_len=max_query_len,
+            max_query_len=(
+                dp_sync_state.max_query_len if dp_sync_state else max_query_len
+            ),
         )
 
     if dp_size == 1:
@@ -322,4 +331,5 @@ def dispatch_cg_and_sync_dp(
         parallel_config=parallel_config,
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
+        allow_skip_drafts=allow_skip_drafts,
     )
