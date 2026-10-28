@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 
 import pytest
+from PIL import Image
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
+from vllm.inputs import TextPrompt
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -57,6 +60,84 @@ FP32_STATE_MODELS = [
 MAX_NUM_SEQS = 4
 
 ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
+
+def test_apc_appended_multimodal_item(vllm_runner) -> None:
+    """An appended image reuses the prefix without corrupting generation."""
+    model = os.getenv("VLLM_HYBRID_MM_TEST_MODEL", "Qwen/Qwen3.5-4B")
+    image = Image.new("RGB", (448, 448), (128, 128, 128))
+    sampling = SamplingParams(
+        temperature=0, max_tokens=16, ignore_eos=True, logprobs=10
+    )
+    with vllm_runner(
+        model,
+        dtype="bfloat16",
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        mamba_ssm_cache_dtype="float32",
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.26,
+        kv_cache_memory_bytes=2 * 1024**3,
+        limit_mm_per_prompt={"image": 5, "video": 0},
+        mm_processor_kwargs={"max_pixels": 448**2},
+    ) as runner:
+        llm = runner.get_llm()
+        tokenizer = llm.get_tokenizer()
+        prompts = []
+        for count in (4, 5):
+            items = [{"type": "text", "text": "Task description.\n\nHistory:\n"}]
+            for index in range(count):
+                items.extend(
+                    [
+                        {"type": "text", "text": f"\n--- Turn {index + 1} ---\n"},
+                        {"type": "image", "image": image},
+                    ]
+                )
+            items.append(
+                {
+                    "type": "text",
+                    "text": "\n"
+                    + "Follow these instructions carefully. " * 500
+                    + "\nWhat next?",
+                }
+            )
+            prompts.append(
+                TextPrompt(
+                    prompt=tokenizer.apply_chat_template(
+                        [
+                            {
+                                "role": "system",
+                                "content": "You are a helpful assistant. " * 300,
+                            },
+                            {"role": "user", "content": items},
+                        ],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    ),
+                    multi_modal_data={"image": [image] * count},
+                )
+            )
+        llm.generate([prompts[0]], sampling, use_tqdm=False)
+        cached = llm.generate([prompts[1]], sampling, use_tqdm=False)[0]
+        assert cached.num_cached_tokens > 0
+        sampling.skip_reading_prefix_cache = True
+        cold = llm.generate([prompts[1]], sampling, use_tqdm=False)[0]
+        assert cold.num_cached_tokens == 0
+        outputs = [result.outputs[0] for result in (cached, cold)]
+        assert all(len(output.token_ids) == sampling.max_tokens for output in outputs)
+        check_logprobs_close(
+            outputs_0_lst=[
+                (outputs[0].token_ids, outputs[0].text, outputs[0].logprobs)
+            ],
+            outputs_1_lst=[
+                (outputs[1].token_ids, outputs[1].text, outputs[1].logprobs)
+            ],
+            name_0="cached",
+            name_1="cold",
+        )
 
 
 def _set_conv_state_layout(monkeypatch, layout: str) -> None:

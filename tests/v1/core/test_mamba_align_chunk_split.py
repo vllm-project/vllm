@@ -16,6 +16,7 @@ import torch
 
 from tests.v1.core.test_prefix_caching import make_request
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -30,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .utils import create_requests
+from .utils import create_requests, create_scheduler
 
 pytestmark = pytest.mark.cpu_test
 
@@ -345,6 +346,46 @@ def test_incremental_multimodal_sibling_reuses_mamba_boundary(
     _, num_computed, shared_prefix_boundary = manager.get_computed_blocks(consumer)
     assert shared_prefix_boundary == last_mm_end // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
     assert num_computed == mamba_block_size
+
+
+@pytest.mark.parametrize("skip_cache", [False, True])
+def test_appending_mm_item_preserves_shared_prefill_splits(skip_cache: bool) -> None:
+    """Appending an item must not change the shared prefix's GEMM chunk sizes."""
+    block_size = 64
+    scheduler = create_scheduler(
+        block_size=block_size,
+        enable_prefix_caching=True,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+    )
+    shared = [
+        PlaceholderRange(offset=10, length=20),
+        PlaceholderRange(offset=200, length=80),
+        PlaceholderRange(offset=281, length=10),
+        PlaceholderRange(offset=310, length=40),
+    ]
+    splits = []
+    for positions in (shared, [*shared, PlaceholderRange(offset=370, length=60)]):
+        request = create_requests(
+            1,
+            num_tokens=600,
+            mm_positions=[positions],
+            sampling_params=SamplingParams(skip_reading_prefix_cache=skip_cache),
+        )[0]
+        ends = []
+        while request.num_computed_tokens < 320:
+            count = scheduler._mamba_block_aligned_split(
+                request, request.num_prompt_tokens - request.num_computed_tokens
+            )
+            assert count > 0
+            request.num_computed_tokens += count
+            ends.append(request.num_computed_tokens)
+        splits.append(ends)
+    assert splits == [[256, 320], [256, 320]]
 
 
 def _prefill(prompt_len: int, budgets: list[int]) -> int:
