@@ -23,12 +23,21 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950, _ON_GFX1151, _ON_RDNA
+    from vllm.platforms.rocm import (
+        _ON_GFX942,
+        _ON_GFX950,
+        _ON_GFX1151,
+        _ON_RDNA,
+        get_cdna_version,
+    )
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
     _ON_GFX1151 = False
     _ON_RDNA = False
+
+    def get_cdna_version() -> int:
+        return 0
 
 logger = init_logger(__name__)
 
@@ -49,18 +58,6 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     return pa_sparse_prefill_opus
 
 
-@functools.cache
-def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
-    """gfx942 prefill kernel when AITER MLA is enabled."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not _ON_GFX942 or not rocm_aiter_ops.is_mla_enabled():
-        return None
-    from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
-
-    return pa_prefill_sparse
-
-
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
@@ -73,8 +70,11 @@ _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES = 512
 
 def _can_use_aiter_pa_prefill_sparse(q: torch.Tensor, kv: torch.Tensor) -> bool:
     """Cheap gate. The AITER import runs only after this passes."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
     return (
-        _ON_GFX942
+        get_cdna_version() == 3
+        and rocm_aiter_ops.is_mla_enabled()
         and q.shape[0] >= _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
         and q.dtype in (torch.bfloat16, torch.float16)
         and kv.dtype == q.dtype
@@ -4669,10 +4669,8 @@ def rocm_sparse_attn_prefill(
             return
 
     if _can_use_aiter_pa_prefill_sparse(q, kv):
-        pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
-    else:
-        pa_prefill_sparse = None
-    if pa_prefill_sparse is not None:
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
         if ragged_indices is None or ragged_indptr is None:
             assert indices is not None
             indices_2d = indices.reshape(indices.shape[0], -1)

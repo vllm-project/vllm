@@ -915,7 +915,7 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
-    monkeypatch.setattr(mod, "_get_aiter_pa_prefill_sparse", lambda: None)
+    monkeypatch.setattr(mod, "_can_use_aiter_pa_prefill_sparse", lambda *args: False)
     monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_dense_fallback)
     monkeypatch.setattr(
         mod,
@@ -941,28 +941,33 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize(
-    ("num_queries", "on_gfx942", "dtype", "kv_dtype", "expected"),
+    ("num_queries", "cdna_version", "mla_enabled", "dtype", "kv_dtype", "expected"),
     [
-        (512, True, torch.bfloat16, torch.bfloat16, True),
-        (512, True, torch.float16, torch.float16, True),
-        (511, True, torch.bfloat16, torch.bfloat16, False),
-        (512, False, torch.bfloat16, torch.bfloat16, False),
-        (512, True, torch.float32, torch.float32, False),
-        (512, True, torch.bfloat16, torch.float16, False),
+        (512, 3, True, torch.bfloat16, torch.bfloat16, True),
+        (512, 3, True, torch.float16, torch.float16, True),
+        (511, 3, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 4, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 0, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 3, False, torch.bfloat16, torch.bfloat16, False),
+        (512, 3, True, torch.float32, torch.float32, False),
+        (512, 3, True, torch.bfloat16, torch.float16, False),
     ],
 )
 def test_can_use_aiter_pa_prefill_sparse(
     monkeypatch,
     num_queries: int,
-    on_gfx942: bool,
+    cdna_version: int,
+    mla_enabled: bool,
     dtype: torch.dtype,
     kv_dtype: torch.dtype,
     expected: bool,
 ) -> None:
     """Literal gate. Expected values are not derived from the cutoff constant."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
-    monkeypatch.setattr(mod, "_ON_GFX942", on_gfx942)
+    monkeypatch.setattr(mod, "get_cdna_version", lambda: cdna_version)
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
     q = torch.empty(num_queries, 1, HEAD_DIM, dtype=dtype)
     kv = torch.empty(4, 1, HEAD_DIM, dtype=kv_dtype)
     assert mod._can_use_aiter_pa_prefill_sparse(q, kv) is expected
@@ -975,7 +980,7 @@ def test_can_use_aiter_pa_prefill_sparse(
 def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
     monkeypatch, num_queries: int, mla_enabled: bool, expect_aiter: bool
 ) -> None:
-    """Call site launches only when the gate and the real getter both pass."""
+    """Call site launches only when the gate passes."""
     from unittest.mock import Mock
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -988,10 +993,8 @@ def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
 
         kernel = pa_prefill_sparse
 
-    getter = mod._get_aiter_pa_prefill_sparse
-    getter.cache_clear()
     monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
-    monkeypatch.setattr(mod, "_ON_GFX942", True)
+    monkeypatch.setattr(mod, "get_cdna_version", lambda: 3)
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False)
 
     def zero_output(*args, **kwargs):
@@ -1018,24 +1021,21 @@ def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
             torch.tensor([0, 1], dtype=torch.int32),
         ),
     )
-    try:
-        q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
-        kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
-        output = torch.empty_like(q)
-        mod.rocm_sparse_attn_prefill(
-            q=q,
-            kv=kv,
-            indices=torch.zeros(num_queries, 1, dtype=torch.int32),
-            topk_length=torch.ones(num_queries, dtype=torch.int32),
-            scale=HEAD_DIM**-0.5,
-            head_dim=HEAD_DIM,
-            nope_head_dim=NOPE_HEAD_DIM,
-            rope_head_dim=ROPE_HEAD_DIM,
-            attn_sink=torch.empty(1, dtype=torch.float32),
-            output=output,
-        )
-    finally:
-        getter.cache_clear()
+    q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
+    kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    mod.rocm_sparse_attn_prefill(
+        q=q,
+        kv=kv,
+        indices=torch.zeros(num_queries, 1, dtype=torch.int32),
+        topk_length=torch.ones(num_queries, dtype=torch.int32),
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        attn_sink=torch.empty(1, dtype=torch.float32),
+        output=output,
+    )
 
     if expect_aiter:
         fake_aiter.assert_called_once()
