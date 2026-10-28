@@ -41,7 +41,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -691,6 +691,11 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
         return events
 
+    def _reduced_stats(self) -> dict[str, int | float]:
+        stats = self.manager.get_stats()
+        assert stats is not None
+        return stats.reduce()
+
     def _release(self, events: list[threading.Event]) -> None:
         for event in events:
             event.set()
@@ -717,7 +722,7 @@ class TestTieringOffloadingManager:
         assert self.manager.has_pending_work()
         self.manager._process_finished_jobs()
         assert self.primary_tier.num_deferred_release_chunks == 2
-        reduced = self.manager.get_stats().reduce()
+        reduced = self._reduced_stats()
         label = self.manager._metrics.tier_label(0)
         assert (
             reduced[f"{TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS}:{label}"] == 2
@@ -727,7 +732,7 @@ class TestTieringOffloadingManager:
 
         self._release(events)
 
-        reduced = self.manager.get_stats().reduce()
+        reduced = self._reduced_stats()
         assert reduced[histogram_count_key(hold, label)] == 1
 
         assert self.primary_tier.num_deferred_release_chunks == 0
@@ -747,6 +752,7 @@ class TestTieringOffloadingManager:
 
         output = self.primary_tier.prepare_write(chunk, _CTX)
         assert output is not None
+        assert isinstance(output.store_spec, CPULoadStoreSpec)
         assert list(output.store_spec.chunk_ids) != [held]
         self.primary_tier.complete_write(chunk, _CTX, True)
 
@@ -791,9 +797,12 @@ class TestTieringOffloadingManager:
         """drain_jobs() completing the deferred release lets reset_cache proceed."""
         self._start_request()
         events = self._promote_with_deferred_release(monkeypatch, to_keys(range(2)))
-        monkeypatch.setattr(
-            self.secondary_tier1, "drain_jobs", lambda: [e.set() for e in events]
-        )
+
+        def drain_jobs() -> None:
+            for event in events:
+                event.set()
+
+        monkeypatch.setattr(self.secondary_tier1, "drain_jobs", drain_jobs)
         self.manager.reset_cache()
         assert self.primary_tier.num_deferred_release_chunks == 0
 
