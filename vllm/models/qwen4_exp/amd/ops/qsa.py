@@ -973,8 +973,9 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
-    # Swept on MI355X at the TP2 decode shape (top-k 2048): mxfp4 tiles are a
-    # quarter of BF16's bytes, so wider tiles and fewer splits win.
+    # Swept on MI355X at the TP2 decode shape (top-k 2048) only; other heads
+    # and selection widths reuse it untuned. mxfp4 tiles are a quarter of
+    # BF16's bytes, so wider tiles and fewer splits win.
     if is_mxfp4 and base_programs > small_profile_limit:
         if base_programs < 32:
             block_n, target_splits, partial_warps = 64, 64, 4
