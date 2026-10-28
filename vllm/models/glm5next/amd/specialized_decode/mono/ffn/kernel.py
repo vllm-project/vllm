@@ -102,6 +102,7 @@ from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
     down_prefetch_batch,
     down_x_words,
     layout,
+    mid_fp8,
     sample_wave_batches,
     stage_tasks,
     ug_task_rounds,
@@ -243,7 +244,12 @@ def build_flash_ffn_kernel(
     KVX = 2 * INDEX_DIM
     assert not kv_fp8 or (dsa and KVX + KV_LORA <= X_WORDS)
     MISC_OFF = X_WORDS
-    MISC_WORDS = max(8 + S * XQ_GROUPS, S * MOE_SLOTS * (expert_inter // 32))
+    MID8 = mid_fp8(expert_inter)
+    # up/gate with MID8: each row's f32 32-column group in misc past the xq scales
+    MID8_OFF = 8 + S * XQ_GROUPS
+    MISC_WORDS = max(
+        MID8_OFF + (S * 32 if MID8 else 0), S * MOE_SLOTS * (expert_inter // 32)
+    )
     KEYS_OFF = MISC_OFF + MISC_WORDS
     DNW_OFF = KEYS_OFF + LDS_KEYS
     RED_OFF = DNW_OFF + S * MOE_SLOTS
@@ -781,15 +787,19 @@ def build_flash_ffn_kernel(
                         got[len(samples) * nxw + j][0].bitcast(fx.Float32),
                     )
 
-        def st_mxfp8(k, q0, q1):
-            """Store one row-major MXFP8 pair for the scaled MFMA."""
+        def mxfp8_word(q0, q1):
+            """E4M3 of this lane's pair and of lane + 1's: the word, on even lanes."""
             w = (
                 fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False))
                 & 0xFFFF
             )
-            nb = _xshfl(w, 1)
+            return w | (_xshfl(w, 1) << 16)
+
+        def st_mxfp8(k, q0, q1):
+            """Store one row-major MXFP8 pair for the scaled MFMA."""
+            w = mxfp8_word(q0, q1)
             if lane % 2 == 0:
-                lds_st(xs, k // 4, (w | (nb << 16)).bitcast(fx.Float32))
+                lds_st(xs, k // 4, w.bitcast(fx.Float32))
 
         def candidate(i):
             """This lane's router candidate i: expert lane + 64 i, or None past N_EXPERTS."""
@@ -2900,19 +2910,45 @@ def build_flash_ffn_kernel(
         gpu.barrier()
         stage_xq(list(range(S)))
         gpu.barrier()
+        NC8 = expert_inter // UG8
+
+        def mid8_publish(slot, grp):
+            """Quantize every row's finished 32-column group (staged in misc) of
+            routed ``slot`` and publish its MXFP8 words and scale."""
+            if wave < (S * 16 + 63) // 64:
+                n = fx.min(tid // 16, S - 1)
+                g16 = tid % 16
+                q0, q1, qs = quant_mxfp8(
+                    lds_ld(misc, MID8_OFF + n * 32 + g16 * 2),
+                    lds_ld(misc, MID8_OFF + n * 32 + g16 * 2 + 1),
+                )
+                w = mxfp8_word(q0, q1)
+                k = (n * MOE_SLOTS + slot) * expert_inter + grp * 32 + g16 * 2
+                if tid < S * 16:
+                    if lane % 2 == 0:
+                        put(mb("mid8"), k // 4, w)
+                    if g16 == 0:
+                        put(mb("mid8s"), k // 32, qs)
+
         u0 = start("ug")
         for task_round in range_constexpr(ug_task_rounds(expert_inter)):
             u = fx.Int32(u0 + task_round * G)
             if u < expert_inter:
-                c = u % (expert_inter // UG8)
-                has_sh = u < expert_inter // UG8
-                slot = has_sh.select(
-                    fx.Int32(MOE_SLOTS - 1), u // (expert_inter // UG8)
-                )
-                w_rg = ((lane % 16) // 8) * (expert_inter // 16) + c // 2
-                w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
+                has_sh = u < NC8
+                c_sh = u % NC8
+                if const_expr(MID8):
+                    # a (routed slot, 32-column group) every 4 rounds, 8 columns a round
+                    p = fx.Int32(u0 + (task_round // 4) * G)
+                    slot = 1 + p // (NC8 // 4)
+                    c = p % (NC8 // 4) * 4 + task_round % 4
+                else:
+                    c = c_sh
+                    slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // NC8)
 
                 def ug8_units(e, sample, shared_live=None):
+                    cw = c if shared_live is None else c_sh
+                    w_rg = ((lane % 16) // 8) * (expert_inter // 16) + cw // 2
+                    w_ln = (lane & -16) | ((cw % 2) * 8 + lane % 8)
                     if const_expr(shared_live is None):
                         rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
                         rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
@@ -2948,6 +2984,7 @@ def build_flash_ffn_kernel(
                     return units
 
                 def ug8_emit(sample, shared):
+                    cs = c_sh if shared else c
                     if tid < (S if shared else 1) * UG8 // 2:
                         n = tid // (UG8 // 2)
                         r = (tid % (UG8 // 2)) * 2
@@ -2963,13 +3000,20 @@ def build_flash_ffn_kernel(
                         )
                         sn = n if shared else fx.Int32(sample)
                         sl = fx.Int32(0) if shared else slot
-                        put2(
-                            mb("mid"),
-                            (sn * MOE_SLOTS + sl) * expert_inter + c * UG8 + r,
-                            g0 * _rcp(1.0 + _exp(-g0)) * v0,
-                            g1 * _rcp(1.0 + _exp(-g1)) * v1,
-                        )
-                    if (c == 0) & (tid < S if shared else tid == 0):
+                        m0 = g0 * _rcp(1.0 + _exp(-g0)) * v0
+                        m1 = g1 * _rcp(1.0 + _exp(-g1)) * v1
+                        if const_expr(MID8 and not shared):
+                            o = MID8_OFF + sample * 32 + task_round % 4 * UG8 + r
+                            lds_st(misc, o, m0)
+                            lds_st(misc, o + 1, m1)
+                        else:
+                            put2(
+                                mb("mid"),
+                                (sn * MOE_SLOTS + sl) * expert_inter + cs * UG8 + r,
+                                m0,
+                                m1,
+                            )
+                    if (cs == 0) & (tid < S if shared else tid == 0):
                         sn = tid if shared else fx.Int32(sample)
                         sl = fx.Int32(0) if shared else slot
                         put(
@@ -3007,6 +3051,9 @@ def build_flash_ffn_kernel(
                     )
                     gpu.barrier()
                     ug8_emit(sample, False)
+                if const_expr(MID8 and task_round % 4 == 3):
+                    gpu.barrier()
+                    mid8_publish(slot, p % (NC8 // 4))
                 if const_expr(task_round + 1 < ug_task_rounds(expert_inter)):
                     gpu.barrier()
 
@@ -3017,6 +3064,50 @@ def build_flash_ffn_kernel(
         DN_W_BYTES = HIDDEN * expert_inter // 2
         DN_S_BYTES = HIDDEN * (expert_inter // 32)
         DN_NKC = expert_inter // 64
+
+        def stage_mid8():
+            """Poll the routed rows' MXFP8 mid as published, quantize the shared
+            expert's f32 mid here: the same LDS words and scales either way."""
+            nw = S * TOP_K * expert_inter // 8  # word pairs
+            ns = S * TOP_K * expert_inter // 32
+            nb = S * expert_inter // 128
+            BPS = expert_inter // 128
+
+            def over_slots(i, per):  # routed item i, ``per`` a (row, slot)
+                seg = i // per
+                return (seg // TOP_K * MOE_SLOTS + 1 + seg % TOP_K) * per + i % per
+
+            wi = [tid + i * THREADS for i in range((nw + THREADS - 1) // THREADS)]
+            si = [tid + i * THREADS for i in range((ns + THREADS - 1) // THREADS)]
+            bi = [wave + b * WAVES for b in range((nb + WAVES - 1) // WAVES)]
+            wd = [over_slots(fx.min(i, nw - 1), expert_inter // 8) * 2 for i in wi]
+            sd = [over_slots(fx.min(i, ns - 1), expert_inter // 32) for i in si]
+            blks = [
+                fx.min(j, nb - 1) // BPS * MOE_SLOTS * BPS + fx.min(j, nb - 1) % BPS
+                for j in bi
+            ]
+            got = poll(
+                [(mb("mid8"), w, 2) for w in wd]
+                + [(mb("mid8s"), s, 1) for s in sd]
+                + [(mb("mid"), blk * 128 + lane * 2, 2) for blk in blks]
+            )
+            for i in range_constexpr(len(wd)):
+                if wi[i] < nw:
+                    lds_st(xs, wd[i], got[i][0].bitcast(fx.Float32))
+                    lds_st(xs, wd[i] + 1, got[i][1].bitcast(fx.Float32))
+            for i in range_constexpr(len(sd)):
+                if si[i] < ns:
+                    lds_st(misc, sd[i], got[len(wd) + i][0].bitcast(fx.Float32))
+            for b in range_constexpr(len(blks)):
+                if bi[b] < nb:
+                    v = got[len(wd) + len(sd) + b]
+                    q0, q1, qs = quant_mxfp8(
+                        v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)
+                    )
+                    st_mxfp8(blks[b] * 128 + lane * 2, q0, q1)
+                    if lane % 16 == 0:
+                        lds_st(misc, blks[b] * 4 + lane // 16, qs.bitcast(fx.Float32))
+
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down")
@@ -3078,19 +3169,25 @@ def build_flash_ffn_kernel(
 
             if const_expr(S <= 4):
                 pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
-            mids = get2_many(
-                [
-                    (mb("mid"), fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2)
-                    for b in range((DN_BLK + WAVES - 1) // WAVES)
-                ]
-            )
-            for b in range_constexpr((DN_BLK + WAVES - 1) // WAVES):
-                blk = wave + b * WAVES
-                if blk < DN_BLK:
-                    q0, q1, qs = quant_mxfp8(mids[b][0], mids[b][1])
-                    st_mxfp8(blk * 128 + lane * 2, q0, q1)
-                    if lane % 16 == 0:
-                        lds_st(misc, blk * 4 + lane // 16, qs.bitcast(fx.Float32))
+            if const_expr(MID8):
+                stage_mid8()
+            else:
+                mids = get2_many(
+                    [
+                        (
+                            mb("mid"),
+                            fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
+                        )
+                        for b in range((DN_BLK + WAVES - 1) // WAVES)
+                    ]
+                )
+                for b in range_constexpr((DN_BLK + WAVES - 1) // WAVES):
+                    blk = wave + b * WAVES
+                    if blk < DN_BLK:
+                        q0, q1, qs = quant_mxfp8(mids[b][0], mids[b][1])
+                        st_mxfp8(blk * 128 + lane * 2, q0, q1)
+                        if lane % 16 == 0:
+                            lds_st(misc, blk * 4 + lane // 16, qs.bitcast(fx.Float32))
             gpu.barrier()
             if const_expr(S > 4):
                 pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]

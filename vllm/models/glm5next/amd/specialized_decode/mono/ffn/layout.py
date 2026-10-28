@@ -133,6 +133,12 @@ def ug_task_rounds(inter: int) -> int:
     return (inter + BLOCKS - 1) // BLOCKS
 
 
+def mid_fp8(inter: int) -> bool:
+    """Up/gate CTAs own whole 32-column MXFP8 groups of routed mid (4 rounds of 8
+    columns each) and publish them quantized; needs every CTA in every round."""
+    return inter % (4 * BLOCKS) == 0
+
+
 def down_prefetch_batch(samples: int) -> int:
     if samples <= 4:
         return 9
@@ -204,6 +210,13 @@ def layout(
         ("sel", samples * MOE_SLOTS * pair_bytes),
         ("prob", samples * MOE_SLOTS * pair_bytes),
         ("mid", samples * MOE_SLOTS * inter * pair_bytes),
+    ]
+    if mid_fp8(inter):
+        items += [
+            ("mid8", samples * MOE_SLOTS * inter // 4 * pair_bytes),
+            ("mid8s", samples * MOE_SLOTS * inter // 32 * pair_bytes),
+        ]
+    items += [
         ("poll_abort", 4),
         ("poll_err_addr", 8),
         ("poll_xrank_addr", 8),
