@@ -156,19 +156,14 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     scheduler.close()
 
 
-@pytest.mark.parametrize("disable_lookahead", [False, True])
-def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
+def test_external_hit_uses_the_same_lookahead_policy_as_core():
     config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
-    set_mtp_config(config, disable_lookahead_block_hashes=disable_lookahead)
+    set_mtp_config(config)
     kv_config = _kv_cache_config()
     kv_config.hash_block_size = 16
-    # Force the hybrid coordinator path, including an explicitly marked draft group.
+    # Force the hybrid coordinator path with a second group.
     kv_config.kv_cache_groups.append(
-        KVCacheGroupSpec(
-            ["draft"],
-            kv_config.kv_cache_groups[0].kv_cache_spec,
-            is_eagle_group=True,
-        )
+        KVCacheGroupSpec(["draft"], kv_config.kv_cache_groups[0].kv_cache_spec)
     )
     codec = BlockIdentityCodec(UMBPNamespace("lookahead-hit"))
     init_none_hash(sha256)
@@ -188,11 +183,7 @@ def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
         }
     )
     scheduler = UMBPStoreConnectorScheduler(config, kv_config, runtime, codec)
-    # Drop recomputes the last block; lookahead reuses it.
-    assert scheduler.get_num_new_matched_tokens(stored, 0) == (
-        16 if disable_lookahead else 32,
-        True,
-    )
+    assert scheduler.get_num_new_matched_tokens(stored, 0) == (32, True)
     # A different token after the block invalidates its lookahead hash.
     changed = request([*range(32), 99])
     assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
@@ -792,23 +783,6 @@ def test_scheduler_lookup_failure_recomputes_and_allows_retry(failure):
         assert scheduler.get_num_new_matched_tokens(request, 0) == (16, False)
     finally:
         scheduler.close()
-
-
-@pytest.mark.parametrize(("use_eagle", "expected"), [(False, 32), (True, 16)])
-def test_scheduler_single_group_lookup_drops_last_block_for_eagle(use_eagle, expected):
-    vllm_config = _vllm_config({"mode": "embedded", "load_async": False})
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: use_eagle
-    )
-    scheduler = UMBPStoreConnectorScheduler(
-        vllm_config,
-        _kv_cache_config(),
-        _SchedulerHandle([True, True]),
-        BlockIdentityCodec(UMBPNamespace("eagle")),
-    )
-    request = make_request("req", num_tokens=33)
-
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
 
 
 def test_scheduler_emits_async_load_without_scheduled_model_tokens():

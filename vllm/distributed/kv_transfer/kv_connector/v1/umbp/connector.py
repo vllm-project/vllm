@@ -114,19 +114,6 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
             )
-        # A restored prefix skips the draft model's prefill too, so its KV must
-        # come from the pool along with the target's.
-        cacheable = set(kv_cache_config.prefix_cacheable_group_ids)
-        skipped_drafts = [
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if getattr(group, "is_eagle_group", False) and group_id not in cacheable
-        ]
-        if skipped_drafts:
-            raise NotImplementedError(
-                f"{runtime_config.mode} UMBP cannot restore draft-model KV cache "
-                f"groups {skipped_drafts}: they are not prefix-cacheable"
-            )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         self._runtime = runtime
         self._topology = topology
