@@ -27,7 +27,9 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
     def __init__(self, config: Mxfp8LinearLayerConfig):
         super().__init__(config)
         self.recipe = (1, 1, 32)
-        self._ds41_bi_math = supports_ds41_mxfp8_bi()
+        self._ds41_bi_math = (
+            supports_ds41_mxfp8_bi() and envs.VLLM_BI_MXFP8_GEMM == "k32"
+        )
 
     @classmethod
     def is_supported(

@@ -34,6 +34,63 @@ def compute_fp8_einsum_recipe(
     return einsum_recipe, tma_aligned_scales
 
 
+# Per wo_a weight shape, the largest M whose fp8_einsum kernels are compiled.
+_EINSUM_WARMED_M: dict[torch.Size, int] = {}
+
+
+def _compile_einsum_configs(
+    num_tokens: int,
+    wo_a: nn.Module,
+    weight_scale: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    *,
+    n_groups: int,
+    heads_per_group: int,
+    nope_dim: int,
+    rope_dim: int,
+    o_lora_rank: int,
+    einsum_recipe: tuple[int, int, int],
+    tma_aligned_scales: bool,
+) -> None:
+    """DeepGEMM's grouped einsum picks a tile config from M and JIT-compiles each
+    new one (~2 s, a serving stall); under batch invariance, run every smaller M
+    once when the weight first sees a larger batch (the startup profile run)."""
+    done = _EINSUM_WARMED_M.get(wo_a.weight.shape, 0)
+    if num_tokens <= done or torch.cuda.is_current_stream_capturing():
+        return
+    _EINSUM_WARMED_M[wo_a.weight.shape] = num_tokens
+    device = wo_a.weight.device
+    o = torch.zeros(
+        (num_tokens, n_groups * heads_per_group, nope_dim + rope_dim),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    positions = torch.zeros(num_tokens, device=device, dtype=torch.int64)
+    z = torch.empty(
+        (num_tokens, n_groups, o_lora_rank), device=device, dtype=torch.bfloat16
+    )
+    for m in range(done + 1, num_tokens):
+        x, x_scale = fused_inv_rope_fp8_quant(
+            o[:m],
+            positions[:m],
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+            quant_group_size=einsum_recipe[2],
+            tma_aligned_scales=tma_aligned_scales,
+            quantize=True,
+        )
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (x, x_scale),
+            (wo_a.weight, weight_scale),
+            z[:m],
+            recipe=einsum_recipe,
+        )
+
+
 def deep_gemm_fp8_o_proj(
     o: torch.Tensor | QuantizedActivation,
     positions: torch.Tensor,
@@ -88,7 +145,11 @@ def deep_gemm_fp8_o_proj(
             if hasattr(wo_a, "weight_scale")
             else wo_a.weight_scale_inv
         )
-        if envs.VLLM_BATCH_INVARIANT and einsum_recipe == (1, 1, 32):
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and envs.VLLM_BI_MXFP8_GEMM == "k32"
+            and einsum_recipe == (1, 1, 32)
+        ):
             z = block32_scaled_mm(
                 o_proj_input,
                 o_scale,
@@ -98,6 +159,20 @@ def deep_gemm_fp8_o_proj(
                 grouped=True,
             )
         else:
+            if envs.VLLM_BATCH_INVARIANT:
+                _compile_einsum_configs(
+                    z.shape[0],
+                    wo_a,
+                    weight_scale,
+                    cos_sin_cache,
+                    n_groups=n_groups,
+                    heads_per_group=heads_per_group,
+                    nope_dim=nope_dim,
+                    rope_dim=rope_dim,
+                    o_lora_rank=o_lora_rank,
+                    einsum_recipe=einsum_recipe,
+                    tma_aligned_scales=tma_aligned_scales,
+                )
             fp8_einsum(
                 "bhr,hdr->bhd",
                 (o_proj_input, o_scale),
