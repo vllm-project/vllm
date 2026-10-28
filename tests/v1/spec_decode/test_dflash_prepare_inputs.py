@@ -13,8 +13,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
-    select_context_window_indices,
     _prepare_dflash_inputs_kernel,
+    select_context_window_indices,
 )
 
 pytestmark = pytest.mark.skipif(
