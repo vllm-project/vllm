@@ -321,8 +321,6 @@ class SchedulerOffloadConfig(NamedTuple):
 class RequestGroupState:
     offload_keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
-    # Index of the next chunk to offload.
-    next_stored_chunk_idx: int = 0
     # Number of offloaded chunks hit (including GPU prefix cache)
     # when the request first started
     num_hit_chunks: int = 0
@@ -441,9 +439,9 @@ class RequestOffloadState:
         Once the request has finished, no further spec-token rejection can
         rewrite the tail, so the exclusion is lifted and the final chunk
         becomes storable (issue #52735). The exclusion must be applied
-        consistently everywhere ``next_stored_chunk_idx`` is derived:
+        consistently everywhere the ON_COMPUTE progress is derived:
         otherwise the trailing chunk of each step is skipped on collection but
-        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
+        jumped over by the progress, so it is never re-considered
         and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
         monotonic, so the finish-time calls all see the lifted exclusion.
         """
@@ -458,17 +456,19 @@ class RequestOffloadState:
         num_keyed_chunks = len(group_state.offload_keys)
         return min(num_chunks, num_allocated_chunks, num_keyed_chunks)
 
-    def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
-        # max(): at the prefill->decode transition of a chunk-aligned prompt,
-        # storable_chunks drops by one (the eagle exclusion kicks in), and the
-        # index must not move backwards past already-stored chunks.
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, self.group_states
-        ):
-            group_state.next_stored_chunk_idx = max(
-                group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
-            )
+    def num_offloadable_tokens(self, num_computed_tokens: int) -> int:
+        num = min(num_computed_tokens, self.req.num_tokens)
+        if self.max_offload_tokens is not None:
+            num = min(num, self.max_offload_tokens)
+        if self.config.offload_prompt_only:
+            num = min(num, self.req.num_prompt_tokens)
+        return num
+
+    def register_boundary_key(self, group_idx: int, boundary_tokens: int) -> OffloadKey:
+        hash_idx = boundary_tokens // self.config.tokens_per_hash - 1
+        key = make_offload_key(self.req.block_hashes[hash_idx], group_idx)
+        self.req_context.set_offload_key_position(key, boundary_tokens)
+        return key
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
