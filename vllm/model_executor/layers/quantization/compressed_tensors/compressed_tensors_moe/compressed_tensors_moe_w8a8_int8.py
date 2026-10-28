@@ -8,7 +8,6 @@ from compressed_tensors.quantization import (
 )
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -34,25 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
-
-
-def maybe_pad_zen_moe_weights(layer: torch.nn.Module, experts_cls: type | None) -> None:
-    """ZenDNN reorders the int8 experts in place and needs room for an N * 4
-    byte compensation row after each one; without that slack it falls back to
-    duplicating every expert."""
-    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import ZenCPUExpertsInt8
-
-    if experts_cls is not ZenCPUExpertsInt8 or not has_zentorch_op(
-        ["zentorch_preprocess_weights"]
-    ):
-        return
-
-    for name in ("w13_weight", "w2_weight"):
-        weight = getattr(layer, name).data
-        padded = torch.ops.zentorch.zentorch_preprocess_weights(weight)
-        # The op hands back its input when the weight is not eligible.
-        if padded.data_ptr() != weight.data_ptr():
-            replace_parameter(layer, name, padded)
 
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
@@ -238,8 +218,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
-
-        maybe_pad_zen_moe_weights(layer, self.experts_cls)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None

@@ -1559,6 +1559,20 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     def supports_expert_map(self) -> bool:
         return False
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """ZenDNN reorders the experts in place and needs room for an N * 4 byte
+        compensation row after each one; without that slack it falls back to
+        duplicating every expert."""
+        if not has_zentorch_op(["zentorch_preprocess_weights"]):
+            return
+
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name).data
+            padded = torch.ops.zentorch.zentorch_preprocess_weights(weight)
+            # The op hands back its input when the weight is not eligible.
+            if padded.data_ptr() != weight.data_ptr():
+                replace_parameter(layer, name, padded)
+
     def workspace_shapes(
         self,
         M: int,
