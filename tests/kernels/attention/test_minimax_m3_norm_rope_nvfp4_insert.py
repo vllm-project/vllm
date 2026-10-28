@@ -46,9 +46,11 @@ def _request_slots(starts, lens, num_pages, gen):
 
 
 class _Batch:
-    def __init__(self, starts, lens, pad, heads, scales, seed=0):
+    def __init__(self, starts, lens, pad, heads, scales, seed=0, mxfp4=False):
         g = torch.Generator().manual_seed(seed)
         self.nq, self.nkv, self.niq = heads
+        self.mxfp4 = mxfp4
+        W = self.W = 68 if mxfp4 else 72
         n = self.n = sum(lens) + pad
         row = (self.nq + 2 * self.nkv + self.niq + 1) * D
         # magnitudes 1e-3 .. 3e3 per 16-value group, some all-zero groups
@@ -72,19 +74,20 @@ class _Batch:
             [_request_slots(starts, lens, pages, g), pad_slots]
         ).cuda()
         # stale bytes; the layer views have a block stride past one page
-        main = 2 * self.nkv * BLK * 72
+        main = 2 * self.nkv * BLK * W
         self.kv_full = torch.randint(0, 256, (pages, main + 256), generator=g)
         self.kv_full = self.kv_full.to(torch.uint8).cuda()
-        self.idx_full = torch.randint(0, 256, (pages, BLK * 72 + 64), generator=g)
+        self.idx_full = torch.randint(0, 256, (pages, BLK * W + 64), generator=g)
         self.idx_full = self.idx_full.to(torch.uint8).cuda()
         self.ks = torch.tensor(scales[0], dtype=torch.float32, device="cuda")
         self.vs = torch.tensor(scales[1], dtype=torch.float32, device="cuda")
 
     def kv(self, full):
-        return full[:, : 2 * self.nkv * BLK * 72].view(-1, 2 * self.nkv, BLK, 72)
+        W = self.W
+        return full[:, : 2 * self.nkv * BLK * W].view(-1, 2 * self.nkv, BLK, W)
 
     def idx(self, full):
-        return full[:, : BLK * 72].view(-1, BLK, 72)
+        return full[:, : BLK * self.W].view(-1, BLK, self.W)
 
     def reference(self):
         qkv = self.qkv.clone()
@@ -104,8 +107,11 @@ class _Batch:
             self.slots,
             self.ks,
             self.vs,
+            self.mxfp4,
         )
-        insert_nvfp4_index(self.idx(idx_full), qkv[:, ik0 : ik0 + D], self.islots)
+        insert_nvfp4_index(
+            self.idx(idx_full), qkv[:, ik0 : ik0 + D], self.islots, self.mxfp4
+        )
         return q, iq, kv_full, idx_full
 
     def run(self, qkv, pos, slots, islots, kv_full, idx_full, q, iq):
@@ -113,6 +119,7 @@ class _Batch:
             qkv, *self.w, self.cs, pos, slots, islots, self.kv(kv_full),
             self.idx(idx_full), self.ks, self.vs, q, iq, num_heads=self.nq,
             num_kv_heads=self.nkv, num_index_heads=self.niq, eps=EPS,
+            mxfp4=self.mxfp4,
         )  # fmt: skip
 
     def fused(self, iq):
@@ -160,9 +167,12 @@ DSPARK = ([3 + 9 * i for i in range(43)], [4] * 43)  # 172 decode rows
         ([0, 100], [4096, 4000], 3),  # the prefill tier
     ],
 )
-@pytest.mark.parametrize("scales", [(1.0, 1.0), (0.002, 3.0)])
-def test_matches_two_kernel_path(heads, starts, lens, pad, scales):
-    _check(_Batch(starts, lens, pad, heads, scales))
+@pytest.mark.parametrize(
+    ("scales", "mxfp4"),
+    [((1.0, 1.0), False), ((0.002, 3.0), False), ((1.0, 1.0), True)],
+)
+def test_matches_two_kernel_path(heads, starts, lens, pad, scales, mxfp4):
+    _check(_Batch(starts, lens, pad, heads, scales, mxfp4=mxfp4))
 
 
 @pytest.mark.parametrize("iq_mode", ["rank", "cols"])
@@ -175,19 +185,21 @@ def test_64k_tokens():
     _check(_Batch([0, 777], [32768, 32768], 0, TP4, (1.0, 1.0)))
 
 
-def test_all_padding():
+@pytest.mark.parametrize("mxfp4", [False, True])
+def test_all_padding(mxfp4):
     """A graph-capture dummy batch: every slot -1, the pages stay as they were."""
-    batch = _Batch([], [], 64, TP4, (1.0, 1.0))
+    batch = _Batch([], [], 64, TP4, (1.0, 1.0), mxfp4=mxfp4)
     _check(batch)
     iq = torch.empty(batch.n, D, dtype=torch.float8_e4m3fn, device="cuda")
     _, kv, idx = batch.fused(iq)
     assert torch.equal(kv, batch.kv_full) and torch.equal(idx, batch.idx_full)
 
 
-def test_cuda_graph_replay():
+@pytest.mark.parametrize("mxfp4", [False, True])
+def test_cuda_graph_replay(mxfp4):
     """Captured once, replayed on new qkv / positions / slots in place."""
-    a = _Batch(*DSPARK, 4, TP4, (1.0, 1.0), seed=1)
-    b = _Batch(*DSPARK, 4, TP4, (1.0, 1.0), seed=2)
+    a = _Batch(*DSPARK, 4, TP4, (1.0, 1.0), seed=1, mxfp4=mxfp4)
+    b = _Batch(*DSPARK, 4, TP4, (1.0, 1.0), seed=2, mxfp4=mxfp4)
     b.w, b.cs = a.w, a.cs  # captured with the layer's weights and RoPE cache
     qkv, pos = a.qkv.clone(), a.pos.clone()
     slots, islots = a.slots.clone(), a.islots.clone()

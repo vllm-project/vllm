@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Gemma norm + RoPE of q / k / index-q / index-k and the NVFP4 K/V + index-K
-page inserts in one launch (FlyDSL, gfx950), bit for bit the ROCm
-``fused_minimax_m3_qknorm_rope_kv_insert`` followed by the NVFP4 page insert.
+"""Gemma norm + RoPE of q / k / index-q / index-k and the NVFP4 or MXFP4 K/V +
+index-K page inserts in one launch (FlyDSL, gfx950), bit for bit the ROCm
+``fused_minimax_m3_qknorm_rope_kv_insert`` followed by the page insert.
 
 Waves of 2 * tp tokens: [q heads | k heads | index-k | index-q heads | v heads x tp];
 a norm wave holds 4 dims of a token per lane (the HIP kernel's lane map).
+
+MXFP4 pages keep NVFP4's data layout with E8M0 scales per 32 dims and no global
+scale (68 B per token and head): K and index-K scales ``[token][4]``, V scales
+``[group][token]``.
 """
 
 import flydsl.compiler as flyc
@@ -182,12 +186,29 @@ def _quant4(xs, gs, inv_gs):
     return _e2m1x2(y[2], y[3], _e2m1x2(y[0], y[1], fx.Int32(0), 0), 1), byte
 
 
-def _v_row(state, row, r, n_run, p0, vs, inv_vs):
+def _quant4_mx(xs):
+    """E2M1 codes of this lane's 4 values (16 bits) and the E8M0 scale byte of
+    their 32-value group (lanes l ^ 0..7): 2^ceil(log2(amax / 6)), 2^0 for an
+    all-zero group."""
+    a = [fx.math.absf(x) for x in xs]
+    m = _maxnum(_maxnum(a[0], a[1]), _maxnum(a[2], a[3]))
+    m = _xmax(_xmax(_xmax(m, 1), 2), 4)
+    qb = bits(m / fx.Float32(6.0))
+    inexact = (qb & 0x7FFFFF) != 0
+    e = ((qb >> 23) & 0xFF) - 127 + inexact.select(fx.Int32(1), fx.Int32(0))
+    # amax / 6 < 2^126, so only the low end clamps (denormal quotients).
+    e = (m == 0.0).select(fx.Int32(0), (e < -126).select(fx.Int32(-126), e))
+    inv = as_f32((fx.Int32(127) - e) << 23)
+    y = [x * inv for x in xs]
+    return _e2m1x2(y[2], y[3], _e2m1x2(y[0], y[1], fx.Int32(0), 0), 1), e + 127
+
+
+def _v_row(state, row, r, n_run, p0, quant):
     """Adds row ``r`` of a V run at octet positions p0.. to ``state``: new
     nibbles and scale bytes, with their masks."""
     words, written = state[0:4], state[4]
     sc, sc_mask = state[5:7], state[7:9]
-    nib, sf = _quant4(_bf16x4(row), vs, inv_vs)
+    nib, sf = quant(_bf16x4(row))
     in_run = n_run > r
     p = p0 + r
     sh = p * 4
@@ -218,16 +239,25 @@ def _k_scale_off(tok, grp):
     return ((((tok // 32) * 4 + grp // 2) * 16 + n) * 2 + (r % 8) // 4) * 2 + grp % 2
 
 
-def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: int):
-    """Build the kernel; ``tp`` token pairs per norm / RoPE wave, one per V wave."""
+def compile_norm_rope_insert(
+    nq: int, nkv: int, niq: int, rotary_dim: int, tp: int, mx: bool = False
+):
+    """Build the kernel; ``tp`` token pairs per norm / RoPE wave, one per V wave;
+    ``mx`` writes MXFP4 pages instead of NVFP4."""
     assert rotary_dim in (8, 16, 32, 64, 128)
     NR = nq + nkv + 1 + niq  # norm + RoPE waves
     S = NR + nkv * tp  # waves per 2 * tp tokens
     ROW = (nq + 2 * nkv + niq + 1) * D
     HALF = rotary_dim // 2
-    SIDE = nkv * BLK * 72  # bytes of one side of a main page
+    NG = 4 if mx else 8  # scale groups per token and head
+    GL = D // NG // 4  # lanes per scale group
+    SIDE = nkv * BLK * (64 + NG)  # bytes of one side of a main page
     TPW = 2 * tp
-    name = f"m3_norm_rope_nvfp4_insert_q{nq}_kv{nkv}_iq{niq}_r{rotary_dim}_t{tp}"
+    fmt = "mxfp4" if mx else "nvfp4"
+    name = f"m3_norm_rope_{fmt}_insert_q{nq}_kv{nkv}_iq{niq}_r{rotary_dim}_t{tp}"
+
+    def quant(xs, gs, inv_gs):
+        return _quant4_mx(xs) if mx else _quant4(xs, gs, inv_gs)
 
     @flyc.kernel(name=name, known_block_size=[64 * NW, 1, 1])
     def kernel(
@@ -419,10 +449,10 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
                 )
                 inv_gs = fx.Float32(1.0) / gs
                 quants = [
-                    _quant4(_bf16x4(qvs[t]), gs, inv_gs) for t in range_constexpr(tp)
+                    quant(_bf16x4(qvs[t]), gs, inv_gs) for t in range_constexpr(tp)
                 ]
                 h = s - nq
-                grp = hl // 4
+                grp = hl // GL
                 for t in range_constexpr(tp):
                     slot = slots[t]
                     tp_ = slot & (BLK - 1)
@@ -431,9 +461,10 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
                         arg_idx + fx.Int64(slot >> 7) * i64_idx_st,
                     )
                     d_off = is_k.select(h * (BLK * 64), fx.Int32(0)) + tp_ * 64 + hl * 2
+                    k_sf = tp_ * NG + grp if mx else _k_scale_off(tp_, grp)
                     s_off = is_k.select(
-                        nkv * BLK * 64 + h * (BLK * 8) + _k_scale_off(tp_, grp),
-                        BLK * 64 + tp_ * 8 + grp,
+                        nkv * BLK * 64 + h * (BLK * NG) + k_sf,
+                        BLK * 64 + tp_ * NG + grp,
                     )
                     d_ptr = _gptr(page + fx.Int64(d_off), T.i16, 2)
                     s_ptr = _gptr(page + fx.Int64(s_off), T.i8, 1)
@@ -441,7 +472,7 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
                     sf8 = quants[t][1].to(fx.Int8)
                     if lives[t] & (slot >= 0):
                         d_ptr[0] = packed
-                        if hl % 4 == 0:
+                        if hl % GL == 0:
                             s_ptr[0] = sf8
         else:
             vh = (s - NR) // tp
@@ -497,11 +528,15 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
             tp_ = slot & (BLK - 1)
             v_side = arg_kv + fx.Int64(slot >> 7) * i64_kv_st + SIDE
             v_data = v_side + fx.Int64(vh * (BLK * 64) + (tp_ // 8) * (D * 4))
-            v_sf = v_side + fx.Int64(nkv * BLK * 64 + vh * (BLK * 8) + tp_ - tp_ % 8)
+            v_sf = v_side + fx.Int64(nkv * BLK * 64 + vh * (BLK * NG) + tp_ - tp_ % 8)
             dp = _gptr(v_data + fx.Int64(dim0 * 4), T.i32, 4)
-            sp = _gptr(v_sf + fx.Int64((hl // 4) * BLK), T.i32, 4)
+            sp = _gptr(v_sf + fx.Int64((hl // GL) * BLK), T.i32, 4)
             go = live & (slot >= 0) & run_first
             inv_vs = fx.Float32(1.0) / vs
+
+            def v_quant(xs):
+                return quant(xs, vs, inv_vs)
+
             # Runs of <= 4 tokens (decode) take the short tile.
             for run_rows, take in (
                 (rows[:4], go & (n_run <= 4)),
@@ -512,13 +547,13 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
                     old_sc = [fx.Int32(sp[i]) for i in range_constexpr(2)]
                     st = [fx.Int32(0)] * 9
                     for r in range_constexpr(len(run_rows)):
-                        st = _v_row(st, run_rows[r], r, n_run, tp_ % 8, vs, inv_vs)
+                        st = _v_row(st, run_rows[r], r, n_run, tp_ % 8, v_quant)
                     keep = ~st[4]
                     for i in range_constexpr(4):
                         dp[i] = st[i] | (old[i] & keep)
                     sc0 = st[5] | (old_sc[0] & ~st[7])
                     sc1 = st[6] | (old_sc[1] & ~st[8])
-                    if hl % 4 == 0:
+                    if hl % GL == 0:
                         sp[0] = sc0
                         sp[1] = sc1
 

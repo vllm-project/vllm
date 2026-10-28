@@ -8,6 +8,9 @@ Within a head: K data ``[token][64 B]``, K scales in the FlyDSL prefill's lane
 order, V data ``[token octet][dim octet][8 dims][4 B]`` (a byte holds two
 consecutive tokens of one dim), V scales ``[group][token]``. An index page is
 ``[128 x 64 B data][128 x 8 B scales]``.
+
+MXFP4 pages (``mxfp4=True``) keep the data layout with E8M0 scales per 32 dims
+(512 B per head): K and index-K scales ``[token][4]``, V scales ``[group][token]``.
 """
 
 import torch
@@ -31,16 +34,32 @@ def quantize_nvfp4(x: torch.Tensor, global_scale: float):
     scale_e4m3 = scale.to(torch.float8_e4m3fn)
     scale_value = scale_e4m3.float()
     quant = torch.where(scale_value != 0, 1.0 / (scale_value * gs), 0.0)
-    y = groups * quant[..., None]
-    grid = torch.tensor(E2M1_GRID, device=x.device)
+    codes = _e2m1_codes(groups * quant[..., None])
+    return codes.view(-1, D), scale_e4m3.view(torch.uint8).view(-1, 8)
+
+
+def quantize_mxfp4(x: torch.Tensor):
+    """E2M1 codes ``[T, 128]`` and E8M0 scale bytes ``[T, 4]`` of fp32 rows: the
+    scale is 2^ceil(log2(amax / 6)), clamped to 2^-126, and 2^0 for zeros."""
+    groups = x.view(-1, 4, 32)
+    s = groups.abs().amax(-1) / 6.0
+    mant, exp = torch.frexp(s)
+    exp = torch.where(mant == 0.5, exp - 1, exp).clamp(min=-126)
+    exp = torch.where(s == 0, 0, exp)
+    codes = _e2m1_codes(groups / torch.exp2(exp.float())[..., None])
+    return codes.view(-1, D), (exp + 127).to(torch.uint8)
+
+
+def _e2m1_codes(y: torch.Tensor) -> torch.Tensor:
+    """Nearest E2M1 code of each value, ties to the even code."""
+    grid = torch.tensor(E2M1_GRID, device=y.device)
     dist = (y.abs()[..., None] - grid).abs()
     is_min = dist == dist.amin(-1, keepdim=True)
-    ids = torch.arange(8, device=x.device)
+    ids = torch.arange(8, device=y.device)
     # Neighbouring codes alternate parity, so every tie has an even candidate.
     even_min = torch.where(is_min & (ids % 2 == 0), ids, 8).amin(-1)
     mag = torch.where(even_min < 8, even_min, dist.argmin(-1))
-    codes = mag | (torch.signbit(y).long() << 3)
-    return codes.view(-1, D), scale_e4m3.view(torch.uint8).view(-1, 8)
+    return mag | (torch.signbit(y).long() << 3)
 
 
 def dequant(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -52,21 +71,24 @@ def dequant(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     return (mag.unflatten(-1, (8, 16)) * s[..., None]).flatten(-2)
 
 
-def head_offsets(side: int, device):
+def head_offsets(side: int, device, mxfp4: bool = False):
     """Byte offsets inside one head's regions of side 0 (K) or 1 (V).
 
     Returns the data byte and nibble shift of each (token, dim) ``[128, 128]``
-    and the scale byte of each (token, group) ``[128, 8]``.
+    and the scale byte of each (token, group) ``[128, 8 (MXFP4: 4)]``.
     """
+    ng = 4 if mxfp4 else 8
     t = torch.arange(BLOCK, device=device)[:, None]
     d = torch.arange(D, device=device)[None, :]
-    g = torch.arange(8, device=device)[None, :]
+    g = torch.arange(ng, device=device)[None, :]
     if side == 0:
         r = t % 32
         n = 4 * (r // 8) + r % 4
         data = t * 64 + d // 2
         shift = (d % 2) * 4 + 0 * t
         scale = ((((t // 32) * 4 + g // 2) * 16 + n) * 2 + (r % 8) // 4) * 2 + g % 2
+        if mxfp4:
+            scale = t * ng + g
     else:
         data = ((t // 8 * 16 + d // 8) * 8 + d % 8) * 4 + (t % 8) // 2
         shift = (t % 2) * 4 + 0 * d
@@ -74,11 +96,12 @@ def head_offsets(side: int, device):
     return data, shift, scale
 
 
-def _region_bases(side: int, heads: int, device):
+def _region_bases(side: int, heads: int, device, mxfp4: bool = False):
     """``[H, 1, 1]`` page offsets of each head's data and scale regions."""
+    ng = 4 if mxfp4 else 8
     h = torch.arange(heads, device=device)[:, None, None]
-    side0 = side * heads * BLOCK * 72
-    return side0 + h * BLOCK * 64, side0 + heads * BLOCK * 64 + h * BLOCK * 8
+    side0 = side * heads * BLOCK * (64 + ng)
+    return side0 + h * BLOCK * 64, side0 + heads * BLOCK * 64 + h * BLOCK * ng
 
 
 def _flat(cache: torch.Tensor) -> torch.Tensor:
@@ -87,16 +110,20 @@ def _flat(cache: torch.Tensor) -> torch.Tensor:
     return cache.as_strided((n,), (1,))
 
 
-def _insert_side(cache, rows, slots, side, global_scale):
+def _quantize(x, global_scale, mxfp4):
+    return quantize_mxfp4(x) if mxfp4 else quantize_nvfp4(x, global_scale)
+
+
+def _insert_side(cache, rows, slots, side, global_scale, mxfp4=False):
     tokens, heads, _ = rows.shape
-    codes, scales = quantize_nvfp4(rows.reshape(-1, D).float(), global_scale)
+    codes, scales = _quantize(rows.reshape(-1, D).float(), global_scale, mxfp4)
     slots = slots.long()
     keep = slots >= 0
     codes = codes.view(tokens, heads, D)[keep].to(torch.uint8)
-    scales = scales.view(tokens, heads, 8)[keep]
+    scales = scales.view(tokens, heads, -1)[keep]
     blk, pos = slots[keep] // BLOCK, slots[keep] % BLOCK
-    data_off, shift, scale_off = head_offsets(side, rows.device)
-    data_base, scale_base = _region_bases(side, heads, rows.device)
+    data_off, shift, scale_off = head_offsets(side, rows.device, mxfp4)
+    data_base, scale_base = _region_bases(side, heads, rows.device, mxfp4)
     page = (blk * cache.stride(0))[:, None, None]
     byte = page + data_base[:, 0] + data_off[pos][:, None]  # [n, H, 128]
     sh = shift[pos][:, None].expand_as(byte)
@@ -107,15 +134,16 @@ def _insert_side(cache, rows, slots, side, global_scale):
     flat[page + scale_base[:, 0] + scale_off[pos][:, None]] = scales
 
 
-def insert_nvfp4_kv(k, v, kv_cache, slots, k_scale, v_scale):
+def insert_nvfp4_kv(k, v, kv_cache, slots, k_scale, v_scale, mxfp4=False):
     """Quantize K / V ``[T, Hkv, 128]`` into their pages; slots < 0 skip."""
-    _insert_side(kv_cache, k, slots, 0, float(k_scale))
-    _insert_side(kv_cache, v, slots, 1, float(v_scale))
+    _insert_side(kv_cache, k, slots, 0, float(k_scale), mxfp4)
+    _insert_side(kv_cache, v, slots, 1, float(v_scale), mxfp4)
 
 
-def insert_nvfp4_index(index_cache, keys, slots):
+def insert_nvfp4_index(index_cache, keys, slots, mxfp4=False):
     """Quantize index keys ``[T, 128]`` into their pages (no global scale)."""
-    codes, scales = quantize_nvfp4(keys.float(), 1.0)
+    codes, scales = _quantize(keys.float(), 1.0, mxfp4)
+    ng = scales.shape[1]
     slots = slots.long()
     keep = slots >= 0
     codes, scales = codes[keep].to(torch.uint8), scales[keep]
@@ -125,9 +153,9 @@ def insert_nvfp4_index(index_cache, keys, slots):
     flat[base + pos[:, None] * 64 + torch.arange(64, device=keys.device)] = codes[
         :, 0::2
     ] | (codes[:, 1::2] << 4)
-    flat[base + BLOCK * 64 + pos[:, None] * 8 + torch.arange(8, device=keys.device)] = (
-        scales
-    )
+    flat[
+        base + BLOCK * 64 + pos[:, None] * ng + torch.arange(ng, device=keys.device)
+    ] = scales
 
 
 def nvfp4_kv_cache_token_major(kv_cache: torch.Tensor):
