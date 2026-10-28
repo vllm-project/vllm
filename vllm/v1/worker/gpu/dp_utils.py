@@ -14,7 +14,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    get_num_ubatches,
+    is_last_ubatch_empty,
+)
 
 
 @dataclass(frozen=True)
@@ -137,7 +141,14 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
+                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens or (
+                    parallel_config.pipeline_parallel_size > 1
+                    and is_last_ubatch_empty(
+                        int(num_tokens_across_dp.min()),
+                        ubatch_desc.num_tokens,
+                        num_ubatches,
+                    )
+                ):
                     # If one rank has an empty second microbatch, run without
                     # CUDA graphs.
                     ubatch_desc = None

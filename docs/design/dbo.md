@@ -52,8 +52,8 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 MRV2 supports stage-local DBO with NIXL EP, DP+EP, TP=1, synchronous
 scheduling, and eager execution. Set `VLLM_USE_V2_MODEL_RUNNER=1` and pass both
-`--enforce-eager` and `--no-async-scheduling`. CUDA graphs and asynchronous
-scheduling remain unsupported for this combination.
+`--enforce-eager` and `--no-async-scheduling`. Asynchronous scheduling remains
+unsupported for this combination; see below for CUDA graphs.
 
 Each pipeline stage agrees on the split within its own DP group. The stage
 receives a complete batch of intermediate tensors, slices all intermediate
@@ -86,6 +86,19 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
 
 This enables overlap within a stage; it does not change the PP scheduling
 algorithm or imply a throughput improvement for every batch shape.
+
+### CUDA graphs
+
+In addition to the eager PP path above, PP+DBO accepts `FULL_DECODE_ONLY` CUDA
+graphs. Pass `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`
+instead of `--enforce-eager` and keep `--no-async-scheduling`. Prefill and
+other shapes without a captured graph use the coordinated eager fallback.
+
+Each stage may pick a different graph size, so a stage sends only its real
+rows, and the next stage copies them into its persistent input buffers before
+padding to its own size. PP transport and sampling stay outside the captured
+forward. Real capture/replay, model outputs and performance have not been
+qualified.
 
 ## DBO Components
 

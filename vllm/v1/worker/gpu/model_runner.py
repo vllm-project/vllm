@@ -2059,12 +2059,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            # Under DBO each stage pads for its own graphs, so the previous
+            # stage sends only the real rows.
+            num_rows = input_batch.num_tokens if self.parallel_config.enable_dbo else n
             new_tensors = {
-                k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                for k, v in self.intermediate_tensors.tensors.items()
+                k: v[:n] for k, v in self.intermediate_tensors.tensors.items()
             }
+            if not dummy_run:
+                for k, v in new_tensors.items():
+                    v[:num_rows].copy_(intermediate_tensors.tensors[k][:num_rows])
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
@@ -2171,9 +2174,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
+            if self.parallel_config.enable_dbo:
+                output_intermediate_tensors = output_intermediate_tensors[
+                    : input_batch.num_tokens
+                ]
+            return output_intermediate_tensors
         return None
 
     @torch.inference_mode()

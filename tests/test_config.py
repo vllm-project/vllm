@@ -4468,3 +4468,35 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def _make_pp_dbo_graph_config(mode):
+    return VllmConfig(
+        model_config=ModelConfig(model="Qwen/Qwen3-30B-A3B", max_model_len=512),
+        scheduler_config=SchedulerConfig(
+            max_model_len=512, is_encoder_decoder=False, async_scheduling=False
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            data_parallel_size=2,
+            enable_dbo=True,
+            all2all_backend="nixl_ep",
+            distributed_executor_backend="mp",
+            nnodes=2,
+            enable_expert_parallel=True,
+        ),
+        compilation_config=CompilationConfig(cudagraph_mode=mode),
+    )
+
+
+def test_pp_dbo_supports_full_decode_graphs(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = _make_pp_dbo_graph_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE])
+def test_pp_dbo_rejects_prefill_graphs(monkeypatch, mode):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="pipeline parallelism outside"):
+        _make_pp_dbo_graph_config(mode)

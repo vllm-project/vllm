@@ -3279,20 +3279,22 @@ class VllmConfig:
 
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
-        # Pipeline stages microbatch locally; only eager, synchronous NIXL EP
-        # with DP>1 and TP=1 is covered.
+        # Pipeline stages microbatch locally; only synchronous NIXL EP with
+        # DP>1 and TP=1, eager or with FULL decode graphs, is covered.
         if parallel_config.pipeline_parallel_size > 1 and not (
             parallel_config.enable_dbo
             and parallel_config.all2all_backend == "nixl_ep"
             and parallel_config.use_batched_dp_moe
             and parallel_config.tensor_parallel_size == 1
             and not self.scheduler_config.async_scheduling
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            and self.compilation_config.cudagraph_mode
+            in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
         ):
             unsupported.append(
                 "dual batch overlap with pipeline parallelism outside "
                 "--enable-dbo, --all2all-backend=nixl_ep, DP>1, TP=1, "
-                "expert parallelism, --no-async-scheduling and --enforce-eager"
+                "expert parallelism, --no-async-scheduling and either "
+                "--enforce-eager or FULL_DECODE_ONLY CUDA graphs"
             )
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
