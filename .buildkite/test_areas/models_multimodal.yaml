@@ -70,7 +70,7 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
-  - examples/generate/unlimited_ocr2.py
+  - examples/generate/multimodal/vision_language_multi_image_offline.py
   - tests/models/multimodal/generation/test_unlimited_ocr.py
   commands:
     - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
