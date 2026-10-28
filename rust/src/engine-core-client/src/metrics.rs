@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
-    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
+    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
+    Family, HistogramMetric, LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
     MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
     SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
 };
@@ -16,10 +16,38 @@ use crate::protocol::stats::{
     CachedTokensBySource, KvConnectorStats, MooncakeStats, MooncakeTransferStats,
     MultiConnectorStats, NixlStats, SchedulerStats,
 };
+use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
 
 const WAITING_REASON_CAPACITY: &str = "capacity";
 const WAITING_REASON_DEFERRED: &str = "deferred";
+
+/// `sleep_state` label values of `vllm:engine_sleep_state`, in the order of
+/// [`EngineSleepState::gauge_values`].
+const SLEEP_STATES: [&str; 3] = ["awake", "weights_offloaded", "discard_all"];
+
+/// Engine sleep state exported as `vllm:engine_sleep_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineSleepState {
+    Awake,
+    Asleep(SleepLevel),
+    /// After `release_kv_cache_memory`, which Python records like a level-0
+    /// sleep.
+    KvCacheReleased,
+}
+
+impl EngineSleepState {
+    /// Gauge values for the `awake`, `weights_offloaded` and `discard_all`
+    /// series, as Python's `PrometheusStatLogger.record_sleep_state` sets them.
+    fn gauge_values(self) -> [u64; 3] {
+        match self {
+            Self::Awake => [1, 0, 0],
+            Self::Asleep(SleepLevel::PauseOnly) | Self::KvCacheReleased => [0, 0, 0],
+            Self::Asleep(SleepLevel::OffloadWeights) => [0, 1, 0],
+            Self::Asleep(SleepLevel::DiscardAll) => [0, 0, 1],
+        }
+    }
+}
 
 /// Cached output-batch metric handles for one model and engine index.
 pub(crate) struct IterationMetricHandles {
@@ -55,6 +83,8 @@ struct SchedulerStatsHandles {
     scheduler_waiting_capacity: U64Gauge,
     scheduler_waiting_deferred: U64Gauge,
     kv_cache_usage: F64Gauge,
+    /// One handle per [`SLEEP_STATES`] entry.
+    engine_sleep_state: [U64Gauge; 3],
 
     // Prefix-cache counters, including the connector-backed external cache path.
     prefix_cache_queries: U64Counter,
@@ -129,7 +159,21 @@ impl SchedulerStatsRecorder {
             })
             .collect();
 
-        Self { engines }
+        let recorder = Self { engines };
+        // Engines start awake, as Python sets when it creates the stat logger.
+        recorder.record_sleep_state(EngineSleepState::Awake);
+        recorder
+    }
+
+    /// Record the sleep state of every connected engine. Sleep and wake are
+    /// utility calls on all engines, so the state is not per engine.
+    pub(crate) fn record_sleep_state(&self, state: EngineSleepState) {
+        let values = state.gauge_values();
+        for handles in self.engines.values() {
+            for (gauge, value) in handles.engine_sleep_state.iter().zip(values) {
+                gauge.set(value);
+            }
+        }
     }
 
     /// Record one scheduler-stats payload for the given engine index.
@@ -171,6 +215,13 @@ fn resolve_scheduler_stats_handles(
             .scheduler_waiting_by_reason
             .get_or_create_owned(&deferred),
         kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
+        engine_sleep_state: SLEEP_STATES.map(|sleep_state| {
+            metrics.engine_sleep_state.get_or_create_owned(&EngineSleepStateLabels {
+                model_name: model_name.to_string(),
+                engine,
+                sleep_state,
+            })
+        }),
         prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
         prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
         external_prefix_cache_queries: metrics
