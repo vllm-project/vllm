@@ -382,6 +382,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "Raon1MiniForCausalLM": _HfExamplesInfo("KRAFTON/Raon-1-mini-preview"),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),

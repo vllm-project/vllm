@@ -203,6 +203,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "pythonic_tool_parser",
         "PythonicToolParser",
     ),
+    "raon_1": (
+        "raon_1_tool_parser",
+        "Raon1MiniToolParser",
+    ),
     "qwen3_coder": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",

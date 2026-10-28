@@ -1075,6 +1075,24 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             out=out,
         )
 
+    def _prefill_conv(self, x, state, weight, metadata, value_scale=None):
+        result = causal_conv1d_fn(
+            x.transpose(0, 1),
+            weight,
+            None,
+            activation="silu",
+            conv_states=state,
+            has_initial_state=metadata.has_initial_state,
+            cache_indices=metadata.non_spec_state_indices_tensor,
+            query_start_loc=metadata.non_spec_query_start_loc,
+            metadata=metadata,
+        ).transpose(0, 1)
+        if value_scale is not None:
+            values = result.view(-1, self.local_num_heads, self.head_dim)
+            result = (values.float() * value_scale[:, :, None]).to(result.dtype)
+            result = result.flatten(1)
+        return result
+
     @eager_break_during_capture
     def _forward(
         self,
@@ -1083,6 +1101,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        value_scale: torch.Tensor | None = None,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1125,6 +1144,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         if (
             self.kda_spec_decode_backend == "flashinfer"
+            and value_scale is None
             and has_spec_decode
             and m.num_prefills == 0
             and m.num_decodes == 0
@@ -1158,6 +1178,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         if (
             self.kda_decode_backend != "triton"
+            and value_scale is None
             and self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
             and not has_spec_decode
@@ -1244,6 +1265,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             mixed_qkv_spec = g1_spec = beta_spec = None
             mixed_qkv_ns, g1_ns, beta_ns = mixed_qkv, g1, beta
 
+        # RDA scales only convolved values; raw convolution history is unchanged.
+        scale_spec = scale_ns = None
+        if value_scale is not None:
+            value_scale = value_scale[:num_actual_tokens]
+            if not has_spec_decode:
+                scale_ns = value_scale
+            elif mixed_qkv_ns is None:
+                scale_spec = value_scale
+            elif spec_token_start is not None:
+                scale_spec = value_scale[spec_slice]
+                scale_ns = value_scale[non_spec_slice]
+            else:
+                scale_spec = value_scale.index_select(0, spec_token_indx)
+                scale_ns = value_scale.index_select(0, non_spec_token_indx)
+
         # Spec-decode multi-query path.
         core_attn_out_spec = None
         if has_spec_decode:
@@ -1287,6 +1323,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
                 )
+                if scale_spec is not None:
+                    v_spec.copy_(
+                        (v_spec.float() * scale_spec[None, :, :, None]).to(v_spec.dtype)
+                    )
                 core_attn_out_spec, _ = fused_recurrent_kda(
                     q=q_spec,
                     k=k_spec,
@@ -1315,28 +1355,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     self.local_projection_size, dim=-1
                 )
 
-                # Separate convolution calls accept row-strided packed inputs
-                # and produce dense Q/K/V without an additional V copy.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
-                        None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
-                        metadata=m,
-                    ).transpose(0, 1)
-
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                q_ns = self._prefill_conv(q_ns, q_conv_state, q_conv_weight, m)
+                k_ns = self._prefill_conv(k_ns, k_conv_state, k_conv_weight, m)
+                v_ns = self._prefill_conv(
+                    v_ns, v_conv_state, v_conv_weight, m, scale_ns
+                )
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
@@ -1486,6 +1509,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     validate_data=True,
                     out=packed_conv_out,
                 )
+                if scale_ns is not None:
+                    values = mixed_qkv_ns[:, 2 * self.local_projection_size :]
+                    scaled = (
+                        values.reshape(-1, self.local_num_heads, self.head_dim).float()
+                        * scale_ns[:, :, None]
+                    )
+                    values.copy_(scaled.flatten(1))
                 (
                     core_attn_out_non_spec,
                     _,

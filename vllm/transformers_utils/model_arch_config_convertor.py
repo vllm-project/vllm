@@ -311,6 +311,7 @@ class ModelArchConfigConvertorBase:
             "glm4_moe_lite_mtp",
             "kimi_k2",
             "kimi_linear",
+            "raon1_mini",
             "longcat_flash",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",

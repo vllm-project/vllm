@@ -165,6 +165,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "muse_reasoning_parser",
         "MuseReasoningParser",
     ),
+    "raon_1": (
+        "raon_1_reasoning_parser",
+        "Raon1MiniParserReasoningAdapter",
+    ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",

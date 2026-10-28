@@ -25,6 +25,7 @@ from vllm.parser.mistral import MistralParser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
+from vllm.parser.raon1_mini import Raon1MiniParser
 from vllm.parser.seed_oss import SeedOssParser
 from vllm.parser.step3p5 import Step3p5Parser
 
@@ -82,6 +83,11 @@ from vllm.parser.step3p5 import Step3p5Parser
     Qwen3ParserReasoningAdapter,
     Qwen3ParserToolAdapter,
 ) = make_adapters(Qwen3Parser)
+
+(
+    Raon1MiniParserReasoningAdapter,
+    Raon1MiniParserToolAdapter,
+) = make_adapters(Raon1MiniParser)
 
 (
     MiMoParserReasoningAdapter,
