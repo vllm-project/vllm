@@ -930,6 +930,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     let semaphore = config.max_concurrency.map(|mc| Arc::new(Semaphore::new(mc)));
 
     let benchmark_start = Instant::now();
+    // Wall-clock anchor for `rps_change_events` timestamps.
+    let benchmark_start_local = chrono::Local::now();
 
     // Arc-wrap shared data to avoid cloning per request
     let shared_api_url = Arc::new(config.api_url.clone());
@@ -1180,7 +1182,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     // Build result JSON
     let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let result_json = build_result_json(
+    let mut result_json = build_result_json(
         config,
         &metrics,
         &actual_output_lens,
@@ -1189,6 +1191,22 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         &date_iso,
         spec_decode_stats.as_ref(),
     );
+    if let Some(ramp_up) = &config.ramp_up {
+        // Same shape as Python: local time, ISO 8601 with microseconds.
+        let events: Vec<serde_json::Value> = schedule
+            .rps_change_offsets(ramp_up.start_rps)
+            .into_iter()
+            .map(|(rps, delay)| {
+                let at =
+                    benchmark_start_local + chrono::Duration::microseconds((delay * 1e6) as i64);
+                serde_json::json!({
+                    "rps": rps,
+                    "timestamp": at.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                })
+            })
+            .collect();
+        result_json["rps_change_events"] = events.into();
+    }
 
     // Save if requested
     if config.save_result || config.append_result {

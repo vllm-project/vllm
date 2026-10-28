@@ -933,6 +933,20 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
         Some(s) => s,
     };
 
+    // The ramp-up schedule replaces the request rate. Accepting one anyway
+    // would stamp the result JSON and its filename with a rate that never ran.
+    for (flag, set) in [
+        ("--request-rate", args.request_rate.is_finite()),
+        ("--sweep-request-rate", args.sweep_request_rate.is_some()),
+    ] {
+        if set {
+            return Err(BenchError::Config(format!(
+                "{flag} cannot be combined with --ramp-up-strategy; \
+                 the ramp-up parameters control the request rate"
+            )));
+        }
+    }
+
     let start_rps = args.ramp_up_start_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-start-rps is required when --ramp-up-strategy is set".into())
     })?;
@@ -944,6 +958,11 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     if start_rps <= 0.0 || end_rps <= 0.0 {
         return Err(BenchError::Config(
             "Ramp-up RPS values must be positive".into(),
+        ));
+    }
+    if start_rps > end_rps {
+        return Err(BenchError::Config(
+            "--ramp-up-start-rps must not exceed --ramp-up-end-rps".into(),
         ));
     }
 
@@ -1063,6 +1082,58 @@ mod tests {
         let mut args = base_timed_trace_args();
         args.extend(["--sweep-max-concurrency", "8,16"]);
         assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    fn ramp_up_args(start: &'static str, end: &'static str) -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--ramp-up-strategy",
+            "linear",
+            "--ramp-up-start-rps",
+            start,
+            "--ramp-up-end-rps",
+            end,
+        ]
+    }
+
+    /// The result filename names the ramp-up, as Python's does, instead of the
+    /// unused `--request-rate` (`infqps`).
+    #[test]
+    fn test_ramp_up_result_filename() {
+        let mut args = ramp_up_args("2", "10");
+        args.extend(["--max-concurrency", "8"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert_eq!(
+            crate::output::json::compute_result_filename(&config, "org/model", "20261028-120000"),
+            "openai-ramp-up-linear-2qps-10qps-concurrency8-model-20261028-120000.json"
+        );
+    }
+
+    /// The ramp-up schedule replaces the request rate, so a rate given next to
+    /// it would never run but still label the result.
+    #[test]
+    fn test_ramp_up_rejects_request_rate_flags() {
+        for flag in [
+            vec!["--request-rate", "5"],
+            vec!["--sweep-request-rate", "1,5"],
+        ] {
+            let mut args = ramp_up_args("2", "10");
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("ramp-up should reject request-rate flags")
+                .to_string();
+            assert!(msg.contains(flag[0]), "{flag:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_ramp_up_rejects_start_above_end() {
+        let msg = BenchConfig::from_args(&parse_args(ramp_up_args("10", "2")))
+            .expect_err("start > end should be rejected")
+            .to_string();
+        assert!(msg.contains("must not exceed"), "{msg}");
     }
 
     #[test]
