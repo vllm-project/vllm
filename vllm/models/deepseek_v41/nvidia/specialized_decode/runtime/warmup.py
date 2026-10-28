@@ -21,7 +21,12 @@ from vllm.forward_context import set_forward_context
 
 from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS
 from ..attention.aux_projections import warmup_aux_projection_gemms
-from ..attention.mxfp8 import pinned_tactics, run_zeros, shape_representatives
+from ..attention.mxfp8 import (
+    pinned_tactics,
+    prefer_pinned_tactics,
+    run_zeros,
+    shape_representatives,
+)
 from ..attention.step import AttentionStep, key_weight, side_weights
 from ..logits.lm_head import autotune_low_batch_lm_head, warmup_low_batch_lm_head
 from ..moe.step import deferred_finalize
@@ -38,6 +43,7 @@ def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
         for linear in (step.attn.fused_wqa_wkv, step.attn.wq_b, step.attn.wo_b)
     )
     rows = min(vllm_config.scheduler_config.max_num_batched_tokens, FUSED_MHC_MAX_ROWS)
+    prefer_pinned_tactics()
     with torch.inference_mode():
         if decode.config.autotune:
             with _tuning():

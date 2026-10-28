@@ -38,11 +38,13 @@ class BoundaryAllReduce(AllReduceMHC):
         self._published: torch.Tensor | None = None
 
     def publish_target(self) -> tuple[int, int]:
-        """(multicast mailbox address, stage-state address) for a producer
+        """(mailbox publish address, stage-state address) for a producer
         that stores its contribution itself, as ``_SharedOnlyPublishDeviceKernel``
         does: generation ``stage_state[0]``, slot ``[rank][token]``, BF16 with
-        negative zero cleared, then ``stage_state[1] = stage_state[0]``. Both
-        stay valid for this instance's lifetime."""
+        negative zero cleared, then ``stage_state[1] = stage_state[0]``. The
+        publish address is the mailbox's multicast address, or with ``unicast``
+        the address of the table of every rank's mailbox base. Both stay valid
+        for this instance's lifetime."""
         return self._multicast, self._stage_state.data_ptr()
 
     def mark_published(self, x: torch.Tensor) -> None:

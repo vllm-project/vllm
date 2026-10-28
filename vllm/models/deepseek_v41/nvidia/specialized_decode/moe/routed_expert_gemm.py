@@ -76,6 +76,9 @@ logger = init_logger(__name__)
 HIDDEN = 5120
 SLICE = 576
 PADDED = 640
+# The routed experts' per-rank intermediate slice by its padded width: 576
+# (padded to 640) at TP4 and 288 (padded to 384) at TP8.
+SLICE_BY_PADDED = {640: 576, 384: 288}
 # The fused front is built for exactly the target layers' routing.
 EXPERTS = 384
 TOP_K = 6
@@ -142,7 +145,11 @@ class RoutedExpertGemm:
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         quant_config: FusedMoEQuantConfig,
     ):
-        check_weights(w13, w13_scale, w2, w2_scale, clamp, top_k)
+        self.padded = int(w13.size(1)) // 2
+        self.slice = SLICE_BY_PADDED.get(self.padded, SLICE)
+        check_weights(
+            w13, w13_scale, w2, w2_scale, clamp, top_k, self.slice, self.padded
+        )
         self.experts = int(w13.size(0))
         self.top_k = top_k
         index = w13.device.index
@@ -151,8 +158,8 @@ class RoutedExpertGemm:
         )
         # Compile the kernels now, not inside a CUDA graph capture.
         _route_kernel(self.device_index)
-        _gemm1_kernel(self.device_index)
-        _gemm2_kernel(self.device_index)
+        _gemm1_kernel(self.device_index, self.slice, self.padded)
+        _gemm2_kernel(self.device_index, self.padded)
         # The modular kernel's input quantization, reused so the activations
         # match its path bit for bit.
         self.prepare_finalize = prepare_finalize
@@ -266,11 +273,15 @@ class RoutedExpertGemm:
         128-row scale atom per token tile, rows 0-7 used)."""
         device = routing.x_quant.device
         padded_rows = TILE * routing.ctas
-        h_values = torch.empty((padded_rows, PADDED), dtype=torch.uint8, device=device)
-        h_scales = torch.empty(
-            routing.ctas * tile_scale_bytes(PADDED), dtype=torch.uint8, device=device
+        h_values = torch.empty(
+            (padded_rows, self.padded), dtype=torch.uint8, device=device
         )
-        _gemm1_kernel(self.device_index)(
+        h_scales = torch.empty(
+            routing.ctas * tile_scale_bytes(self.padded),
+            dtype=torch.uint8,
+            device=device,
+        )
+        _gemm1_kernel(self.device_index, self.slice, self.padded)(
             _pointer(cutlass.Float4E2M1FN, self.w13, 32),
             _pointer(cutlass.Float8E8M0FNU, self.w13_scale, 16),
             _pointer(cutlass.Float8E4M3FN, routing.x_quant, 16),
@@ -298,7 +309,7 @@ class RoutedExpertGemm:
             dtype=torch.bfloat16,
             device=routing.x_quant.device,
         )
-        _gemm2_kernel(self.device_index)(
+        _gemm2_kernel(self.device_index, self.padded)(
             _pointer(cutlass.Float4E2M1FN, self.w2, 32),
             _pointer(cutlass.Float8E8M0FNU, self.w2_scale, 16),
             _pointer(cutlass.Float8E4M3FN, h_values, 16),
@@ -373,11 +384,11 @@ def _front_kernel(device_index: int, image: bool):
 
 
 @cache
-def _gemm1_kernel(device_index: int):
-    """``RoutedExpertGemm1`` compiled for a device."""
+def _gemm1_kernel(device_index: int, slice_: int = SLICE, padded: int = PADDED):
+    """``RoutedExpertGemm1`` compiled for a device and slice."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertGemm1(HIDDEN, SLICE, PADDED),
+            RoutedExpertGemm1(HIDDEN, slice_, padded),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E8M0FNU, 16),
             _fake(cutlass.Float8E4M3FN, 16),
@@ -396,11 +407,11 @@ def _gemm1_kernel(device_index: int):
 
 
 @cache
-def _gemm2_kernel(device_index: int):
-    """``RoutedExpertGemm2`` compiled for a device."""
+def _gemm2_kernel(device_index: int, padded: int = PADDED):
+    """``RoutedExpertGemm2`` compiled for a device and padded intermediate."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertGemm2(HIDDEN, PADDED),
+            RoutedExpertGemm2(HIDDEN, padded),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E8M0FNU, 16),
             _fake(cutlass.Float8E4M3FN, 16),
@@ -428,15 +439,17 @@ def check_weights(
     w2_scale: torch.Tensor,
     clamp: torch.Tensor | None,
     top_k: int,
+    slice_: int = SLICE,
+    padded: int = PADDED,
 ) -> None:
     """Raise ``ValueError`` unless the weights have the layout the kernels read
     and the routing fits the route kernel."""
     experts = w13.size(0)
     for tensor, shape in (
-        (w13, (experts, 2 * PADDED, HIDDEN // 2)),
-        (w13_scale, (experts, 2 * PADDED, HIDDEN // 32)),
-        (w2, (experts, HIDDEN, PADDED // 2)),
-        (w2_scale, (experts, HIDDEN, PADDED // 32)),
+        (w13, (experts, 2 * padded, HIDDEN // 2)),
+        (w13_scale, (experts, 2 * padded, HIDDEN // 32)),
+        (w2, (experts, HIDDEN, padded // 2)),
+        (w2_scale, (experts, HIDDEN, padded // 32)),
     ):
         if (
             tuple(tensor.shape) != shape
@@ -464,8 +477,8 @@ def check_weights(
     # GEMM1 never reads w13's padding tile (intermediate 576..639), so the
     # padding must be zero, as must the matching K columns of w2.
     if (
-        torch.count_nonzero(w13.view(torch.uint8)[:, 2 * SLICE :]).item()
-        or torch.count_nonzero(w2.view(torch.uint8)[:, :, SLICE // 2 :]).item()
+        torch.count_nonzero(w13.view(torch.uint8)[:, 2 * slice_ :]).item()
+        or torch.count_nonzero(w2.view(torch.uint8)[:, :, slice_ // 2 :]).item()
     ):
         raise ValueError("the intermediate padding of w13/w2 is not zero")
 

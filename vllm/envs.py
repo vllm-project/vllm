@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_DSV41_MHC_UNICAST: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -640,6 +641,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # DeepSeek-V4.1's fused Lamport all-reduce + mHC publishes each rank's
+    # contribution with NVLink multicast when its mailbox gets a multicast
+    # mapping, and with unicast stores into every rank's mailbox otherwise.
+    # Set to 1 to force the unicast path (for testing).
+    "VLLM_DSV41_MHC_UNICAST": lambda: bool(
+        int(os.getenv("VLLM_DSV41_MHC_UNICAST", "0"))
+    ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),

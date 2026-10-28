@@ -61,6 +61,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
     HIDDEN,
     PADDED,
     SLICE,
+    SLICE_BY_PADDED,
     TOP_K,
     FrontConfig,
     RoutedExpertGemm,
@@ -112,8 +113,7 @@ def _routing(rows: int, generator: torch.Generator) -> torch.Tensor:
     return torch.stack(ids).to(torch.int32).to(DEVICE)
 
 
-@pytest.fixture(scope="module")
-def experts():
+def _make_experts(slice_: int, padded: int):
     """Random MXFP4 experts converted by vLLM for the TRT-LLM-gen backend, the
     tensors both the FlashInfer path and the low-batch kernels read."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -122,7 +122,7 @@ def experts():
     )
 
     generator = torch.Generator().manual_seed(0)
-    e, p, h = EXPERTS, PADDED, HIDDEN
+    e, p, h = EXPERTS, padded, HIDDEN
 
     def randint(low, high, *shape):
         return torch.randint(low, high, shape, dtype=torch.uint8, generator=generator)
@@ -132,9 +132,9 @@ def experts():
         randint(118, 126, e, 2 * p, h // 32),
     )
     w2, w2_scale = randint(0, 256, e, h, p // 2), randint(118, 126, e, h, p // 32)
-    # The intermediate is 576 wide, padded with zeros to 640.
-    w13.view(e, 2, p, -1)[:, :, SLICE:] = 0
-    w2[:, :, SLICE // 2 :] = 0
+    # The per-rank intermediate (576 at TP4, 288 at TP8) is zero-padded.
+    w13.view(e, 2, p, -1)[:, :, slice_:] = 0
+    w2[:, :, slice_ // 2 :] = 0
     w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         nn.Module(),
@@ -148,6 +148,24 @@ def experts():
     )
     clamp = torch.full((e,), 10.0, dtype=torch.float32, device=DEVICE)
     return w13, w13_scale, w2, w2_scale, clamp
+
+
+@pytest.fixture(scope="module")
+def experts():
+    """TP4 experts (576-column intermediate slice padded to 640)."""
+    return _make_experts(SLICE, PADDED)
+
+
+@pytest.fixture(
+    scope="module",
+    params=sorted(SLICE_BY_PADDED.items(), reverse=True),
+    ids=lambda shape: f"padded{shape[0]}",
+)
+def experts_by_tp(request):
+    """Experts at every tensor-parallel slice the GEMMs take: TP4's 576 columns
+    padded to 640 and TP8's 288 padded to 384."""
+    padded, slice_ = request.param
+    return _make_experts(slice_, padded)
 
 
 def _gemm(experts) -> RoutedExpertGemm:
@@ -207,7 +225,7 @@ def _flashinfer_experts(experts, routing, output=None):
         top_k=TOP_K,
         n_group=None,
         topk_group=None,
-        intermediate_size=PADDED,
+        intermediate_size=w13.size(1) // 2,
         local_expert_offset=0,
         local_num_experts=EXPERTS,
         routed_scaling_factor=None,
@@ -242,12 +260,12 @@ def _fma_finalize(rows: torch.Tensor, permuted: torch.Tensor, weights: torch.Ten
 
 @pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
 @pytest.mark.parametrize("rows", [1, 5, 6, 8])
-def test_routed_experts_match_flashinfer(experts, rows, graph):
+def test_routed_experts_match_flashinfer(experts_by_tp, rows, graph):
     """Route + GEMM pair: the routed rows bitwise those of FlashInfer's
     TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp of its
     finalized output."""
     generator = torch.Generator().manual_seed(rows)
-    gemm = _gemm(experts)
+    gemm = _gemm(experts_by_tp)
 
     def inputs():
         x = torch.randn(rows, HIDDEN, generator=generator).to(torch.bfloat16)
@@ -268,10 +286,10 @@ def test_routed_experts_match_flashinfer(experts, rows, graph):
     else:
         routing, out = run()
     routed = out.gemm2_permuted[out.expanded_idx_to_permuted_idx.long()]
-    assert torch.equal(routed, _flashinfer_experts(experts, routing))
+    assert torch.equal(routed, _flashinfer_experts(experts_by_tp, routing))
 
     finalized = torch.empty(rows, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
-    _flashinfer_experts(experts, routing, finalized)
+    _flashinfer_experts(experts_by_tp, routing, finalized)
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
@@ -519,9 +537,13 @@ def _quantized(rows: int, k: int) -> QuantizedActivation:
 
 
 @pytest.mark.parametrize("rows", [1, 5, 6, 8])
-@pytest.mark.parametrize("shape", list(mxfp8_linear.PINNED_TACTICS), ids=str)
+@pytest.mark.parametrize(
+    "shape",
+    list(dict.fromkeys((n, k) for n, k, _ in mxfp8_linear.PINNED_TACTICS)),
+    ids=str,
+)
 def test_low_latency_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on
+    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 and TP8 shapes on
     ``cutedsl_low_latency``, eagerly and replayed, within BF16 tolerance of the
     stock ``cute-dsl`` layer; a BF16 input is left to the stock layer."""
     if not mxfp8_linear._backend_supported():
@@ -542,6 +564,17 @@ def test_low_latency_mxfp8_mm(shape, rows):
 
     x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
     assert mxfp8_linear.low_latency_mm(linear, x) is None
+
+
+def test_pinned_tactics_by_tensor_parallel_size():
+    """A runner problem (N, M, K, L) gets its shape's pinned tactic at the
+    tensor parallel size it belongs to, and only for 5-8 rows."""
+    pinned = mxfp8_linear._pinned
+    assert pinned((1792, 8, 5120, 1), 4) == (128, 10, 1, 4)
+    assert pinned((1792, 8, 5120, 1), 8) == (128, 10, 1, 2)
+    assert pinned((4096, 5, 1280, 1), 8) == (128, 10, 1, 2)
+    assert pinned((4096, 5, 1280, 1), 4) is None
+    assert pinned((8192, 4, 1280, 1), 4) is None
 
 
 @pytest.mark.parametrize("rows", [1, 5, 6, 8, 16, 17])
