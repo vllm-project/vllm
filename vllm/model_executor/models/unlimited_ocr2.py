@@ -14,17 +14,14 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.unlimited_ocr2 import (
-    DashRouter,
-    dash_attention,
-)
+from vllm.model_executor.layers.unlimited_ocr2 import DashRouter
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionMetadata,
 )
-from vllm.v1.attention.ops.unlimited_ocr2 import cache_dash_prefill, paged_dash_decode
+from vllm.v1.attention.ops.unlimited_ocr2 import paged_dash_decode, paged_dash_prefill
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
@@ -32,6 +29,7 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 )
 
 TOKEN_ROLES_KEY = "unlimited_ocr2_token_roles"
+PAGE_POSITIONS_KEY = "unlimited_ocr2_page_positions"
 
 
 class UnlimitedOCR2Attention(nn.Module):
@@ -99,13 +97,15 @@ class UnlimitedOCR2Attention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view_as(k)
         iq, ik = self.dash_router(hidden_states)
-        roles = get_forward_context().additional_kwargs.get(TOKEN_ROLES_KEY)
+        kwargs = get_forward_context().additional_kwargs
+        roles = kwargs.get(TOKEN_ROLES_KEY)
+        positions = kwargs[PAGE_POSITIONS_KEY]
         result = torch.empty_like(q)
-        self._attention(q, k, v, iq, ik, roles, result)
+        self._attention(q, k, v, iq, ik, roles, positions, result)
         return self.o_proj(result.flatten(1))[0]
 
     @eager_break_during_capture
-    def _attention(self, q, k, v, iq, ik, roles, result):
+    def _attention(self, q, k, v, iq, ik, roles, positions, result):
         context = get_forward_context()
         all_metadata = context.attn_metadata
         if all_metadata is None:
@@ -138,6 +138,7 @@ class UnlimitedOCR2Attention(nn.Module):
                     metadata.rswa_prefix_lens,
                     backend=self.dash_backend,
                     cached_summaries=True,
+                    positions=positions,
                 )
             )
         else:
@@ -175,30 +176,25 @@ class UnlimitedOCR2Attention(nn.Module):
                         else None,
                         backend=self.dash_backend,
                         cached_summaries=True,
+                        positions=positions[:, start:end],
                     )
                 else:
-                    assert length == end - start, "DASH requires complete prefills"
-                    result[start:end] = dash_attention(
+                    result[start:end] = paged_dash_prefill(
                         q[start:end],
                         k[start:end],
                         v[start:end],
                         iq[start:end],
                         ik[start:end],
                         roles[start:end],
+                        positions[:, start:end],
+                        cache,
+                        metadata.block_table[request : request + 1],
+                        length,
+                        slots[start:end],
                         self.dash_router.head_cls,
                         self.sp,
                         self.layer_idx,
-                        backend=self.dash_backend,
-                    )
-                    cache_dash_prefill(
-                        k[start:end],
-                        v[start:end],
-                        ik[start:end],
-                        roles[start:end],
-                        slots[start:end].long(),
-                        cache,
-                        self.sp,
-                        self.dash_router.head_cls,
+                        self.dash_backend,
                     )
 
 
@@ -287,7 +283,7 @@ def _page_count_guard_kernel(
     eos = tl.load(Params + slot * 3 + 1)
     cap = tl.load(Params + slot * 3 + 2)
     prompt_len = tl.load(PromptLen + slot)
-    length = tl.load(Positions + row) + 1 - prompt_len
+    length = tl.maximum(tl.load(Positions + row) + 1 - prompt_len, 0)
     expected = tl.load(State + slot * 4)
     seen = tl.load(State + slot * 4 + 1)
     markers = tl.load(State + slot * 4 + 2)

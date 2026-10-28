@@ -293,6 +293,14 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
 )
 class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
     requires_raw_input_tokens = True
+    supports_mrope = True
+
+    def get_mrope_input_positions(self, input_tokens, mm_features):
+        from vllm.model_executor.layers.unlimited_ocr2 import prompt_page_positions
+
+        return prompt_page_positions(
+            input_tokens, self.text_config.sparse_attention_config
+        ), 0
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -323,7 +331,7 @@ class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
 
         from vllm.forward_context import get_forward_context
 
-        from .unlimited_ocr2 import TOKEN_ROLES_KEY
+        from .unlimited_ocr2 import PAGE_POSITIONS_KEY, TOKEN_ROLES_KEY
 
         context = get_forward_context()
         if context.attn_metadata is not None and input_ids is None:
@@ -333,9 +341,11 @@ class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
             roles = (input_ids == sp["image_token_id"]).long()
             roles = roles + 2 * (input_ids == sp["page_token_id"]).long()
             context.additional_kwargs[TOKEN_ROLES_KEY] = roles
+        context.additional_kwargs[PAGE_POSITIONS_KEY] = positions
         try:
             return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+                input_ids, positions[0], intermediate_tensors, inputs_embeds, **kwargs
             )
         finally:
             context.additional_kwargs.pop(TOKEN_ROLES_KEY, None)
+            context.additional_kwargs.pop(PAGE_POSITIONS_KEY, None)

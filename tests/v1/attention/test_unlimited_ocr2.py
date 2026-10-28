@@ -366,3 +366,132 @@ def test_decode_rope_preserves_long_position_rounding(dtype, main):
     expected = page_rope(x, coords[:, 0], coords[:, 1], sp, main=main)
     actual = decode_page_rope(x, coords[:, 0], coords[:, 1], sp, main=main)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(backend):
+    """Chunks can end before an image, inside it, or at the instruction tail."""
+    from vllm.model_executor.layers.unlimited_ocr2 import prompt_page_positions
+    from vllm.v1.attention.ops.unlimited_ocr2 import (
+        paged_dash_decode,
+        paged_dash_prefill,
+    )
+
+    torch.manual_seed(42)
+    device, dtype = "cuda", torch.bfloat16
+    roles = torch.tensor(
+        [0, 2] + [1] * 1043 + [0, 2] + [1] * 1061 + [0] * 5, device=device
+    )
+    length, h, d, block_size = len(roles), 2, 128, 16
+    sp = {
+        "sparse_block_size": 32,
+        "sparse_local_block": 1,
+        "sparse_index_dim": d,
+        "sparse_attention_freq": [1],
+        "dash_topk_blocks": 12,
+        "image_token_id": 1,
+        "page_token_id": 2,
+    }
+    positions = prompt_page_positions(roles.tolist(), sp).to(device)
+    q = torch.randn(length + 2, 4, d, device=device, dtype=dtype)
+    k = torch.randn(length + 2, h, d, device=device, dtype=dtype)
+    v = torch.randn_like(k)
+    iq = torch.randn(length + 2, d, device=device, dtype=dtype)
+    ik = torch.randn_like(iq)
+    cls = torch.randn(d, device=device, dtype=dtype)
+    table = torch.randperm(256, device=device, dtype=torch.int32)[None]
+    cache = torch.full(
+        (256, block_size, h + 1, 2 * d), float("nan"), device=device, dtype=dtype
+    ).permute(0, 2, 1, 3)
+    ar = torch.arange(length + 2, device=device)
+    slots = table[0, ar // block_size] * block_size + ar % block_size
+    expected = dash_attention(
+        q[:length],
+        k[:length],
+        v[:length],
+        iq[:length],
+        ik[:length],
+        roles,
+        cls,
+        sp,
+        0,
+        backend=backend,
+    )
+    chunks = [0, 1, 2, 17, 32, 1024, 1045, 1047, 1500, 2048, 2109, length]
+    for start, end in zip(chunks, chunks[1:]):
+        args = (
+            q[start:end],
+            k[start:end],
+            v[start:end],
+            iq[start:end],
+            ik[start:end],
+            roles[start:end],
+        )
+        if end - start == 1:
+            actual = paged_dash_decode(
+                *args,
+                cache,
+                table,
+                torch.tensor([end], device=device, dtype=torch.int32),
+                slots[start:end],
+                cls,
+                sp,
+                0,
+                4096,
+                backend=backend,
+                cached_summaries=True,
+                positions=positions[:, start:end],
+            )
+        else:
+            actual = paged_dash_prefill(
+                *args,
+                positions[:, start:end],
+                cache,
+                table,
+                end,
+                slots[start:end],
+                cls,
+                sp,
+                0,
+                backend,
+            )
+        torch.testing.assert_close(
+            actual, expected[start:end], atol=0.00390625, rtol=0.01
+        )
+    # Both pages' decode offsets must survive the chunk boundaries.
+    for step in range(2):
+        pos = length + step
+        roles = torch.cat((roles, torch.tensor([2], device=device)))
+        actual = paged_dash_decode(
+            q[pos : pos + 1],
+            k[pos : pos + 1],
+            v[pos : pos + 1],
+            iq[pos : pos + 1],
+            ik[pos : pos + 1],
+            roles[-1:],
+            cache,
+            table,
+            torch.tensor([pos + 1], device=device, dtype=torch.int32),
+            slots[pos : pos + 1],
+            cls,
+            sp,
+            0,
+            4096,
+            torch.tensor([length], device=device, dtype=torch.int32),
+            backend=backend,
+            cached_summaries=True,
+        )
+        expected = dash_attention(
+            q[pos : pos + 1],
+            k[: pos + 1],
+            v[: pos + 1],
+            iq[pos : pos + 1],
+            ik[: pos + 1],
+            roles,
+            cls,
+            sp,
+            0,
+            prompt_length=length,
+            backend=backend,
+        )
+        torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)

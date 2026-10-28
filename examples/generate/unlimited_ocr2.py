@@ -37,10 +37,10 @@ def main():
     llm = LLM(
         model="baidu/Unlimited-OCR-2",
         attention_config={"backend": args.attention_backend},
-        enable_chunked_prefill=False,
+        enable_chunked_prefill=True,
         enable_prefix_caching=False,
         max_model_len=args.max_model_len,
-        max_num_batched_tokens=args.max_model_len,
+        max_num_batched_tokens=min(4096, args.max_model_len),
         limit_mm_per_prompt={"image": len(images)},
         mm_encoder_attn_backend="TORCH_SDPA",
         logits_processors=logits_processors,

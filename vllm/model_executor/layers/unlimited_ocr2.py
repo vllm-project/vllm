@@ -77,6 +77,25 @@ def page_coordinates(
     return tok, page, image_page, query_page
 
 
+def prompt_page_positions(input_tokens: list[int], sp: dict) -> torch.Tensor:
+    """Full-prompt token/page positions, page count and negative page lengths.
+
+    The last two channels carry DASH cache metadata through the existing
+    multi-dimensional position interface. Negative lengths distinguish prompt
+    positions from the runner's ordinary, nonnegative decode positions.
+    """
+    ids = torch.tensor(input_tokens)
+    roles = (ids == sp["image_token_id"]).long()
+    roles += 2 * (ids == sp["page_token_id"]).long()
+    tok, page, _, _ = page_coordinates(roles)
+    last_image = torch.where(roles == 1)[0][-1]
+    prefill = torch.arange(len(ids)) <= last_image
+    pages = int(page.max())
+    counts = torch.zeros(pages + 1, dtype=torch.long)
+    counts.scatter_add_(0, page, prefill.long())
+    return torch.stack((tok, page, torch.full_like(tok, pages), -counts[page] - 1))
+
+
 def page_rope(
     x: torch.Tensor, tok: torch.Tensor, page: torch.Tensor, sp: dict, *, main: bool
 ) -> torch.Tensor:

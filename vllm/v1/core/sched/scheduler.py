@@ -2018,8 +2018,6 @@ class Scheduler(SchedulerInterface):
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget, [], []
-        requested_num_new_tokens = num_new_tokens
-        original_encoder_compute_budget = encoder_compute_budget
         encoder_inputs_to_schedule: list[int] = []
         mm_features = request.mm_features
         assert mm_features is not None
@@ -2175,17 +2173,6 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
-
-        if (
-            not self.scheduler_config.enable_chunked_prefill
-            and not self.is_mm_encoder_only
-            and num_new_tokens < requested_num_new_tokens
-        ):
-            # Encoder pressure must not split models requiring complete prompts.
-            # Release cache hits pinned during this unsuccessful admission and
-            # restore the compute budget before trying another waiting request.
-            self.encoder_cache_manager.free(request)
-            return [], 0, original_encoder_compute_budget, [], []
 
         return (
             encoder_inputs_to_schedule,

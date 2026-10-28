@@ -18,9 +18,10 @@ Gundam cropping applies independently to each page with at most 16 local tiles,
 matching the official v2 preprocessing. Set `mm_processor_kwargs={"crop_mode": False}`
 for one 1024-pixel global view per page.
 
-Prefill requires the entire prompt: disable chunked prefill and set
-`max_num_batched_tokens` to at least `max_model_len`. Input and generated tokens
-must fit within `max_model_len`. By default there is no page-count stopping
+Chunked prefill is supported: `max_num_batched_tokens` can be smaller than
+`max_model_len`, including chunks within an image's token span. Page positions
+are computed from the full prompt once; each chunk reads earlier input KV from
+the paged cache. Input and generated tokens must fit within `max_model_len`. By default there is no page-count stopping
 guard; generation can repeat pages up to `max_tokens`. Pass
 `--page-count-guard` (or register
 `vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor`

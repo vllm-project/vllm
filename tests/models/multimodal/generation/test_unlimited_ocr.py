@@ -58,6 +58,7 @@ def test_unlimited_ocr2_batched_pages(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     enforce_eager = graph_mode == "eager"
     prefill_graph = graph_mode == "prefill"
+    chunked_prefill = graph_mode != "decode"
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", str(int(prefill_graph)))
     pages = []
@@ -73,7 +74,7 @@ def test_unlimited_ocr2_batched_pages(
     with vllm_runner(
         "baidu/Unlimited-OCR-2",
         max_model_len=8192,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=1024 if chunked_prefill else 8192,
         max_num_seqs=2,
         kv_cache_memory_bytes=1024**3,
         gpu_memory_utilization=0.1,
@@ -87,7 +88,7 @@ def test_unlimited_ocr2_batched_pages(
             "cudagraph_capture_sizes": [2, 1024, 4096] if prefill_graph else [2],
             **({"cudagraph_mode": "FULL_AND_PIECEWISE"} if prefill_graph else {}),
         },
-        enable_chunked_prefill=False,
+        enable_chunked_prefill=chunked_prefill,
         enable_prefix_caching=False,
         mm_encoder_attn_backend="TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
@@ -148,8 +149,9 @@ def test_unlimited_ocr2_batched_pages(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("use_v2", [False, True])
-def test_unlimited_ocr2_encoder_pressure_keeps_complete_prefills(
-    vllm_runner, monkeypatch, use_v2
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
+    vllm_runner, monkeypatch, use_v2, backend
 ):
     """Queue distinct cropped pages beyond the encoder cache's token budget."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
@@ -174,11 +176,12 @@ def test_unlimited_ocr2_encoder_pressure_keeps_complete_prefills(
     with vllm_runner(
         "baidu/Unlimited-OCR-2",
         max_model_len=4096,
-        max_num_batched_tokens=4096,
+        max_num_batched_tokens=257,
+        attention_config={"backend": backend},
         max_num_seqs=8,
         kv_cache_memory_bytes=1024**3,
         gpu_memory_utilization=0.1,
-        enable_chunked_prefill=False,
+        enable_chunked_prefill=True,
         enable_prefix_caching=False,
         mm_encoder_attn_backend="TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
@@ -191,6 +194,7 @@ def test_unlimited_ocr2_encoder_pressure_keeps_complete_prefills(
             SamplingParams(temperature=0, max_tokens=180, skip_special_tokens=False),
         )
         assert len(outputs) == len(requests)
+        assert all(len(output.prompt_token_ids) > 257 for output in outputs)
         for output in outputs:
             for text in expected:
                 assert text in output.outputs[0].text

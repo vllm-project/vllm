@@ -320,6 +320,14 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 raise ValueError("Unlimited-OCR-2 requires index_dim == head_dim")
             if sparse["dash_sigma"] <= 0 or sparse["dash_topk_blocks"] <= 0:
                 raise ValueError("Unlimited-OCR-2 requires positive sigma and top-K")
+            # Token/page RoPE plus two DASH cache metadata channels.
+            pairs = sparse.get("sparse_rope_page_pairs", 1)
+            text_config.mrope_section = [
+                sparse["sparse_index_dim"] // 2 - pairs,
+                pairs,
+                0,
+                0,
+            ]
             text_config.unlimited_ocr2 = True
             text_config.sparse_attention_config = sparse
             window = sparse["sparse_local_block"] * sparse["sparse_block_size"]
@@ -370,8 +378,6 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                     "PIECEWISE or FULL_AND_PIECEWISE; full prefill graphs "
                     "are not supported"
                 )
-        if vllm_config.scheduler_config.enable_chunked_prefill:
-            raise ValueError("Unlimited-OCR-2 requires --no-enable-chunked-prefill")
         parallel = vllm_config.parallel_config
         unsupported = {
             "pipeline parallelism": parallel.pipeline_parallel_size != 1,

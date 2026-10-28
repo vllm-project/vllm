@@ -178,7 +178,7 @@ def _apply_v2(processor, prompt_ids, output_ids) -> torch.Tensor:
 class TestPageCountGuardV2:
     @pytest.mark.parametrize("page_cap", [0, 3])
     def test_matches_core_step_by_step(self, page_cap):
-        prompt_ids = [PAGE_ID, PAGE_ID, 100]
+        prompt_ids = [PAGE_ID, 100, PAGE_ID, 100]
         output_ids = [10, 11, PAGE_ID, 12, 13, 14, PAGE_ID, 15, PAGE_ID]
         core = PageCountGuard(PAGE_ID, EOS_ID, page_cap)
 
@@ -191,6 +191,14 @@ class TestPageCountGuardV2:
             }
         )
         assert v2.add_request(0, params)
+
+        # Prefill chunks must never count prompt markers as generated output.
+        _commit(v2, prompt_ids, [])
+        v2.apply_staged_writes()
+        for computed in [1, 3, len(prompt_ids)]:
+            ctx = _make_v2_ctx(1, [computed])
+            logits = v2.apply(_logits().unsqueeze(0).to("cuda"), ctx)[0].cpu()
+            assert torch.equal(logits, _step(core, prompt_ids, []))
 
         running: list[int] = []
         for token_id in output_ids:

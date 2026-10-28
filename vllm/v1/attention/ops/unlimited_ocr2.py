@@ -411,6 +411,145 @@ def _gather_segments(
     tl.store(GV + dest, value, (x < size)[:, None])
 
 
+@triton.jit
+def _prefill_metadata(
+    C,
+    T,
+    Lens,
+    Slots,
+    Positions,
+    HeadCls,
+    PS: tl.constexpr,
+    CB: tl.constexpr,
+    CH: tl.constexpr,
+    CT: tl.constexpr,
+    TS: tl.constexpr,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    BS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    count = -tl.load(Positions + 3 * PS + row) - 1
+    if (count >= 0) & (tl.load(Slots + row) >= 0):
+        page = tl.load(Positions + PS + row).to(tl.int32)
+        byte = tl.arange(0, 4)
+        if tl.load(Positions + row) == 0:
+            count_block = tl.load(T + row * TS + page // B).to(tl.int64)
+            count_ptr = C + count_block * CB + H * CH + page % B * CT
+            tl.store(
+                count_ptr + D + 18 + byte, (count.to(tl.uint32) >> (byte * 8)) & 255
+            )
+        length = tl.load(Lens + row)
+        if length % BS == 0:
+            p = length - BS + tl.arange(0, BS)
+            block = tl.load(T + row * TS + p // B).to(tl.int64)
+            ptr = C + block * CB + H * CH + p % B * CT
+            d = tl.arange(0, D)
+            keys = tl.load(ptr[:, None] + d[None, :]).to(tl.float32)
+            cls = tl.load(HeadCls + d).to(tl.float32)
+            bits = _summarize(keys, cls, D).to(tl.uint32, bitcast=True)
+            index = d[:, None] * 4 + byte[None, :]
+            p = length - BS + index // (D - 32)
+            block = tl.load(T + row * TS + p // B).to(tl.int64)
+            dest = C + block * CB + H * CH + p % B * CT
+            tl.store(
+                dest + D + 32 + index % (D - 32),
+                (bits[:, None] >> (byte[None, :] * 8)) & 255,
+            )
+
+
+def paged_dash_prefill(
+    q,
+    k,
+    v,
+    iq,
+    ik,
+    roles,
+    positions,
+    cache,
+    block_table,
+    length,
+    slots,
+    head_cls,
+    sp,
+    layer_idx,
+    backend,
+):
+    """Extend a prompt using paged history and full-prompt page coordinates."""
+    n, h, dim = k.shape
+    coords = torch.stack(
+        (positions[0], positions[1], positions[2], positions[1] - 1), -1
+    ).to(torch.int32)
+    q = page_rope(q, positions[0], positions[1], sp, main=True)
+    k = page_rope(k, positions[0], positions[1], sp, main=True)
+    iq = page_rope(iq, positions[0], positions[1], sp, main=False)
+    ik = page_rope(ik, positions[0], positions[1], sp, main=False)
+    cb, ch, ct, _ = cache.stride()
+    b = cache.shape[2]
+    _write[(n, h + 1)](
+        cache,
+        k,
+        v,
+        ik,
+        roles,
+        coords,
+        slots,
+        cb,
+        ch,
+        ct,
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        ik.stride(0),
+        b,
+        h,
+        dim,
+    )
+    table = block_table.expand(n, -1)
+    lens = torch.arange(length - n + 1, length + 1, device=q.device, dtype=torch.int32)
+    _prefill_metadata[(n,)](
+        cache,
+        table,
+        lens,
+        slots,
+        positions,
+        head_cls,
+        positions.stride(0),
+        cb,
+        ch,
+        ct,
+        table.stride(0),
+        b,
+        h,
+        dim,
+        int(sp["sparse_block_size"]),
+        num_warps=4,
+    )
+    output = torch.empty_like(q)
+    for start in range(0, n, 256):
+        end = min(start + 256, n)
+        prefix = torch.full_like(lens[start:end], length)
+        output[start:end] = _paged_dash_attention(
+            q[start:end],
+            iq[start:end],
+            coords[start:end],
+            cache,
+            table[start:end],
+            lens[start:end],
+            slots[start:end],
+            head_cls,
+            sp,
+            layer_idx,
+            length,
+            prefix,
+            backend,
+            True,
+        )
+    return output
+
+
 def paged_dash_decode(
     q,
     k,
@@ -429,6 +568,7 @@ def paged_dash_decode(
     prefix_lens=None,
     backend="FLASH_ATTN",
     cached_summaries=False,
+    positions=None,
 ):
     """One query per request; all sequence-dependent decisions stay on GPU."""
     n, nh, dim = q.shape
@@ -453,6 +593,11 @@ def paged_dash_decode(
         dim,
         max_model_len,
     )
+    if positions is not None:
+        prompt = torch.stack(
+            (positions[0], positions[1], positions[2], positions[1] - 1), -1
+        ).to(torch.int32)
+        coords = torch.where((positions[3] < 0)[:, None], prompt, coords)
     q = decode_page_rope(q, coords[:, 0], coords[:, 1], sp, main=True)
     k = decode_page_rope(k, coords[:, 0], coords[:, 1], sp, main=True)
     iq = decode_page_rope(iq, coords[:, 0], coords[:, 1], sp, main=False)
@@ -477,6 +622,64 @@ def paged_dash_decode(
         h,
         dim,
     )
+    if positions is not None:
+        _prefill_metadata[(n,)](
+            cache,
+            block_table,
+            seq_lens,
+            slots,
+            positions,
+            head_cls,
+            positions.stride(0),
+            cb,
+            ch,
+            ct,
+            ts,
+            b,
+            h,
+            dim,
+            int(sp["sparse_block_size"]),
+            num_warps=4,
+        )
+    return _paged_dash_attention(
+        q,
+        iq,
+        coords,
+        cache,
+        block_table,
+        seq_lens,
+        slots,
+        head_cls,
+        sp,
+        layer_idx,
+        max_model_len,
+        prefix_lens,
+        backend,
+        cached_summaries,
+    )
+
+
+def _paged_dash_attention(
+    q,
+    iq,
+    coords,
+    cache,
+    block_table,
+    seq_lens,
+    slots,
+    head_cls,
+    sp,
+    layer_idx,
+    max_model_len,
+    prefix_lens,
+    backend,
+    cached_summaries,
+):
+    n, nh, dim = q.shape
+    h = cache.shape[1] - 1
+    b = cache.shape[2]
+    cb, ch, ct, _ = cache.stride()
+    ts = block_table.stride(0)
     bs = int(sp["sparse_block_size"])
     nb = triton.cdiv(max_model_len, bs)
     scores = torch.empty((n, nb), device=q.device, dtype=torch.float32)
