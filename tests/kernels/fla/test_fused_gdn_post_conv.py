@@ -402,11 +402,8 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
 
 @torch.inference_mode()
 def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
-    """fused_post_conv_prep consumes b/a as chunk views of a packed ba
-    projection (row stride 2*HV) and matches the contiguous path bitwise.
-
-    Qwen3.5's GDN layout relies on this to skip two contiguous() copies per
-    layer."""
+    """Packed b/a chunk views (row stride 2*HV) must match contiguous inputs
+    bitwise."""
     torch.manual_seed(0)
     dtype = torch.bfloat16
     device = "cuda"

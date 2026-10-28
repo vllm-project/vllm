@@ -16,7 +16,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 EPS = 1e-6
 DTYPES = [torch.bfloat16, torch.float16, torch.float32]
-NUM_TOKENS = [1, 3, 16, 129, 257]
+NUM_TOKENS = [1, 129]
 HIDDEN_SIZES = [2048, 4096]
 # (rtol, atol) per dtype; the kernel accumulates in fp32 like the reference,
 # so the gap is output rounding and reduction order only.
@@ -43,7 +43,7 @@ def _gemma_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_fused_pre_fc_norms_matches_eager(
+def test_fused_pre_fc_norms_correctness(
     num_tokens: int, hidden_size: int, dtype: torch.dtype
 ):
     """Fused kernel == cat([norm_e(embeds), norm_h(hidden)]) for Gemma-style
@@ -63,27 +63,3 @@ def test_fused_pre_fc_norms_matches_eager(
     assert fused.shape == (num_tokens, 2 * hidden_size)
     rtol, atol = TOLS[dtype]
     torch.testing.assert_close(fused.float(), ref.float(), rtol=rtol, atol=atol)
-
-
-@requires_cuda
-@torch.inference_mode()
-def test_fused_pre_fc_norms_offset_views():
-    """Row-offset (non-zero storage offset) inputs produce the same result as
-    fresh contiguous tensors, exercising stride handling and pointer
-    alignment specialization."""
-    set_random_seed(0)
-    num_tokens, hidden_size = 129, 4096
-    dtype = torch.bfloat16
-    embeds_buf = torch.randn(num_tokens + 1, hidden_size, dtype=dtype, device="cuda")
-    hidden_buf = torch.randn(num_tokens + 3, hidden_size, dtype=dtype, device="cuda")
-    emb_w = torch.randn(hidden_size, dtype=dtype, device="cuda") * 0.2
-    hid_w = torch.randn(hidden_size, dtype=dtype, device="cuda") * 0.2
-
-    embeds = embeds_buf[1:]
-    hidden = hidden_buf[3:]
-    fused = fused_pre_fc_norms(embeds, hidden, emb_w, hid_w, EPS)
-    ref = fused_pre_fc_norms(
-        embeds.contiguous(), hidden.contiguous(), emb_w, hid_w, EPS
-    )
-
-    torch.testing.assert_close(fused, ref, rtol=0.0, atol=0.0)

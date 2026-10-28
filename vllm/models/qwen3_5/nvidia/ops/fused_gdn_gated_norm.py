@@ -25,13 +25,7 @@ def _fused_gdn_gated_rms_norm_kernel(
     NORM_BEFORE_GATE: tl.constexpr,
     ACTIVATION: tl.constexpr,
 ):
-    """Per-head gated RMS norm reading z from its packed [q, k, v, z] row.
-
-    Numerics mirror ``layer_norm_fwd_kernel`` (fp32 accumulation, same op
-    order) with ``IS_RMS_NORM=True`` and no bias; only the z pointer math
-    differs: row ``t`` head ``h`` lives at ``t * stride_z_tok + h * N``
-    instead of a contiguous row, which removes the z reshape copy.
-    """
+    """FLA-equivalent per-head gated RMS norm with token-strided z."""
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
     head = tl.program_id(1)
 

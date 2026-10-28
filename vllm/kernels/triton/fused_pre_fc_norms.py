@@ -28,9 +28,6 @@ def _fused_pre_fc_norms_kernel(
     H: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """MTP input fusion: GemmaRMSNorm(embeds) and GemmaRMSNorm(hidden) written
-    side-by-side into ``out`` ([N, 2H]) ready for the fc GEMM. Replaces
-    2x GemmaRMSNorm + cat."""
     tok = tl.program_id(0)
     off = tl.arange(0, BLOCK)
     mask = off < H

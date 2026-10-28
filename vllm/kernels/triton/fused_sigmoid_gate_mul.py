@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused sigmoid-gate-multiply Triton kernel: ``out = x * sigmoid(gate)``.
-
-Currently used by the Qwen3.5 attention output gate, where it replaces the
-eager ``attn_output * torch.sigmoid(gate)`` sequence (two kernels plus an
-intermediate tensor) with a single launch. See :func:`fused_sigmoid_gate_mul`.
-"""
+"""Fused sigmoid-gate-multiply Triton kernel: ``out = x * sigmoid(gate)``."""
 
 import torch
 
@@ -53,7 +48,6 @@ def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """
     if (
         x.ndim != 2
-        or gate.ndim != 2
         or x.shape != gate.shape
         or x.dtype != gate.dtype
         or not x.is_contiguous()
@@ -67,8 +61,6 @@ def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     if num_tokens == 0 or hidden == 0:
         return out
 
-    # Autotune-lite heuristic, resolved from the (graph-static) shape at
-    # launch time, so it is safe under CUDA graph capture.
     if hidden <= 1024:
         block = triton.next_power_of_2(hidden)
         num_warps = 4

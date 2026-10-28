@@ -191,11 +191,8 @@ def test_packed_decode_supports_large_batch_head_grid():
 @pytest.mark.parametrize("num_tokens", [1, 9])
 @torch.inference_mode()
 def test_packed_decode_strided_ba_bitwise(num_tokens: int) -> None:
-    """The packed decode kernel accepts b/a as chunk views of a packed ba
-    projection (row stride 2*HV) and matches the contiguous path bitwise.
-
-    Qwen3.5's GDN layout relies on this to skip two contiguous() copies per
-    layer."""
+    """Packed b/a chunk views (row stride 2*HV) must match contiguous inputs
+    bitwise."""
     torch.manual_seed(0)
     dtype = torch.bfloat16
     device = torch.device(DEVICE)

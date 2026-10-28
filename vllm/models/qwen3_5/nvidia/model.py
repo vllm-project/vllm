@@ -168,11 +168,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
         )
-        # Fuse the TP all-reduce of every row-parallel output into the
-        # following GemmaRMSNorm (deepseek_v32 pattern): producers run with
-        # reduce_results=False and hand an un-reduced partial to the norm.
-        # Restricted to PP==1 so intermediate_tensors always carry the
-        # (partial, residual) pair between stages -- never consumed raw.
+        # Defer row-parallel all-reduces to the following norm
+        # (deepseek_v32 pattern); exclude PP and SP.
         self.use_fused_allreduce_norm = (
             get_tensor_model_parallel_world_size() > 1
             and parallel_config.pipeline_parallel_size == 1
@@ -207,14 +204,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 reduce_results=reduce_results,
                 mrope_positions_factor=mrope_positions_factor(vllm_config),
             )
-            # Qwen3.5 dropped torch.compile for breakable CUDA graphs; recover
-            # the sigmoid-gate-mul fusion with the Triton kernel.
             self.self_attn.use_fused_output_gate = True
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
 
-        # NOTE: Determine the MLP type based on the model type
-        # Qwen3.5 use all layers for MLP / Qwen3.5-MoE use sparse MoE blocks
         if config.model_type == "qwen3_5_moe_text":
             self.mlp = Qwen3NextSparseMoeBlock(
                 vllm_config=vllm_config,
@@ -283,10 +276,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         if not self.use_fused_allreduce_norm:
             return super().forward(hidden_states, residual, positions, **kwargs)
 
-        # Fused path: row-parallel outputs stay un-reduced and their TP
-        # all-reduce fuses into the following GemmaRMSNorm. layer_scale is a
-        # per-channel multiply, which commutes with the deferred all-reduce.
-        # The SP-MoE branches are unreachable here (excluded by the switch).
+        # layer_scale is a per-channel multiply, which commutes with the
+        # deferred all-reduce.
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -772,27 +763,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        Args:
-            input_ids: Flattened (concatenated) input_ids corresponding to a
-                batch.
-            positions: Flattened (concatenated) position ids corresponding to a
-                batch.
-                **NOTE**: If mrope is enabled (default setting for Qwen3VL
-                opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
-            intermediate_tensors: Intermediate tensors from previous pipeline
-                stages.
-            inputs_embeds: Pre-computed input embeddings.
-            **kwargs: Additional keyword arguments including:
-                - pixel_values: Pixel values to be fed to a model.
-                    `None` if no images are passed.
-                - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
-                    LLM. `None` if no images are passed.
-                - pixel_values_videos: Pixel values of videos to be fed to a
-                    model. `None` if no videos are passed.
-                - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
-                    LLM. `None` if no videos are passed.
-
+        With mrope enabled (default for Qwen3VL-class models), ``positions``
+        has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
