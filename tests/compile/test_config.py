@@ -758,6 +758,119 @@ def test_no_capture_sizes_disable_cudagraphs(monkeypatch, kwargs):
     assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
 
+@pytest.mark.parametrize("sm100", [True, False])
+@pytest.mark.parametrize(
+    ("graph_mode", "kwargs", "schedule", "adaptive", "error"),
+    [
+        # Every way the resolved decode grid can end up empty.
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"decode_cudagraph_capture_request_sizes": []},
+            None,
+            True,
+            "decode CUDA graphs",
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"max_decode_cudagraph_capture_requests": 0},
+            None,
+            True,
+            "decode CUDA graphs",
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"decode_cudagraph_capture_request_sizes": [4096]},
+            None,
+            True,
+            "decode CUDA graphs",
+        ),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            {"decode_cudagraph_capture_request_sizes": []},
+            None,
+            True,
+            "decode CUDA graphs",
+        ),
+        # With no graph at all the mode becomes NONE, which main already rejects.
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {
+                "max_prefill_cudagraph_capture_tokens": 0,
+                "max_decode_cudagraph_capture_requests": 0,
+            },
+            None,
+            True,
+            "full CUDA graphs",
+        ),
+        # Valid configs.
+        (CUDAGraphMode.FULL_AND_PIECEWISE, {}, None, True, None),
+        (CUDAGraphMode.FULL_DECODE_ONLY, {}, None, True, None),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"max_decode_cudagraph_capture_requests": 1},
+            None,
+            True,
+            None,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32]},
+            None,
+            True,
+            None,
+        ),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, {}, [(1, 64, 7), (65, 1024, 3)], True, None),
+        # FULL runs every batch in one routine whose token-keyed FULL graphs
+        # price the steps.
+        (
+            CUDAGraphMode.FULL,
+            {"decode_cudagraph_capture_request_sizes": []},
+            None,
+            True,
+            None,
+        ),
+        # A prefill-only instance without adaptive verification.
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            {"decode_cudagraph_capture_request_sizes": []},
+            None,
+            False,
+            None,
+        ),
+    ],
+)
+def test_adaptive_verification_sees_the_resolved_decode_sizes(
+    monkeypatch, sm100, graph_mode, kwargs, schedule, adaptive, error
+):
+    """Adaptive verification prices its steps by replaying decode graphs, so it
+    must reject every config whose resolved decode grid is empty, at config
+    time, and accept the rest. Validation runs on the resolved sizes, as in
+    `VllmConfig.__post_init__`."""
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: sm100 and family == 100,
+    )
+    compilation_config = CompilationConfig(cudagraph_mode=graph_mode, **kwargs)
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=1024,
+        num_speculative_tokens=7,
+        max_num_batched_tokens=16384,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=schedule,
+        method="dspark",
+    )
+    VllmConfig._set_cudagraph_sizes(config)
+    validated = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
+        lora_config=None,
+        compilation_config=compilation_config,
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+    )
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        VllmConfig._validate_adaptive_verification(validated)
+
+
 @pytest.mark.usefixtures("off_sm100")
 @pytest.mark.parametrize(
     ("method", "kwargs", "widest_draft_decode", "max_capture_size"),
