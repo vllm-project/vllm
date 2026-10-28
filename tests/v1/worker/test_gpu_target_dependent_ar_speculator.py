@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -17,17 +18,22 @@ from vllm.model_executor.models.mistral_eagle import EagleMistralForCausalLM
 from vllm.model_executor.models.mistral_large_3_eagle import (
     EagleMistralLarge3ForCausalLM,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
+    prepare_prefill_inputs,
+)
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
@@ -679,3 +685,79 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator._configure_decode_metadata_update()
 
     assert speculator.supports_decode_metadata_update is expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="GPU input preparation"
+)
+def test_standalone_draft_prefill_uses_prompt_lookahead_and_correction():
+    """Chunked prompt rows use the next prompt token, decode rows use the sample."""
+    device = torch.device(current_platform.device_type)
+    idx_mapping_np = np.array([2, 0], dtype=np.intp)
+    idx_mapping = torch.from_numpy(idx_mapping_np).to(device)
+    seq_lens_cpu = torch.tensor([3, 11], dtype=torch.int32)
+    cu_num_logits_np = np.array([0, 1, 4], dtype=np.int32)
+    batch = InputBatch(
+        req_ids=["prefill", "decode"],
+        num_reqs=2,
+        num_reqs_after_padding=2,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=idx_mapping_np,
+        expanded_idx_mapping=torch.tensor(
+            [2, 0, 0, 0], device=device, dtype=torch.int64
+        ),
+        expanded_local_pos=torch.tensor(
+            [2, 8, 9, 10], device=device, dtype=torch.int32
+        ),
+        num_scheduled_tokens=np.array([3, 3], dtype=np.int32),
+        num_tokens=6,
+        num_tokens_after_padding=6,
+        num_draft_tokens=2,
+        num_draft_tokens_per_req=np.array([0, 2], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 3, 6], device=device, dtype=torch.int32),
+        query_start_loc_np=np.array([0, 3, 6], dtype=np.int32),
+        seq_lens=seq_lens_cpu.to(device),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        dcp_local_seq_lens=None,
+        num_computed_tokens_np=np.array([0, 8], dtype=np.int32),
+        prefill_len_np=np.array([4, 8], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([0, 8], dtype=np.int32),
+        is_prefilling_np=np.array([True, False], dtype=np.bool_),
+        has_prefill=True,
+        decode_graph_eligible=False,
+        input_ids=torch.tensor(
+            [11, 12, 13, 21, 22, 23], device=device, dtype=torch.int32
+        ),
+        positions=torch.tensor([0, 1, 2, 8, 9, 10], device=device, dtype=torch.int64),
+        is_padding=torch.zeros(6, device=device, dtype=torch.bool),
+        logits_indices=torch.tensor([2, 3, 4, 5], device=device, dtype=torch.int64),
+        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
+        cu_num_logits_np=cu_num_logits_np,
+        has_structured_output_reqs=False,
+        prompt_lens=None,
+    )
+    buffers = InputBuffers(max_num_reqs=4, max_num_tokens=8, device=device)
+    expanded_input_ids = torch.empty(8, device=device, dtype=torch.int32)
+    expanded_positions = torch.empty(8, device=device, dtype=torch.int64)
+    last_token_indices = torch.empty(4, device=device, dtype=torch.int64)
+    total = prepare_prefill_inputs(
+        input_buffers=buffers,
+        input_batch=batch,
+        last_sampled=torch.tensor([24, 0, 99], device=device, dtype=torch.int32),
+        num_rejected=torch.tensor([0, 2], device=device, dtype=torch.int32),
+        expanded_input_ids=expanded_input_ids,
+        expanded_positions=expanded_positions,
+        last_token_indices=last_token_indices,
+        max_num_reqs=4,
+        max_model_len=32,
+        num_sampled=torch.tensor([0, 1], device=device, dtype=torch.int32),
+        next_prefill_tokens=torch.tensor(
+            [[0, 0, 14, 0]], device=device, dtype=torch.int32
+        ),
+    )
+    assert total == 8
+    assert expanded_input_ids.tolist() == [11, 12, 13, 14, 21, 24, 0, 0]
+    assert expanded_positions.tolist() == [0, 1, 2, 3, 8, 9, 10, 11]
+    assert last_token_indices.tolist() == [3, 5, 0, 0]
+    assert buffers.query_start_loc.tolist() == [0, 4, 8, 8, 8]
+    assert buffers.seq_lens.tolist() == [4, 12, 0, 0]
