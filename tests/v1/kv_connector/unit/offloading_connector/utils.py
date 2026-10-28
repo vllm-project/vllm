@@ -514,7 +514,7 @@ class RequestRunner:
             # and no pending finished_req_ids awaiting build_connector_meta.
             if (
                 not self.scheduler.requests
-                and not self.connector_scheduler._jobs
+                and not self.connector_scheduler._job_statuses
                 and not self.scheduler.finished_req_ids
             ):
                 break
@@ -581,7 +581,7 @@ class RequestRunner:
                 and prev_token_id != token_id
                 and (
                     self.scheduler.requests
-                    or self.connector_scheduler._jobs
+                    or self.connector_scheduler._job_statuses
                     or self.scheduler.finished_req_ids
                 )
             ):
@@ -602,7 +602,7 @@ class RequestRunner:
                     # Request still running, just exhausted decoded_tokens.
                     break
                 if not self.scheduler.finished_req_ids and (
-                    not complete_transfers or not self.connector_scheduler._jobs
+                    not complete_transfers or not self.connector_scheduler._job_statuses
                 ):
                     break
 

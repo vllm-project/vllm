@@ -229,8 +229,8 @@ def test_swa_offload_window_covers_unaligned_hit(
         m.allocate_external_computed_blocks(request.request_id, 0, external)
     blocks = KVCacheBlocks(tuple(m.req_to_blocks[request.request_id] for m in managers))
     sched.update_state_after_alloc(request, blocks, external)
-    assert len(sched._jobs) == 1
-    job = next(iter(sched._jobs.values()))
+    assert len(sched._job_statuses) == 1
+    job = next(iter(sched._job_statuses.values()))
     if needs_left:
         assert {left_key, swa[end - 1]} <= job.keys
     manager.complete_load(job.keys, state.req_context)
@@ -345,7 +345,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         scheduler._events_tracker.take_events(
             [
                 OffloadingEvent(
-                    keys=list(scheduler._jobs[job_id].keys),
+                    keys=list(scheduler._job_statuses[job_id].keys),
                     medium=Medium.CPU,
                     removed=False,
                 )
@@ -1041,7 +1041,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
         scheduler._events_tracker.take_events(
             [
                 OffloadingEvent(
-                    keys=list(scheduler._jobs[job_id].keys),
+                    keys=list(scheduler._job_statuses[job_id].keys),
                     medium=Medium.CPU,
                     removed=False,
                 )
@@ -1137,7 +1137,7 @@ def test_eagle_partial_lookup_loads_attention_proof(missing):
     load_job = scheduler._current_batch_load_jobs[load_job_id]
     assert {
         (get_offload_group_idx(key), get_offload_block_hash(key))
-        for key in scheduler._jobs[load_job_id].keys
+        for key in scheduler._job_statuses[load_job_id].keys
     } == {(0, b"h3"), (0, b"h6"), (1, b"h5")}
     dst_spec = load_job.dst_spec
     assert isinstance(dst_spec, GPULoadStoreSpec)
@@ -1231,7 +1231,7 @@ def test_eagle_partial_lookup_after_recurrent_group_tightens_hit():
     [load_job_id] = scheduler._current_batch_load_jobs
     assert {
         (get_offload_group_idx(key), get_offload_block_hash(key))
-        for key in scheduler._jobs[load_job_id].keys
+        for key in scheduler._job_statuses[load_job_id].keys
     } == {(0, b"h3"), (0, b"h7"), (0, b"h9"), (1, b"h8")}
 
 
@@ -1266,7 +1266,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
             )
         meta = scheduler.build_connector_meta(output)
         for job_id in meta.store_jobs:
-            stored.update(scheduler._jobs[job_id].keys)
+            stored.update(scheduler._job_statuses[job_id].keys)
         scheduler.update_connector_output(
             KVConnectorOutput(
                 kv_connector_worker_meta=OffloadingWorkerMetadata(
@@ -1314,7 +1314,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
         num_external_tokens=24,
     )
     [load_job_id] = scheduler._current_batch_load_jobs
-    assert scheduler._jobs[load_job_id].keys == stored
+    assert scheduler._job_statuses[load_job_id].keys == stored
 
 
 @pytest.mark.parametrize("host_hit", [False, True])
@@ -3533,9 +3533,9 @@ def test_complete_store_waits_for_all_worker_acks(
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
-    assert len(runner.connector_scheduler._jobs) == 1
-    job_id = next(iter(runner.connector_scheduler._jobs))
-    assert runner.connector_scheduler._jobs[job_id].pending_count == 3
+    assert len(runner.connector_scheduler._job_statuses) == 1
+    job_id = next(iter(runner.connector_scheduler._job_statuses))
+    assert runner.connector_scheduler._job_statuses[job_id].pending_count == 3
     runner.manager.complete_store.reset_mock()
 
     runner.connector_scheduler.update_connector_output(
@@ -3546,7 +3546,7 @@ def test_complete_store_waits_for_all_worker_acks(
         )
     )
     assert runner.manager.complete_store.call_count == 0
-    assert runner.connector_scheduler._jobs[job_id].pending_count == 2
+    assert runner.connector_scheduler._job_statuses[job_id].pending_count == 2
 
     runner.connector_scheduler.update_connector_output(
         KVConnectorOutput(
@@ -3556,7 +3556,7 @@ def test_complete_store_waits_for_all_worker_acks(
         )
     )
     assert runner.manager.complete_store.call_count == 1
-    assert job_id not in runner.connector_scheduler._jobs
+    assert job_id not in runner.connector_scheduler._job_statuses
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -3742,7 +3742,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Capture in-flight load job IDs before reset.
     load_job_ids = {
         jid
-        for jid, status in runner.connector_scheduler._jobs.items()
+        for jid, status in runner.connector_scheduler._job_statuses.items()
         if not status.is_store
     }
     assert load_job_ids, "expected in-flight load jobs before reset"
@@ -3767,7 +3767,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     assert load_job_ids <= runner.connector_scheduler._current_batch_jobs_to_flush
 
     # All internal job tracking must be cleared.
-    assert not runner.connector_scheduler._jobs
+    assert not runner.connector_scheduler._job_statuses
     assert not runner.connector_scheduler._block_id_to_pending_jobs
     if runner.connector_scheduler._chunks_being_loaded is not None:
         assert not runner.connector_scheduler._chunks_being_loaded
@@ -3822,7 +3822,7 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     req_id = str(runner.req_id)
     req_status = cs._req_status[req_id]
     assert req_status.transfer_jobs, "expected an in-flight store before finish"
-    assert any(job.is_store for job in cs._jobs.values())
+    assert any(job.is_store for job in cs._job_statuses.values())
 
     # Finish the request while its store is still in flight. The manager hook
     # is deferred because the final store decision has not happened yet.
@@ -3899,13 +3899,13 @@ def test_prefix_cache_reset_preserves_same_step_offload_reload(
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert len(req_status.transfer_jobs) == 1
     (job_id,) = req_status.transfer_jobs
-    assert not runner.connector_scheduler._jobs[job_id].is_store
+    assert not runner.connector_scheduler._job_statuses[job_id].is_store
     assert job_id in runner.offloading_spec.handler.waiting_jobs
     runner.manager.complete_load.assert_not_called()
 
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(0, 1))
     runner.manager.complete_load.assert_called_once()
-    assert not runner.connector_scheduler._jobs
+    assert not runner.connector_scheduler._job_statuses
     assert not runner.scheduler.requests
 
 
@@ -3946,7 +3946,7 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
     pending_store_jobs = set(req_status.transfer_jobs)
     assert pending_store_jobs
     assert all(
-        runner.connector_scheduler._jobs[jid].is_store for jid in pending_store_jobs
+        runner.connector_scheduler._job_statuses[jid].is_store for jid in pending_store_jobs
     )
 
     free_block_queue.num_free_blocks = 0
@@ -5369,7 +5369,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         fence_snapshots.append(
             dict(runner.connector_scheduler._block_id_to_pending_jobs)
         )
-        for js in runner.connector_scheduler._jobs.values():
+        for js in runner.connector_scheduler._job_statuses.values():
             if js.is_store:
                 job_block_ids.update(js.deferred_fence_block_ids or [])
 
@@ -5441,7 +5441,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
         decoded_tokens=[0] * tokens_per_chunk,
         complete_transfers=False,
     )
-    assert len(runner.connector_scheduler._jobs) >= 1
+    assert len(runner.connector_scheduler._job_statuses) >= 1
 
     # Run 2: 4 more tokens + EOS → block 3 full → more jobs created.
     # Request finishes → all jobs registered in fence.
@@ -5449,7 +5449,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
         decoded_tokens=[0] * tokens_per_chunk + [EOS_TOKEN_ID],
         complete_transfers=False,
     )
-    num_jobs = len(runner.connector_scheduler._jobs)
+    num_jobs = len(runner.connector_scheduler._job_statuses)
     assert num_jobs >= 2, f"Expected multiple in-flight jobs, got {num_jobs}"
 
     # Run 3: block reuse → fence flushes both jobs.
@@ -5466,7 +5466,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
 
     # Post-condition: fence cleaned up, all jobs gone.
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
+    assert len(runner.connector_scheduler._job_statuses) == 0
 
 
 def test_request_finished_mixed_full_attn_and_sliding_window(
@@ -5527,7 +5527,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         fence_snapshots.append(
             dict(runner.connector_scheduler._block_id_to_pending_jobs)
         )
-        for js in runner.connector_scheduler._jobs.values():
+        for js in runner.connector_scheduler._job_statuses.values():
             if js.is_store:
                 sw_block_ids.update(js.fenced_block_ids or [])
                 non_sw_block_ids.update(js.deferred_fence_block_ids or [])
@@ -5572,7 +5572,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
+    assert len(runner.connector_scheduler._job_statuses) == 0
 
 
 def test_chunked_local_attention_reports_its_chunk_window():
@@ -5947,9 +5947,9 @@ class TestMambaHybridOffloadServing:
         )
 
         def complete_all_jobs():
-            job_ids = list(scheduler._jobs.keys())
+            job_ids = list(scheduler._job_statuses.keys())
             for jid in job_ids:
-                stored.update(scheduler._jobs[jid].keys)
+                stored.update(scheduler._job_statuses[jid].keys)
             if job_ids:
                 scheduler.update_connector_output(
                     KVConnectorOutput(
