@@ -34,13 +34,6 @@ logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
-_FP8_DTYPES = (
-    torch.float8_e4m3fn,
-    torch.float8_e4m3fnuz,
-    torch.float8_e5m2,
-    torch.float8_e5m2fnuz,
-)
-
 
 @functools.cache
 def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
@@ -3748,8 +3741,8 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         "_rocm_sparse_attn_prefill_ragged_triton",
     )
 
-    kv_is_fp8 = kv.dtype in _FP8_DTYPES
-    assert not (kv_is_fp8 and q.dtype in _FP8_DTYPES), (
+    kv_is_fp8 = kv.dtype == FP8_DTYPE
+    assert not (kv_is_fp8 and q.dtype == FP8_DTYPE), (
         f"FP8 KV requires model-dtype Q, got q={q.dtype}"
     )
     block_h = 16
@@ -4117,8 +4110,8 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         rope_head_dim,
         "_rocm_sparse_attn_decode_ragged_bf16_triton",
     )
-    kv_is_fp8 = kv.dtype in _FP8_DTYPES
-    assert not (kv_is_fp8 and q.dtype in _FP8_DTYPES), (
+    kv_is_fp8 = kv.dtype == FP8_DTYPE
+    assert not (kv_is_fp8 and q.dtype == FP8_DTYPE), (
         f"FP8 KV requires model-dtype Q, got q={q.dtype}"
     )
     if out is None:
