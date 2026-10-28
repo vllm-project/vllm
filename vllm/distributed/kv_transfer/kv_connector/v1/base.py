@@ -92,8 +92,9 @@ class KVConnectorTransferResults:
     Failed receives also appear in ``finished_recving`` so the scheduler can
     release the request from its transfer wait state.
 
-    A receive that may still be written to (e.g. a timed-out one-sided RDMA
-    write) can be reported in ``failed_recving`` only, by every worker. With
+    Connectors that opt in via ``reports_failed_recving_before_finished`` may
+    report a receive that can still be written to (e.g. a timed-out one-sided
+    RDMA write) in ``failed_recving`` only, from every worker. With
     ``kv_load_failure_policy="fail"`` the request then fails, but its blocks
     stay allocated until the receive is reported in ``finished_recving``.
     """
@@ -743,6 +744,19 @@ class KVConnectorBase_V1(ABC):
 
         """
         return None
+
+    def reports_failed_recving_before_finished(self) -> bool:
+        """Whether workers may report a receive in ``failed_recving`` before
+        it is in ``finished_recving``.
+
+        If True, ``KVOutputAggregator`` forwards a receive that every worker
+        reported failed without waiting for it to finish.
+
+        Returns:
+            bool: False by default.
+
+        """
+        return False
 
     @classmethod
     def build_kv_connector_stats(
