@@ -30,24 +30,29 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEQuantConfig,
+    )
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm"]
 FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4", "fp8_block"]
+Sm90WeightFormat = Literal["fp8_block", "mxfp4"]
 _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
     kNvfp4Static: "nvfp4",
     kMxfp4Static: "mxfp4",
     kFp8Static128BlockSym: "fp8_block",
 }
 
-# FP4 weights run on the Blackwell megakernels, block FP8 weights on the
-# Hopper FP8 pull-style CuTeDSL megakernel.
+# FP4 weights run on the Blackwell megakernels. Block FP8 and MXFP4 weights
+# run on the Hopper pull-style CuTeDSL megakernels with FP8 activations.
+_SM90 = (9, 0)
 _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
     "nvfp4": _BLACKWELL_CAPABILITIES,
-    "mxfp4": _BLACKWELL_CAPABILITIES,
-    "fp8_block": frozenset({(9, 0)}),
+    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM90},
+    "fp8_block": frozenset({_SM90}),
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
 
@@ -61,6 +66,15 @@ def _current_capability() -> tuple[int, int] | None:
 
 def supports_current_device() -> bool:
     return _current_capability() in _SUPPORTED_CAPABILITIES
+
+
+def sm90_weight_format(quant_config: FusedMoEQuantConfig) -> Sm90WeightFormat | None:
+    """The weights a Hopper megakernel takes, or None on Blackwell."""
+    if quant_config.use_fp8_w8a8 and quant_config.is_block_quantized:
+        return "fp8_block"
+    if quant_config.weight_quant_dtype == "mxfp4" and _current_capability() == _SM90:
+        return "mxfp4"
+    return None
 
 
 _E2M1_LUT = (
@@ -152,7 +166,9 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"weight scheme {weight_key}")
     elif weight_format not in spec.weight_formats:
         unsupported.append(f"{weight_format.upper()} weights")
-    elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format]:
+    elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format] or (
+        spec.kernel == "deep_gemm" and _current_capability() == _SM90
+    ):
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
@@ -177,7 +193,12 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append("runtime weight transfer")
     if vllm_config.parallel_config.enable_dbo:
         unsupported.append("dual batch overlap")
-    if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
+    # FlashInfer keeps a per-expert scale of the Hopper MXFP4 weights outside
+    # the layer parameters, where EPLB cannot move it.
+    if vllm_config.parallel_config.enable_eplb and (
+        spec.kernel == "deep_gemm"
+        or (weight_format == "mxfp4" and _current_capability() == _SM90)
+    ):
         unsupported.append("EPLB")
     return tuple(unsupported)
 
@@ -251,7 +272,7 @@ def mxfp4_moe_ep_weights(
     w2_scale: torch.Tensor,
 ) -> FlashInferMoeEpWeights:
     spec = flashinfer_moe_ep_backend_spec(moe_backend)
-    if spec.kernel == "deep_gemm":
+    if spec.kernel == "deep_gemm" or _current_capability() == _SM90:
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
         w13=_dequant_mxfp4_experts(w13, w13_scale),
@@ -323,6 +344,7 @@ class _FlashInferMoeEpApi:
                 MoEEpTensors,
                 MoEWeightPack,
                 Nvfp4CutedslMegaMoeConfig,
+                PrequantizedMoEWeights,
                 Sm90PullFp8MegaMoeConfig,
             )
         except ImportError as err:
@@ -330,6 +352,12 @@ class _FlashInferMoeEpApi:
                 "FlashInfer MoE-EP requires the public API shipped with "
                 "FlashInfer 0.7.2 or newer"
             ) from err
+        try:
+            from flashinfer.moe_ep import (
+                Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig as Sm90Mxfp4MegaMoeConfig,
+            )
+        except ImportError:
+            Sm90Mxfp4MegaMoeConfig = None
 
         self.BootstrapConfig = BootstrapConfig
         self.DeepGemmMegaMoeConfig = DeepGemmMegaMoeConfig
@@ -339,7 +367,9 @@ class _FlashInferMoeEpApi:
         self.MoEEpTensors = MoEEpTensors
         self.MoEWeightPack = MoEWeightPack
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
+        self.PrequantizedMoEWeights = PrequantizedMoEWeights
         self.Sm90PullFp8MegaMoeConfig = Sm90PullFp8MegaMoeConfig
+        self.Sm90Mxfp4MegaMoeConfig = Sm90Mxfp4MegaMoeConfig
 
 
 def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
@@ -363,12 +393,18 @@ class FlashInferMoeEp:
         epilogue: FlashInferMoeEpEpilogue | None = None,
         *,
         apply_topk_in_fc1: bool,
-        block_fp8: bool = False,
+        sm90_format: Sm90WeightFormat | None = None,
     ) -> None:
         spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
         if spec.kernel == "deep_gemm":
             _expose_deep_gemm_to_flashinfer()
         api = _load_flashinfer_moe_ep_api()
+        if sm90_format == "mxfp4" and api.Sm90Mxfp4MegaMoeConfig is None:
+            raise RuntimeError(
+                "FlashInfer MoE-EP with MXFP4 weights on Hopper requires a "
+                "FlashInfer build with the SM90 MXFP4 MegaMoE "
+                "(flashinfer-ai/flashinfer#4843)"
+            )
         if epilogue is None:
             epilogue = FlashInferMoeEpEpilogue()
         ep_group = get_ep_group()
@@ -383,11 +419,17 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
-        if block_fp8:
+        if sm90_format == "fp8_block":
             megakernel = api.Sm90PullFp8MegaMoeConfig(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,
                 fp8_scale_mode="blockwise",
+                gate_up_clamp=moe.swiglu_limit,
+            )
+        elif sm90_format == "mxfp4":
+            megakernel = api.Sm90Mxfp4MegaMoeConfig(
+                intermediate_size=moe.intermediate_size,
+                top_k=moe.experts_per_token,
                 gate_up_clamp=moe.swiglu_limit,
             )
         elif spec.kernel == "cutedsl":
@@ -413,7 +455,7 @@ class FlashInferMoeEp:
                 activation_clamp=moe.swiglu_limit,
                 fast_math=True,
             )
-        if block_fp8:
+        if sm90_format == "fp8_block":
             # The oracle already put w13 in the kernel's row order
             # (sm90_fp8_block_moe_ep_weights); the kernel reads (E, K, N) views
             # with K contiguous.
@@ -429,7 +471,14 @@ class FlashInferMoeEp:
                 ),
             )
         else:
-            weight_pack = api.MoEWeightPack(
+            # Packed MXFP4 goes in as loaded: FlashInfer folds its E8M0 scales
+            # into the kernel layout instead of requantizing.
+            weight_pack_cls = (
+                api.PrequantizedMoEWeights
+                if sm90_format == "mxfp4"
+                else api.MoEWeightPack
+            )
+            weight_pack = weight_pack_cls(
                 w13=weights.w13,
                 w2=weights.w2,
                 w13_scale=weights.w13_scale,
@@ -450,7 +499,7 @@ class FlashInferMoeEp:
         )
         # Created collectively, in the same order on every EP rank.
         self._workspaces: list[tuple[int, Any]] = []
-        if block_fp8:
+        if sm90_format is not None:
             self._workspaces = [
                 (capacity, self._mega_layer.create_workspace(capacity))
                 for capacity in _SM90_WORKSPACE_CAPACITIES
@@ -463,7 +512,7 @@ class FlashInferMoeEp:
         self._top_k = moe.experts_per_token
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
         self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
-        self._block_fp8 = block_fp8
+        self._sm90_format = sm90_format
 
     @property
     def can_overlap_shared_experts(self) -> bool:
@@ -475,7 +524,8 @@ class FlashInferMoeEp:
 
     @property
     def topk_indices_dtype(self) -> torch.dtype:
-        return torch.int32
+        # The SM90 MXFP4 kernel takes int64 expert ids.
+        return torch.int64 if self._sm90_format == "mxfp4" else torch.int32
 
     @property
     def is_monolithic(self) -> bool:
@@ -510,12 +560,15 @@ class FlashInferMoeEp:
                 f"FlashInfer MoE-EP got {hidden_states.shape[0]} tokens, but "
                 f"the workspace supports at most {self._max_num_tokens}"
             )
-        tensors = self._tensors(hidden_states, topk_ids, topk_weights)
-        if self._return_workspace_view and getattr(
-            self._mega_layer, "supports_output_view", False
-        ):
-            return self._mega_layer.forward(tensors, return_workspace_view=True)
-        return self._mega_layer.forward(tensors, workspace=self._workspace())
+        tensors = self._tensors(
+            hidden_states, topk_ids.to(self.topk_indices_dtype), topk_weights
+        )
+        return self._mega_layer.forward(
+            tensors,
+            workspace=self._workspace(),
+            return_workspace_view=self._return_workspace_view
+            and getattr(self._mega_layer, "supports_output_view", False),
+        )
 
     def _workspace(self) -> Any | None:
         """The smallest workspace that fits the batch on every EP rank.
@@ -545,7 +598,9 @@ class FlashInferMoeEp:
             device=self._device,
         )
         topk_ids = (
-            torch.arange(self._top_k, dtype=torch.int32, device=self._device)
+            torch.arange(
+                self._top_k, dtype=self.topk_indices_dtype, device=self._device
+            )
             .mul_(self._num_experts // self._top_k)
             .view(1, self._top_k)
         )
@@ -571,13 +626,14 @@ class FlashInferMoeEp:
         """
         if self._mega_layer is None:
             raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
-        # The SM90 FP8 legs carry two (unused in blockwise mode) dequant scales.
+        # The SM90 legs end in two scale slots: unused by blockwise FP8, while
+        # MXFP4 keeps a per-expert scale there (hence no EPLB).
         (fc1_weight, fc1_sf, *_), (fc2_weight, fc2_sf, *_) = (
             self._mega_layer._transformed
         )
         # Block-FP8 weights keep their dtype, so the layer holds the kernel's
         # FP8 runtime layout that preprocessed-weight loading rebuilds from.
-        as_bytes = not self._block_fp8
+        as_bytes = self._sm90_format != "fp8_block"
         return (
             _expert_major_bytes(fc1_weight, as_bytes),
             _expert_major_bytes(fc1_sf, as_bytes),
