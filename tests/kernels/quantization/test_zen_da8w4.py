@@ -489,6 +489,31 @@ def test_zen_cpu_int8_decode_keeps_full_width_values(mock_zentorch_ops):
         torch.testing.assert_close(w13_out[expert], quantized)
 
 
+@pytest.mark.parametrize("num_bits", [4, 8])
+def test_zen_cpu_conversion_logs_the_width(mock_zentorch_ops, caplog, num_bits):
+    """VLLM_CPU_INT4_W4A8 reads as int4-only, so the width it actually serves
+    has to be visible at load time."""
+    w13, w2, w13_scale, w2_scale = _make_moe_weights(32, num_bits=num_bits)
+
+    import vllm.logger
+
+    vllm.logger._print_info_once.cache_clear()
+    with caplog.at_level("INFO"):
+        int_wna16.convert_to_wna16_moe_kernel_format(
+            backend=WNA16MoEBackend.ZEN_CPU,
+            layer=torch.nn.Module(),
+            quant_config=_ct_quant_args(num_bits=num_bits, group_size=32),
+            input_dtype=torch.bfloat16,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+        )
+
+    assert f"DA8W{num_bits}" in caplog.text
+    assert f"W{num_bits}A16" in caplog.text
+
+
 def _ct_quant_args(num_bits: int = 4, group_size: int | None = 128):
     """A real compressed-tensors config: the Zen gate reads the width by
     checkpoint format, so a duck-typed stub reads as an unknown format."""

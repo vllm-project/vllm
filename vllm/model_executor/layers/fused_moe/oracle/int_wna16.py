@@ -1717,6 +1717,12 @@ def convert_to_wna16_moe_kernel_format(
         # Backend selection already rejected widths outside _ZEN_CPU_NUM_BITS.
         zen_num_bits = _zen_cpu_num_bits(quant_config)
         assert zen_num_bits is not None
+        # Names the width, since VLLM_CPU_INT4_W4A8 reads as int4-only.
+        logger.info_once(
+            "[zen_cpu] Using zentorch_fused_moe for DA8W%d MoE (W%dA16 checkpoint)",
+            zen_num_bits,
+            zen_num_bits,
+        )
         return _process_weights_zen_cpu(
             w13,
             w2,
