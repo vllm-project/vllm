@@ -1555,6 +1555,7 @@ def test_v41_compressor_bi_batch_chunk_pd_graph_cache_bytes(length, monkeypatch)
         2,
     )
     compressor.rms_norm_eps = 1e-20
+    compressor.pcp_size, compressor.pcp_rank = 1, 0
     compressor.norm = SimpleNamespace(weight=gamma)
     compressor.state_cache = SimpleNamespace(prefix="state", kv_cache=ring)
     compressor.k_cache_prefix = "main"
