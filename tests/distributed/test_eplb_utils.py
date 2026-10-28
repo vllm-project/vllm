@@ -271,8 +271,14 @@ class _EplbTestGroup:
         return 2
 
 
-def test_rearrange_handles_heterogeneous_model_topologies_sync(monkeypatch):
-    """Sync rearrangement uses each model's physical expert and group counts."""
+class _EplbTestEvent:
+    def record(self, stream: torch.Stream | None = None) -> None:
+        pass
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async):
+    """Rearrangement keeps each model's physical expert and group counts."""
     monkeypatch.setattr(
         parallel_config_module.current_platform, "is_cuda_alike", lambda: True
     )
@@ -283,10 +289,11 @@ def test_rearrange_handles_heterogeneous_model_topologies_sync(monkeypatch):
         eplb_config=EPLBConfig(
             window_size=4,
             step_interval=8,
-            use_async=False,
+            use_async=use_async,
             communicator="torch_gloo",
         ),
     )
+    monkeypatch.setattr(eplb_state_module, "CpuGpuEvent", _EplbTestEvent)
     state = EplbState(parallel_config, torch.device("cpu"))
     group = _EplbTestGroup()
     monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: group)
@@ -312,14 +319,29 @@ def test_rearrange_handles_heterogeneous_model_topologies_sync(monkeypatch):
 
     state.rearrange()
 
-    assert torch.equal(
-        state.model_states["target"].physical_to_logical_map,
-        torch.tensor([[1, 2, 3, 0, 1, 2]]),
-    )
-    assert torch.equal(
-        state.model_states["draft"].physical_to_logical_map,
-        torch.tensor([[1, 2, 3, 4, 5, 0, 1, 2]]),
-    )
+    target_state = state.model_states["target"]
+    draft_state = state.model_states["draft"]
+    if use_async:
+        assert target_state.eplb_stats is not None
+        assert (
+            target_state.eplb_stats.num_replicas,
+            target_state.eplb_stats.num_groups,
+        ) == (6, 4)
+        assert draft_state.eplb_stats is not None
+        assert (
+            draft_state.eplb_stats.num_replicas,
+            draft_state.eplb_stats.num_groups,
+        ) == (8, 6)
+        assert target_state.rebalanced and draft_state.rebalanced
+    else:
+        assert torch.equal(
+            target_state.physical_to_logical_map,
+            torch.tensor([[1, 2, 3, 0, 1, 2]]),
+        )
+        assert torch.equal(
+            draft_state.physical_to_logical_map,
+            torch.tensor([[1, 2, 3, 4, 5, 0, 1, 2]]),
+        )
 
 
 def test_allreduce_list_handles_matching_shapes(dist_init):
