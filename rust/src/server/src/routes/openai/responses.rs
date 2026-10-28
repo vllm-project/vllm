@@ -31,6 +31,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
+use vllm_llm::RequestTimestamps;
 
 use self::convert::{build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
@@ -40,6 +41,7 @@ use self::types::{
 };
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, chat_submit_error, engine_error, server_error};
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
@@ -86,8 +88,12 @@ pub async fn create_responses(
     );
 
     if stream_requested {
-        let event_stream =
-            responses_event_stream(chat_stream, response, prepared.include_reasoning);
+        let event_stream = responses_event_stream(
+            chat_stream,
+            response,
+            prepared.include_reasoning,
+            api_server_options.enable_per_request_metrics,
+        );
         let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
@@ -138,6 +144,7 @@ async fn collect_responses(
     include_reasoning: bool,
     ApiServerOptions {
         enable_log_requests,
+        enable_per_request_metrics,
         ..
     }: &ApiServerOptions,
 ) -> Result<ResponsesResponse, ApiError> {
@@ -180,6 +187,7 @@ async fn collect_responses(
         response,
         items.into_output_items(),
         terminal,
+        *enable_per_request_metrics,
     ))
 }
 
@@ -199,6 +207,7 @@ struct TerminalOutput {
     finish_reason: FinishReason,
     kv_transfer_params: Option<serde_json::Value>,
     ec_transfer_params: Option<serde_json::Value>,
+    timestamps: RequestTimestamps,
 }
 
 impl TerminalOutput {
@@ -212,12 +221,14 @@ impl TerminalOutput {
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                timestamps,
                 ..
             } => Some(Self {
                 usage,
                 finish_reason,
                 kv_transfer_params: kv_transfer_params.map(|params| *params),
                 ec_transfer_params: ec_transfer_params.map(|params| *params),
+                timestamps,
             }),
             _ => None,
         }
@@ -233,7 +244,9 @@ fn completed_response(
         finish_reason,
         kv_transfer_params,
         ec_transfer_params,
+        timestamps,
     }: TerminalOutput,
+    enable_per_request_metrics: bool,
 ) -> ResponsesResponse {
     let status = response_status(&finish_reason);
     ResponsesResponse {
@@ -243,6 +256,8 @@ fn completed_response(
         }),
         output,
         usage: Some(build_usage(&usage)),
+        metrics: enable_per_request_metrics
+            .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count)),
         kv_transfer_params,
         ec_transfer_params,
         ..response
@@ -282,6 +297,7 @@ async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
     response: ResponsesResponse,
     include_reasoning: bool,
+    enable_per_request_metrics: bool,
     mut y: TryYielder<ResponseStreamEvent, Infallible>,
 ) -> Result<(), Infallible> {
     let mut items = OutputItemStreamer::new(include_reasoning);
@@ -352,7 +368,9 @@ async fn responses_event_stream(
                 Some(&terminal.usage),
             )
         }
-        Some(terminal) => completed_response(response, output, terminal),
+        Some(terminal) => {
+            completed_response(response, output, terminal, enable_per_request_metrics)
+        }
     };
     y.yield_ok(terminal_event(Arc::new(final_response))).await;
     Ok(())

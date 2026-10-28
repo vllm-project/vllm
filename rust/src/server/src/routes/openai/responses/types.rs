@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
     ToolReference, default_true, deserialize_request_top_k,
@@ -660,6 +661,8 @@ pub struct ResponsesResponse {
     pub usage: Option<ResponseUsage>,
     #[serde(default)]
     pub user: Option<String>,
+    /// vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    pub metrics: Option<PerRequestMetrics>,
     pub presence_penalty: f32,
     pub frequency_penalty: f32,
     #[serde(default)]
@@ -831,6 +834,7 @@ mod tests {
                 total_tokens: 5,
             }),
             user: None,
+            metrics: None,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
             kv_transfer_params: None,

@@ -727,6 +727,7 @@ pub(crate) fn build_response(
         truncation,
         usage: None,
         user,
+        metrics: None,
         presence_penalty: sampling.presence_penalty,
         frequency_penalty: sampling.frequency_penalty,
         kv_transfer_params: None,

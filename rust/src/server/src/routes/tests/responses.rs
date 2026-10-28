@@ -375,6 +375,57 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_per_request_metrics_follow_server_option() {
+    for (enabled, stream) in [(false, false), (true, false), (true, true)] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-openai-responses-metrics",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_api_server_options(ApiServerOptions {
+                    enable_per_request_metrics: enabled,
+                    ..Default::default()
+                }),
+        ));
+        let response = responses_call(
+            &app,
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "input": "hello",
+                "stream": stream,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let payloads = if stream {
+            sse_json_payloads(&text)
+        } else {
+            vec![serde_json::from_str(&text).expect("decode json")]
+        };
+        // Only the final response carries metrics, as in Python.
+        let (terminal, lifecycle) = payloads.split_last().expect("response payload");
+        let final_response = if stream {
+            &terminal["response"]
+        } else {
+            terminal
+        };
+        assert_eq!(final_response["metrics"].is_object(), enabled, "{text}");
+        assert!(
+            lifecycle.iter().all(|event| event["response"].get("metrics").is_none()),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_header_request_id_takes_precedence() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
