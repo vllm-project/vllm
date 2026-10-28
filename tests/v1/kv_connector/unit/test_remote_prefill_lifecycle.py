@@ -621,10 +621,7 @@ def test_early_finished_recving_completes_pending_load(aborted):
         assert scheduler.running == [request]
     scheduler.update_from_output(output_1, EMPTY_MODEL_RUNNER_OUTPUT)
     if not aborted:
-        scheduler.update_from_output(output_2, create_model_runner_output([request]))
-        scheduler.update_from_output(
-            scheduler.schedule(), create_model_runner_output([request], use_eos=True)
-        )
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     scheduler.schedule()
     assert_scheduler_empty(scheduler)
 

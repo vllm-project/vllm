@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-import threading
 import time
-from contextlib import suppress
+from contextlib import closing, suppress
 
 import pytest
 
@@ -39,9 +38,8 @@ def rpc_queue():
 
 @pytest.fixture
 def receiver():
-    receiver = EarlyKVRecvReceiver()
-    yield receiver
-    receiver.close()
+    with closing(EarlyKVRecvReceiver()) as receiver:
+        yield receiver
 
 
 def _sender(monkeypatch, connector, path: str) -> EarlyKVRecvSender:
@@ -50,22 +48,16 @@ def _sender(monkeypatch, connector, path: str) -> EarlyKVRecvSender:
     return EarlyKVRecvSender(path)
 
 
-def _wait_for_poll(sender: EarlyKVRecvSender, reader: MessageQueue) -> bool | None:
-    """None if the worker would still be spinning after 5 s."""
-    result: list[bool] = []
-    thread = threading.Thread(
-        target=lambda: result.append(sender.wait_for_poll(reader)), daemon=True
-    )
-    thread.start()
-    thread.join(timeout=5)
-    return result[0] if result else None
-
-
+@pytest.mark.timeout(10)
 def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver):
     writer, reader = rpc_queue
-    sender = _sender(monkeypatch, _PendingConnector(done={"r"}), receiver.path)
-    try:
-        assert _wait_for_poll(sender, reader) is True
+    monkeypatch.setattr(early_kv_recv.time, "perf_counter", lambda: 0)
+    # Enqueue during the wait: the sender must leave the RPC for dequeue().
+    monkeypatch.setattr(early_kv_recv.time, "sleep", lambda _: writer.enqueue("rpc"))
+    with closing(
+        _sender(monkeypatch, _PendingConnector(done={"r"}), receiver.path)
+    ) as sender:
+        assert sender.wait_for_poll(reader)
         sender.poll()
         received: list[set[str]] = []
         deadline = time.monotonic() + 5
@@ -73,44 +65,22 @@ def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver):
             received.extend(receiver.drain())
         assert received == [{"r"}]
         assert receiver.drain() == []
-        # Still waiting for the next RPC: poll again after the interval.
-        assert _wait_for_poll(sender, reader) is True
-        writer.enqueue("rpc")
-        assert _wait_for_poll(sender, reader) is False
-    finally:
-        sender.close()
+        assert not sender.wait_for_poll(reader)
+        assert not sender.wait_for_poll(reader)  # Already queued RPC takes priority.
+        assert reader.dequeue(timeout=1) == "rpc"
 
 
 def test_sender_stops_polling_when_idle_or_shut_down(monkeypatch, rpc_queue, receiver):
     _, reader = rpc_queue
-    sender = _sender(monkeypatch, _PendingConnector(), receiver.path)
-    try:
+    with closing(_sender(monkeypatch, _PendingConnector(), receiver.path)) as sender:
         # A paused engine sends nothing: block in dequeue() instead of spinning.
         now = time.perf_counter()
         monkeypatch.setattr(early_kv_recv.time, "perf_counter", lambda: now + 2)
-        assert _wait_for_poll(sender, reader) is False
+        assert not sender.wait_for_poll(reader)
         sender.step_rpc_done()
-        assert _wait_for_poll(sender, reader) is True
+        assert sender.wait_for_poll(reader)
         reader.shutdown()
-        assert _wait_for_poll(sender, reader) is False
-    finally:
-        sender.close()
-
-
-def test_rpc_arriving_during_poll_wait_is_not_consumed(
-    monkeypatch, rpc_queue, receiver
-):
-    writer, reader = rpc_queue
-    sender = _sender(monkeypatch, _PendingConnector(), receiver.path)
-    monkeypatch.setattr(early_kv_recv, "_POLL_INTERVAL_S", 1.0)
-    monkeypatch.setattr(early_kv_recv, "_ACTIVE_WINDOW_S", 5.0)
-    monkeypatch.setattr(early_kv_recv.time, "sleep", lambda _: writer.enqueue("rpc"))
-    try:
-        sender.poll()
-        assert _wait_for_poll(sender, reader) is False
-        assert reader.dequeue(timeout=1) == "rpc"
-    finally:
-        sender.close()
+        assert not sender.wait_for_poll(reader)
 
 
 def _poll_with_failure(path, broken_channel):
