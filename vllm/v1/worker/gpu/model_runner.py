@@ -1155,6 +1155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.block_tables,
                         self.attn_groups,
                         self.kv_cache_config,
+                        self.cudagraph_manager.capture_stream,
                     )
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
@@ -1903,6 +1904,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,
+                    np.diff(input_batch.cu_num_logits_np),
                 )
                 self._set_active_loras(*lora_inputs)
         else:
