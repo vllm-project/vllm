@@ -46,7 +46,6 @@ class CompressedSlotMappingKernel(
     @triton.jit(
         do_not_specialize=[
             "block_table_stride",
-            "num_tokens",
             "out_len",
             "num_rows",
         ]
@@ -54,7 +53,7 @@ class CompressedSlotMappingKernel(
     def kernel(
         # [out_len]
         compressed_slot_mapping_ptr,
-        # [num_tokens] the tokens' own slots
+        # the tokens' own slots
         slot_mapping_ptr,
         # [num_reqs + 1]
         query_start_loc_ptr,
@@ -66,7 +65,6 @@ class CompressedSlotMappingKernel(
         block_size,
         dcp_world_size,
         cp_interleave,
-        num_tokens,
         out_len,
         num_rows,
         COMPRESS_RATIO: tl.constexpr,
@@ -84,7 +82,6 @@ class CompressedSlotMappingKernel(
             COMPRESS_RATIO,
             dcp_world_size,
             cp_interleave,
-            num_tokens,
             out_len,
             num_rows,
             PAD_ID=PAD_ID,
@@ -145,7 +142,6 @@ class CompressedSlotMappingKernel(
             compress_ratio=compile_key.compress_ratio,
             dcp_world_size=compile_key.dcp_world_size,
             cp_interleave=compile_key.cp_interleave,
-            num_tokens=1,
             out_len=1,
         )
 
@@ -161,14 +157,14 @@ class CompressedSlotMappingKernel(
         compress_ratio: int,
         dcp_world_size: int,
         cp_interleave: int,
-        num_tokens: int,
         out_len: int,
     ) -> LaunchSpec:
         num_rows = block_table.shape[0]
-        tail_blocks = cdiv(max(out_len - num_tokens, 0), self.TRITON_BLOCK_SIZE)
+        # The tail clears from the device-read qsl[num_rows], which the host
+        # cannot know without a sync; size for the widest tail.
+        tail_blocks = cdiv(out_len, self.TRITON_BLOCK_SIZE)
         return (num_rows + tail_blocks,), dict(
             block_table_stride=block_table.stride(0),
-            num_tokens=num_tokens,
             out_len=out_len,
             num_rows=num_rows,
             COMPRESS_RATIO=compress_ratio,
@@ -218,7 +214,6 @@ def get_compressed_slot_mapping(
         compress_ratio,
         dcp_world_size,
         cp_interleave,
-        num_tokens,
         out_len,
     )
     return compressed_slot_mapping[:num_tokens]

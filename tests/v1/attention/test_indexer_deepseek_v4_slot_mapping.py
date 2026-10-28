@@ -413,6 +413,35 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_clears_gap_from_qsl_end_to_padded_width():
+    """Graph-padded decode reads the full out width while qsl stays flat
+    at the unpadded total; the tail clears from qsl[num_rows]."""
+    device = torch.device("cuda")
+    # Two one-token requests plus a padding row; the captured graph pads
+    # the step to 8 tokens while qsl goes flat at the unpadded total of 2.
+    query_start_loc = torch.tensor([0, 1, 2, 2], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([10, 12, 0], dtype=torch.int32, device=device)
+    block_table = torch.tensor(
+        [[3, 9], [4, 8], [0, 0]], dtype=torch.int32, device=device
+    )
+    slot_mapping = torch.tensor(
+        [100, 101, -1, -1, -1, -1, -1, -1], dtype=torch.int64, device=device
+    )
+    out = torch.full((8,), 777, dtype=torch.int64, device=device)
+    compressed = get_compressed_slot_mapping(
+        8,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size=4,
+        compress_ratio=2,
+        out=out,
+    )
+    assert compressed.tolist() == [9 * 4, 8 * 4 + 1, -1, -1, -1, -1, -1, -1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
     """Under DCP each rank writes only the states it owns, at the state's
     rank-local position."""

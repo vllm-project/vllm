@@ -85,7 +85,6 @@ def _compressed_slot_body(
     compress_ratio,
     dcp_world_size,
     cp_interleave,
-    num_tokens,
     out_len,
     num_rows,
     PAD_ID: tl.constexpr,
@@ -93,10 +92,12 @@ def _compressed_slot_body(
 ):
     batch_idx = tl.program_id(0)
     if batch_idx >= num_rows:
-        # Request programs cover [0, num_tokens); graph replays read the
-        # buffer's full padded width, so tail programs clear the rest.
+        # Request programs cover [0, qsl[num_rows]); CUDA-graph padding
+        # keeps that below the padded token count, and an uncleared gap
+        # there retains the previous step's slots.
+        covered = tl.load(query_start_loc_ptr + num_rows)
         offsets = (
-            num_tokens
+            covered
             + (batch_idx - num_rows) * TRITON_BLOCK_SIZE
             + tl.arange(0, TRITON_BLOCK_SIZE)
         )
@@ -469,7 +470,6 @@ def _decode_prologue_kernel(
             _load_scalar(params, 13),
             _load_scalar(params, 14),
             _load_scalar(params, 15),
-            num_actual_tokens,
             _load_scalar(params, 16),
             _load_scalar(params, 17),
             PAD_ID=-1,
@@ -838,10 +838,11 @@ class DecodePrologueBatch:
         out_len = out.numel()
         self._note_shared_tensor("query_start_loc", query_start_loc)
         self._note_shared_tensor("seq_lens", seq_lens)
-        self._note_shared_int("num_actual_tokens", num_tokens)
         self._add_row(
             _KIND_COMPRESSED_SLOT,
-            num_rows + cdiv(max(out_len - num_tokens, 0), _TRITON_BLOCK_SIZE),
+            # The tail clears from the device-read qsl[num_rows], which the
+            # host cannot know without a sync; size for the widest tail.
+            num_rows + cdiv(out_len, _TRITON_BLOCK_SIZE),
             [out, slot_mapping, block_table],
             [
                 block_table.stride(0),
