@@ -1202,6 +1202,14 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
+        if self.aux_output_config.enable_hidden_states:
+            from vllm.distributed.aux_output_connector.hidden_states import (
+                verify_hidden_config,
+            )
+
+            verify_hidden_config(self)
+        if not self.aux_output_config.enable_return_routed_experts:
+            return
         if not self.model_config.is_moe:
             raise ValueError("AuxOutput Connector only supports MoE models.")
         if not self.cache_config.enable_prefix_caching:

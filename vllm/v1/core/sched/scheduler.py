@@ -469,7 +469,11 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
+            AuxOutputSchedulerConnector(
+                self.kv_cache_manager,
+                self.connector,
+                aux_config=vllm_config.aux_output_config,
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -2416,6 +2420,16 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
+            hidden_capture, hidden_skip = (
+                (None, None)
+                if self.aux_output_connector is None
+                else self.aux_output_connector.take_hidden_output(
+                    request,
+                    model_runner_output.aux_output_connector_output,
+                    len(new_token_ids),
+                    stopped,
+                )
+            )
             routed_experts = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2504,6 +2518,8 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        hidden_state_capture=hidden_capture,
+                        hidden_capture_skip_reason=hidden_skip,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
