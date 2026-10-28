@@ -492,6 +492,9 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
+            if getattr(self, "prefill_context_kv_only", False):
+                self.draft_tokens[:num_reqs].fill_(-1)
+                return self.draft_tokens[:num_reqs]
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
@@ -601,6 +604,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
+        if getattr(self, "prefill_context_kv_only", False):
+            self.draft_tokens[:num_reqs].fill_(-1)
+            return self.draft_tokens[:num_reqs]
         # During FULL cudagraph with a model that supports decode metadata updates,
         # the metadata update is captured in the graph, and we can skip the full
         # build below.

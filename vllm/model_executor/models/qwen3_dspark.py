@@ -240,6 +240,17 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        from .dspark_context_kv import DSparkContextKVModel, context_kv_only
+
+        self.prefill_context_kv_only = context_kv_only(vllm_config)
+        if self.prefill_context_kv_only:
+            self.model = DSparkContextKVModel(
+                vllm_config, target_layer_num, maybe_prefix(prefix, "model")
+            )
+            self.draft_id_to_target_id = None
+            self.has_own_embed_tokens = True
+            self.has_own_lm_head = True
+            return
         self.model = Qwen3DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -310,6 +321,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if self.prefill_context_kv_only:
+            return self.model.load_context_weights(weights)
         model_weights = {}
         includes_embed_tokens = False
         includes_lm_head = False
