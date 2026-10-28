@@ -655,9 +655,21 @@ def test_integrated_gpu_expert_assignment(
     assert bool(aligned) == expected_aligned
 
 
-@pytest.mark.parametrize("override,expected_naive_m2", [("0", False), ("1", True)])
+@pytest.mark.parametrize(
+    "override,m,expected_naive",
+    [
+        ("0", 1, False),
+        ("0", 2, False),
+        ("1", 1, True),
+        ("1", 2, False),
+        ("2", 2, True),
+        ("true", 2, True),
+        ("heuristic", 2, True),
+        ("invalid_setting", 2, True),
+    ],
+)
 def test_naive_block_assignment_override(
-    override: str, expected_naive_m2: bool, monkeypatch, workspace_init
+    override: str, m: int, expected_naive: bool, monkeypatch, workspace_init
 ):
     """Test environment variable override for naive block assignment."""
     import vllm.envs as envs
@@ -673,7 +685,7 @@ def test_naive_block_assignment_override(
     monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
 
     set_random_seed(7)
-    m, e, n, k, topk, dtype = 2, 128, 256, 128, 8, torch.bfloat16
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
     a = torch.randn((m, k), device="cuda", dtype=dtype)
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
@@ -682,7 +694,7 @@ def test_naive_block_assignment_override(
     with set_current_vllm_config(vllm_config):
         fused_moe(a, w1, w2, score, topk, renormalize=False)
 
-    assert (not bool(aligned)) == expected_naive_m2
+    assert (not bool(aligned)) == expected_naive
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)

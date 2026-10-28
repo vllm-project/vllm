@@ -1646,7 +1646,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Override Triton MoE naive block assignment path. None for auto-detection,
-    # "0" / "false" to disable naive path, "1" / "true" to force standard threshold.
+    # "0" / "false" to disable naive path, "true" / "heuristic" to force standard
+    # discrete threshold, or a positive integer N to cap naive assignment at
+    # num_tokens <= N (e.g. "1" to enforce batch-1 only for A/B benchmarking).
     "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT": lambda: os.getenv(
         "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT", None
     ),

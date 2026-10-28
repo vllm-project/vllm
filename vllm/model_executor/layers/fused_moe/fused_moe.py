@@ -1611,6 +1611,29 @@ def _weights_host_resident(*weights: torch.Tensor) -> bool:
     return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
 
 
+@functools.lru_cache(maxsize=4)
+def _parse_naive_block_assignment_override(
+    override: str | None,
+) -> int | bool | None:
+    if override is None:
+        return None
+    val = override.strip().lower()
+    if val in ("0", "false", "off", "disable", "disabled"):
+        return False
+    if val in ("true", "on", "enable", "enabled", "heuristic"):
+        return True
+    try:
+        max_tokens = int(val)
+        return max_tokens if max_tokens > 0 else False
+    except ValueError:
+        logger.warning_once(
+            "Invalid VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT value '%s'. "
+            "Falling back to architecture-aware auto-detection.",
+            override,
+        )
+        return None
+
+
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1642,29 +1665,19 @@ def _prepare_expert_assignment(
             and block_shape[1] > 0
         )
     ):
-        override = envs.VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT
-        if override is not None:
-            val = override.strip().lower()
-            if val in ("0", "false", "off"):
-                naive_block_assignment = False
-            elif val in ("1", "true", "on"):
-                naive_block_assignment = (
-                    num_tokens * top_k_num * 4 <= global_num_experts
-                )
-            else:
-                try:
-                    max_tokens = int(val)
-                    naive_block_assignment = (
-                        num_tokens <= max_tokens
-                        and num_tokens * top_k_num * 4 <= global_num_experts
-                    )
-                except ValueError:
-                    naive_block_assignment = (
-                        num_tokens * top_k_num * 4 <= global_num_experts
-                    )
+        override_rule = _parse_naive_block_assignment_override(
+            envs.VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT
+        )
+        if override_rule is False:
+            naive_block_assignment = False
+        elif override_rule is True:
+            naive_block_assignment = num_tokens * top_k_num * 4 <= global_num_experts
+        elif isinstance(override_rule, int):
+            naive_block_assignment = (
+                num_tokens <= override_rule
+                and num_tokens * top_k_num * 4 <= global_num_experts
+            )
         else:
-            from vllm.platforms import current_platform
-
             device_idx = (
                 topk_ids.device.index if topk_ids.device.index is not None else 0
             )
