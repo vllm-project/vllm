@@ -49,7 +49,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
         GroupOffloadConfig,
     )
 

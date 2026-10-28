@@ -43,8 +43,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
-    RequestOffloadState,
     _create_req_context,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    RequestOffloadState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,

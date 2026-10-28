@@ -21,8 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    GroupOffloadConfig,
     OffloadingConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    GroupOffloadConfig,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
