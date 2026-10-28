@@ -2854,6 +2854,9 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
+            if request.use_structured_output:
+                # The grammar drops -1 padding, which is not a proposed draft.
+                spec_token_ids = strip_speculative_padding(spec_token_ids)
             # Add newly generated spec token ids to the request.
             request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
@@ -3260,7 +3263,7 @@ class Scheduler(SchedulerInterface):
         num_accepted_tokens: int,
         num_verified_tokens: int,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats or not num_draft_tokens:
+        if not self.log_stats:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)

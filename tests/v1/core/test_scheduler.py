@@ -2814,12 +2814,12 @@ def test_adaptive_verification_stats_count_actual_budget():
     assert payload["per_step_verified"] == [4]
 
 
-def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
+def _run_spec_verify_steps(scheduler, rounds, grammar=None):
     """Drive prefill + one draft/verify step per round for a single request.
 
     ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
-    step each. ``num_invalid_per_round`` optionally injects the grammar-invalid
-    draft count structured-output decoding would trim before scheduling.
+    step each. ``grammar`` optionally makes the request use structured outputs
+    after prefill, so the scheduler trims draft tokens with it.
     Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
@@ -2839,10 +2839,12 @@ def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
 
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
-    for i, (spec, out) in enumerate(rounds):
+    if grammar is not None:
+        req.structured_output_request = SimpleNamespace(
+            grammar=grammar, reasoning_ended=True
+        )
+    for spec, out in rounds:
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
-        if num_invalid_per_round is not None and num_invalid_per_round[i]:
-            req.num_trimmed_spec_tokens = num_invalid_per_round[i]
         output = scheduler.schedule()
         scheduler.update_from_output(output, _mk_output([out]))
     return req
@@ -2870,24 +2872,67 @@ def test_per_request_spec_decode_detailed_records_per_step():
     assert payload["num_spec_steps"] == 3
 
 
+class _PrefixGrammar:
+    """Grammar that accepts only the first ``num_valid`` draft tokens."""
+
+    def __init__(self, num_valid: int) -> None:
+        self.num_valid = num_valid
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        return tokens[: self.num_valid]
+
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        return True
+
+    def is_terminated(self) -> bool:
+        return False
+
+
 def test_per_request_spec_decode_counts_invalid_drafts():
-    # Grammar-invalid draft tokens trimmed by sync structured output decoding
-    # still count as drafted, but not as verified.
+    # Sync structured output decoding schedules the valid draft tokens plus the
+    # first invalid one. The trimmed draft tokens still count as drafted, but
+    # the -1 padding does not.
     scheduler = create_scheduler(
-        num_speculative_tokens=3,
+        num_speculative_tokens=4,
         per_request_spec_decode_metrics="summary",
     )
-    # One verify step: 2 scheduled + 1 grammar-invalid, output accepts 2.
+    # One verify step: [1, 2, 3] proposed, 1 valid, [1, 2] scheduled, 1 accepted.
     req = _run_spec_verify_steps(
-        scheduler,
-        [([1, 2], [1, 2, 5])],
-        num_invalid_per_round=[1],
+        scheduler, [([1, 2, 3, -1], [1, 5])], grammar=_PrefixGrammar(num_valid=1)
     )
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["num_draft_tokens"] == 3
     assert payload["num_verified_tokens"] == 2
-    assert payload["num_accepted_draft_tokens"] == 2
-    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
+    assert payload["num_accepted_draft_tokens"] == 1
+    assert payload["acceptance_histogram"] == [0, 1, 0, 0, 0]
+
+
+def test_spec_decode_stats_keep_batch_after_all_padding_draft():
+    # An async request whose draft slots are all padding proposes no draft
+    # tokens. It must not reset the stats of other requests in the batch.
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    requests = create_requests(num_requests=2, num_tokens=1)
+    req_ids = [req.request_id for req in requests]
+    req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
+    for req in requests:
+        scheduler.add_request(req)
+
+    def _mk_output(sampled):
+        return ModelRunnerOutput(
+            req_ids=req_ids, req_id_to_index=req_id_to_index, sampled_token_ids=sampled
+        )
+
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
+    scheduler.update_draft_token_ids(DraftTokenIds(req_ids, [[1, 2], [1, 2]]))
+    output = scheduler.schedule()
+    output.num_invalid_spec_tokens = {req_ids[1]: 2}
+    engine_outputs = scheduler.update_from_output(output, _mk_output([[1, 9], [5]]))
+
+    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 2
+    assert stats.num_draft_tokens == 2
+    assert stats.num_verified_tokens == 2
+    assert stats.num_accepted_tokens == 1
 
 
 def test_per_request_spec_decode_acceptance_disabled_by_default():
