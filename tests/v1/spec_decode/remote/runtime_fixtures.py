@@ -3,6 +3,7 @@
 """Shared real configuration and stateful external draft executor fixtures."""
 
 from collections import defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +35,15 @@ BLOCK_SIZE = 2
 STRIDE = 1 << 20
 
 
+@contextmanager
+def cpu_accelerator_cleanup():
+    """CPU model loading has no accelerator allocator to empty."""
+    with pytest.MonkeyPatch.context() as patch:
+        if torch.accelerator.current_accelerator() is None:
+            patch.setattr(torch.accelerator, "empty_cache", lambda: None)
+        yield
+
+
 @pytest.fixture
 def cpu_parallel_state(tmp_path_factory):
     from vllm.distributed import (
@@ -44,7 +54,7 @@ def cpu_parallel_state(tmp_path_factory):
     )
 
     rendezvous = tmp_path_factory.mktemp("remote-dist") / "store"
-    with set_current_vllm_config(make_config()):
+    with cpu_accelerator_cleanup(), set_current_vllm_config(make_config()):
         init_distributed_environment(
             world_size=1,
             rank=0,
