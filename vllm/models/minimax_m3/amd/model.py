@@ -25,6 +25,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
