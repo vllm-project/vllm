@@ -9,10 +9,10 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.kernels.linear import (
+    fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
@@ -274,7 +274,7 @@ class Fp8LinearMethod(LinearMethodBase):
             # Use per-token quantization for better perf if dynamic and cutlass
             if self.act_q_static:
                 self.activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
+            elif cutlass_fp8_supported() or current_platform.is_xpu():
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
@@ -432,7 +432,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     bias,
                 )
             else:
-                if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+                if fp8_scaled_mm_is_batch_invariant(self.fp8_linear):
                     return self.fp8_linear.apply_weights(layer, x, bias)
 
                 # per-tensor/channel: dequant to BF16 and run GEMM
@@ -508,11 +508,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key = kFp8Dynamic128Sym
         else:
             weight_key = kFp8StaticTensorSym
-            activation_key = (
-                kFp8StaticTensorSym
-                if self.quant_config.activation_scheme == "static"
-                else kFp8DynamicTensorSym
-            )
+            if self.quant_config.activation_scheme == "static":
+                activation_key = kFp8StaticTensorSym
+            elif envs.VLLM_BATCH_INVARIANT:
+                # A per-tensor dynamic scale is the max over every token in
+                # the batch, so a request's quantized activations would depend
+                # on the requests it is batched with.
+                activation_key = kFp8DynamicTokenSym
+            else:
+                activation_key = kFp8DynamicTensorSym
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
@@ -774,6 +779,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.moe_block_shape,
+            per_act_token_quant=self.per_act_token_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
@@ -818,6 +824,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
