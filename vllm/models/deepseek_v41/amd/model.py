@@ -604,6 +604,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
+                lambda: any(i < cut for i in self.aux_hidden_state_layers),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
@@ -1343,6 +1344,18 @@ class DeepseekV41LLMForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                getattr(layer, "ffn", None),
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 AMD fused shared experts are not supported yet; "
+                "please open an issue."
+            )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
