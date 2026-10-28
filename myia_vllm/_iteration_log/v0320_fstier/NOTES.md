@@ -3915,3 +3915,41 @@ Et le census prouve que ce n'est **pas** une photo inter-crons (la leçon du cyc
 **Observation VRAM (Q41)** : GPU 0 à **23 026-23 035 MiB** sur 3 échantillons — le seuil de ré-ouverture (> 23 000) est franchi de ~30 MiB. Cause identifiée **côté desktop** : GPU 1, sans desktop, reste à **21 650** ; `--query-compute-apps` liste ~10 processus Windows sur GPU 0 (3× Edge, Chrome, VS Code, 2× NVIDIA Overlay, Docker Desktop, PhoneExperienceHost…) ≈ 1,4 GiB. Marge vers le total 24 564 = **1 530 MiB**. **Q41 non ré-ouverte** : mécanisme identifié, risque de boot non démontré (le boot du 27/10 à 0.73 a réussi avec 22,25 GiB libres). Re-question seulement si GPU 1 monte aussi, ou si un boot échoue.
 
 **Retrait de la question** : nouveau `StartedAt` **et** `--kv-offloading-size 32` dans les args non-défauts du conteneur recréé.
+
+---
+
+## Cycle 08:1xZ (28/10) — feu 🟠 CONFIRMÉ sur deux passes : repli po-2024 demandé, et correction de mon propre cadrage Q43
+
+**Moteur sain, mais saturé.** 30 h sans restart (`StartedAt` 27/10 02:15:05Z), `RC=0`, OOM **0**, health **200 en 3,3 ms**, 3 conteneurs Up. Ce n'est pas une panne — c'est une **saturation KV**, et c'est la distinction qui commande tout le reste du cycle.
+
+### Les deux jambes du 🟠, mesurées
+
+**Batterie 1 (6 sondes, 20 s d'écart, requête d'un mot)** : `90.04s` (timeout client) · `60.88s` · `50.55s` · `9.73s` · `12.74s` · `10.26s` ⇒ **6/6 > 9 s, 5/6 > 10 s, médiane 50,55 s**.
+**Batterie 2 (~5 min plus tard, 3 sondes)** : `0.23s` · `13.21s` · `10.42s` ⇒ **2/3 > 10 s**.
+**Cumul : 8/9 sondes au-dessus de 9 s sur deux passes espacées** — ce n'est pas la rafale de prefills froids du faux 🟠 de 02:2xZ, c'est installé.
+
+**Préemptions 20 → 27 (+7 sur 2 h)** contre **+0** au cycle précédent. **KV GPU 97,5 %** avec **7 requêtes longues en vol** et une file à 0-3 (elle se vide par préemption, pas par service). `prompt_tokens_total` **+27,8 M en ~25 min** : le moteur travaille, il n'est pas figé. **Zéro WEDGE 2/2.**
+
+**Census 2 h** : 535 requêtes à 4,5/min, dont **310 corps de 100 K-1 M (58 %)** ; statuts 200:510, 401:23, 400:2. **`400 window+1` = 2** — la fenêtre à zéro du cycle 06:1xZ **ne tenait pas** ; il faut plusieurs fenêtres avant de conclure quoi que ce soit sur #431.
+
+**WEDGE** : 3 nouveaux `fail 1/2` (06:59:30, 07:19:25, 07:26:32), tous à compteurs avançants, **zéro 2/2**. Densité en hausse (2 en 7 min) mais le moteur n'a jamais décroché.
+
+**Corroboration par un consommateur réel** : la condensation RSM a basculé en **fallback cloud à 07:41-07:43** (`#2719 cloud fallback condensation succeeded` ×2, puis `Condensation completed`) — exactement pendant l'épisode. Le petit caller synchrone est la première victime, et il dégrade proprement. C'est la prédiction du 27/10 vérifiée sur pièce.
+
+### Action : repli po-2024 mandaté à claudish
+
+[ASK] posté sur le dashboard claudish (08:2xZ) avec les deux batteries, le mécanisme (KV 97,5 %, admission `scheduler_reserve_full_isl=True`), et la demande d'un **seul** siège, **po-2024 en premier** selon l'échelle du user (puis po-2023, po-2027, po-2028 en dernier). J'ai **explicitement assumé** de ne pas attendre un 2ᵉ cycle 🟠 : ma règle des deux cycles visait les transitoires, un **timeout à 90 s sur une requête d'un mot** n'en est pas un.
+
+### ⚠ Correction de mon propre cadrage Q43 (à ne pas répéter)
+
+J'ai présenté ce matin le tier RAM 24 → 32 GiB comme un plafond « **13 → 20 sessions** ». En regardant la saturation de près, c'est **faux dans sa formulation** : ce qui sature est le **KV GPU (831 723 tokens)**, pas le tier. Élargir le tier RAM élargit le **working set gardé en cache** — donc moins de re-prefill à la ré-admission — mais **pas le nombre de requêtes admises simultanément**, qui reste borné par `gpu-util 0.73` et par l'admission « prompt entier » . **Le tier aide la pression observée ; il n'est pas le levier de concurrence.** Le levier immédiat est le repli de siège. La leçon vaut au-delà de Q43 : ne pas confondre **capacité de cache** et **capacité de concurrence**.
+
+### Ce que je n'ai pas fait, délibérément
+
+**Aucun recreate** du conteneur (qui appliquerait les 32 GiB). À 97,5 % de KV, un restart viderait 831 K tokens de contexte vivant et déclencherait une tempête de re-prefill — le piège documenté du 20/10 (« les restarts aggravent via le cache wipe »). Le recreate attend un creux.
+
+### Annexes
+
+VRAM : GPU 0 **22 871-22 872 MiB** — **redescendue sous la ligne 23 000 toute seule** depuis les 23 034 du 07:2xZ (le desktop a rendu ~160 MiB), ce qui **confirme expérimentalement** l'hypothèse desktop : GPU 1 reste plat à 21 650, GPU 2 à 98 MiB (CoursIA libre). `/dev/shm` **24G/63G = 39 %**. Prefix cache since-boot : 664,5 M queries / 519,3 M hits = **78,2 %** ; `external_prefix_cache_hits_total` **108,5 M**. Condensation nominale hors incident. nbaudit **ok 08:06:00Z**, 0 échec, 5 séries. Commit hôte **76,1 %** (marge 91,9 Go). G: OK (82 %, 705 G libres).
+
+Sécurité : aucune IP inconnue en 200. `92.184.141.58` (1×200) **attribuée par son contenu** — prompt système « expert en synthèse de communications inter-agents » ⇒ condensation RSM, même famille que Q40, **pas une alerte**. `fp=1f7f6080cb65` ×20 = clé morte en boucle de 401 (connue) ; `NONE` ×2. WARN RSM « concurrent instance possible (myia-ai-01) » : `CronList` ne montre **qu'un** cron `d6ab14d5` — pas de doublon de mon côté, c'est une autre lane de la machine.
