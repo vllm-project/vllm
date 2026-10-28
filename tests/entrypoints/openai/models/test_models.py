@@ -4,6 +4,7 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
 
@@ -13,8 +14,8 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # generation quality here
 
 
-@pytest.fixture(scope="module")
-def server(qwen3_lora_files):
+@pytest.fixture(scope="module", params=[False, True], ids=["online", "offline"])
+def server(qwen3_lora_files, request):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -34,7 +35,10 @@ def server(qwen3_lora_files):
         "128",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    if request.param:
+        snapshot_download(MODEL_NAME)
+    env = {"HF_HUB_OFFLINE": "1"} if request.param else {}
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env) as remote_server:
         yield remote_server
 
 

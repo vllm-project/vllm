@@ -3,6 +3,9 @@
 
 from vllm import envs
 
+# Bind Hugging Face's snapshot downloader before ModelScope patches Hub functions.
+from vllm.model_hub import hf_snapshot_download as _hf_snapshot_download  # noqa: F401
+
 if envs.VLLM_USE_MODELSCOPE:
     try:
         # Patch here, before each import happens

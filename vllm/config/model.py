@@ -153,9 +153,10 @@ class ModelConfig:
     """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
-    """Name or path of the Hugging Face model to use. It is also used as the
+    """Name or path of the model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
-    not specified."""
+    not specified. Use `hf://owner/model` or `modelscope://owner/model` to
+    select a Hub independently of `VLLM_USE_MODELSCOPE`."""
     model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object
     storage (e.g., RunAI) to preserve the original URI while `model` points to
@@ -168,8 +169,8 @@ class ModelConfig:
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
     tokenizer: str = None  # type: ignore[assignment]
-    """Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    name or path will be used."""
+    """Name or path of the tokenizer to use. If unspecified, model
+    name or path will be used. Supports `hf://` and `modelscope://` prefixes."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
 

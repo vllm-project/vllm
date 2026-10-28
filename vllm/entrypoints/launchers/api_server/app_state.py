@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.model_hub import strip_model_source
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -49,7 +50,7 @@ async def init_app_state(
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
-        served_model_names = [args.model]
+        served_model_names = [strip_model_source(args.model)]
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)

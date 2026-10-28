@@ -344,6 +344,26 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+### Per-model Hub selection
+
+Use `hf://owner/model` or `modelscope://owner/model` for the model, `--tokenizer`,
+or the `model` field in `--speculative-config`, including corresponding `LLM` arguments.
+A ModelScope target can use a Hugging Face draft:
+
+```shell
+vllm serve modelscope://Qwen/Qwen3-8B \
+  --speculative-config '{"method":"eagle3","model":"hf://RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
+```
+
+Prefixes override `VLLM_USE_MODELSCOPE` per model; bare IDs and local paths are
+unchanged. Install `modelscope` for `modelscope://`. The default served name omits
+the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
+Use existing revision and download-directory options; URI revisions, subpaths,
+and queries are not supported.
+Cross-repository `auto_map` code uses the same Hub as its model or tokenizer,
+with the existing `code_revision` option. Executing custom code still requires
+`trust_remote_code`.
+
 ## Feature Status Legend
 
 - ✅︎ indicates that the feature is supported for the model.

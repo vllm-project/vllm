@@ -119,6 +119,7 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
+from vllm.model_hub import parse_model_source, resolve_model_source
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -930,6 +931,34 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+        resolve_source = functools.partial(
+            resolve_model_source,
+            download_dir=self.download_dir,
+            hf_token=self.hf_token,
+            code_revision=self.code_revision,
+        )
+        model = self.model
+        reference = parse_model_source(model)
+        if reference is not None:
+            self.model = resolve_source(
+                model,
+                revision=self.revision,
+                metadata_only=self.load_format == "dummy",
+            )
+            if not self.served_model_name:
+                self.served_model_name = [reference[1]]
+            if self.tokenizer is None:
+                self.tokenizer = model
+        if self.tokenizer is not None:
+            tokenizer_revision = self.tokenizer_revision or self.revision
+            if self.tokenizer == model and tokenizer_revision == self.revision:
+                self.tokenizer = self.model
+            else:
+                self.tokenizer = resolve_source(
+                    self.tokenizer,
+                    revision=tokenizer_revision,
+                    metadata_only=True,
+                )
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             # Skip cloud storage URIs (s3://, gs://, az://) — they are not
@@ -2132,6 +2161,19 @@ class EngineArgs:
         self.speculative_config = {
             k.replace("-", "_"): v for k, v in self.speculative_config.items()
         }
+        if draft_model := self.speculative_config.get("model"):
+            draft_load_config = self.speculative_config.get("draft_load_config") or {}
+            if isinstance(draft_load_config, LoadConfig):
+                draft_load_config = asdict(draft_load_config)
+            self.speculative_config["model"] = resolve_model_source(
+                draft_model,
+                revision=self.speculative_config.get("revision"),
+                code_revision=self.speculative_config.get("code_revision"),
+                download_dir=draft_load_config.get("download_dir") or self.download_dir,
+                hf_token=self.hf_token,
+                metadata_only=draft_load_config.get("load_format", self.load_format)
+                == "dummy",
+            )
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
