@@ -270,6 +270,16 @@ def test_mxfp4_hadamard32_target_resolves_to_rotated_mxfp4_linear():
     assert method_cls is Mxfp4OnlineLinearMethod
 
 
+def test_rocm_platform_supports_mxfp4_hadamard32():
+    """`--quantization mxfp4_hadamard32` reaches the ROCm allowlist unchanged."""
+    try:
+        from vllm.platforms.rocm import RocmPlatform
+    except ImportError:
+        pytest.skip("vllm.platforms.rocm not importable outside a ROCm stack")
+
+    RocmPlatform.verify_quantization("mxfp4_hadamard32")
+
+
 @pytest.mark.parametrize("size", [0, 24, 33])
 def test_hadamard_size_must_be_power_of_two(size):
     with pytest.raises(ValueError, match="power of two"):
