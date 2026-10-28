@@ -1725,13 +1725,12 @@ class VllmConfig:
             and (
                 executor_backend not in ("mp", "uni")
                 or self.parallel_config.nnodes_within_dp != 1
-                or self.parallel_config.pipeline_parallel_size != 1
                 or not self.kv_transfer_config.is_kv_consumer
             )
         ):
             raise ValueError(
                 "enable_early_recv requires a KV consumer with the uni executor "
-                "or same-node mp workers, and PP=1."
+                "or same-node mp workers."
             )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:

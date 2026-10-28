@@ -384,6 +384,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
+    def has_pending_recving(self) -> bool:
+        assert self.connector_worker is not None
+        return self.connector_worker.has_pending_recving()
+
+    def poll_finished_recving(self) -> set[str]:
+        assert self.connector_worker is not None
+        return self.connector_worker.poll_finished_recving()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()

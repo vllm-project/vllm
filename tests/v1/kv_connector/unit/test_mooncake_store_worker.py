@@ -183,6 +183,7 @@ def _make_store_recving_thread(
     tp_rank: int = 0,
     disk_offload_buffer_budget_bytes: int | None = None,
     is_hma_required: bool = False,
+    early_recv: bool = False,
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -206,6 +207,7 @@ def _make_store_recving_thread(
         coord=coord,
         disk_offload_buffer_budget_bytes=disk_offload_buffer_budget_bytes,
         is_hma_required=is_hma_required,
+        early_recv=early_recv,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -286,6 +288,7 @@ class _FakeKVTransferConfig:
     ) -> None:
         self.kv_role = kv_role
         self.kv_connector_extra_config = extra_config or {}
+        self.enable_early_recv = False
 
     def get_from_extra_config(self, key: str, default: object) -> object:
         return self.kv_connector_extra_config.get(key, default)
@@ -3696,6 +3699,7 @@ def _make_bare_worker(
     block_size: int = 16,
     kv_role: str = "kv_both",
     save_decode_cache: bool = False,
+    early_recv: bool = False,
 ) -> mooncake_store_worker.MooncakeStoreWorker:
     """Construct a MooncakeStoreWorker via __new__, bypassing __init__.
 
@@ -3720,6 +3724,10 @@ def _make_bare_worker(
     worker.kv_recv_threads = []
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
+    worker.early_recv = early_recv
+    worker._loading_req_ids = set()
+    worker._loaded_req_ids = set()
+    worker._loaded_with_errors_req_ids = set()
     worker.finished_store_req = set()
     worker.tp_size = 1
     worker.store_tp_size = None
@@ -4579,6 +4587,43 @@ def test_start_load_kv_queues_async_load():
 
     assert req.load_spec.token_len == 32
     assert w.recv_request_queue.get_nowait() is req
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("is_hma_required", [False, True])
+def test_early_recv_reports_only_error_free_loads_early(is_hma_required):
+    """A load with errors must not run before the scheduler sees its invalid
+    blocks or failure, so only error-free loads go out early, each once."""
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = [[-1, 0], [0, 0], [0, 0]]
+    recv_thread = _make_store_recving_thread(
+        store, is_hma_required=is_hma_required, early_recv=True
+    )
+    w = _make_bare_worker(kv_role="kv_consumer", early_recv=True)
+    w._is_hma_required = is_hma_required
+    w.kv_recv_threads = [recv_thread]
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    for req_id in ("bad", "good", "late"):
+        meta.add_request(_make_load_req(req_id, [b"h0", b"h1"], token_len=32))
+
+    w.start_load_kv(meta)
+    assert w.has_pending_recving()
+    for _ in range(2):
+        recv_thread._handle_request(w.recv_request_queue.get_nowait())
+
+    assert w.poll_finished_recving() == {"good"}
+    results = w.get_transfer_results(set(), meta)
+    assert results.finished_recving == {"bad"}
+    assert results.failed_recving == ({"bad"} if is_hma_required else set())
+    assert w.get_block_ids_with_load_errors() == (set() if is_hma_required else {0})
+
+    # An error-free load found by the step's get_finished() waits for the poll.
+    recv_thread._handle_request(w.recv_request_queue.get_nowait())
+    assert w.get_transfer_results(set(), meta).finished_recving == set()
+    assert w.has_pending_recving()
+    assert w.poll_finished_recving() == {"late"}
+    assert not w.has_pending_recving()
+    assert w.poll_finished_recving() == set()
 
 
 def test_putting_consumer_queues_decode_save():

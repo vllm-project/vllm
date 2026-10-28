@@ -84,6 +84,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.parallel_config.data_parallel_size_local = 1
     cfg.kv_transfer_config.kv_role = "kv_both"
     cfg.kv_transfer_config.kv_connector_extra_config = {}
+    cfg.kv_transfer_config.enable_early_recv = False
     cfg.kv_events_config = None
     cfg.model_config.model = "/tmp/m"
     cfg.model_config.use_mla = False

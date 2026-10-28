@@ -45,6 +45,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
+        assert vllm_config.kv_transfer_config is not None
+        if (
+            vllm_config.kv_transfer_config.enable_early_recv
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support enable_early_recv with "
+                "pipeline_parallel_size > 1."
+            )
         super().__init__(vllm_config, engine_id, kv_cache_config)
         if self.kv_transfer_config.enable_early_recv:
             self._early_finished_recving = set()

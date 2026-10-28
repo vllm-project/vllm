@@ -4541,6 +4541,17 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_
 
 
 @pytest.mark.cpu_test
+def test_early_recv_rejects_pipeline_parallel():
+    """Early receive is not supported with NIXL pull and PP, so it is rejected
+    for every KV role, not only kv_consumer."""
+    vllm_config = create_vllm_config(kv_role="kv_both")
+    vllm_config.kv_transfer_config.enable_early_recv = True
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    with pytest.raises(NotImplementedError, match="enable_early_recv"):
+        NixlConnectorWorker(vllm_config, "engine", make_kv_cache_config(block_size=16))
+
+
+@pytest.mark.cpu_test
 def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker = recv_worker
     worker._early_finished_recving = set()

@@ -306,6 +306,19 @@ Tensor-parallel collectives and low-precision arithmetic are not bitwise
 invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
 same greedy output as recomputing the prefix at the decode TP size.
 
+### Early Load Reporting
+
+Set `"enable_early_recv": true` at the top level of `--kv-transfer-config`
+(not in `kv_connector_extra_config`) to report loads that completed without
+errors before the next step output, so the scheduler can run their requests in
+its next step. Without it, a completion reaches the scheduler with a later step
+output, which delays the request by several engine steps, more with larger
+PP. Loads with errors keep the regular path. It requires `kv_consumer` or
+`kv_both` and the `uni` executor or the `mp` executor with all workers on one
+node. PP is supported, except together with NixlConnector in a
+`MultiConnector`, which rejects early receive with PP. See [Early receive reporting](nixl_connector_usage.md#early-receive-reporting)
+for polling behavior and overhead. Disabled by default.
+
 ## Standalone EGM over NVLink
 
 Extended GPU Memory (EGM) lets a separate Mooncake provider contribute
