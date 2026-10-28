@@ -71,7 +71,8 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
         help="MoE routing. balanced: fixed routing with equal load per EP rank. "
         "zipf: fixed weighted sampling without replacement (alpha=1.25), "
         "with expert popularity shuffled per layer. "
-        "auto: balanced with dummy weights, else real.",
+        "auto: zipf with dummy weights, else real; falls back to real when "
+        "the synthetic fixture is unsupported.",
     )
     parser.add_argument(
         "--exclude-drafter",

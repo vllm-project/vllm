@@ -31,9 +31,11 @@ token rows. Zipf allows EP load imbalance; `--routing balanced` gives equal
 load per EP rank. Neither synthetic mode supports grouped top-k routing;
 Zipf also does not support prefill context parallelism.
 
-The default remains `--routing auto`: balanced with dummy weights, real routing
-otherwise. Zipf is a synthetic workload, not a fit to a particular model's
-routing or speculative-token correlations.
+The default `--routing auto` selects Zipf with dummy weights and real routing
+otherwise. When the model or parallel layout does not support the synthetic
+fixture, `auto` warns and falls back to real routing. Use `--routing balanced`
+to explicitly request equal EP load. Zipf is a synthetic workload, not a fit
+to a particular model's routing or speculative-token correlations.
 
 ## Attention Kernel Benchmark
 

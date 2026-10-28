@@ -32,7 +32,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
 )
-@pytest.mark.parametrize("routing", ["auto", "zipf"])
+@pytest.mark.parametrize("routing", ["auto", "balanced"])
 def test_bench_forward_hybrid_verify(tmp_path, routing):
     """Repeated target verification starts from the same recurrent state."""
     config = dict(
@@ -111,7 +111,7 @@ def test_bench_forward_hybrid_verify(tmp_path, routing):
     assert [row["case"] for row in rows] == ["verify", "mixed"]
     for row in rows:
         (rank,) = row["ranks"]
-        assert rank["routing"] == ("balanced" if routing == "auto" else routing)
+        assert rank["routing"] == ("zipf" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["timing_scope"] == "target_only"
         assert row["median_us"] > 0

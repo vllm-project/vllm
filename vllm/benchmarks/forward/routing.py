@@ -235,17 +235,15 @@ def install_routing(
 ) -> tuple[str, RoutingFixture | None]:
     """Resolve `--routing` and install a synthetic fixture if selected.
 
-    `auto` is balanced with dummy weights and real otherwise; it falls back to
+    `auto` is Zipf with dummy weights and real otherwise; it falls back to
     real routing when the model doesn't support the fixture.
     """
     mode = requested
     if mode == "auto":
-        mode = "balanced" if dummy_weights else "real"
+        mode = "zipf" if dummy_weights else "real"
     if mode == "real":
         return mode, None
     parallel = runner.parallel_config
-    if mode == "zipf" and parallel.prefill_context_parallel_size > 1:
-        raise NotImplementedError("Zipf routing with prefill context parallelism.")
     ep_size = (
         parallel.data_parallel_size
         * parallel.tensor_parallel_size
@@ -257,6 +255,8 @@ def install_routing(
     if not parallel.enable_expert_parallel:
         num_tokens *= parallel.prefill_context_parallel_size
     try:
+        if mode == "zipf" and parallel.prefill_context_parallel_size > 1:
+            raise NotImplementedError("Zipf routing with prefill context parallelism.")
         routing = RoutingFixture(
             runner.model,
             num_tokens,
