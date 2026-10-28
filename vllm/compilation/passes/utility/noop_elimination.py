@@ -81,8 +81,8 @@ class NoOpEliminationPass(VllmInductorPass):
                 input = node.args[0]
                 # If the input is a reshape, rebind to that node
                 if self.is_reshape(input) and self.can_bypass(input):
-                    # The new input is guaranteed not to be a reshape,
-                    # because we process nodes in order
+                    # The new input is not a bypassable reshape, because we
+                    # process nodes in order
                     node.update_arg(0, input.args[0])
                     if len(input.users) == 0:
                         graph.erase_node(input)
@@ -97,7 +97,12 @@ class NoOpEliminationPass(VllmInductorPass):
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
-            elif is_func(node, torch.ops.aten.slice_scatter.default):
+            elif (
+                is_func(node, torch.ops.aten.slice_scatter.default)
+                # slice_scatter copies; replacing it with an alias is unsafe
+                # once the graph may hold in-place ops.
+                and not self.graph_may_mutate
+            ):
                 base, view, dim_index, start, end = node.args[:5]
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape

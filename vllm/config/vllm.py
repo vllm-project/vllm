@@ -1863,6 +1863,8 @@ class VllmConfig:
             and "+rotary_embedding" not in cc.custom_ops
         ):
             # MRoPE is not an IR op yet; its fusion matches the RoPE custom op.
+            # CompilationConfig only covers an explicit flag; this covers the
+            # optimization-level default.
             cc.custom_ops.append("+rotary_embedding")
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
