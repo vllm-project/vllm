@@ -252,6 +252,30 @@ def test_minimax_m3_sparse_decode_fp8_split_scales(
             v_scale=vs,
             fp16_dot=fp16_dot,
         )
+        if not batch_invariant and (
+            not fp16_dot
+            or cache.dtype == DTYPE
+            or (scale_mode == "per_token_head" and ks is not None)
+        ):
+            # Fallbacks retain the original split policy and numerics.
+            unchanged = torch.empty_like(q)
+            with monkeypatch.context() as patch:
+                patch.setenv("VLLM_BATCH_INVARIANT", "1")
+                minimax_m3_sparse_attn_decode(
+                    q,
+                    cache,
+                    topk,
+                    block_table,
+                    seq_lens,
+                    NUM_KV_HEADS,
+                    HEAD_DIM**-0.5,
+                    unchanged,
+                    decode_query_len=1,
+                    k_scale=ks,
+                    v_scale=vs,
+                    fp16_dot=fp16_dot,
+                )
+            torch.testing.assert_close(output, unchanged, rtol=0, atol=0)
 
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
     assert (got.float() - ref.float()).abs().mean() < (

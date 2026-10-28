@@ -673,20 +673,17 @@ def minimax_m3_sparse_attn_decode(
     # launch_pdl was specified but unrecognised"). Only pass it when PDL is
     # actually supported -- on ROCm use_pdl is always False, so it's omitted.
     pdl_launch = {"launch_pdl": True} if use_pdl else {}
-    tune_decode = (
-        current_platform.is_cuda()
+    fp16_dot = (
+        fp16_dot
+        and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and not envs.VLLM_BATCH_INVARIANT
-    )
-    fp16_dot = (
-        tune_decode
         and q.dtype == torch.bfloat16
         and use_fp8
         and kv_scale_mode != _KV_SCALE_PER_TOKEN_HEAD
-        and fp16_dot
     )
     # split-K over the selected blocks; chunk count is shape-constant (cuda graph).
-    if tune_decode:
+    if fp16_dot:
         # Target two CTAs per SM without rounding the split count to a power of two.
         resident = 2 * num_compute_units(q.device.index or 0)
         target = max(1, min(max_topk, resident // max(1, total_q * num_kv_heads)))
