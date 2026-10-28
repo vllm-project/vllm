@@ -26,6 +26,7 @@ from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
     DiarizedTranscriptionSegment,
     MultiModalEmbeddings,
+    StreamingDiarizedTranscriptParser,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -88,6 +89,60 @@ _MOSS_DIARIZED_HEADER_RE = re.compile(
     r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
 )
 _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
+
+
+class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
+    """Parses ``[start][Sxx]text[end]`` output, sending each segment once the
+    next segment's header has arrived."""
+
+    def __init__(self, model_cls: type[SupportsTranscription]) -> None:
+        super().__init__(model_cls)
+        self._scan_pos = 0
+        # (header start, header end, start time, speaker) of unsent segments.
+        self._headers: list[tuple[int, int, float, str]] = []
+        self._num_segments = 0
+
+    def process_delta(
+        self, text_delta: str, finished: bool
+    ) -> list[DiarizedTranscriptionSegment]:
+        self._text += text_delta
+        for match in _MOSS_DIARIZED_HEADER_RE.finditer(self._text, self._scan_pos):
+            self._scan_pos = match.end()
+            start = parse_diarized_timestamp(match["start"])
+            speaker = parse_diarized_speaker(match["speaker"])
+            if start is not None and speaker is not None:
+                self._headers.append((match.start(), match.end(), start, speaker))
+
+        # A segment's body runs up to the next header, so the last one stays
+        # open until the output ends.
+        num_final = len(self._headers) if finished else len(self._headers) - 1
+        segments: list[DiarizedTranscriptionSegment] = []
+        for index in range(num_final):
+            _, body_start, start, speaker = self._headers[index]
+            body_end = (
+                self._headers[index + 1][0]
+                if index + 1 < len(self._headers)
+                else len(self._text)
+            )
+            body = self._text[body_start:body_end]
+            end_match = _MOSS_DIARIZED_END_RE.search(body)
+            end = parse_diarized_timestamp(end_match["end"]) if end_match else None
+            if end_match is None or end is None or end < start:
+                raise ValueError(
+                    "Model output did not contain a valid diarized transcript"
+                )
+            if segment_text := body[: end_match.start()].strip():
+                segments.append(
+                    DiarizedTranscriptionSegment(
+                        start=start, end=end, speaker=speaker, text=segment_text
+                    )
+                )
+
+        del self._headers[: max(num_final, 0)]
+        self._num_segments += len(segments)
+        if finished and self._num_segments == 0:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        return segments
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -655,42 +710,14 @@ class MossTranscribeDiarizeForConditionalGeneration(
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
-        headers: list[tuple[re.Match[str], float, str]] = []
-        for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
-            start = parse_diarized_timestamp(match["start"])
-            speaker = parse_diarized_speaker(match["speaker"])
-            if start is not None and speaker is not None:
-                headers.append((match, start, speaker))
-
-        if not headers:
+        try:
+            return MossStreamingDiarizedParser(cls).process_delta(text, finished=True)
+        except ValueError:
             return []
 
-        segments: list[DiarizedTranscriptionSegment] = []
-        for index, (header, start, speaker) in enumerate(headers):
-            next_header_start = (
-                headers[index + 1][0].start() if index + 1 < len(headers) else len(text)
-            )
-            body = text[header.end() : next_header_start]
-            end_match = _MOSS_DIARIZED_END_RE.search(body)
-            if end_match is None:
-                return []
-
-            end = parse_diarized_timestamp(end_match["end"])
-            if end is None or end < start:
-                return []
-
-            segment_text = body[: end_match.start()].strip()
-            if segment_text:
-                segments.append(
-                    DiarizedTranscriptionSegment(
-                        start=start,
-                        end=end,
-                        speaker=speaker,
-                        text=segment_text,
-                    )
-                )
-
-        return segments
+    @classmethod
+    def get_streaming_diarized_parser_cls(cls) -> type[MossStreamingDiarizedParser]:
+        return MossStreamingDiarizedParser
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
