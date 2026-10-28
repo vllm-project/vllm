@@ -52,10 +52,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.molmo import (
-    _load_split_embedding,
-    _split_embedding_loader,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import normalize_image
 from vllm.multimodal.inputs import (
@@ -1176,9 +1172,6 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
             self.embedding_size,
             text_config.hidden_size,
             quant_config=quant_config,
-        )
-        self.embed_tokens.weight.weight_loader = _split_embedding_loader(
-            self.embed_tokens
         )
 
         decoder_layer = (
@@ -2659,9 +2652,8 @@ class Molmo2ForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        loaded: set[str] = set()
-        weights = _load_split_embedding(self.model.embed_tokens, weights, loaded)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper) | loaded
+        weights = _get_weights_with_merged_embedding(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
@@ -2670,3 +2662,29 @@ class Molmo2ForConditionalGeneration(
             connector="vision_backbone.image_projector",
             tower_model="vision_backbone",
         )
+
+
+def _get_weights_with_merged_embedding(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    embedding_weights = {}
+    for name, weight in weights:
+        if "wte.embedding" in name:
+            embedding_weights["embedding"] = weight
+        elif "wte.new_embedding" in name:
+            embedding_weights["new_embedding"] = weight
+        else:
+            yield (name, weight)
+    # this is compatible with most of quantization,
+    # because they won't quantize embed_tokens
+    if "embedding" not in embedding_weights or "new_embedding" not in embedding_weights:
+        raise ValueError(
+            "Checkpoint is missing 'wte.embedding' or "
+            "'wte.new_embedding' weights required for Molmo2."
+        )
+
+    embedding_weights = torch.cat(
+        [embedding_weights["embedding"], embedding_weights["new_embedding"]],
+        dim=0,
+    )
+    yield ("model.embed_tokens.weight", embedding_weights)

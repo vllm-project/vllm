@@ -156,19 +156,8 @@ class StaticSinkAttention(Attention, CustomOp):
         self.sink_value = None
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
-        """Set the sink K/V derived from the loaded weights (after every load).
-
-        On a weight reload the KV cache exists, so write them into it now:
-        captured CUDA graphs never rerun the population in ``forward``. On
-        cold start the KV cache is allocated after loading, so the first
-        forward with a KV cache populates it.
-        """
         self.sink_key = sink_key
         self.sink_value = sink_value
-        if self.kv_cache.numel() > 0:
-            self.populate_sink_kv(self.kv_cache)
-        else:
-            self.sink_populated = False
 
     def forward_native(
         self,

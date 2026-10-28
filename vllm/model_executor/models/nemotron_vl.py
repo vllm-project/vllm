@@ -16,9 +16,6 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
@@ -602,8 +599,6 @@ class LlamaNemotronVLForSequenceClassification(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_weights = super().load_weights(weights)
-        if not is_mtp_completeness_check_enabled():
-            return loaded_weights
 
         # reranker checkpoint omits the inner LM seq-cls head
         # (`language_model.score.*`). It is unused by this outer model, but

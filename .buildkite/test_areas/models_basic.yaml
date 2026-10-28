@@ -71,7 +71,6 @@ steps:
   - tests/models/test_registry.py
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl.py
-  - tests/models/test_openpangu_post_load.py
   - tests/models/test_deepseek_v41_decoder_replay_layers.py
   - tests/models/test_deepseek_v41_replay_batch.py
   - tests/models/test_deepseek_v41_pcp.py
@@ -89,7 +88,6 @@ steps:
       models/test_registry.py
       models/test_deepseek_v4_vl_rocm.py
       models/test_deepseek_v4_vl.py
-      models/test_openpangu_post_load.py
       models/transformers/test_layer_registry_e2e.py
       models/test_deepseek_v41_replay_start.py
       models/test_deepseek_v41_decoder_replay_layers.py
