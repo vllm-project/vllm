@@ -10,17 +10,16 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-xpu"
-nightly="${VLLM_XPU_KERNEL_NIGHTLY:-0}"
-kernel_build_args=()
-case "$nightly" in
+kernel_nightly="${VLLM_XPU_KERNEL_NIGHTLY:-0}"
+case "$kernel_nightly" in
   0|1) ;;
   *)
-    echo "VLLM_XPU_KERNEL_NIGHTLY must be 0 or 1, got: $nightly" >&2
+    echo "VLLM_XPU_KERNEL_NIGHTLY must be 0 or 1, got: $kernel_nightly" >&2
     exit 1
     ;;
 esac
 
-if [[ "$nightly" == "1" ]]; then
+if [[ "$kernel_nightly" == "1" ]]; then
   : "${BUILDKITE_JOB_ID:?Kernel nightly requires a Buildkite job}"
   # Invalidate a previous successful attempt before retrying this step.
   buildkite-agent meta-data set xpu-kernel-nightly-image pending
@@ -37,18 +36,6 @@ if [[ "$nightly" == "1" ]]; then
   wheel_name="$(basename "${wheels[0]}")"
   kernel_sha="$(cat "$kernel_dir/kernel-commit.txt")"
   IMAGE="$REGISTRY/$REPO:${BUILDKITE_COMMIT}-kernel-${kernel_sha:0:12}-${BUILDKITE_JOB_ID}-xpu"
-  kernel_build_args=(--build-context "kernel-wheel=${kernel_dir}")
-
-  requirements_backup="$(mktemp)"
-  cp requirements/xpu.txt "$requirements_backup"
-  trap 'cp "$requirements_backup" requirements/xpu.txt; rm -f "$requirements_backup"' EXIT
-  if [[ "$(grep -Ec '^vllm[-_]xpu[-_]kernels==' requirements/xpu.txt)" != "1" ]]; then
-    echo "Expected exactly one vllm-xpu-kernels pin in requirements/xpu.txt" >&2
-    exit 1
-  fi
-  sed -i -E \
-    "s|^vllm[-_]xpu[-_]kernels==.*$|vllm-xpu-kernels @ file:///opt/kernel-wheels/${wheel_name}|" \
-    requirements/xpu.txt
 fi
 
 # authenticate with AWS ECR
@@ -56,21 +43,46 @@ aws ecr-public get-login-password --region us-east-1 | docker login --username A
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com || true
 
 # skip build if image already exists
-if [[ "$nightly" == "0" ]] && docker manifest inspect "$IMAGE" &> /dev/null; then
+if [[ "$kernel_nightly" == "0" ]] && docker manifest inspect "$IMAGE" &> /dev/null; then
   echo "Image found"
 else
   echo "Image not found, proceeding with build..."
+  build_image="$IMAGE"
+  if [[ "$kernel_nightly" == "1" ]]; then
+    build_image="${IMAGE}-base"
+  fi
+
   # build
   docker build \
-    "${kernel_build_args[@]}" \
     --file docker/Dockerfile.xpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
-    --tag "$IMAGE" \
+    --tag "$build_image" \
     --progress plain .
-  if [[ "$nightly" == "1" ]]; then
+
+  if [[ "$kernel_nightly" == "1" ]]; then
     kernel_version="${wheel_name#vllm_xpu_kernels-}"
     kernel_version="${kernel_version%%-*}"
+
+    kernel_container="vllm-kernel-nightly-${BUILDKITE_JOB_ID}"
+    cleanup_kernel_container() {
+      docker rm -f "$kernel_container" >/dev/null 2>&1 || true
+    }
+    trap cleanup_kernel_container EXIT
+    docker create \
+      --name "$kernel_container" \
+      --entrypoint /bin/bash \
+      "$build_image" \
+      -c 'set -eo pipefail
+        uv pip install --python /opt/venv/bin/python \
+          --reinstall --no-deps /tmp/kernel-wheel.whl
+      '
+    docker cp "${wheels[0]}" "${kernel_container}:/tmp/kernel-wheel.whl"
+    docker start --attach "$kernel_container"
+    docker commit "$kernel_container" "$IMAGE"
+    docker rm "$kernel_container"
+    docker image rm "$build_image"
+
     docker run --rm --env "EXPECTED_KERNEL_VERSION=${kernel_version}" \
       --entrypoint /bin/bash "$IMAGE" -c '
         set -eo pipefail
@@ -78,11 +90,12 @@ else
         /opt/venv/bin/python -c "import torch; import vllm_xpu_kernels._C"
       '
   fi
+
   # push
   docker push "$IMAGE"
 fi
 
-if [[ "$nightly" == "1" ]]; then
+if [[ "$kernel_nightly" == "1" ]]; then
   buildkite-agent meta-data set xpu-kernel-nightly-image "$IMAGE"
 fi
 
