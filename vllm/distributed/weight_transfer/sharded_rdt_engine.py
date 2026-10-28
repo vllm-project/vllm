@@ -1377,7 +1377,6 @@ class ShardedRDTWeightTransferEngine(
             LAYERWISE_INFO,
             _copy_and_restore_kernel_tensors,
         )
-        from vllm.model_executor.utils import fill_padding
 
         stream = self._quant_stream or self._proc_stream
         assert stream is not None  # created in _ensure_proc_worker before use
@@ -1390,7 +1389,6 @@ class ShardedRDTWeightTransferEngine(
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 assert info is not None  # completed leaf module is set up for reload
-                fill_padding(layer)
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):

@@ -68,33 +68,56 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def mark_padding(param: torch.Tensor, region: torch.Tensor, value: float) -> None:
-    """Record that ``region``, a view of ``param``, holds ``value`` rather than
-    checkpoint data; `fill_padding` writes it before every post-load processing.
+def mark_padding(
+    layer: torch.nn.Module,
+    name: str,
+    region: torch.Tensor,
+    value: float | None = None,
+) -> None:
+    """Record that ``region``, a view of ``layer.<name>`` left out by a loader,
+    holds padding; `fill_padding` writes it before the next post-load processing.
 
     Loaders record padding instead of writing it, so post-load processing sees
     the same padding on every load: a reload may load into storage holding
     stale bytes (uninitialized layerwise tensors, or post-processed bytes when
-    loading in place), and transfer engines may write checkpoint bytes without
-    running loaders at all. A region of one expert (``param[e]``) is recorded
-    for every expert.
+    loading in place). Unless ``value`` is given, it is the region's content
+    when first recorded, i.e. its ``create_weights`` initial value (0 if that
+    is not constant). A region of one expert (``param[e]``) is recorded for
+    every expert. Records live on the layer, which outlives the parameter
+    tensors across reloads.
     """
+    param = getattr(layer, name)
     offset = region.storage_offset() - param.storage_offset()
     shape, stride = tuple(region.shape), tuple(region.stride())
-    if region.ndim < param.ndim:
+    assert region.ndim in (param.ndim, param.ndim - 1), (name, shape)
+    if region.ndim < param.ndim:  # one expert: param[e]
         offset %= param.stride(0)
         shape, stride = (param.shape[0], *shape), (param.stride(0), *stride)
-    if "padding" not in param.__dict__:
-        param.padding = set()
-    param.padding.add((offset, shape, stride, value))
+    layout = (tuple(param.shape), tuple(param.stride()), param.dtype)
+    layouts = layer.__dict__.setdefault("_padding_layouts", {})
+    regions = layer.__dict__.setdefault("_padding_regions", {}).setdefault(name, {})
+    if layouts.setdefault(name, layout) != layout:
+        raise ValueError(f"{name}: padding recorded for another layout")
+    key = (offset, shape, stride)
+    if value is not None:
+        regions[key] = value
+    elif key not in regions:
+        values = region.float().flatten()
+        regions[key] = values[0].item() if bool((values == values[0]).all()) else 0
+    layer._padding_pending = True
 
 
 def fill_padding(module: torch.nn.Module) -> None:
-    """Write the padding recorded by `mark_padding` for ``module``'s parameters,
-    in checkpoint layout, before post-load processing reads it."""
-    for param in module.parameters(recurse=False):
-        data = param.data
-        for offset, shape, stride, value in getattr(param, "padding", ()):
+    """Write the padding recorded by `mark_padding` since the last fill, in
+    checkpoint layout, before post-load processing reads it."""
+    if not module.__dict__.pop("_padding_pending", False):
+        return
+    for name, regions in module._padding_regions.items():
+        data = getattr(module, name).data
+        layout = (tuple(data.shape), tuple(data.stride()), data.dtype)
+        if layout != module._padding_layouts[name]:
+            continue  # already post-processed
+        for (offset, shape, stride), value in regions.items():
             data.as_strided(shape, stride, data.storage_offset() + offset).fill_(value)
 
 

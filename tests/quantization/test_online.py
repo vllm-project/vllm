@@ -4,7 +4,7 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
 
@@ -1085,8 +1085,9 @@ def test_online_requantized_moe_reload(
             moe_parallel_config=SimpleNamespace(tp_size=1),
         )
         layer._get_hidden_dim = RoutedExperts._get_hidden_dim
-        layer._narrow_expert_data_for_padding = (
-            RoutedExperts._narrow_expert_data_for_padding
+        layer._split_padding = RoutedExperts._split_padding
+        layer._narrow_and_mark_padding = MethodType(
+            RoutedExperts._narrow_and_mark_padding, layer
         )
         layer.quant_method = method
         layer.quant_config = SimpleNamespace(online_quantization_config=None)
