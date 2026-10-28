@@ -6,6 +6,10 @@ prefill completes. `NixlPushConnector` adds a **push-based** alternative
 in which P writes the KV blocks directly into D's pre-allocated memory
 via `NIXL WRITE`.
 
+Enable it with `"kv_connector": "NixlPushConnector"`. Serving
+frameworks that only accept the `NixlConnector` name can instead set
+`"kv_connector_extra_config": {"transfer_mode": "push"}`.
+
 This document describes the threading, queues, and scheduling
 interactions specific to the push design. The pull-mode design is
 unchanged; the push connector reuses the same handshake, NIXL agent
