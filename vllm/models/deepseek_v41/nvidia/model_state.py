@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+from collections import defaultdict
 from dataclasses import replace
 from typing import Any
 
@@ -20,14 +22,18 @@ from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWAMetadata,
+    DeepseekSparseSWAMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool, _load_ptr
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -156,6 +162,98 @@ def _gather_replay_batch_kernel(
             )
 
 
+@triton.jit
+def _fill_swa_siblings_kernel(
+    # [num_siblings, 6]: swa_indices, swa_lens, is_valid_token, block_table, its
+    # row stride, slot_mapping
+    sibling_ptrs_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    token_to_req_indices_ptr,
+    replay_start_ptr,
+    WINDOW: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    WINDOW_BLOCK: tl.constexpr,
+):
+    """Token ``program_id(0)`` of sibling ``program_id(1)``, as the causal decode
+    path of DeepseekSparseSWAMetadataBuilder.build writes it."""
+    tok = tl.program_id(0)
+    ptrs = sibling_ptrs_ptr + tl.program_id(1) * 6
+    is_valid = tl.load(_load_ptr(ptrs + 5, tl.int64) + tok) >= 0
+    tl.store(_load_ptr(ptrs + 2, tl.int8) + tok, is_valid.to(tl.int8))
+
+    req = tl.load(token_to_req_indices_ptr + tok)
+    query_start = tl.load(query_start_loc_ptr + req)
+    query_len = tl.load(query_start_loc_ptr + req + 1) - query_start
+    pos = tl.load(seq_lens_ptr + req) - query_len + tok - query_start
+    start = tl.maximum(pos - (WINDOW - 1), 0)
+    start = tl.maximum(start, tl.load(replay_start_ptr + req))
+    swa_len = tl.where(is_valid, pos + 1 - start, 0)
+    tl.store(_load_ptr(ptrs + 1, tl.int32) + tok, swa_len)
+
+    cols = tl.arange(0, WINDOW_BLOCK)
+    block_table_ptr = _load_ptr(ptrs + 3, tl.int32) + req * tl.load(ptrs + 4)
+    window_pos = start + cols
+    blocks = tl.load(block_table_ptr + window_pos // BLOCK_SIZE, mask=cols < swa_len)
+    slots = tl.where(cols < swa_len, blocks * BLOCK_SIZE + window_pos % BLOCK_SIZE, -1)
+    swa_indices_ptr = _load_ptr(ptrs, tl.int32) + tok * WINDOW
+    tl.store(swa_indices_ptr + cols, slots, mask=cols < WINDOW)
+
+
+def _fill_decode_swa_siblings(
+    metadata: DeepseekSparseSWAMetadata,
+    siblings: list[tuple[Any, torch.Tensor, torch.Tensor]],
+    ptr_tables: dict[tuple[int, ...], torch.Tensor],
+) -> list[DeepseekSparseSWAMetadata]:
+    """The metadata of same-spec SWA groups, each given as (builder, block_table,
+    slot_mapping), from the first group's causal decode-only metadata in one launch.
+    """
+    builder = siblings[0][0]
+    num_tokens = metadata.num_decode_tokens
+    assert metadata.num_prefill_tokens == 0
+    key = tuple(
+        value
+        for b, block_table, slot_mapping in siblings
+        for value in (
+            b.decode_swa_indices.data_ptr(),
+            b.decode_swa_lens.data_ptr(),
+            b.is_valid_token.data_ptr(),
+            block_table.data_ptr(),
+            block_table.stride(0),
+            slot_mapping.data_ptr(),
+        )
+    )
+    if (ptrs := ptr_tables.get(key)) is None:
+        if len(ptr_tables) >= 16:  # ubatch slices move the addresses every step
+            ptr_tables.clear()
+        ptrs = async_tensor_h2d(list(key), builder.device, torch.int64).view(-1, 6)
+        ptr_tables[key] = ptrs
+    _fill_swa_siblings_kernel[(num_tokens, len(siblings))](
+        ptrs,
+        metadata.query_start_loc,
+        metadata.seq_lens,
+        metadata.token_to_req_indices,
+        metadata.replay_start,
+        WINDOW=builder.window_size,
+        BLOCK_SIZE=builder.block_size,
+        WINDOW_BLOCK=triton.next_power_of_2(builder.window_size),
+    )
+    filled = []
+    for b, block_table, slot_mapping in siblings:
+        # copy.copy, not dataclasses.replace: ~10x cheaper on this wide dataclass.
+        sibling = copy.copy(metadata)
+        sibling.block_table = block_table
+        sibling.slot_mapping = slot_mapping
+        sibling.is_valid_token = b.is_valid_token[:num_tokens]
+        sibling.decode_swa_indices = b.decode_swa_indices[:num_tokens]
+        sibling.decode_swa_lens = b.decode_swa_lens[:num_tokens]
+        sibling.flashinfer_sparse_index_cache = {}
+        for layer_type, plan in b.build_tile_scheduler(num_tokens).items():
+            setattr(sibling, f"tile_sched_{layer_type}", plan)
+        filled.append(sibling)
+    return filled
+
+
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
     """Hands the batch's replay starts to the sliding-window builders."""
 
@@ -219,6 +317,11 @@ class DeepseekV41ModelState(DefaultModelState):
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
+        # Indices of same-spec SWA groups, first group first (set on first use);
+        # decode steps fill the rest from the first's metadata in one launch.
+        self._swa_siblings: list[list[int]] = []
+        self._swa_decode_threshold = 0
+        self._swa_sibling_ptrs: dict[tuple[int, ...], torch.Tensor] = {}
 
         self.decoder_replay_layers: DecoderReplayLayers | None = getattr(
             model, "decoder_replay_layers", None
@@ -352,6 +455,27 @@ class DeepseekV41ModelState(DefaultModelState):
                     device=self.device,
                 )
             self._warm_up_replay_kernels(input_batch, slot_mappings)
+            by_spec: dict[Any, list[int]] = defaultdict(list)
+            for i, groups in enumerate(attn_groups):
+                builder = groups[0].get_metadata_builder() if len(groups) == 1 else None
+                if isinstance(builder, DeepseekSparseSWAMetadataBuilder):
+                    by_spec[groups[0].kv_cache_spec].append(i)
+            self._swa_siblings = [ids for ids in by_spec.values() if len(ids) > 1]
+            for first, *_ in self._swa_siblings:
+                builder = attn_groups[first][0].get_metadata_builder()
+                assert isinstance(builder, DeepseekSparseSWAMetadataBuilder)
+                self._swa_decode_threshold = builder.decode_threshold
+                _fill_swa_siblings_kernel.warmup(
+                    torch.zeros(1, 6, dtype=torch.int64, device=self.device),
+                    input_batch.query_start_loc,
+                    input_batch.seq_lens,
+                    builder.token_to_req_indices,
+                    self._replay_start,
+                    WINDOW=builder.window_size,
+                    BLOCK_SIZE=builder.block_size,
+                    WINDOW_BLOCK=triton.next_power_of_2(builder.window_size),
+                    grid=(1,),
+                )
         if (
             self.pcp_size > 1
             and self.decoder_replay_layers is not None
@@ -403,17 +527,46 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
+
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = int(input_batch.num_scheduled_tokens.max())
+        # Same-spec SWA groups differ only in block table and slots: on decode-only
+        # steps the first builds and the rest are filled from it in one launch.
+        fill_siblings = (
+            not for_capture
+            and self.pcp_size == 1
+            and max_query_len <= self._swa_decode_threshold
+        )
+        siblings = self._swa_siblings if fill_siblings else []
+        skipped = {j for ids in siblings for j in ids[1:]}
         attn_metadata = self._build_attn_metadata(
             input_batch,
             cudagraph_mode,
             block_tables,
             slot_mappings,
-            attn_groups,
+            [[] if i in skipped else groups for i, groups in enumerate(attn_groups)],
             kv_cache_config,
             for_capture=for_capture,
             ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
+        for first, *rest in siblings:
+            filled = _fill_decode_swa_siblings(
+                attn_metadata[attn_groups[first][0].layer_names[0]],
+                [
+                    (
+                        attn_groups[j][0].get_metadata_builder(ubatch_idx),
+                        block_tables[j],
+                        slot_mappings[j],
+                    )
+                    for j in rest
+                ],
+                self._swa_sibling_ptrs,
+            )
+            for j, metadata in zip(rest, filled):
+                for layer_name in attn_groups[j][0].layer_names:
+                    attn_metadata[layer_name] = metadata
         if self.decoder_replay_layers is not None:
             assert replay_start is not None
             self._prepare_replay_batch(

@@ -883,3 +883,40 @@ def test_dspark_noncausal_draft_decode_update_matches_build():
     assert md.decode_swa_width == builder.noncausal_index_width
     torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
     torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_swa_siblings_match_their_own_build():
+    """Same-spec SWA groups filled in one launch match their own build()."""
+    from vllm.models.deepseek_v41.nvidia.model_state import _fill_decode_swa_siblings
+
+    seq_lens, query_lens = [30, 12, 70], [1, 1, 1]
+    qsl, seq_lens_t, _, slots, table = make_batch(seq_lens, query_lens, "cuda")
+    slots[1] = -1  # a padded row
+    sibling_slots = torch.where(slots >= 0, slots + 1000, -1)
+    replay_start = torch.tensor([25, 0, 0], dtype=torch.int32, device="cuda")
+
+    def build(builder, block_table, slot_mapping):
+        common = CommonAttentionMetadata(
+            query_start_loc=qsl,
+            query_start_loc_cpu=qsl.cpu(),
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t.cpu(),
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=1,
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+        )
+        return builder.build(0, common, replay_start=replay_start)
+
+    leader, sibling, ref = (make_builder(vision=False) for _ in range(3))
+    for b in (sibling, ref):  # stale rows from an earlier step
+        b.decode_swa_indices.fill_(7)
+        b.decode_swa_lens.fill_(7)
+    siblings = [(sibling, table + 50, sibling_slots)]
+    filled = _fill_decode_swa_siblings(build(leader, table, slots), siblings, {})
+    expected = build(ref, table + 50, sibling_slots)
+    for name in ("is_valid_token", "decode_swa_indices", "decode_swa_lens"):
+        assert torch.equal(getattr(filled[0], name), getattr(expected, name)), name
