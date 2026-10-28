@@ -434,6 +434,29 @@ steps:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
 
+- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
+  key: dsv41-mono-decode-numerics-tp8-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/deepseek_v41/amd/
+  - vllm/models/deepseek_v41/nvidia/model_state.py
+  - tests/models/test_dsv41_mono_numerics.py
+  - tests/models/test_dsv41_mono_layers.py
+  commands:
+  # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
+  - pytest -v -s "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8]"
+  - >-
+    pytest -v -s
+    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
+    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-28]"
+
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
   dind: false
