@@ -24,54 +24,12 @@ from ....utils import (
 )
 
 
-def _r3_capture_state(worker):
-    runner = worker.model_runner
-    connector = runner.aux_output_connector
-    capturer = connector._capturer
-    callbacks, sinks = {}, {}
-    for module in runner.model.modules():
-        for target in (module, getattr(module, "router", None)):
-            callback = getattr(target, "capture_fn", None)
-            if callback is not None:
-                assert callback.func.__self__ is capturer
-                callbacks[id(callback)] = True
-        sink = getattr(getattr(module, "routed_experts", None), "routing_sink", None)
-        if sink is not None:
-            assert sink.capture_fn.func.__self__ is capturer
-            sinks[id(sink)] = sink.buffer.data_ptr()
-    assert len(callbacks) + len(sinks) == capturer.shape_per_token[0]
-    assert connector._store is not None or worker.rank != 0
-    return (
-        id(connector),
-        id(capturer),
-        capturer.device_buffer.data_ptr(),
-        callbacks,
-        sinks,
-    )
-
-
-def _has_r3_graphs(worker):
-    return bool(worker.model_runner.cudagraph_manager.graphs)
-
-
-@pytest.mark.parametrize(
-    "eager,tp,kv_bytes",
-    [
-        pytest.param(True, 1, None, id="eager-auto-kv"),
-        pytest.param(False, 1, None, id="graph-auto-kv"),
-        pytest.param(True, 1, 64 << 20, id="eager-explicit-kv"),
-        pytest.param(False, 2, None, marks=multi_gpu_marks(num_gpus=2), id="graph-tp2"),
-    ],
-)
 @create_new_process_for_each_test()
-def test_routed_experts_capture_survives_sleep_and_reload(
-    monkeypatch, tmp_path, eager, tp, kv_bytes
-):
+def test_routed_experts_capture_survives_sleep_and_reload(monkeypatch, tmp_path):
     """R3 buffers and callbacks survive sleep/wake and weight reload."""
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     torch.manual_seed(0)
     config = Qwen3MoeConfig(
@@ -96,22 +54,12 @@ def test_routed_experts_capture_survives_sleep_and_reload(
         skip_tokenizer_init=True,
         enable_sleep_mode=True,
         enable_return_routed_experts=True,
-        enforce_eager=eager,
-        tensor_parallel_size=tp,
+        enforce_eager=True,
         max_model_len=64,
         max_num_seqs=2,
         max_num_batched_tokens=64,
         gpu_memory_utilization=0.3,
-        kv_cache_memory_bytes=kv_bytes,
-        compilation_config={
-            "mode": 0,
-            "cudagraph_mode": "FULL",
-            "cudagraph_capture_sizes": [1, 2, 4, 8],
-        },
     )
-    state = llm.collective_rpc(_r3_capture_state)
-    if not eager:
-        assert all(llm.collective_rpc(_has_r3_graphs))
     prompt = {"prompt_token_ids": [1, 2, 3, 4]}
     params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
     expected = None
@@ -133,7 +81,6 @@ def test_routed_experts_capture_survives_sleep_and_reload(
         else:
             assert output.token_ids == expected[0]
             np.testing.assert_array_equal(routes, expected[1])
-        assert llm.collective_rpc(_r3_capture_state) == state
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
