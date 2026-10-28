@@ -67,6 +67,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from .utils import (
     create_model_runner_output,
     create_request,
+    expand_strided_descs,
     make_nixl_pcp_producer,
     make_nixl_push_scheduler,
 )
@@ -380,6 +381,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
+        w.draft_tp_mappings = {}
+        w._head_sharded_draft_kv_heads = None
+        w._head_sharded_draft_regions = set()
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
@@ -389,12 +393,15 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._failed_remote_engines = set()
+        w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]
         w._transfer_layer_names = ()
         w._transfer_layer_region_indices = ()
+        w._packed_member_layouts = {}
         w._transfer_layer_group_ids = ()
         w.dst_region_num_blocks = {}
         w.dst_region_group_ids = {}
@@ -966,14 +973,8 @@ class TestPushWriterNotifs:
         notif_msg = f"{request_id}:1".encode()
         w._pending_completion_notifs.put(notif_msg)
 
-        # transfer_topo is consulted only for the producer-side path; we
-        # make it a MagicMock because the D-side branch returns early.
-        w.transfer_topo = MagicMock()
+        w._get_new_notifs()
 
-        notified = w._get_new_notifs()
-
-        # Notif consumed; D-side just touches _recving_transfers.
-        assert notified == set()
         assert request_id in w._recving_transfers
 
     def test_get_transfer_results_evicts_completed_state(self):
@@ -1295,7 +1296,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["request_id"] = bogus_rid
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
@@ -1388,14 +1389,13 @@ class TestPushWriterNegative:
             logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
         )
         w = _StubWriterWorker.fresh()
-        w.transfer_topo = MagicMock()
         # Forward a completion notif for an unknown request_id.
         w._pending_completion_notifs.put(b"never-heard-of-you:1")
 
-        notified = w._get_new_notifs()
-        assert notified == set()
+        w._get_new_notifs()
         # Did not register anywhere.
         assert "never-heard-of-you" not in w._recving_transfers
+        assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(self):
         """Empty metadata must not wake the writer or enqueue anything."""
@@ -1416,7 +1416,6 @@ class TestPushWriterNegative:
         leases of tracked P-side requests on the engine main thread, and
         ignore request IDs that aren't being tracked."""
         w = _StubWriterWorker.fresh()
-        w.transfer_topo = MagicMock()
         # _handle_heartbeat reads ``self._lease_extension`` (set in the
         # real ``__init__``).
         w._lease_extension = 10
@@ -1430,8 +1429,7 @@ class TestPushWriterNegative:
         # and another tracked one.
         w._pending_completion_notifs.put(b"HB:req-a,req-unknown,req-b")
 
-        notified = w._get_new_notifs()
-        assert notified == set()
+        w._get_new_notifs()
 
         # Tracked leases were renewed strictly forward in time.
         now = time.perf_counter()
@@ -1456,20 +1454,19 @@ class TestPushPipelineParallel:
         """Each PP stage WRITEs its own layers and sends one notif; D must
         collect pp_size notifs before reporting the recv done."""
         w = _StubWriterWorker.fresh()
-        w.transfer_topo = MagicMock()
         request_id = "req-pp-2"
         w._recving_metadata[request_id] = MagicMock(pp_size=2)
         notif = f"{request_id}:1".encode()
 
         # First stage: counted, not yet done.
         w._pending_completion_notifs.put(notif)
-        assert w._get_new_notifs() == set()
+        w._get_new_notifs()
         assert request_id not in w._recving_transfers
         assert w.consumer_notification_counts_by_req[request_id] == 1
 
         # Second (final) stage: now reported done.
         w._pending_completion_notifs.put(notif)
-        assert w._get_new_notifs() == set()
+        w._get_new_notifs()
         assert request_id in w._recving_transfers
         assert request_id not in w.consumer_notification_counts_by_req
 
@@ -2044,8 +2041,13 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
 
     plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
-    local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
-    remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    # Builders emit one strided run per region; expand to per-block descriptors.
+    local_descs = expand_strided_descs(
+        worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    )
+    remote_descs = expand_strided_descs(
+        worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    )
     local_counts = [local_num_blocks[i] for i in worker._transfer_layer_region_indices]
     local_ids = worker._compute_desc_ids(
         [[1, 2], [3]], 4, None, 1, region_num_blocks=local_counts
@@ -2141,6 +2143,21 @@ def test_layer_alignment_rejects_inconsistent_region_geometry(field):
     with pytest.raises(AssertionError, match="lengths disagree"):
         worker._align_remote_regions_by_layer(metadata)
     assert msgspec.msgpack.encode(metadata) == original
+
+
+def test_head_sharded_draft_push_rejects_heterogeneous_tp():
+    """Push mode writes a head-sharded draft's KV under an MLA target only at
+    equal TP; heterogeneous TP is the pull path's job."""
+    w = _StubWriterWorker.fresh()
+    w._head_sharded_draft_regions = {1}
+    w.transfer_topo = MagicMock(tp_size=4)
+    meta = MagicMock(spec=NixlAgentMetadata)
+    with patch.object(
+        NixlBaseConnectorWorker, "_validate_remote_agent_handshake", return_value=None
+    ):
+        w._validate_remote_agent_handshake(meta, remote_tp_size=4)
+        with pytest.raises(NotImplementedError, match="push mode"):
+            w._validate_remote_agent_handshake(meta, remote_tp_size=1)
 
 
 def test_set_region_layers_rejects_duplicate_local_layer():

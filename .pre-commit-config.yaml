@@ -21,7 +21,7 @@ repos:
   rev: v21.1.2
   hooks:
   - id: clang-format
-    exclude: 'csrc/libtorch_stable/moe/topk_softmax_kernels.cu|vllm/third_party/.*'
+    exclude: 'csrc/moe/topk_softmax_kernels.cu|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/DavidAnson/markdownlint-cli2
@@ -30,7 +30,6 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
-    exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -75,6 +74,7 @@ repos:
         --no-emit-package, cupy-cuda12x,
         # nvidia packages (unsuffixed / unified naming)
         --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cccl,
         --no-emit-package, nvidia-cuda-cupti,
         --no-emit-package, nvidia-cuda-nvrtc,
         --no-emit-package, nvidia-cuda-runtime,
@@ -177,6 +177,14 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-agent-files
+    name: Check agent instruction files and skills
+    language: python
+    entry: python tools/pre_commit/check_agent_files.py
+    files: ^(\.agents/|\.claude/|(.*/)?(AGENTS|CLAUDE)\.md$|tools/pre_commit/check_agent_files\.py$)
+    pass_filenames: false
+    additional_dependencies: [PyYAML, regex]
+    verbose: true # `note:` lines are advisory, so the hook passes
   - id: check-buildkite-step-keys
     name: Check every Buildkite step declares an explicit key
     language: python
@@ -192,29 +200,13 @@ repos:
     additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: python tools/pre_commit/mypy.py "3.10"
-    <<: &mypy_common
-      language: python
-      types_or: [python, pyi]
-      require_serial: true
-      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
-  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.11
+  - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for the oldest supported Python version
     entry: python tools/pre_commit/mypy.py "3.11"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.12
-    entry: python tools/pre_commit/mypy.py "3.12"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.13
-    entry: python tools/pre_commit/mypy.py "3.13"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
+    language: python
+    types_or: [python, pyi]
+    require_serial: true
+    additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, "pydantic==2.13.5"]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
@@ -286,11 +278,23 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-dockerignore-tracked
+    name: Check .dockerignore does not exclude tracked files
+    entry: python tools/pre_commit/check_dockerignore_tracked.py
+    language: python
+    always_run: true
+    pass_filenames: false
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-trust-remote-code
+    name: Check for hardcoded trust_remote_code=True
+    entry: python tools/pre_commit/check_trust_remote_code.py
+    language: python
+    types: [python]
+    files: ^vllm/
   # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
   # skips with a warning when cargo is not installed.
   - id: rust-cargo-autoinherit

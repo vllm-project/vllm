@@ -95,7 +95,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
             else:
                 cm = common_attn_metadata
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+            attn_metadata = attn_group.build_metadata_for_drafting(
                 common_attn_metadata=cm, draft_index=draft_index
             )
             per_group_attn_metadata.append(attn_metadata)
@@ -291,11 +291,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         self.draft_attn_groups = list(attention_groups.values())
         if self.draft_attn_groups:
             self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
+            self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         else:
             self.kv_cache_gid = 0
             self.block_size = kv_cache_config.kv_cache_groups[

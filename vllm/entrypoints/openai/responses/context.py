@@ -21,9 +21,6 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -35,12 +32,16 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
+    response_item_status,
 )
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
@@ -194,6 +195,9 @@ class SimpleContext(ConversationContext):
         self._accumulated_text: str = ""
         self._accumulated_token_ids: list[int] = []
         self._accumulated_logprobs: list = []
+        # Items already sent as output_item.done events; the final
+        # streaming response reuses them instead of reparsing.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -312,6 +316,7 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -344,6 +349,7 @@ class ParsableContext(ConversationContext):
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -375,6 +381,7 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
+                    finish_reason=completion.finish_reason,
                 )
             )
         elif completion.text:
@@ -382,7 +389,7 @@ class ParsableContext(ConversationContext):
                 ResponseOutputMessage(
                     type="message",
                     id=f"msg_{random_uuid()}",
-                    status="completed",
+                    status=response_item_status(completion.finish_reason),
                     role="assistant",
                     content=[
                         ResponseOutputText(
@@ -648,11 +655,17 @@ class HarmonyContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # Each completed message with the items sent for it in
+        # output_item.done events, so the final response can reuse their ids.
+        self.streamed_items_by_message: list[
+            tuple[Message, list[ResponseOutputItem]]
+        ] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -764,6 +777,8 @@ class HarmonyContext(ConversationContext):
         if num_cached_token is not None:
             self.num_cached_tokens += num_cached_token
             self.current_turn_metrics.cached_input_tokens = num_cached_token
+
+        self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.

@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -150,6 +151,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+
+    def _validate_remote_agent_handshake(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_size: int,
+        remote_dcp_size: int = 1,
+    ) -> None:
+        super()._validate_remote_agent_handshake(
+            nixl_agent_meta, remote_tp_size, remote_dcp_size
+        )
+        assert self.transfer_topo is not None
+        if (
+            self._head_sharded_draft_regions
+            and self.transfer_topo.tp_size != remote_tp_size
+        ):
+            raise NotImplementedError(
+                "NIXL push mode does not support a head-sharded draft's KV "
+                "under an MLA target with heterogeneous TP. Use pull mode."
+            )
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
@@ -751,11 +771,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Drain HB / completion notifs forwarded by the writer thread.
 
         The writer owns ``nixl_wrapper.get_new_notifs`` for push; PUSH_REG
-        notifs are handled there. Everything else is forwarded here for
-        existing accounting.
+        notifs are handled there. P learns of finished pushes from its WRITE
+        handles, so this never reports finished sends.
         """
-        assert self.transfer_topo is not None
-        notified_req_ids: set[str] = set()
         while True:
             try:
                 notif = self._pending_completion_notifs.get_nowait()
@@ -769,45 +787,27 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             req_id, tp_size = msg.rsplit(":", 1)
 
-            # Not tracked as a P-side send/process for this notif.
-            if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                if (meta := self._recving_metadata.get(req_id)) is not None:
-                    # Consumer waits for one notif per producer rank writing
-                    # here: pp_size stages * producers-per-consumer (>1 when
-                    # producer TP > consumer TP; tp_size is the producer TP).
-                    producers_per_consumer = max(1, int(tp_size) // self.world_size)
-                    expected_notifs = meta.pp_size * producers_per_consumer
-                    self.consumer_notification_counts_by_req[req_id] += 1
-                    notifs = self.consumer_notification_counts_by_req[req_id]
-                    if notifs < expected_notifs:
-                        continue
-                    del self.consumer_notification_counts_by_req[req_id]
-                    # P drove the transfer (we own no NIXL handle), so
-                    # materialise an empty ``_recving_transfers`` entry for
-                    # ``_pop_done_transfers`` to report done.
-                    self._recving_transfers.setdefault(req_id, [])
-                else:
-                    # Not tracked on either side (lease may have expired
-                    # before the notif arrived). Log and skip.
-                    logger.error(
-                        "Unrecognized request %s notif (may have expired).",
-                        req_id,
-                    )
+            if (meta := self._recving_metadata.get(req_id)) is None:
+                # The lease may have expired before the notif arrived.
+                self.xfer_stats.record_notification_after_expiry()
+                logger.error(
+                    "Unrecognized request %s notif (may have expired).", req_id
+                )
                 continue
-
-            n_consumers = int(tp_size)
-            tp_ratio = self.transfer_topo.tp_ratio(n_consumers)
-            consumers_per_producer = -tp_ratio if n_consumers > self.world_size else 1
+            # Consumer waits for one notif per producer rank writing
+            # here: pp_size stages * producers-per-consumer (>1 when
+            # producer TP > consumer TP; tp_size is the producer TP).
+            producers_per_consumer = max(1, int(tp_size) // self.world_size)
+            expected_notifs = meta.pp_size * producers_per_consumer
             self.consumer_notification_counts_by_req[req_id] += 1
-            if (
-                self.consumer_notification_counts_by_req[req_id]
-                == consumers_per_producer
-            ):
-                notified_req_ids.add(req_id)
-                del self.consumer_notification_counts_by_req[req_id]
-                self._reqs_to_process.remove(req_id)
-                self._reqs_to_send.pop(req_id, None)
-        return notified_req_ids
+            if self.consumer_notification_counts_by_req[req_id] < expected_notifs:
+                continue
+            del self.consumer_notification_counts_by_req[req_id]
+            # P drove the transfer (we own no NIXL handle), so
+            # materialise an empty ``_recving_transfers`` entry for
+            # ``_pop_done_transfers`` to report done.
+            self._recving_transfers.setdefault(req_id, [])
+        return set()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
@@ -837,7 +837,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
-            self.consumer_notification_counts_by_req.pop(req_id, None)
             done_sending.add(req_id)
 
         # Tell the writer to drop any state it still holds for any
