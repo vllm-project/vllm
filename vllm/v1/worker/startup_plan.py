@@ -35,8 +35,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# 2: routed-experts buffers moved into the profiled window, so plans recorded
-#    before that change overstate the KV-cache budget when R3 is enabled.
 PLAN_SCHEMA_VERSION = 2
 
 

@@ -825,252 +825,121 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def _connector_config(*, max_num_batched_tokens=32, max_bytes=None):
-    return SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
-        cache_config=SimpleNamespace(enable_prefix_caching=True),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=8, max_num_batched_tokens=max_num_batched_tokens
-        ),
-        max_concurrent_batches=2,
-    )
-
-
-def _kv_cache_config(*, num_blocks=10):
-    return SimpleNamespace(
-        num_blocks=num_blocks,
-        kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-    )
-
-
-def _fake_capturer(capacity: int = 32) -> Any:
-    return SimpleNamespace(
-        shape_per_token=(2,),
-        output_dtype_name="int32",
-        device_buffer=torch.empty(capacity, 2, dtype=torch.int32),
-        snapshot_routing_data=Mock(),
-    )
-
-
-def _install_fake_capturer(
-    monkeypatch, *, capacity: int = 32, bind_error=None
-) -> tuple[Any, list[tuple[str, object]]]:
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    events: list[tuple[str, object]] = []
-    capturer = _fake_capturer(capacity)
-
-    def make_capturer(*args, **kwargs):
-        events.append(("allocate", None))
-        return capturer
-
-    def bind(model, candidate):
-        events.append(("bind", candidate))
-        if bind_error is not None:
-            raise bind_error
-        return lambda: events.append(("unbind", None))
-
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", make_capturer)
-    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
-    return capturer, events
-
-
-def _connector_with_capturer(monkeypatch, *, capacity: int = 32):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    capturer, events = _install_fake_capturer(monkeypatch, capacity=capacity)
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
-    return connector, capturer, events
-
-
-def _install_storage(
-    monkeypatch,
-    *,
-    is_output_rank: bool = True,
-    buffer_error=None,
-    store=None,
-    on_store_close=None,
-):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    store = store if store is not None else Mock()
-    if on_store_close is not None:
-        store.close.side_effect = on_store_close
-    store_constructor = Mock()
-    background_store_constructor = Mock(side_effect=lambda inner, **_: store)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(
-            is_first_rank=is_output_rank, world_size=1 if is_output_rank else 2
-        ),
-    )
-    monkeypatch.setattr(
-        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
-    )
-    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
-    monkeypatch.setattr(
-        aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
-    )
-    if buffer_error is None:
-        monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
-    else:
-        monkeypatch.setattr(
-            aux_output_worker,
-            "RoutedExpertsBuffer",
-            Mock(side_effect=buffer_error),
-        )
-    return store, store_constructor, background_store_constructor
-
-
-def test_get_aux_output_connector_creates_early_connector(monkeypatch):
+def test_get_aux_output_connector_passes_config(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     connector = Mock()
     constructor = Mock(return_value=connector)
     monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
-    config = SimpleNamespace()
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32)
+    )
+    model = Mock()
+    kv_cache_config = Mock()
+    capture = Mock()
 
-    assert aux_output_worker.get_aux_output_connector(config) is connector
-    constructor.assert_called_once_with(config)
+    result = aux_output_worker.get_aux_output_connector(
+        model, config, kv_cache_config, capture
+    )
+
+    constructor.assert_called_once_with(
+        model=model,
+        kv_cache_config=kv_cache_config,
+        vllm_config=config,
+        capture=capture,
+    )
+    assert result is connector
 
 
-def test_connector_initializes_capturer_once(monkeypatch):
-    connector, capturer, events = _connector_with_capturer(monkeypatch)
-
-    connector.initialize_routed_experts_capturer(object())
-
-    assert [event[0] for event in events] == ["allocate", "bind"]
-    assert events[1][1] is capturer
-    assert connector._capturer is capturer
-    assert connector._unbind_capturer is not None
-
-
-def test_connector_capturer_init_failure_leaves_no_owner(monkeypatch):
+@pytest.mark.parametrize("reuse_capture", [False, True], ids=["create", "reuse"])
+def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
+    monkeypatch, reuse_capture
+):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    _install_fake_capturer(monkeypatch, bind_error=ValueError("no router"))
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
+    capturer = Mock()
+    constructor = Mock(return_value=capturer)
+    bind = Mock()
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+    )
 
-    with pytest.raises(ValueError, match="no router"):
-        connector.initialize_routed_experts_capturer(object())
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=None,
+        max_concurrent_batches=2,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+    )
+    model = Mock()
+    connector = aux_output_worker.AuxOutputWorkerConnector(
+        vllm_config=config,
+        model=model,
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
+        **({"capture": capturer} if reuse_capture else {}),
+    )
 
-    assert connector._capturer is None
-    assert connector._unbind_capturer is None
-    connector.close()
-
-
-def test_connector_storage_uses_capturer_and_initializes_once(monkeypatch):
-    connector, capturer, _ = _connector_with_capturer(monkeypatch)
-    _, store_constructor, background_store_constructor = _install_storage(monkeypatch)
-    kv_cache_config = _kv_cache_config()
-
-    connector.initialize_storage(kv_cache_config)
-
+    if reuse_capture:
+        constructor.assert_not_called()
+        bind.assert_not_called()
+    else:
+        constructor.assert_called_once_with(
+            max_num_batched_tokens=32,
+            vllm_config=config,
+        )
+        bind.assert_called_once_with(model, capturer)
     assert connector._capturer is capturer
-    assert store_constructor.call_args.kwargs["max_bytes"] == 2560
-    assert store_constructor.call_args.kwargs["object_nbytes"] == 128
-    assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
-    with pytest.raises(RuntimeError, match="already initialized"):
-        connector.initialize_storage(kv_cache_config)
-
-
-def test_connector_storage_requires_capturer(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    with pytest.raises(AssertionError, match="must run before"):
-        connector.initialize_storage(SimpleNamespace(num_blocks=1, kv_cache_groups=[]))
-
-
-def test_connector_non_output_rank_keeps_capturer_without_storage(monkeypatch):
-    connector, capturer, _ = _connector_with_capturer(monkeypatch)
-    _install_storage(monkeypatch, is_output_rank=False)
-
-    connector.initialize_storage(_kv_cache_config(num_blocks=1))
-
-    assert connector._capturer is not None
-    assert id(connector._capturer) == id(capturer)
-    assert connector._store is None
-    assert connector._buffer is None
     connector.begin_step(Mock())
     assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
 
 
-def test_connector_rejects_undersized_capturer(monkeypatch):
-    """Silently truncated snapshots would blame the wrong tokens on experts."""
-    connector, _, _ = _connector_with_capturer(monkeypatch, capacity=16)
-    _install_storage(monkeypatch)
+def test_aux_output_worker_connector_default_capacity(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    with pytest.raises(AssertionError, match="smaller than the scheduler"):
-        connector.initialize_storage(_kv_cache_config(num_blocks=1))
+    tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
+    store_constructor = Mock()
+    background_store_constructor = Mock(side_effect=lambda store, **_: store)
+    capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
+    monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
+    )
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())
+    monkeypatch.setattr(
+        aux_output_worker,
+        "resolve_kv_cache_block_sizes",
+        lambda *_: (32, 16),
+    )
+    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
+    monkeypatch.setattr(
+        aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
+    )
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
 
-
-def test_connector_storage_failure_releases_store(monkeypatch):
-    connector, _, _ = _connector_with_capturer(monkeypatch)
-    store, _, _ = _install_storage(
-        monkeypatch, buffer_error=RuntimeError("buffer failed")
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=None),
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+    kwargs = dict(
+        vllm_config=config,
+        model=Mock(),
+        kv_cache_config=SimpleNamespace(
+            num_blocks=10,
+            kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="buffer failed"):
-        connector.initialize_storage(_kv_cache_config())
-
-    store.close.assert_called_once_with()
-    assert connector._store is None
-    assert connector._buffer is None
-
-
-def test_connector_storage_failure_keeps_original_error_when_close_fails(monkeypatch):
-    connector, _, _ = _connector_with_capturer(monkeypatch)
-    store, _, _ = _install_storage(
-        monkeypatch,
-        buffer_error=RuntimeError("buffer failed"),
-        store=Mock(),
-    )
-    store.close.side_effect = RuntimeError("store close failed")
-
-    with pytest.raises(RuntimeError, match="buffer failed"):
-        connector.initialize_storage(_kv_cache_config())
-
-    store.close.assert_called_once_with()
-    assert connector._store is None
-    assert connector._buffer is None
-
-
-def test_connector_close_releases_storage_then_capturer(monkeypatch):
-    connector, _, events = _connector_with_capturer(monkeypatch)
-    _install_storage(
-        monkeypatch,
-        on_store_close=lambda: events.append(("store_close", None)),
-    )
-    connector.initialize_storage(_kv_cache_config())
-
-    connector.close()
-    connector.close()
-
-    assert [event[0] for event in events] == [
-        "allocate",
-        "bind",
-        "store_close",
-        "unbind",
-    ]
-    assert connector._capturer is None
-    assert connector._unbind_capturer is None
-    assert connector._store is None
-    assert connector._buffer is None
-
-
-def test_connector_close_with_only_capturer_is_safe(monkeypatch):
-    connector, _, events = _connector_with_capturer(monkeypatch)
-
-    connector.close()
-    connector.close()
-
-    assert [event[0] for event in events] == ["allocate", "bind", "unbind"]
-    assert connector._capturer is None
-    assert connector._unbind_capturer is None
+    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
+    assert store_constructor.call_args.kwargs["max_bytes"] == 2560
+    assert store_constructor.call_args.kwargs["object_nbytes"] == 128
+    assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):
@@ -1103,65 +972,3 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
-
-
-@pytest.mark.parametrize(
-    ("has_connector", "is_rocm", "expected", "second_expected"),
-    [
-        (
-            True,
-            False,
-            ["clear", "clear_breakable", "release_graphs", "connector_close"],
-            [],
-        ),
-        (False, False, [], []),
-        (
-            False,
-            True,
-            ["clear", "clear_breakable"],
-            ["clear", "clear_breakable"],
-        ),
-    ],
-)
-def test_release_capture_resources(
-    monkeypatch, has_connector, is_rocm, expected, second_expected
-):
-    import vllm.v1.worker.gpu.model_runner as mrv2
-
-    events: list[str] = []
-
-    def recorder(name: str):
-        return lambda *args, **kwargs: events.append(name)
-
-    monkeypatch.setattr(
-        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: is_rocm)
-    )
-    monkeypatch.setattr(
-        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
-    )
-    monkeypatch.setattr(
-        mrv2,
-        "BreakableCUDAGraphWrapper",
-        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
-    )
-    manager = SimpleNamespace(release_graphs=recorder("release_graphs"))
-    connector = (
-        SimpleNamespace(close=recorder("connector_close")) if has_connector else None
-    )
-    runner = SimpleNamespace(
-        cudagraph_manager=manager if (has_connector or not is_rocm) else None,
-        aux_output_connector=connector,
-    )
-
-    mrv2.GPUModelRunner._release_capture_resources(runner)
-
-    # Graphs captured the R3 callbacks and are dropped before the connector
-    # releases the buffers and unbinds the callbacks.
-    assert events == expected
-    assert runner.aux_output_connector is None
-    if has_connector:
-        assert runner.cudagraph_manager is None
-
-    events.clear()
-    mrv2.GPUModelRunner._release_capture_resources(runner)
-    assert events == second_expected
