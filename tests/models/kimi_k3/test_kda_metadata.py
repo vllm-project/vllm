@@ -3,6 +3,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
+from typing import TypeVar
 from unittest.mock import Mock, patch
 
 import pytest
@@ -26,7 +27,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -67,6 +67,8 @@ PRUNED_METADATA_FIELDS = {
     "flashinfer_prefill_seq_order",
 }
 
+_BuilderT = TypeVar("_BuilderT", bound=GDNAttentionMetadataBuilder)
+
 
 def _assert_matches_shared_gdn(
     reference: GDNAttentionMetadata, actual: KimiK3KDAMetadata
@@ -101,7 +103,7 @@ def _assert_matches_shared_gdn(
 
 
 def _make_builder(
-    builder_cls: type[AttentionMetadataBuilder],
+    builder_cls: type[_BuilderT],
     num_speculative_tokens: int,
     full_cuda_graph: bool,
     device: torch.device = DEVICE,
@@ -114,7 +116,7 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
-) -> AttentionMetadataBuilder:
+) -> _BuilderT:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -668,6 +670,8 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         )
     context = builder.recoverssm_context
     assert context is not None
+    commit = context.commit
+    assert isinstance(commit, Mock)
     actual = builder.build(
         0,
         common_attn_metadata,
@@ -705,7 +709,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
             is common_attn_metadata.compute_num_computed_tokens()
         )
         assert postprocess.block_size == BLOCK_SIZE
-    args = context.commit.call_args.args
+    args = commit.call_args.args
     assert args[0] is num_accepted_tokens
     torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
@@ -816,7 +820,7 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
     ],
 )
 def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
-    builder_cls: type[AttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
+    builder_cls: type[GDNAttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
 ):
     """`build_for_cudagraph_capture` is not capture-only: a DP rank with nothing
     scheduled re-stages its FULL-graph metadata through it on every dummy step,

@@ -478,11 +478,6 @@ _MULTIMODAL_MODELS = {
     ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
-    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
-    "KeyeVL1_5ForConditionalGeneration": (
-        "keye_vl1_5",
-        "KeyeVL1_5ForConditionalGeneration",
-    ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
     "KimiK3ForConditionalGeneration": (
@@ -551,6 +546,10 @@ _MULTIMODAL_MODELS = {
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        "nemotron3_5_transcribe",
+        "Nemotron3_5TranscribeForConditionalGeneration",
+    ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "MuseSparkForConditionalGeneration": (
@@ -728,6 +727,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "Exaone4_5_MTP": ("exaone4_5_mtp", "Exaone4_5_MTP"),
     "NemotronHMTPModel": ("nemotron_h_mtp", "NemotronHMTP"),
+    "Nemotron3_5TranscribeMTPModel": (
+        "nemotron3_5_transcribe",
+        "Nemotron3_5TranscribeMTP",
+    ),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
@@ -892,6 +895,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "StableLMEpochForCausalLM": "0.28.0",
     # Superseded by the generic "Terratorch" architecture
     "PrithviGeoSpatialMAE": "0.28.0",
+    "KeyeForConditionalGeneration": "0.33.0",
+    "KeyeVL1_5ForConditionalGeneration": "0.33.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
