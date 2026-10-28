@@ -10,16 +10,21 @@
 //! [`EngineCoreStreamDelivery`](crate::EngineCoreStreamDelivery). The request
 //! task is then woken once per delivery instead of once per engine step.
 //!
-//! Outputs are never merged, reordered, or dropped here; the consumer merges a
+//! Model outputs are never merged, reordered, or dropped here; the consumer merges a
 //! delivery into one output (see `vllm-llm`). Merging here would hide the raw
 //! outputs that request metrics observe one by one (per-step timestamps for
 //! inter-token latency, prefill stats, lifecycle events), and would have to
 //! combine wire-level fields such as undecoded logprobs tensors and opaque
 //! values.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use tokio::sync::mpsc;
+use futures::task::AtomicWaker;
+use parking_lot::Mutex;
+use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{debug, warn};
 
 use crate::client::stream::{EngineCoreStreamDelivery as Delivery, EngineCoreStreamOutput};
@@ -27,24 +32,85 @@ use crate::error::{Error, Result};
 
 /// Create the output channel for one request.
 pub(crate) fn output_channel(stream_interval: NonZeroU32) -> (OutputSender, OutputReceiver) {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let queue = Arc::new(OutputQueue::default());
     let sender = OutputSender {
-        tx,
+        queue: queue.clone(),
         stream_interval: stream_interval.get() as usize,
         delivered_first: false,
         buffered: Vec::new(),
         buffered_tokens: 0,
     };
-    (sender, rx)
+    (sender, OutputReceiver { queue })
 }
 
 /// Receiving half of a request's output channel.
-pub(crate) type OutputReceiver = mpsc::UnboundedReceiver<Result<Delivery>>;
+#[derive(Debug)]
+pub(crate) struct OutputReceiver {
+    queue: Arc<OutputQueue>,
+}
+
+#[derive(Debug, Default)]
+struct OutputQueue {
+    pending: Mutex<PendingOutputs>,
+    waker: AtomicWaker,
+}
+
+#[derive(Debug, Default)]
+struct PendingOutputs {
+    // Model outputs retain their existing lossless queue. Replaceable progress
+    // has one separate slot, ordered relative to those outputs.
+    outputs: VecDeque<(u64, Result<Delivery>)>,
+    progress: Option<(u64, Delivery)>,
+    order: u64,
+    sender_closed: bool,
+    receiver_closed: bool,
+}
+
+impl OutputReceiver {
+    pub(crate) fn try_recv(&mut self) -> std::result::Result<Result<Delivery>, TryRecvError> {
+        let mut pending = self.queue.pending.lock();
+        if pending
+            .progress
+            .as_ref()
+            .is_some_and(|(order, _)| pending.outputs.front().is_none_or(|(next, _)| order < next))
+        {
+            return Ok(Ok(pending.progress.take().unwrap().1));
+        }
+        if let Some((_, output)) = pending.outputs.pop_front() {
+            return Ok(output);
+        }
+        Err(if pending.sender_closed {
+            TryRecvError::Disconnected
+        } else {
+            TryRecvError::Empty
+        })
+    }
+
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Delivery>>> {
+        self.queue.waker.register(cx.waker());
+        match self.try_recv() {
+            Ok(output) => Poll::Ready(Some(output)),
+            Err(TryRecvError::Empty) => Poll::Pending,
+            Err(TryRecvError::Disconnected) => Poll::Ready(None),
+        }
+    }
+}
+
+impl Drop for OutputReceiver {
+    fn drop(&mut self) {
+        let mut pending = self.queue.pending.lock();
+        pending.receiver_closed = true;
+        pending.outputs.clear();
+        pending.progress = None;
+        drop(pending);
+        let _ = self.queue.waker.take();
+    }
+}
 
 /// Sending half of a request's output channel, owned by its registry entry.
 #[derive(Debug)]
 pub(crate) struct OutputSender {
-    tx: mpsc::UnboundedSender<Result<Delivery>>,
+    queue: Arc<OutputQueue>,
     /// Minimum number of new tokens per delivery after the first one.
     stream_interval: usize,
     /// Whether the first ordinary output has been delivered.
@@ -96,30 +162,99 @@ impl OutputSender {
     /// Deliver the held-back outputs, then terminate the stream with `error`.
     pub fn send_error(mut self, error: Error) {
         self.flush();
-        let _ = self.tx.send(Err(error));
+        self.enqueue(Err(error), false);
     }
 
     fn deliver(&self, delivery: Delivery) {
-        if let Err(mpsc::error::SendError(Ok(delivery))) = self.tx.send(Ok(delivery)) {
-            debug!(
-                request_id = delivery.first().request_id,
-                "request output stream receiver dropped"
-            );
-        }
+        let replaceable = matches!(&delivery, Delivery::One(output)
+            if progress_only(&output.output));
+        self.enqueue(Ok(delivery), replaceable);
     }
+
+    fn enqueue(&self, delivery: Result<Delivery>, replaceable: bool) {
+        let mut pending = self.queue.pending.lock();
+        if pending.receiver_closed {
+            if let Ok(delivery) = delivery {
+                debug!(
+                    request_id = delivery.first().request_id,
+                    "request output stream receiver dropped"
+                );
+            }
+            return;
+        }
+        pending.order += 1;
+        let order = pending.order;
+        if replaceable {
+            pending.progress = Some((order, delivery.unwrap()));
+        } else {
+            pending.outputs.push_back((order, delivery));
+        }
+        drop(pending);
+        self.queue.waker.wake();
+    }
+}
+
+/// Only discard outputs whose sole payload is a replaceable snapshot. Exhaustive
+/// destructuring makes new protocol fields require an explicit decision here.
+fn progress_only(output: &crate::protocol::output::EngineCoreOutput) -> bool {
+    let crate::protocol::output::EngineCoreOutput {
+        request_id: _,
+        new_token_ids,
+        new_logprobs,
+        new_prompt_logprobs_tensors,
+        pooling_output,
+        finish_reason,
+        stop_reason,
+        events,
+        kv_transfer_params,
+        ec_transfer_params,
+        trace_headers,
+        prefill_stats,
+        routed_experts,
+        num_nans_in_logits,
+        mm_cache_miss_hashes,
+        new_sampling_mask,
+        spec_decode_metrics,
+        prompt_token_id_logprobs,
+        error,
+        prefill_progress,
+    } = output;
+    prefill_progress.is_some()
+        && new_token_ids.is_empty()
+        && new_logprobs.is_none()
+        && new_prompt_logprobs_tensors.is_none()
+        && pooling_output.is_none()
+        && finish_reason.is_none()
+        && stop_reason.is_none()
+        && events.is_none()
+        && kv_transfer_params.is_none()
+        && ec_transfer_params.is_none()
+        && trace_headers.is_none()
+        && prefill_stats.is_none()
+        && routed_experts.is_none()
+        && *num_nans_in_logits == 0
+        && mm_cache_miss_hashes.is_none()
+        && new_sampling_mask.is_none()
+        && spec_decode_metrics.is_none()
+        && prompt_token_id_logprobs.is_none()
+        && error.is_none()
 }
 
 impl Drop for OutputSender {
     fn drop(&mut self) {
         // Every path that ends a live request delivers held-back outputs first
         // (terminal output, `flush`, or `send_error`). Outputs left here are lost.
-        if !self.buffered.is_empty() && !self.tx.is_closed() {
+        let mut pending = self.queue.pending.lock();
+        if !self.buffered.is_empty() && !pending.receiver_closed {
             warn!(
                 request_id = self.buffered[0].request_id,
                 count = self.buffered.len(),
                 "dropping request output sender with held-back outputs"
             );
         }
+        pending.sender_closed = true;
+        drop(pending);
+        self.queue.waker.wake();
     }
 }
 
@@ -150,6 +285,92 @@ mod tests {
         let mut output = output(token_ids);
         output.output.finish_reason = Some(EngineCoreFinishReason::Length);
         output
+    }
+
+    fn progress(sequence: u64) -> EngineCoreStreamOutput {
+        let mut output = output(&[]);
+        output.output.prefill_progress = Some(Box::new(PrefillProgress {
+            request_id: "req".into(),
+            sequence,
+            phase: 3,
+            prompt_tokens: 100,
+            total_compute_tokens: 100,
+            completed_compute_tokens: 0,
+            remaining_compute_tokens: 100,
+            local_cached_tokens: 0,
+            external_cached_tokens: 0,
+            pending_kv_transfer_tokens: 0,
+            cache_accounting_final: true,
+        }));
+        output
+    }
+
+    #[test]
+    fn slow_receiver_keeps_one_latest_progress_without_crossing_model_output() {
+        let (mut sender, mut receiver) = channel(1);
+        for sequence in 1..=10_000 {
+            sender.send(progress(sequence));
+        }
+        assert!(sender.queue.pending.lock().outputs.is_empty());
+        sender.send(output(&[1]));
+        sender.send(progress(10_001));
+        sender.send(progress(10_002));
+        sender.send(finished(&[2]));
+        drop(sender);
+        let first = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(first.last().new_token_ids, [1]);
+        let latest = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(
+            latest.last().prefill_progress.as_ref().unwrap().sequence,
+            10_002
+        );
+        assert!(receiver.try_recv().unwrap().unwrap().last().finished());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn progress_coalescing_preserves_other_payloads_and_errors() {
+        let (mut sender, mut receiver) = channel(1);
+        let mut with_metrics = progress(1);
+        with_metrics.output.num_nans_in_logits = 1;
+        sender.send(with_metrics);
+        sender.send(progress(2));
+        sender.send_error(Error::EngineCoreDead);
+        assert_eq!(
+            receiver.try_recv().unwrap().unwrap().last().num_nans_in_logits,
+            1
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .unwrap()
+                .unwrap()
+                .last()
+                .prefill_progress
+                .as_ref()
+                .unwrap()
+                .sequence,
+            2
+        );
+        assert!(receiver.try_recv().unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn progress_wakes_receiver_and_receiver_drop_releases_pending_state() {
+        let (mut sender, mut receiver) = channel(1);
+        let mut receive = Box::pin(futures::future::poll_fn(|cx| receiver.poll_recv(cx)));
+        assert!(futures::poll!(receive.as_mut()).is_pending());
+        sender.send(progress(1));
+        assert!(receive.await.unwrap().is_ok());
+        sender.send(progress(2));
+        sender.send(output(&[1]));
+        drop(receiver);
+        let pending = sender.queue.pending.lock();
+        assert!(pending.progress.is_none());
+        assert!(pending.outputs.is_empty());
     }
 
     fn channel(stream_interval: u32) -> (OutputSender, OutputReceiver) {
