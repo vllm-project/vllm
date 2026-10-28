@@ -3512,6 +3512,40 @@ def test_complete_store_waits_for_all_worker_acks(
     assert job_id not in runner.connector_scheduler._jobs
 
 
+def test_worker_completion_uses_exact_request_state_after_req_id_reuse(
+    request_runner,
+):
+    runner = request_runner(block_size=4, num_gpu_blocks=20, async_scheduling=False)
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+
+    [job_id] = runner.connector_scheduler._jobs
+    old_status = runner.connector_scheduler._req_status[str(runner.req_id)]
+    replacement = RequestOffloadState(
+        config=old_status.config,
+        req=old_status.req,
+        req_context=ReqContext(old_status.req.request_id),
+        offloading_context=old_status.offloading_context,
+    )
+    runner.connector_scheduler._req_status[old_status.req.request_id] = replacement
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: runner.connector_scheduler.config.num_workers}
+            )
+        )
+    )
+
+    assert runner.manager.complete_store.call_args.args[1] is old_status.req_context
+    assert (
+        runner.connector_scheduler._req_status[old_status.req.request_id] is replacement
+    )
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
     """Validates max_offload_tokens: type coercion, boundary values, and capping.

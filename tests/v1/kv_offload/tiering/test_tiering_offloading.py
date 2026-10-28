@@ -652,7 +652,7 @@ class TestTieringOffloadingManager:
             if successful_indices is None
             else {chunks[i] for i in successful_indices}
         )
-        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+        assert set(self.manager._request_load_sources[id(_CTX)]) == (
             expected_source_keys
         )
 
@@ -1032,6 +1032,19 @@ class TestTieringOffloadingManager:
         assert tier1_submit_store.call_count == 1
         job_metadata = tier1_submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
+
+    def test_delayed_store_keeps_old_request_when_id_reused(self, manager_setup):
+        chunks = to_keys(range(2))
+        old_ctx = ReqContext(req_id="reused")
+        new_ctx = ReqContext(req_id="reused")
+        self.manager.on_new_request(old_ctx)
+        assert self.manager.prepare_store(chunks, old_ctx) is not None
+        self.manager.on_request_finished(old_ctx)
+
+        self.manager.on_new_request(new_ctx)
+        self.manager.complete_store(chunks, old_ctx, success=False)
+
+        assert self.manager._req_state["reused"].req_context is new_ctx
 
     def test_on_request_finished_delays_only_secondary_until_store_submitted(
         self, manager_setup, monkeypatch

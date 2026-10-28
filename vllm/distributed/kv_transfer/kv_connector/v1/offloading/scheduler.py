@@ -79,6 +79,7 @@ class TransferJobStatus:
     """Tracks scheduler-side state for a single transfer job."""
 
     req_id: ReqId
+    req_status: "RequestOffloadState"
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
@@ -1532,6 +1533,7 @@ class OffloadingConnectorScheduler:
         req_status.transfer_jobs.add(load_job_id)
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
+            req_status=req_status,
             pending_count=self.config.num_workers,
             keys=set(keys_to_load),
             is_store=False,
@@ -1639,6 +1641,7 @@ class OffloadingConnectorScheduler:
                 self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
                 self._jobs[job_id] = TransferJobStatus(
                     req_id=req_id,
+                    req_status=req_status,
                     pending_count=self.config.num_workers,
                     keys={key},
                     is_store=True,
@@ -1786,6 +1789,7 @@ class OffloadingConnectorScheduler:
                 self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
+                req_status=req_status,
                 pending_count=self.config.num_workers,
                 keys=set(store_output.keys_to_store),
                 is_store=True,
@@ -2116,6 +2120,7 @@ class OffloadingConnectorScheduler:
             # when the request finishes
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
+                req_status=req_status,
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
                 is_store=True,
@@ -2330,7 +2335,7 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
-            req_status = self._req_status[job_status.req_id]
+            req_status = job_status.req_status
             if job_status.is_store:
                 self.manager.complete_store(job_status.keys, req_status.req_context)
             else:
@@ -2351,7 +2356,9 @@ class OffloadingConnectorScheduler:
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
-                del self._req_status[job_status.req_id]
+                current_status = self._req_status.get(job_status.req_id)
+                if current_status is req_status:
+                    del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None
