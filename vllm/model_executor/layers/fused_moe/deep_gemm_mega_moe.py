@@ -206,6 +206,14 @@ def check_deep_gemm_mega_moe_supported(
         )
 
 
+# Checkpoint projection names of each shared-expert shard.
+_SHARED_EXPERT_PROJS = {
+    "w1": ("w1", "gate_proj"),
+    "w3": ("w3", "up_proj"),
+    "w2": ("w2", "down_proj"),
+}
+
+
 def _linear_weight_scale(linear: nn.Module) -> torch.Tensor | None:
     scale = getattr(linear, "weight_scale", None)
     return getattr(linear, "weight_scale_inv", None) if scale is None else scale
@@ -357,7 +365,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             (
                 spec
                 for spec in self.weight_format.shared
-                if all(_matches_weight_spec(lin, spec) for lin in (gate_up, down))
+                if all(self._shared_linear_fits(lin, spec) for lin in (gate_up, down))
             ),
             None,
         )
@@ -391,6 +399,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return shared_size // inter, spec
         logger.warning_once("Disabling MegaMoE shared-expert fusion: %s.", reason)
         return 0, None
+
+    def _shared_linear_fits(self, linear: nn.Module, spec: MegaMoEWeightSpec) -> bool:
+        """Whether a shared-expert linear's checkpoint tensors load into ``spec``."""
+        return _matches_weight_spec(linear, spec)
 
     def _kernel_fuses_shared_experts(self, spec: MegaMoEWeightSpec) -> bool:
         from vllm.utils.deep_gemm import _import_deep_gemm
@@ -531,24 +543,27 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
-        if ".w2." in name or ".down_proj." in name:
-            param_name = "shared_l2_weight"
-        elif ".w1." in name or ".w3." in name:
-            param_name = "shared_l1_weight"
-        else:
-            raise ValueError(f"Unexpected shared-expert tensor: {name}")
-        if "weight_scale" in name:
-            param_name += "_scale"
+        param_name = self._shared_param_name(name)
         param = getattr(self, param_name)
         param.weight_loader(param, loaded_weight, name)
         return f"{name.partition('shared_experts.')[0]}experts.{param_name}"
 
+    def _shared_param_name(self, name: str) -> str:
+        """Parameter that shared-expert checkpoint tensor ``name`` loads into."""
+        layer = "shared_l2" if self._shared_shard_id(name) == "w2" else "shared_l1"
+        return f"{layer}_weight_scale" if "weight_scale" in name else f"{layer}_weight"
+
+    @staticmethod
+    def _shared_shard_id(name: str) -> str:
+        for shard_id, projs in _SHARED_EXPERT_PROJS.items():
+            if any(f".{proj}." in name for proj in projs):
+                return shard_id
+        raise ValueError(f"Unexpected shared-expert tensor: {name}")
+
     def shared_weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
     ) -> None:
-        shard_id = (
-            "w1" if ".w1." in weight_name else "w3" if ".w3." in weight_name else "w2"
-        )
+        shard_id = self._shared_shard_id(weight_name)
         is_scale = "weight_scale" in weight_name
         self._load_weight(param.data, loaded_weight, shard_id, is_scale)
 
@@ -599,18 +614,26 @@ class DeepGemmMegaMoEExperts(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pair a checkpoint shard with its destination in the MegaMoE layout."""
         k = src.shape[-1]
+        if not is_scale:
+            dst = DeepGemmMegaMoEExperts._weight_shard_view(dst, shard_id)
+            return dst, src.reshape(dst.shape)
         if shard_id == "w2":
-            if not is_scale:
-                return dst, src
             # UTCCP: scale row 128*b + 32*j + i -> 128*b + 4*i + j.
             return dst.view(-1, 32, 4, k).transpose(1, 2), src.reshape(-1, 4, 32, k)
         half = 0 if shard_id == "w1" else 1
-        if not is_scale:
-            # Interleave gate/up by 8 rows: r -> (r // 8) * 16 + 8 * half + r % 8.
-            return dst.view(-1, 2, 8, k)[:, half], src.reshape(-1, 8, k)
         # Interleave + UTCCP: 64b + 16j + 8q + m -> 128b + 64q + 32half + 4m + j.
         dst = dst.view(-1, 2, 2, 8, 4, k)[:, :, half].permute(0, 3, 1, 2, 4)
         return dst, src.reshape(-1, 4, 2, 8, k)
+
+    @staticmethod
+    def _weight_shard_view(weight: torch.Tensor, shard_id: str) -> torch.Tensor:
+        """The part of a kernel-layout ``weight`` that holds checkpoint shard
+        ``shard_id``; flattened to 2-D it is in checkpoint row order."""
+        if shard_id == "w2":
+            return weight
+        # Interleave gate/up by 8 rows: r -> (r // 8) * 16 + 8 * half + r % 8.
+        half = 0 if shard_id == "w1" else 1
+        return weight.view(-1, 2, 8, weight.shape[-1])[:, half]
 
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
