@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
-import copy
 import gc
 import os
 import time
@@ -110,7 +109,7 @@ from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
-    measure_kv_cache_bytes,
+    measure_kv_cache_blocks,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -122,11 +121,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
-from .gpu.warmup import (
-    run_context_prefill_warmup,
-    run_mixed_prefill_decode_warmup,
-    warmup_kernels,
-)
+from .gpu.warmup import run_kv_cache_sizing_warmup, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -1040,77 +1035,8 @@ class Worker(WorkerBase):
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
-        kv_cache = self._v2_model_runner().extensible_kv_cache
-        assert kv_cache is not None
-        kv_cache_config = copy.copy(self._kv_cache_config)
-        kv_cache_config.num_blocks = num_blocks
-        # Connectors that derive geometry from the config must see the
-        # committed storages the rebuilt views will have.
-        kv_cache_config.kv_cache_tensors = kv_cache.committed_kv_cache_tensors(
-            kv_cache_config,
-            self.cache_config.get_resolved_kv_cache_layout(),
-            num_blocks,
-        )
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-        # Config resolution rejects `custom_mem_pool`; a connector that wants
-        # the KV cache in its own pool some other way cannot have it either.
-        if (
-            has_kv_transfer_group()
-            and get_kv_transfer_group().get_mem_pool_context() is not None
-        ):
-            raise ValueError(
-                "The KV connector allocates the KV cache from its own memory "
-                "pool, which the extensible KV cache cannot use. Disable it with "
-                "--no-enable-extensible-kv-cache."
-            )
-        extend_kv_cache(self._v2_model_runner(), num_blocks)
+        extend_kv_cache(self._v2_model_runner(), self._kv_cache_config, num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
-
-    def _measure_kv_cache_blocks(self) -> int:
-        """Size an extensible KV cache from the memory free after warmup.
-
-        Keeps free the larger of the profiled peak and warmup's allocated (not
-        reserved) transient peak. Torch's cache is emptied first: its blocks may
-        not fit the large workspaces the first real steps allocate.
-        """
-        torch.accelerator.synchronize()
-        gc.collect()
-        stats = torch.accelerator.memory_stats(self.device)
-        warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
-            "allocated_bytes.all.current", 0
-        )
-        torch.accelerator.empty_cache()
-        free_memory, _ = torch.accelerator.get_memory_info(self.device)
-        kv_cache = self._v2_model_runner().extensible_kv_cache
-        assert kv_cache is not None
-        transient_peak = max(kv_cache.reserved_headroom_bytes, warmup_peak)
-        available = measure_kv_cache_bytes(
-            init_free_memory=self.init_snapshot.free_memory,
-            free_memory=free_memory,
-            committed_bytes=kv_cache.physical_bytes,
-            requested_memory=int(self.requested_memory),
-            transient_peak_bytes=transient_peak,
-        )
-        available = reserve_mm_ipc_gpu_memory(
-            available,
-            self.model_config.multimodal_config,
-            getattr(self.parallel_config, "_api_process_count", 1),
-        )
-        num_blocks = kv_cache.blocks_within(
-            available, aligned=self.vllm_config.kv_transfer_config is not None
-        )
-        logger.info(
-            "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "
-            "%s GiB kept for transient activations; %d KV cache blocks (%s GiB) "
-            "fit within the requested %s GiB.",
-            format_gib(free_memory),
-            format_gib(kv_cache.physical_bytes),
-            format_gib(transient_peak),
-            num_blocks,
-            format_gib(num_blocks * kv_cache.bytes_per_block),
-            format_gib(self.requested_memory),
-        )
-        return num_blocks
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(
@@ -1132,7 +1058,7 @@ class Worker(WorkerBase):
                 kv_cache.warmup_committable_blocks = num_committable_kv_blocks
             # Track the transient peak of the warmup steps themselves; they
             # reach shapes (spec-decode drafts, encoder batches) profiling
-            # does not, and `_measure_kv_cache_blocks` keeps that peak free.
+            # does not, and `measure_kv_cache_blocks` keeps that peak free.
             torch.accelerator.reset_peak_memory_stats(self.device)
         warmup_sizes: list[int] = []
 
@@ -1183,41 +1109,10 @@ class Worker(WorkerBase):
                 warmup_kernels(
                     self.model_runner, self.execute_model, self.sample_tokens
                 )
-            if (
-                self.cache_config.enable_extensible_kv_cache
-                and not self.model_config.is_encoder_decoder
-            ):
-                # Profiling ran the full token budget without attention. Run it
-                # as a real step so the peak that measured sizing keeps free
-                # covers the largest prefill the scheduler can issue: one
-                # request of up to the model length, the rest of the budget in
-                # a second, capped to what a block table row can hold. This
-                # sizes rather than compiles, so it runs without JIT warmup.
-                run_mixed_prefill_decode_warmup(
-                    self._v2_model_runner(),
-                    self.execute_model,
-                    self.sample_tokens,
-                    min(
-                        self.scheduler_config.max_num_batched_tokens,
-                        self.model_config.max_model_len,
-                    ),
+            if self.cache_config.enable_extensible_kv_cache:
+                run_kv_cache_sizing_warmup(
+                    self._v2_model_runner(), self.execute_model, self.sample_tokens
                 )
-                if self.model_config.use_mla:
-                    from vllm.model_executor.layers.attention.mla_attention import (
-                        MLACommonMetadataBuilder,
-                    )
-
-                    # Fill one chunked-context workspace, so the measured
-                    # peak covers up-projecting a prefix cache hit's context.
-                    builder = MLACommonMetadataBuilder
-                    run_context_prefill_warmup(
-                        self._v2_model_runner(),
-                        self.execute_model,
-                        self.sample_tokens,
-                        builder.determine_chunked_prefill_workspace_size(
-                            self.vllm_config
-                        ),
-                    )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1351,7 +1246,15 @@ class Worker(WorkerBase):
 
         num_kv_blocks = None
         if self.cache_config.enable_extensible_kv_cache:
-            num_kv_blocks = self._measure_kv_cache_blocks()
+            kv_cache = self._v2_model_runner().extensible_kv_cache
+            assert kv_cache is not None
+            num_kv_blocks = measure_kv_cache_blocks(
+                kv_cache,
+                self.vllm_config,
+                self.device,
+                init_free_memory=self.init_snapshot.free_memory,
+                requested_memory=int(self.requested_memory),
+            )
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
