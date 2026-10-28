@@ -32,6 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_support import mask_below_threshold
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -137,11 +138,15 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
+        threshold = self._draft_support_threshold(logits, idx_map, self.temperature)
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
         if self.draft_watermarker is not None:
+            # The watermarker samples from and caches the logits it is given.
             return self.draft_watermarker.sample(
-                logits,
+                logits
+                if threshold is None
+                else mask_below_threshold(logits, threshold),
                 idx_map,
                 self.temperature,
                 self.seeds,
@@ -165,6 +170,7 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
             logits_cache_num_shards=self.draft_logits_num_shards,
             logits_cache_shard_idx=self.draft_logits_shard_idx,
+            logits_threshold=threshold,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
