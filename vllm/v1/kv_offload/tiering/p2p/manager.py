@@ -74,7 +74,9 @@ _DRAIN_SLEEP_S = 0.001
 # Longest a reaped session's still-running transfer keeps its source pins.
 # NIXL may never report a wedged transfer terminal, and a hold without a
 # bound would look like a full cache; past this the handle is released.
-_RETAINED_HOLD_CAP_S = 120.0
+# The peer cannot reconnect while it holds retained transfers (see
+# _retained_peer), so this also bounds how long it stays unreachable.
+_RETAINED_HOLD_CAP_S = 30.0
 
 # Idle sessions are only reaped when remaining capacity is at most this
 # many slots. Session setup is expensive; below this headroom, keep idle
@@ -666,9 +668,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Block until every submitted load/store job has completed or failed.
 
         Loops calling ``_poll_once()`` until no session has outstanding
-        inbound loads or in-flight outbound stores. Mid-flight transfers
-        are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
-        needs the primary memoryview to be quiescent, not aborted. Results
+        inbound loads or in-flight outbound stores, and no reaped session's
+        transfer is still retained (bounded by its hold cap). Mid-flight
+        transfers are NOT cancelled — the caller
+        (``TieringOffloadingManager.reset_cache``) needs the primary
+        memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
         """
@@ -676,7 +680,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         warned = False
         while True:
             self._poll_once()
-            pending = any(s.has_pending_work for s in self._sessions.values())
+            pending = bool(self._retained) or any(
+                s.has_pending_work for s in self._sessions.values()
+            )
             if not pending:
                 return
             if not warned and time.monotonic() - start > 5.0:
@@ -739,7 +745,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
-        if self._reconnect_wait(peer_id) > 0:
+        if self._reconnect_wait(peer_id) > 0 or self._retained_peer(peer_id):
             return None
 
         max_peers = envs.VLLM_P2P_MAX_PEERS
@@ -808,6 +814,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
                 # Tell the peer, so its lookups fall back now rather than
                 # at the handshake deadline.
+                with contextlib.suppress(Exception):
+                    conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+                conn.close()
+                continue
+            if self._retained_peer(conn.peer_id):
+                logger.info(
+                    "P2P %s: rejecting inbound peer %s — its reaped "
+                    "session's transfers are still running",
+                    self._local_id,
+                    conn.peer_id,
+                )
                 with contextlib.suppress(Exception):
                     conn.send({TYPE_KEY: DisconnectMsg.TYPE})
                 conn.close()
@@ -939,6 +956,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     def _retained_job_ids(self) -> set[int]:
         return {jid for _, job_ids, _ in self._retained.values() for jid in job_ids}
+
+    def _retained_peer(self, peer_id: str) -> bool:
+        """Whether a reaped session of *peer_id* still has running transfers.
+
+        Its registration stays until they stop. A new session would load
+        the peer's NIXL agent again under the same name: NIXL keeps the old
+        UCX endpoints, possibly failed, and the old registration's release
+        removes the agent under the new one. So the peer stays out until
+        the transfers stop, at most _RETAINED_HOLD_CAP_S.
+        """
+        return any(pid == peer_id for pid, _, _ in self._retained.values())
 
     def _schedule_reconnect_backoff(self, peer_id: str) -> float:
         """Record a data-plane fault for *peer_id*; return its reconnect wait.

@@ -101,7 +101,7 @@ class SessionCloseResult(NamedTuple):
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
     # transfer_id → store job_ids it still reads
-    retained: dict[int, frozenset[int]] = {}
+    retained: dict[int, frozenset[int]]
 
 
 class P2PSession:

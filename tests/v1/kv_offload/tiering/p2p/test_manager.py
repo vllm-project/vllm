@@ -2435,6 +2435,66 @@ class TestRetainedTransfers:
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
         assert mgr._retained == {}
 
+    def test_outbound_waits_for_retained_transfers(self):
+        """A new session would load the peer's NIXL agent under the same
+        name while the reaped one's registration still holds it."""
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() while transfers are retained")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_inbound_is_told_to_disconnect_while_retained(self):
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_other_peers_are_not_held(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        assert not mgr._retained_peer("10.0.0.2:8000")
+
+    def test_drain_jobs_waits_for_retained_transfers(self, monkeypatch):
+        """reset_cache() asserts every job finished once drain_jobs()
+        returns, so a retained transfer's store jobs must be settled."""
+        mgr, data = self._reap({7: frozenset({1})})
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        polls = [0]
+
+        def poll_retired():
+            polls[0] += 1
+            return [7] if polls[0] == 3 else []
+
+        data.poll_retired = poll_retired  # type: ignore[method-assign]
+        monkeypatch.setattr(manager_module.time, "sleep", lambda s: None)
+        mgr.drain_jobs()
+
+        assert polls[0] == 3
+        assert mgr._retained == {}
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+
 
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
