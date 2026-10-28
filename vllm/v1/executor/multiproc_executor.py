@@ -1223,20 +1223,18 @@ class WorkerProc:
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
             self._execute_worker_rpc(rpc_request)
-            if self.early_kv_recv is not None and rpc_request[0] in (
+            if early_kv_recv is not None and rpc_request[0] in (
                 "execute_model",
                 "sample_tokens",
             ):
                 # Other RPCs, e.g. sleep after a pause, keep the worker idle.
-                self.early_kv_recv.step_rpc_done()
-                if self.use_async_scheduling or rpc_request[3] not in (
-                    None,
-                    self.rank,
-                ):
+                early_kv_recv.step_rpc_done()
+                output_rank = rpc_request[3]
+                if self.use_async_scheduling or output_rank not in (None, self.rank):
                     # Receives found during the step go out now rather than
                     # with its output, ready only once the GPU finishes it.
                     # A synchronous replying worker polls in enqueue_output().
-                    self.early_kv_recv.poll()
+                    early_kv_recv.poll()
             del rpc_request
 
     def _execute_worker_rpc(

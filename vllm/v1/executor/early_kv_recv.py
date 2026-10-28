@@ -23,7 +23,7 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
 
     def __init__(self, expected_finished_count: int):
         super().__init__(expected_finished_count)
-        self._early_failed_recving = set[str]()
+        self._failed_recving_ready = set[str]()
 
     def add_finished_recving(self, req_ids: set[str]) -> set[str]:
         """Callers report each worker/load once; identities are not deduplicated."""
@@ -39,23 +39,23 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
                 finished.add(req_id)
                 self._recv_remaining_count.pop(req_id, None)
         failed = finished & self._failed_recving_pending
-        self._early_failed_recving.update(failed)
+        self._failed_recving_ready.update(failed)
         return finished - failed
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
     ) -> ModelRunnerOutput | None:
         output = super().aggregate(outputs, output_rank)
-        if output is not None and self._early_failed_recving:
+        if output is not None and self._failed_recving_ready:
             # A quorum completed by an early vote still uses normal recovery.
             kv_output = output.kv_connector_output
             assert kv_output is not None
             kv_output.finished_recving = (
                 kv_output.finished_recving or set()
-            ) | self._early_failed_recving
-            kv_output.failed_recving |= self._early_failed_recving
-            self._failed_recving_pending -= self._early_failed_recving
-            self._early_failed_recving.clear()
+            ) | self._failed_recving_ready
+            kv_output.failed_recving |= self._failed_recving_ready
+            self._failed_recving_pending -= self._failed_recving_ready
+            self._failed_recving_ready.clear()
         return output
 
 

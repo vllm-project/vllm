@@ -55,10 +55,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         results = super().get_transfer_results()
         if self._early_finished_recving is not None:
             # Normal collection may finish before the GPU output is ready.
-            self._early_finished_recving.update(
-                results.finished_recving - results.failed_recving
-            )
-            results.finished_recving &= results.failed_recving
+            successful = results.finished_recving - results.failed_recving
+            self._early_finished_recving.update(successful)
+            results.finished_recving.difference_update(successful)
         return results
 
     def has_pending_recving(self) -> bool:
