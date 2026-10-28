@@ -271,6 +271,16 @@ The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--p
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
 
+#### Capacity and Eviction
+
+The FS tier does not bound its own size. To keep a `root_dir` (shared or not) under a byte budget, run one evictor process per `root_dir`, alongside any number of engines:
+
+```bash
+python -m vllm.v1.kv_offload.tiering.fs.evict /mnt/kv --max-bytes 500G
+```
+
+Every `--interval-s` seconds (default `60`; `0` runs one pass), it scans `root_dir` and, if block files exceed `--max-bytes`, deletes the oldest by mtime until usage is at `--low-watermark` (default `0.9`) of the budget. Since a stored block is never rewritten, this is first-in, first-out. It also removes `.tmp` files older than `--tmp-grace-s` (default `3600`), left by writers that crashed mid-store. Engines need no coordination: a block deleted after an engine looked it up fails to load and is recomputed.
+
 ### Object Store (OBJ)
 
 The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object store through the NIXL OBJ backend.
