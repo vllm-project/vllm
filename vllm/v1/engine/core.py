@@ -1008,10 +1008,6 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
-        if self.model_executor.is_sleeping:
-            raise RuntimeError(
-                "Cannot resume with sleeping memory; wake all tags first"
-            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
@@ -1022,9 +1018,6 @@ class EngineCore:
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
-
-        Callers must serialize sleep, wake, pause, and resume operations; see
-        the control request ordering contract in docs/features/sleep_mode.md.
 
         Args:
             level: Sleep level.
@@ -1040,7 +1033,7 @@ class EngineCore:
             raise RuntimeError(
                 f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
             )
-        # Callers serialize control operations, including the drain interval.
+        # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
         if level < 1:

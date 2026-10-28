@@ -16,22 +16,6 @@ Key benefits:
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
-## Control request ordering
-
-The caller must serialize sleep, wake, pause, and resume operations for each
-engine, including requests from different clients. Wait for each operation to
-complete successfully before issuing the next one. With asynchronous Python
-APIs, await the operation; with HTTP APIs, wait for its successful response.
-
-`sleep(mode="wait")` waits for in-flight requests to finish and for worker sleep
-to complete before returning to the caller. This does not block EngineCore from
-handling other control requests while requests drain. Overlapping control
-operations are unsupported; the engine does not guarantee that it will reject
-them or execute them in the intended order. Coordinate multiple clients through
-a single controller or a shared lock. A timeout or disconnected client does not
-prove that the operation stopped; establish its outcome before issuing another
-control operation.
-
 ## Sleep levels
 
 Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since nothing is backed up, restore the weights after waking up with `collective_rpc("reload_weights")`.
@@ -374,10 +358,16 @@ the selected allocator tags. It cannot selectively restore graph or driver
 state. Ordinary worker RPCs are rejected while checkpointed. A checkpointed
 worker cannot execute another model until restored.
 
-Follow the caller-serialization requirement in
-[Control request ordering](#control-request-ordering), including while level-1
-sleep is draining requests. A partial wake keeps scheduling paused until all
-allocator tags are awake.
+Serialize sleep, wake, pause, and resume calls across all clients, including
+while level-1 sleep is draining requests. Wait for each call to complete before
+issuing the next. A partial wake does not automatically resume scheduling; wake
+all allocator tags before explicitly resuming or submitting new inference.
+Do not use an explicit resume call to bypass sleeping memory.
+
+If EngineCore exits during a management call, the client may remain waiting even
+after the workers terminate. Use an external timeout and restart the failed
+engine; a timeout does not establish that the operation completed. Do not retry
+control operations on an engine whose checkpoint outcome is unknown.
 
 As with the ordinary executor, `sleep()` is a no-op while weights remain asleep.
 For example, after `wake_up(tags=["kv_cache"])`, another `sleep()` does not
