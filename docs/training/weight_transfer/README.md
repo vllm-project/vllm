@@ -41,8 +41,9 @@ engine drives on your behalf:
 !!! warning
     Weight updates and `reload_weights` cannot target a model managed by Expert
     Parallel Load Balancing (EPLB). Checkpoint loading uses the initial expert
-    placement, and pending rebalances can overwrite updated weights. Start the
-    engine with EPLB disabled for weight updates. Expert parallelism without
+    placement, and pending rebalances can overwrite updated weights. Disable EPLB
+    to update an EPLB-managed model. Updates to a dense main or draft model remain
+    supported when only the other model uses EPLB. Expert parallelism without
     EPLB remains supported.
 
 ## Quickstart
