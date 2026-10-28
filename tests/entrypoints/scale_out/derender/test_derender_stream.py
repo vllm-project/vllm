@@ -1334,6 +1334,53 @@ def _chat_request(**kwargs):
     return ChatCompletionRequest(**kwargs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("derenderer_fixture", ["derenderer", "parsed_derenderer"])
+@pytest.mark.parametrize(
+    ("add_generation_prompt", "role", "echoed"),
+    [(True, "bot", ""), (False, "assistant", "1, 2,")],
+)
+async def test_stream_role_and_echo_match_chat_completion(
+    request, monkeypatch, derenderer_fixture, add_generation_prompt, role, echoed
+):
+    """Streaming derender sends the role `/v1/chat/completions` would and
+    the `echo` text once, at the start of the first chunk's content."""
+    dr = request.getfixturevalue(derenderer_fixture)
+    monkeypatch.setattr(dr, "response_role", "bot")
+    chat_request = _chat_request(
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {"role": "assistant", "content": "1, 2,"},
+        ],
+        add_generation_prompt=add_generation_prompt,
+        continue_final_message=not add_generation_prompt,
+        echo=True,
+    )
+
+    async def stream(chat_request: ChatCompletionRequest) -> list[DeltaMessage]:
+        deltas = []
+        state = None
+        for _ in range(2):
+            chunk, state = await dr.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk([_FakeParser.CONTENT]),
+                state=state,
+                chat_request=chat_request,
+                prompt_token_ids=[1],
+            )
+            deltas.append(chunk.choices[0].delta)
+        return deltas
+
+    first, second = await stream(chat_request)
+    plain_first, plain_second = await stream(
+        chat_request.model_copy(update={"echo": False})
+    )
+
+    assert (first.role, second.role) == (role, None)
+    assert first.content == echoed + (plain_first.content or "") or None
+    assert second.content == plain_second.content
+
+
 class TestDerenderChatStreamParsed:
     """derender_chat_stream: parser branch (replay + parse_delta) exercised
     against the deterministic `_FakeParser` so these pin OnlineDerenderer's
