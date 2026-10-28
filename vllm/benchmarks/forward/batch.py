@@ -57,7 +57,9 @@ def _num_blocks(
     block_size = kv_block_size(spec, dcp_size)
     if isinstance(spec, UniformTypeKVCacheSpecs):
         spec = spec.first_spec
-    if isinstance(spec, (CircularBufferSpec, MambaSpec)):
+    if isinstance(spec, MambaSpec):
+        return 0, 1 + spec.num_speculative_blocks
+    if isinstance(spec, CircularBufferSpec):
         return 0, 1
     total = -(-kv_len // block_size)
     skipped = 0
@@ -74,11 +76,12 @@ def build_batch(
     vocab_size: int,
     rng: np.random.Generator,
     dcp_size: int = 1,
+    lookahead: int = 0,
 ) -> BenchBatch:
     """Allocate disjoint blocks and build `NewRequestData` for every request.
 
     Groups share one block pool, so block IDs are unique across groups. Block
-    0 is the null block.
+    0 is the null block. Lookahead reserves space for the drafter's KV writes.
 
     With prefix P = K - Q (KV length K, query length Q):
 
@@ -110,7 +113,7 @@ def build_batch(
         block_ids = []
         for group, ranges in zip(kv_cache_groups, group_block_ranges):
             skipped, live = _num_blocks(
-                group.kv_cache_spec, computed, req.kv_len, dcp_size
+                group.kv_cache_spec, computed, req.kv_len + lookahead, dcp_size
             )
             block_ids.append([0] * skipped + list(range(cursor, cursor + live)))
             ranges.append((cursor, cursor + live))
