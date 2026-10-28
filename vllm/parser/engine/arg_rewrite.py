@@ -407,7 +407,10 @@ class _StreamingArgs:
     argument extender streamed (recorded by :meth:`extend_streamed`);
     otherwise the delta falls back to a full pass.
     A trailing open string under a streamable key streams its content
-    verbatim, so a long value is not rescanned on every delta.
+    verbatim, so a long value is not rescanned on every delta.  A trailing
+    open string the prefix withholds (an optional string, or one nested in
+    an object or array) is buffered the same way: the cache grows while
+    only string content arrives, and the closing tick re-parses.
 
     The tail is only resumed from a comma whose member starts with a quoted
     key, and never past the offset where the rewriter first structurally
@@ -424,6 +427,7 @@ class _StreamingArgs:
         "_corrected_boundary",
         "_emitted",
         "streams",
+        "_open_string",
         "_at_end",
         "_stop",
         "_nonfinite",
@@ -441,7 +445,7 @@ class _StreamingArgs:
         # A property schema makes the rewriter parse regardless, so only the
         # schema-less fast path needs the scan.
         self._nonfinite = not properties and _document_has_non_finite_literal(args_json)
-        corrected, self.safe, self.streams = self._rewrite(args_json)
+        corrected, self.safe, self.streams, self._open_string = self._rewrite(args_json)
         self._raw = args_json
         self._raw_boundary = 0
         self._corrected_boundary = 0
@@ -470,19 +474,21 @@ class _StreamingArgs:
         self._emitted += len(text)
         self._tail_parts.append(text)
 
-    def _rewrite(self, text: str, *, stop_shift: int = 0) -> tuple[str, str, bool]:
+    def _rewrite(
+        self, text: str, *, stop_shift: int = 0
+    ) -> tuple[str, str, bool, bool]:
         """Correct *text*; fold its give-up offset, shifted by *stop_shift*."""
         rewriter = _ArgsRewriter(
             text, self._properties, final=False, force_parse=self._nonfinite
         )
         out = rewriter.rewrite()
-        safe, streams = safe_arg_prefix(out, self._string_keys)
+        safe, streams, open_string = safe_arg_prefix(out, self._string_keys)
         # The first structural give-up is final: everything after it is
         # copied verbatim, so a tail scan may not resume beyond it.
         if rewriter.stop is not None:
             stop = rewriter.stop + stop_shift
             self._stop = stop if self._stop is None else min(self._stop, stop)
-        return out, safe, streams
+        return out, safe, streams, open_string
 
     def _extends(self, args_json: str) -> bool:
         """Whether *args_json* still has the cached document as its prefix."""
@@ -516,13 +522,20 @@ class _StreamingArgs:
         extends = self._extends(args_json)
         if not extends and not self._resumable(args_json):
             return None
-        if extends and self.streams and self._at_end:
+        stream = self.streams and self._at_end
+        if extends and (stream or self._open_string):
             delta = args_json[len(raw) :]
-            # No unescaped quote means the delta stays inside the cached open
-            # string, so a non-finite-looking token in it is string content
-            # and cannot need the rewrite the fragment check guards against.
-            if not _unescaped_quote(delta, is_escaped(raw, len(raw))):
+            # Only an unescaped quote can leave the cached open string; until
+            # then the delta is string content, so a non-finite-looking token
+            # in it cannot need the rewrite the fragment check guards against.
+            if '"' not in delta or not _unescaped_quote(
+                delta, is_escaped(raw, len(raw))
+            ):
                 self._raw = args_json
+                if not stream:
+                    # The string is withheld from the safe prefix: only the
+                    # cache grows, and the closing tick re-parses.
+                    return "", False
                 self._emitted += len(delta)
                 self._tail_parts.append(delta)
                 return delta, True
@@ -536,7 +549,9 @@ class _StreamingArgs:
         base = self._raw_boundary
         raw_tail = args_json[base:]
         tail = "{" + raw_tail if skip else args_json
-        tail_out, safe_tail, streams = self._rewrite(tail, stop_shift=base - skip)
+        tail_out, safe_tail, streams, open_string = self._rewrite(
+            tail, stop_shift=base - skip
+        )
         body = tail_out[skip:]
         # Only the finalized prefix is known to match; if the new tail does
         # not reproduce the emitted text from the resume boundary, a full
@@ -560,6 +575,7 @@ class _StreamingArgs:
                 self._tail_parts.append(delta)
         self._raw = args_json
         self.streams = streams
+        self._open_string = open_string
         # The safe prefix reaching the end of the corrected body is a
         # boundary-relative property; ``end`` was computed before the
         # boundary above may have advanced.
@@ -569,7 +585,7 @@ class _StreamingArgs:
 
 def safe_arg_prefix(
     json_str: str, string_keys: set[str] | None = None
-) -> tuple[str, bool]:
+) -> tuple[str, bool, bool]:
     """Return the prefix of *json_str* up to the last top-level value.
 
     Middle values (followed by a comma) are stable across streaming
@@ -580,10 +596,13 @@ def safe_arg_prefix(
     their unterminated content instead of buffering long arguments until
     the closing tag arrives.
 
-    Also returns whether the returned prefix stops inside that trailing
-    string, so streamed text may be appended to it.  This holds even when
-    *json_str* closes the string: converters serialise an open raw value
-    as a closed JSON string.
+    The second value reports whether the returned prefix stops inside that
+    trailing string, so streamed text may be appended to it.  This holds
+    even when *json_str* closes the string: converters serialise an open
+    raw value as a closed JSON string.  The third reports whether *json_str*
+    itself ends inside an unclosed string.  Such a string may be withheld
+    from the prefix, but no structural text can follow until it closes, so
+    a streaming caller can extend its cache without re-parsing.
     """
     last_colon = -1
     last_key: str | None = None
@@ -616,12 +635,12 @@ def safe_arg_prefix(
             last_key = pending_key
             pending_key = None
     if last_colon < 0:
-        return "", False
+        return "", False, in_string
     end = next_non_ws(json_str, last_colon + 1)
     if end >= len(json_str) or json_str[end] != '"':
-        return json_str[:end], False
+        return json_str[:end], False, in_string
     if string_keys is not None and last_key not in string_keys:
-        return json_str[:end], False
+        return json_str[:end], False, in_string
 
     escape = False
     for i in range(end + 1, len(json_str)):
@@ -633,5 +652,5 @@ def safe_arg_prefix(
             escape = True
             continue
         if c == '"':
-            return json_str[:i], True
-    return json_str, True
+            return json_str[:i], True, in_string
+    return json_str, True, in_string

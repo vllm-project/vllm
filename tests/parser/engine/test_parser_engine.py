@@ -2029,6 +2029,25 @@ class TestSafeArgPrefix:
     def test_safe_arg_prefix(self, json_str, expected):
         assert safe_arg_prefix(json_str)[0] == expected
 
+    @pytest.mark.parametrize(
+        "json_str, open_string",
+        [
+            ('{"a": 1', False),
+            ('{"a": ', False),
+            ('{"a": "x', True),
+            ('{"a": "x"', False),
+            ('{"a": "x", "b', True),
+            ('{"o": {"a": "x', True),
+            ('{"a": ["x', True),
+            ('{"a": "x\\', True),
+            ('{"a": "x\\\\"', False),
+            ("", False),
+        ],
+    )
+    def test_open_string(self, json_str, open_string):
+        """The third value reports whether the text ends inside a string."""
+        assert safe_arg_prefix(json_str)[2] is open_string
+
 
 # ── Coercion instability regression tests ────────────────────────
 
@@ -2313,7 +2332,7 @@ class TestIncrementalArgRewrite:
             if convert is not None:
                 current = convert(current, True)
             corrected = _ArgsRewriter(current, properties, final=False).rewrite()
-            safe, _ = safe_arg_prefix(corrected, string_keys)
+            safe = safe_arg_prefix(corrected, string_keys)[0]
             deltas.append(safe[len(emitted) :])
             emitted = safe
         return deltas
@@ -2336,6 +2355,31 @@ class TestIncrementalArgRewrite:
             (
                 {"items": {"type": "array"}},
                 ['{"items": [', '{"a": ', "1", "}, ", '{"b": 2}', "]}"],
+            ),
+            pytest.param(
+                {"body": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                ['{"body": "', "he", "llo", '"', "}"],
+                id="withheld-anyof",
+            ),
+            pytest.param(
+                {"body": {"type": ["string", "null"]}},
+                ['{"body": "', "he", 'll"', "}"],
+                id="withheld-type-list",
+            ),
+            pytest.param(
+                {
+                    "obj": {
+                        "type": "object",
+                        "properties": {"body": {"type": "string"}},
+                    }
+                },
+                ['{"obj": {"body": "', "he", 'llo"', "}}"],
+                id="withheld-nested-object",
+            ),
+            pytest.param(
+                {"arr": {"type": "array", "items": {"type": "string"}}},
+                ['{"arr": ["', "he", 'llo"', "]}"],
+                id="withheld-nested-array",
             ),
         ],
     )
@@ -2407,16 +2451,56 @@ class TestIncrementalArgRewrite:
         assert "".join(per_chunk) == '{"s": "abc", "t": '
         assert "".join(per_chunk) + flush == '{"s": "abc", "t": 1}'
 
-    def test_long_string_is_not_rewritten_per_delta(self, rewrite_counts):
-        """An open string streams verbatim, so its deltas do not re-rewrite
-        the accumulated document."""
-        tool = _make_tool("f", {"body": {"type": "string"}})
+    @pytest.mark.parametrize(
+        "schema,prefix,suffix",
+        [
+            pytest.param(
+                {"body": {"type": "string"}}, '{"body": "', '"}', id="streamable"
+            ),
+            pytest.param(
+                {"body": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                '{"body": "',
+                '"}',
+                id="withheld-anyof",
+            ),
+            pytest.param(
+                {"body": {"type": ["string", "null"]}},
+                '{"body": "',
+                '"}',
+                id="withheld-type-list",
+            ),
+            pytest.param(
+                {
+                    "obj": {
+                        "type": "object",
+                        "properties": {"body": {"type": "string"}},
+                    }
+                },
+                '{"obj": {"body": "',
+                '"}}',
+                id="withheld-nested-object",
+            ),
+            pytest.param(
+                {"arr": {"type": "array", "items": {"type": "string"}}},
+                '{"arr": ["',
+                '"]}',
+                id="withheld-nested-array",
+            ),
+        ],
+    )
+    def test_long_string_is_not_rewritten_per_delta(
+        self, rewrite_counts, schema, prefix, suffix
+    ):
+        """An open trailing string is only string content, so its deltas do
+        not re-rewrite the accumulated document, whether it streams or is
+        withheld by the safe prefix."""
+        tool = _make_tool("f", schema)
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         body = "x" * 4000
-        chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
-        chunks.append('"}')
+        chunks = [prefix] + [body[i : i + 8] for i in range(0, len(body), 8)]
+        chunks.append(suffix)
         args = _stream_tool_args(engine, "f", chunks)
-        assert args == '{"body": "' + body + '"}'
+        assert args == prefix + body + suffix
         assert rewrite_counts.calls < 10, (
             f"rewrote {rewrite_counts.calls} times for {len(chunks)} deltas"
         )
