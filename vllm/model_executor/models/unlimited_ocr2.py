@@ -19,6 +19,7 @@ from vllm.model_executor.layers.unlimited_ocr2 import (
     dash_attention,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionMetadata,
@@ -263,6 +264,85 @@ class PageCountGuard:
             logits[self.eos_token_id] = -float("inf")
 
 
+@triton.jit
+def _page_count_guard_kernel(
+    Logits,
+    Tokens,
+    PromptLen,
+    Positions,
+    Slots,
+    Params,
+    State,
+    LOGIT_STRIDE: tl.constexpr,
+    LOGIT_COL_STRIDE: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    slot = tl.load(Slots + row).to(tl.int64)
+    page = tl.load(Params + slot * 3)
+    if page < 0:
+        return
+    eos = tl.load(Params + slot * 3 + 1)
+    cap = tl.load(Params + slot * 3 + 2)
+    prompt_len = tl.load(PromptLen + slot)
+    length = tl.load(Positions + row) + 1 - prompt_len
+    expected = tl.load(State + slot * 4)
+    seen = tl.load(State + slot * 4 + 1)
+    markers = tl.load(State + slot * 4 + 2)
+    last = tl.load(State + slot * 4 + 3)
+    offsets = tl.arange(0, BLOCK)
+    if expected < 0:
+        expected = tl.full((), 0, tl.int64)
+        for prompt_start in range(0, prompt_len, BLOCK):
+            prompt_pos = prompt_start + offsets
+            token = tl.load(
+                Tokens + slot * TOKEN_STRIDE + prompt_pos,
+                prompt_pos < prompt_len,
+                other=-1,
+            )
+            expected += tl.sum(
+                ((prompt_pos < prompt_len) & (token == page)).to(tl.int64), 0
+            )
+        tl.store(State + slot * 4, expected)
+    if expected == 0:
+        return
+    if length < seen:
+        seen = tl.full((), 0, tl.int64)
+        markers = tl.full((), 0, tl.int64)
+        last = tl.full((), -1, tl.int64)
+    for output_start in range(seen, length, BLOCK):
+        output_pos = output_start + offsets
+        token = tl.load(
+            Tokens + slot * TOKEN_STRIDE + prompt_len + output_pos,
+            output_pos < length,
+            other=-1,
+        )
+        found = (output_pos < length) & (token == page)
+        markers += tl.sum(found.to(tl.int64), 0)
+        last = tl.maximum(last, tl.max(tl.where(found, output_pos, -1), 0))
+    tl.store(State + slot * 4 + 1, length)
+    tl.store(State + slot * 4 + 2, markers)
+    tl.store(State + slot * 4 + 3, last)
+    force = tl.full((), -1, tl.int64)
+    if markers > expected:
+        force = eos
+    elif (cap > 0) & (length - last - 1 >= cap):
+        force = tl.where(markers < expected, page, eos)
+    if force >= 0:
+        for fill_start in range(0, VOCAB_SIZE, BLOCK):
+            logit_pos = fill_start + offsets
+            # Preserve the forced token's existing logit, including other masks.
+            tl.store(
+                Logits + row * LOGIT_STRIDE + logit_pos * LOGIT_COL_STRIDE,
+                -float("inf"),
+                (logit_pos < VOCAB_SIZE) & (logit_pos != force),
+            )
+    elif markers < expected:
+        tl.store(Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE, -float("inf"))
+
+
 class PageCountGuardLogitsProcessor(LogitsProcessor):
     """Page-count guard for Unlimited-OCR-2 multi-page parsing.
 
@@ -291,12 +371,15 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
     ``hf_config.eos_token_id`` when not given. The processor is inactive for
     requests (or v1 configs) where no page token id can be resolved.
 
-    Per-slot state is keyed by the persistent request slot and the
-    generated-token tail is re-read from the runner's committed token
-    history each step.
+    GPU state is keyed by the persistent request slot. The prompt is scanned
+    once; subsequent steps scan only newly committed output tokens.
     """
 
     def __init__(self, vllm_config: VllmConfig, req_states: LogitsProcRequestState):
+        from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
+
+        if vllm_config.speculative_config is not None:
+            raise ValueError("Page count guard does not support speculative decoding")
         hf_config = vllm_config.model_config.hf_config
         sparse_config = getattr(hf_config, "sparse_attention_config", None)
         self._default_page_token_id = self._read(sparse_config, "page_token_id")
@@ -307,6 +390,13 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
 
         self.all_token_ids = req_states.all_token_ids
         self.prompt_len_np = req_states.prompt_len.np
+        self._prompt_len = req_states.prompt_len
+        self._params = StagedWriteTensor(
+            (req_states.max_num_reqs, 3), torch.int64, req_states.device
+        )
+        self._state = StagedWriteTensor(
+            (req_states.max_num_reqs, 4), torch.int64, req_states.device
+        )
         self._guards: dict[int, PageCountGuard] = {}
 
     @staticmethod
@@ -336,9 +426,11 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         self._guards.pop(req_idx, None)
+        self._state.stage_write(req_idx, 0, [-1, 0, 0, -1])
         extra_args = sampling_params.extra_args or {}
         page_token_id = extra_args.get("page_token_id", self._default_page_token_id)
         if page_token_id is None:
+            self._params.stage_write(req_idx, 0, [-1, 0, 0])
             return False
         self._validate_token_id("page_token_id", page_token_id)
 
@@ -359,27 +451,30 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
         self._guards[req_idx] = PageCountGuard(
             page_token_id, eos_token_id, max_page_tokens
         )
+        self._params.stage_write(
+            req_idx, 0, [page_token_id, eos_token_id, max_page_tokens]
+        )
         return True
+
+    def apply_staged_writes(self) -> None:
+        self._params.apply_write()
+        self._state.apply_write()
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
         if not self._guards:
             return logits
-        # NOTE(eager): per-row host reads of the committed token history.
-        # Rows are requests here; Unlimited-OCR-2 does not support
-        # speculative decoding.
-        for row, req in enumerate(ctx.idx_mapping_np):
-            guard = self._guards.get(int(req))
-            if guard is None:
-                continue
-            prompt_len = int(self.prompt_len_np[req])
-            if guard.expected_pages < 0:
-                # First apply for this request: the prompt is committed now,
-                # so the page markers can be counted from the token history.
-                prompt_ids = self.all_token_ids.gpu[req, :prompt_len].tolist()
-                guard.seed_expected_pages(prompt_ids)
-            if guard.expected_pages <= 0:
-                continue
-            total_len = int(ctx.seq_lens_upper_bound_np[row])
-            output_ids = self.all_token_ids.gpu[req, prompt_len:total_len].tolist()
-            guard.step(output_ids, logits[row])
+        _page_count_guard_kernel[(logits.shape[0],)](
+            logits,
+            self.all_token_ids.gpu,
+            self._prompt_len.gpu,
+            ctx.pos,
+            ctx.expanded_idx_mapping,
+            self._params.gpu,
+            self._state.gpu,
+            logits.stride(0),
+            logits.stride(1),
+            self.all_token_ids.gpu.stride(0),
+            logits.shape[1],
+            1024,
+        )
         return logits

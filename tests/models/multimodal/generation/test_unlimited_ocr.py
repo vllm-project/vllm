@@ -79,6 +79,9 @@ def test_unlimited_ocr2_batched_pages(
         gpu_memory_utilization=0.1,
         enforce_eager=enforce_eager,
         attention_config={"backend": backend},
+        logits_processors=[
+            "vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor"
+        ],
         kernel_config={"enable_jit_warmup": False},
         compilation_config={
             "cudagraph_capture_sizes": [2, 1024, 4096] if prefill_graph else [2],

@@ -29,6 +29,8 @@ page: EOS is masked until all pages are done, extra page markers force EOS,
 and `max_page_tokens` (default 20000) caps each page. The guard reads
 `page_token_id` / `eos_token_id` / `max_page_tokens` from
 `SamplingParams.extra_args` when given.
+With Model Runner V2, the guard counts prompt markers once and processes new
+output tokens on the GPU, without copying token history back to the CPU.
 
 ## Attention and KV cache
 

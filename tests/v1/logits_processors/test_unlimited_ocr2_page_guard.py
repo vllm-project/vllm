@@ -144,7 +144,7 @@ def _make_v2_ctx(num_reqs: int, seq_lens: list[int]):
         idx_mapping_np=np.arange(num_reqs),
         expanded_local_pos=torch.zeros(num_reqs, dtype=torch.long, device=device),
         input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=device),
-        pos=torch.zeros(num_reqs, dtype=torch.long, device=device),
+        pos=torch.tensor(seq_lens, dtype=torch.long, device=device) - 1,
         seq_lens_upper_bound_np=np.array(seq_lens, dtype=np.int32),
     )
 
@@ -161,6 +161,7 @@ def _make_v2_guard(model: str = "baidu/Unlimited-OCR-2"):
 def _commit(processor, prompt_ids: list[int], output_ids: list[int]) -> None:
     ids = prompt_ids + output_ids
     processor.prompt_len_np[0] = len(prompt_ids)
+    processor._prompt_len.copy_to_uva()
     processor.all_token_ids.gpu[0, : len(ids)] = torch.tensor(
         ids, dtype=torch.int32, device=processor.all_token_ids.gpu.device
     )
@@ -168,23 +169,25 @@ def _commit(processor, prompt_ids: list[int], output_ids: list[int]) -> None:
 
 def _apply_v2(processor, prompt_ids, output_ids) -> torch.Tensor:
     _commit(processor, prompt_ids, output_ids)
+    processor.apply_staged_writes()
     ctx = _make_v2_ctx(1, [len(prompt_ids) + len(output_ids)])
     return processor.apply(_logits().unsqueeze(0).to("cuda"), ctx)[0].cpu()
 
 
 @_requires_cuda
 class TestPageCountGuardV2:
-    def test_matches_core_step_by_step(self):
+    @pytest.mark.parametrize("page_cap", [0, 3])
+    def test_matches_core_step_by_step(self, page_cap):
         prompt_ids = [PAGE_ID, PAGE_ID, 100]
         output_ids = [10, 11, PAGE_ID, 12, 13, 14, PAGE_ID, 15, PAGE_ID]
-        core = PageCountGuard(PAGE_ID, EOS_ID, 3)
+        core = PageCountGuard(PAGE_ID, EOS_ID, page_cap)
 
         v2 = _make_v2_guard()
         params = SamplingParams(
             extra_args={
                 "page_token_id": PAGE_ID,
                 "eos_token_id": EOS_ID,
-                "max_page_tokens": 3,
+                "max_page_tokens": page_cap,
             }
         )
         assert v2.add_request(0, params)
@@ -247,3 +250,85 @@ class TestPageCountGuardV2:
             ]
         )
         assert classes == [PageCountGuardLogitsProcessor]
+
+    def test_apply_has_no_host_reads(self):
+        """Both initialization and incremental decoding must stay asynchronous."""
+        v2 = _make_v2_guard()
+        assert v2.add_request(0, SamplingParams())
+        for output in ([], [PAGE_ID, 10], [PAGE_ID, 10, PAGE_ID]):
+            _commit(v2, [PAGE_ID, 100], output)
+            v2.apply_staged_writes()
+            ctx = _make_v2_ctx(1, [2 + len(output)])
+            logits = _logits().unsqueeze(0).cuda()
+            previous = torch.cuda.get_sync_debug_mode()
+            try:
+                torch.cuda.set_sync_debug_mode("error")
+                v2.apply(logits, ctx)
+            finally:
+                torch.cuda.set_sync_debug_mode(previous)
+            expected = _step(PageCountGuard(PAGE_ID, EOS_ID), [PAGE_ID, 100], output)
+            assert torch.equal(logits[0].cpu(), expected)
+
+    def test_batched_reordering_and_slot_reuse(self):
+        """State follows slots across row changes, resumption and new occupants."""
+        from dataclasses import replace
+
+        from vllm.engine.arg_utils import EngineArgs
+
+        config = EngineArgs(
+            model="baidu/Unlimited-OCR-2", enable_chunked_prefill=False
+        ).create_engine_config()
+        req_state = _make_v2_req_state(max_num_reqs=3)
+        v2 = PageCountGuardLogitsProcessor(config, req_state)
+        params = SamplingParams(extra_args={"max_page_tokens": 3})
+        prompts = [[PAGE_ID, 100], [PAGE_ID, PAGE_ID, 100], [100]]
+        outputs = [[PAGE_ID, 10], [10, 11, 12], [10, 11, 12]]
+        inactive = set()
+        for slot in range(3):
+            assert v2.add_request(slot, params)
+
+        def check(order):
+            for slot in range(3):
+                ids = prompts[slot] + outputs[slot]
+                req_state.prompt_len.np[slot] = len(prompts[slot])
+                req_state.all_token_ids.gpu[slot, : len(ids)] = torch.tensor(
+                    ids, device="cuda"
+                )
+            req_state.prompt_len.copy_to_uva()
+            v2.apply_staged_writes()
+            ctx = _make_v2_ctx(3, [len(prompts[s]) + len(outputs[s]) for s in order])
+            mapping = torch.tensor(order, device="cuda")
+            ctx = replace(
+                ctx,
+                idx_mapping=mapping,
+                expanded_idx_mapping=mapping,
+                idx_mapping_np=np.array(order),
+            )
+            # Preserve existing masks and exercise a noncontiguous logits view.
+            logits = torch.arange(
+                3 * VOCAB_SIZE * 2, dtype=torch.float32, device="cuda"
+            ).reshape(3, -1)[:, ::2]
+            logits[:, PAGE_ID] = -float("inf")
+            expected = logits.cpu()
+            for row, slot in enumerate(order):
+                if slot in inactive:
+                    continue
+                guard = PageCountGuard(PAGE_ID, EOS_ID, 3)
+                guard.seed_expected_pages(prompts[slot])
+                guard.step(outputs[slot], expected[row])
+            actual = v2.apply(logits, ctx).cpu()
+            assert torch.equal(actual, expected)
+
+        check([0, 1, 2])
+        outputs[0].extend([11, 12])
+        outputs[1].extend([PAGE_ID, 10, PAGE_ID, 11, 12, 13])
+        check([2, 0, 1])
+        # A resumed request arrives with already generated output.
+        assert v2.add_request(1, params)
+        # Slot 0 is reused by a new request with a different prompt page count.
+        assert v2.add_request(0, params)
+        prompts[0], outputs[0] = [PAGE_ID] * 3, [PAGE_ID, 10]
+        check([1, 2, 0])
+        assert not v2.add_request(1, SamplingParams(extra_args={"page_token_id": None}))
+        inactive.add(1)
+        check([2, 1, 0])
