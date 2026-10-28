@@ -143,11 +143,9 @@ def _select_cfg(M, N, K):
     (served K: 384/768/1024/2048/6144).
     """
     if 16 < M <= 64 and (N >= 2048 or M > 32):
-        # A BLOCK_M=16 tile streams the whole weight once per 16 rows, so from 17 rows
-        # on, cover M with one tile row instead. Timed with the weight read from HBM
-        # (rotating copies larger than the MALL); replaying one resident weight hides
-        # the re-reads. MiniMax-M3 TP2/TP4 shapes: 1.2-1.9x at M=32/64. A narrow N
-        # (< 2048) has too few N-tiles for BLOCK_M=64, so it stays at 32.
+        # A BLOCK_M=16 grid re-streams the weight once per 16 rows; cover M with one
+        # tile row instead. Tuned with the weight read from HBM (a MALL-resident
+        # weight hides the re-reads). Narrow N (< 2048) has too few N-tiles for 64.
         BLOCK_M = 32 if M <= 32 or N < 2048 else 64
         if BLOCK_M == 32 and K % 1024 == 0:
             BLOCK_K = 1024
