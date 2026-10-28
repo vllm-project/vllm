@@ -233,6 +233,30 @@ def test_prefills_without_context_are_skipped_and_neutralized():
         assert torch.isneginf(output_lse[:, token_slice]).all()
 
 
+def test_context_partial_shares_a_padded_chunk_partials_head_stride():
+    """A backend may return its chunk partial as a view of a head-padded
+    buffer. The running partial must share that head stride: the merges with
+    a continuation chunk and with the new tokens' partial require it."""
+    metadata = build_chunked_context([2048, 320], [4, 4], 1024)
+    assert metadata is not None
+    padded = torch.empty(4, 2, 8)[..., :3]
+
+    output, _ = init_mla_context_partial(
+        metadata, attn_output=padded, attn_softmax_lse=torch.empty(2, 4), num_tokens=8
+    )
+    assert output.shape == (8, 2, 3)
+    assert output.stride(1) == padded.stride(1)
+
+    # An unpadded partial keeps a contiguous one.
+    output, _ = init_mla_context_partial(
+        metadata,
+        attn_output=torch.empty(4, 2, 3),
+        attn_softmax_lse=torch.empty(2, 4),
+        num_tokens=8,
+    )
+    assert output.is_contiguous()
+
+
 def test_no_context_needs_no_chunks():
     assert build_chunked_context([0, 0], [4, 4], 1024) is None
 

@@ -19,6 +19,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -272,6 +273,23 @@ def test_context_prefill_warmup_attends_to_the_requested_context():
         assert num_computed + num_scheduled < MAX_MODEL_LEN
         assert num_scheduled == runner.decode_query_len + 1
     assert cache.commits == [1 + 3 * cdiv(MAX_MODEL_LEN, BLOCK_SIZE)]
+
+
+def test_context_prefill_warmup_stays_within_the_context_and_vocabulary():
+    """A long model length must not inflate the context past what the step
+    needs, nor its prompt ids past the vocabulary they embed from."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.extensible_kv_cache = _StubExtensibleCache(1024)
+    outputs: list[SchedulerOutput] = []
+
+    assert run_context_prefill_warmup(
+        runner, outputs.append, lambda grammar_output: None, num_context_tokens=100
+    )
+
+    (request,) = outputs[0].scheduled_new_reqs
+    assert request.num_computed_tokens == 100
+    vocab_size = runner.model_config.get_vocab_size()
+    assert max(request.prompt_token_ids) < vocab_size < len(request.prompt_token_ids)
 
 
 def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
