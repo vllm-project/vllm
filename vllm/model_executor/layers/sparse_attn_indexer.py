@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import math
+
 import torch
 import torch.distributed as dist
 
@@ -46,6 +48,7 @@ from vllm.utils.deep_gemm import (
     mqa_logits_use_mx_scales,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -478,6 +481,10 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
+    # DeepSelect ranks SM100's BF16 decode logits directly; other top-k
+    # backends and the DCP merge read an FP32 copy.
+    fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -498,11 +505,34 @@ def sparse_attn_indexer(
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Decode rows per step: each decode is padded to 1 + speculative tokens.
+        # The profiling run sets the vLLM config; other dummy runs may not.
+        max_decode_tokens = 0
+        if (cfg := get_current_vllm_config_or_none()) is not None:
+            max_decode_tokens = min(
+                cfg.scheduler_config.max_num_seqs,
+                cfg.scheduler_config.max_num_batched_tokens,
+            ) * (1 + cfg.num_speculative_tokens)
+
+        # Dummy allocation for the peak logits memory during inference: the
+        # prefill chunks' budget, or the decode logits, which eager and
+        # piecewise steps allocate outside the CUDA graph pools. DeepGEMM emits
+        # them in BF16 on SM100 and FP32 elsewhere, each row holding whole KV
+        # splits at a 1024-byte stride; the FP32 copy keeps that stride.
+        if current_platform.is_device_capability_family(100):
+            logits_dtype, split_kv = torch.bfloat16, 384
+        else:
+            logits_dtype, split_kv = torch.float32, 256
+        row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
+        elem_bytes = logits_dtype.itemsize
+        if logits_dtype != torch.float32 and fp32_decode_logits:
+            elem_bytes += torch.float32.itemsize
+        max_logits_bytes = max(
+            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+            max_decode_tokens * round_up(max_model_len, row_align) * elem_bytes,
+        )
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
 
         # The dummy run returns before exchange_topk executes, so reserve its
@@ -887,9 +917,9 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 indices=decode_metadata.indices,
             )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
+            # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
+            # one context length per row.
+            if fp32_decode_logits:
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -1057,7 +1087,6 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
-        self._cp_kv_cache_interleave_size: int | None = None
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1085,20 +1114,6 @@ class SparseAttnIndexer(CustomOp):
 
                 _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
                 _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
-
-    @property
-    def cp_kv_cache_interleave_size(self) -> int:
-        """With PD+DCP, the real value isn't known until block_size is finalized,
-        which happens after this layer is built. Safe to cache after the first access,
-        as long as the adjustment always runs before any forward pass
-        (it's set up in Worker.initialize_from_config, ahead of warmup/serving).
-        """
-        if self._cp_kv_cache_interleave_size is None:
-            value = self._parallel_config.cp_kv_cache_interleave_size
-            if isinstance(get_forward_context().attn_metadata, dict):
-                self._cp_kv_cache_interleave_size = value
-            return value
-        return self._cp_kv_cache_interleave_size
 
     def forward_native(
         self,
@@ -1158,7 +1173,7 @@ class SparseAttnIndexer(CustomOp):
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,
-            self.cp_kv_cache_interleave_size,
+            self._parallel_config.cp_kv_cache_interleave_size,
             False,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
@@ -1186,12 +1201,11 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx11, on_gfx950
+        from vllm.platforms.rocm import on_gfx950
 
         if (
             rocm_aiter_ops.is_enabled()
             or rocm_aiter_ops.is_rdna_aiter_enabled()
-            or on_gfx11()
             # The so-called AITER sparse indexer op has a native gfx950 path:
             # its cache insert, MQA logits, and top-k fallbacks are implemented
             # by local Triton/C++ kernels and do not require the aiter package.
@@ -1219,7 +1233,7 @@ class SparseAttnIndexer(CustomOp):
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
-            "native architecture (gfx950/gfx11)."
+            "native architecture (gfx950)."
         )
 
     def forward_cpu(

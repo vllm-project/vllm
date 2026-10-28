@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.v1.core.utils import get_kv_cache_configs
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -48,10 +49,7 @@ from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
-from vllm.v1.core.kv_cache_planning import (
-    estimate_max_model_len,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_planning import estimate_max_model_len
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
