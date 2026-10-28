@@ -175,8 +175,130 @@ def hpc_fuse_moe_blockwise(
     )
 
 
+@functools.cache
+def has_hpc_sm120_moe() -> bool:
+    """Return `True` if the installed HPC-Ops has the SM120 fused MoE."""
+    if not has_hpc():
+        return False
+    try:
+        from hpc import (  # noqa: F401
+            fuse_moe_blockwise_fp8_sm120,
+            fuse_moe_blockwise_mxfp4_sm120,
+        )
+    except ImportError:
+        logger.warning_once(
+            "The installed hpc package has no SM120 fused MoE; it needs "
+            "a newer https://github.com/Tencent/hpc-ops built for SM120."
+        )
+        return False
+    return True
+
+
+def hpc_prepare_fp8_moe_weights_sm120(
+    weight: torch.Tensor, weight_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Requantize 128-block FP8 expert weights against UE8M0 scales in place
+    and return them with the scales packed for the SM120 MoE."""
+    from hpc import prepare_fp8_moe_weights_sm120
+
+    return weight, prepare_fp8_moe_weights_sm120(weight, weight_scale)
+
+
+def hpc_prepare_mxfp4_moe_weights_sm120(
+    scale: torch.Tensor, rows: int, cols: int
+) -> torch.Tensor:
+    """Prepare MXFP4 MoE weight scales for the SM120 MXFP4 fused MoE.
+
+    Packs `[experts, rows, cols // 32]` UE8M0 scales into the GEMM layout.
+    """
+    from hpc import prepare_mxfp4_moe_weights_sm120
+
+    return prepare_mxfp4_moe_weights_sm120(scale, rows, cols)
+
+
+def hpc_fuse_moe_blockwise_fp8_sm120(
+    x: torch.Tensor,
+    x_scale: torch.Tensor | None,
+    gate_up_weight: torch.Tensor,
+    gate_up_weight_scale: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_weight_scale: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_scale: torch.Tensor,
+    rank_ep: int,
+    num_expert_total: int,
+    output: torch.Tensor,
+    swiglu_limit: float | None = None,
+) -> torch.Tensor:
+    """128-block FP8 fused MoE on SM120.
+
+    `x` is BF16 with `x_scale=None`, which the kernel quantizes itself, or FP8
+    with power-of-two 128-block `x_scale`. Weight scales come from
+    `hpc_prepare_fp8_moe_weights_sm120`.
+    """
+    from hpc import fuse_moe_blockwise_fp8_sm120
+
+    return fuse_moe_blockwise_fp8_sm120(
+        x,
+        x_scale,
+        gate_up_weight,
+        gate_up_weight_scale,
+        down_weight,
+        down_weight_scale,
+        topk_ids,
+        topk_scale,
+        rank_ep=rank_ep,
+        num_expert_total=num_expert_total,
+        output=output,
+        swiglu_limit=swiglu_limit,
+    )
+
+
+def hpc_fuse_moe_blockwise_mxfp4_sm120(
+    x: torch.Tensor,
+    x_scale: torch.Tensor | None,
+    gate_up_weight: torch.Tensor,
+    gate_up_weight_scale: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_weight_scale: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_scale: torch.Tensor,
+    rank_ep: int,
+    num_expert_total: int,
+    output: torch.Tensor,
+    swiglu_limit: float | None = None,
+) -> torch.Tensor:
+    """MXFP4 weight x MXFP8 activation fused MoE on SM120.
+
+    `x` is MXFP8 with its UE8M0 `x_scale`, or BF16 with `x_scale=None`, which
+    the kernel quantizes to MXFP8 itself. Weight scales come from
+    `hpc_prepare_mxfp4_moe_weights_sm120`.
+    """
+    from hpc import fuse_moe_blockwise_mxfp4_sm120
+
+    return fuse_moe_blockwise_mxfp4_sm120(
+        x,
+        x_scale,
+        gate_up_weight,
+        gate_up_weight_scale,
+        down_weight,
+        down_weight_scale,
+        topk_ids,
+        topk_scale,
+        rank_ep=rank_ep,
+        num_expert_total=num_expert_total,
+        output=output,
+        swiglu_limit=swiglu_limit,
+    )
+
+
 __all__ = [
     "has_hpc",
+    "has_hpc_sm120_moe",
     "hpc_fuse_moe",
     "hpc_fuse_moe_blockwise",
+    "hpc_fuse_moe_blockwise_fp8_sm120",
+    "hpc_fuse_moe_blockwise_mxfp4_sm120",
+    "hpc_prepare_fp8_moe_weights_sm120",
+    "hpc_prepare_mxfp4_moe_weights_sm120",
 ]

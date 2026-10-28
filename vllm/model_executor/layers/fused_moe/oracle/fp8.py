@@ -701,6 +701,14 @@ def convert_to_fp8_moe_kernel_format(
         w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
             w13, w2, w13_scale, w2_scale
         )
+    elif fp8_backend == Fp8MoeBackend.HPC and current_platform.is_device_capability(
+        120
+    ):
+        from vllm.utils.hpc import hpc_prepare_fp8_moe_weights_sm120
+
+        assert block_quant
+        w13, w13_scale = hpc_prepare_fp8_moe_weights_sm120(w13, w13_scale)
+        w2, w2_scale = hpc_prepare_fp8_moe_weights_sm120(w2, w2_scale)
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,

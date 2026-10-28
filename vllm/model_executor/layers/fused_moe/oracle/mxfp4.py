@@ -171,6 +171,8 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
     FLASHINFER_MOE_EP_DEEP_GEMM = "FLASHINFER_MOE_EP_DEEP_GEMM"
+    # HPC-Ops W4A8 (SM120)
+    HPC = "HPC"
 
 
 # Backends that share the same TRTLLM weight format
@@ -345,6 +347,11 @@ def backend_to_kernel_cls(
 
         return [FlashInferMoeEpExperts]
 
+    elif backend == Mxfp4MoeBackend.HPC:
+        from vllm.model_executor.layers.fused_moe.hpc_moe import HPCMxfp4Experts
+
+        return [HPCMxfp4Experts]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -390,6 +397,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
+        "hpc": [Mxfp4MoeBackend.HPC],
     }
     if backends := mapping.get(runner_backend):
         return backends
@@ -475,6 +483,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.HPC,
     ):
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
@@ -862,8 +871,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # DeepGEMM requires M/N/K alignment
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
-    elif backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4:
-        # CUTLASS scale tiles cover 128 rows by 128 elements
+    elif backend in (Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4, Mxfp4MoeBackend.HPC):
+        # CUTLASS and the SM120 HPC scale tiles cover 128 rows by 128 elements
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
@@ -1626,6 +1635,24 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    if mxfp4_backend == Mxfp4MoeBackend.HPC:
+        from vllm.utils.hpc import hpc_prepare_mxfp4_moe_weights_sm120
+
+        # Weights hold two E2M1 values per byte, so the reduction extent is
+        # twice the last dimension.
+        return (
+            w13_weight.data,
+            w2_weight.data,
+            hpc_prepare_mxfp4_moe_weights_sm120(
+                w13_weight_scale.data, w13_weight.shape[1], w13_weight.shape[2] * 2
+            ),
+            hpc_prepare_mxfp4_moe_weights_sm120(
+                w2_weight_scale.data, w2_weight.shape[1], w2_weight.shape[2] * 2
+            ),
+            w13_bias,
+            w2_bias,
+        )
+
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
@@ -2141,6 +2168,19 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
             mx_alignment=256,
+            is_scale_swizzled=False,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.HPC:
+        # HPC quantizes BF16 activations itself; pre-quantized MXFP8 input
+        # takes raw [tokens, hidden // 32] UE8M0 scales.
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
             is_scale_swizzled=False,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8:
