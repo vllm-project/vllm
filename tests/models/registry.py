@@ -704,7 +704,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
-    "ColUltraVBertForRetrieval": _HfExamplesInfo("athrael-soju/ColUltraVBERT"),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo(
+        "athrael-soju/ColUltraVBERT",
+        # Later revisions declare the UltraVBertModel architecture instead.
+        revision="509adbab61b71da0484b20f3baf718e15219d761",
+    ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ModernVBertModel": _HfExamplesInfo("ModernVBERT/colmodernvbert-merged"),
     "ColQwen3": _HfExamplesInfo(

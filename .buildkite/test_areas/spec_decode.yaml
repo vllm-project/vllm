@@ -358,6 +358,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Spec Decode Draft Model"
   key: spec-decode-draft-model-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   optional: true
@@ -469,6 +470,7 @@ steps:
   commands:
     # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+    - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
@@ -478,6 +480,7 @@ steps:
       timeout_in_minutes: 120
       commands:
       - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+      - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
       depends_on:
       - image-build-amd
       source_file_dependencies:

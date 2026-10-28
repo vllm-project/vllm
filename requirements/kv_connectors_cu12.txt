@@ -3,5 +3,5 @@
 lmcache == 0.5.6
 cuda-python >= 12, < 13
 cupy-cuda12x != 14.1.0
-nixl == 1.5.1
+nixl == 1.5.0
 mooncake-transfer-engine >= 0.3.12
