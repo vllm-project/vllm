@@ -14,6 +14,8 @@ disabled (score-only indexer), single shared index head. The selected block ids
 feed the block-sparse attention kernels in ``sparse_attn``.
 """
 
+import os
+
 import torch
 
 from vllm.platforms import current_platform
@@ -22,6 +24,32 @@ from vllm.utils.math_utils import round_up
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+
+def _sm90_split_k_target_grid() -> int:
+    """CTA target for the SM90 split-K score path (tunable; 8 waves of
+    H200's 132 SMs. 1056 beat 264/512/2112 in normalized full-run timing
+    on real-weight serving and scales better for many-small-request
+    batches whose natural CTA count is scarce)."""
+    try:
+        return int(os.environ.get("VLLM_M3_SPLITK_TARGET_GRID", "1056"))
+    except ValueError:
+        return 512
+
+
+def _sm90_split_k_enabled() -> bool:
+    """Kill switch for the SM90 split-K score path (registered in
+    vllm/envs.py; the direct os.environ read keeps standalone file-loaded
+    use working)."""
+    try:
+        import vllm.envs as envs
+
+        return not envs.VLLM_DISABLE_M3_INDEXER_SPLITK
+    except Exception:
+        return os.environ.get("VLLM_DISABLE_M3_INDEXER_SPLITK", "0") not in (
+            "1",
+            "true",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +731,12 @@ def minimax_m3_index_score(
     )
     BLOCK_SIZE_Q = 64
     n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
+    # Split-K across score blocks: splits write disjoint block columns, so
+    # the result is bit-identical to split_k=1. SM120 has always enabled it;
+    # SM90 needs it even more -- chunked prefill (e.g. 2048 tokens -> 32
+    # q-tiles) leaves the grid far below the 132 SMs, making the score
+    # latency-bound on each CTA's sequential K stream (~90% of score time on
+    # H200 at 128K+ context). Target 4 waves of CTAs there.
     SCORE_TARGET_GRID = 48
     split_k = max(
         1,
@@ -711,7 +745,22 @@ def minimax_m3_index_score(
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
     ):
-        split_k = 1
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+            and _sm90_split_k_enabled()
+        ):
+            SCORE_TARGET_GRID = _sm90_split_k_target_grid()
+            split_k = max(
+                1,
+                min(
+                    max_block,
+                    SCORE_TARGET_GRID
+                    // max(1, n_q_tiles * batch * num_idx_heads),
+                ),
+            )
+        else:
+            split_k = 1
     grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
