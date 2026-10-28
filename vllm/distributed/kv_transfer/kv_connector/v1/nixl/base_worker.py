@@ -269,7 +269,31 @@ class NixlBaseConnectorWorker:
         # have different num_blocks (and thus different FA desc counts).
         num_ssm_descs = len(ssm_regions) * ssm_regions_per_layer
         if pairs is None:
-            pairs = self._local_hybrid_pairs(len(block_ids), ssm_regions)
+            # Read every local region at the blocks of each group holding a
+            # layer in it. Hybrid regions are keyed by base address, so some
+            # hold only another group's layers (e.g. KDA-only or scratch-only
+            # tensors); reading them for this group would re-read aliased bytes.
+            default_regions: list[int] = []
+            default_groups: list[int] = []
+            for i in range(len(block_ids)):
+                group_regions = (
+                    self._group_region_indices[i]
+                    if self._group_region_indices
+                    else None
+                )
+                if i == self._ple_group_index:
+                    group_regions = [-1]
+                elif _is_ssm_spec(self._group_spec_types[i]):
+                    group_regions = [
+                        r
+                        for r in ssm_regions
+                        if group_regions is None or r in group_regions
+                    ]
+                elif group_regions is None:
+                    group_regions = list(range(self.num_regions))
+                default_regions.extend(group_regions)
+                default_groups.extend([i] * len(group_regions))
+            pairs = (default_regions, default_groups)
         pair_regions = np.asarray(pairs[0], dtype=np.int64)
         pair_keys = np.asarray(pairs[1], dtype=np.int64)
         sub_descs = np.arange(ssm_regions_per_layer, dtype=np.int64)
@@ -307,34 +331,6 @@ class NixlBaseConnectorWorker:
             return np.array([], dtype=np.int32)
         # NIXL takes int32 ids without a conversion copy.
         return np.concatenate(all_descs).astype(np.int32)
-
-    def _local_hybrid_pairs(
-        self, num_groups: int, ssm_regions: Sequence[int]
-    ) -> tuple[list[int], list[int]]:
-        """``(regions, groups)`` reading every local region at the blocks of
-        each group holding a layer in it, in region order."""
-        regions: list[int] = []
-        groups: list[int] = []
-        for i in range(num_groups):
-            # Hybrid regions are keyed by base address, so some hold only
-            # another group's layers (e.g. KDA-only or scratch-only tensors).
-            # Reading them for this group would only re-read aliased bytes.
-            group_regions = (
-                self._group_region_indices[i] if self._group_region_indices else None
-            )
-            if i == self._ple_group_index:
-                group_regions = [-1]
-            elif _is_ssm_spec(self._group_spec_types[i]):
-                group_regions = [
-                    r
-                    for r in ssm_regions
-                    if group_regions is None or r in group_regions
-                ]
-            elif group_regions is None:
-                group_regions = list(range(self.num_regions))
-            regions.extend(group_regions)
-            groups.extend([i] * len(group_regions))
-        return regions, groups
 
     def _build_local_splits_from_plan(
         self,
