@@ -996,26 +996,15 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
+        self.connector_scheduler: MooncakeConnectorScheduler | None = None
+        self.connector_worker: MooncakeConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None, (
                 "kv_cache_config is required for SCHEDULER role"
             )
-            self.connector_scheduler: MooncakeConnectorScheduler | None = (
-                MooncakeConnectorScheduler(vllm_config, self.engine_id, kv_cache_config)
+            self.connector_scheduler = MooncakeConnectorScheduler(
+                vllm_config, self.engine_id, kv_cache_config
             )
-            self.connector_worker: MooncakeConnectorWorker | None = None
-        elif role == KVConnectorRole.WORKER:
-            self.connector_scheduler = None
-            self.connector_worker = self._build_worker(vllm_config, kv_cache_config)
-
-    def _build_worker(
-        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
-    ) -> "MooncakeConnectorWorker":
-        """The worker this mode drives; each connector supplies its own."""
-        raise NotImplementedError(
-            "MooncakeBaseConnector does not pick a worker; instantiate "
-            "MooncakeConnector or MooncakePullConnector."
-        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
@@ -1192,16 +1181,23 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MooncakeConnector(MooncakeBaseConnector):
-    """Mooncake P2P connector in WRITE mode.
+    """Push-based (WRITE) Mooncake KV transfer connector.
 
     A decoder asks the prefiller for its blocks and the prefiller writes them
     into the decoder's registered KV cache.
     """
 
-    def _build_worker(
-        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
-    ) -> "MooncakeConnectorWorker":
-        return MooncakeConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        if role == KVConnectorRole.WORKER:
+            self.connector_worker = MooncakeConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
 
 
 class MooncakeConnectorScheduler:
