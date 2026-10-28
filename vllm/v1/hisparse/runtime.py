@@ -1133,8 +1133,8 @@ class HiSparseSlotInvalidator:
         if group_table is None:
             if any(table.shape != tables[0].shape for table in tables):
                 raise ValueError("HiSparse index groups must share one hot layout.")
-            group_table = torch.tensor(
-                key, dtype=torch.int64, device=self.request_state_indices.device
+            group_table = async_tensor_h2d(
+                list(key), self.request_state_indices.device, torch.int64
             )
             self._group_tables[key] = group_table
         num_state_rows, region_stride = tables[0].shape
