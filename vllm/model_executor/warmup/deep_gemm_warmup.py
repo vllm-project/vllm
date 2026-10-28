@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MoE
     from vllm.models.kimi_k3.nvidia.model import KimiMoE
     from vllm.models.minimax_m3.nvidia.model import MiniMaxM3MoE
+    from vllm.models.qwen4_exp.nvidia.mega_moe import Qwen4ExpMegaMoeBlock
 
 
 def _generate_optimal_warmup_m_values(
@@ -169,9 +170,12 @@ def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> "TypeGuard[DeepseekV4Mo
 
 def _mega_moe_may_use_deep_gemm(
     module: torch.nn.Module,
-) -> "TypeGuard[DeepseekV4MoE | KimiMoE | MiniMaxM3MoE]":
+) -> "TypeGuard[DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock]":
     if _mega_moe_uses_mega_gate(module):
         return module.use_native_mega_moe
+    qwen4_exp = sys.modules.get("vllm.models.qwen4_exp.nvidia.mega_moe")
+    if qwen4_exp is not None and isinstance(module, qwen4_exp.Qwen4ExpMegaMoeBlock):
+        return True
     kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
     minimax = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
     return (
@@ -345,7 +349,7 @@ FP8_FP4_MEGA_MOE_WARMUP_CACHE: set[tuple] = set()
 
 
 def _get_fp8_fp4_mega_moe_warmup_key(
-    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE",
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
 ) -> tuple:
     gate = module.gate
     return (
@@ -355,11 +359,13 @@ def _get_fp8_fp4_mega_moe_warmup_key(
         getattr(gate, "e_score_correction_bias", None) is not None,
         getattr(module, "image_sentinel_lo", 0),
         module.experts.has_fused_shared_experts,
+        # quantization_config ignore/targets can mix MXFP8 and MXFP4 layers.
+        module.experts.weight_format.name,
     )
 
 
 def _get_fp8_fp4_mega_moe_m_values(
-    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE", max_tokens: int
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock", max_tokens: int
 ) -> list[int]:
     """Get the M values that reach every MegaMoE kernel and, where used,
     bf16_mega_gate config."""
@@ -390,7 +396,7 @@ def _get_fp8_fp4_mega_moe_m_values(
 
 
 def _deepgemm_fp8_fp4_mega_moe_warmup(
-    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE",
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
     max_tokens: int,
     pbar: tqdm | None = None,
 ):
