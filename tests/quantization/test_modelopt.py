@@ -1187,10 +1187,10 @@ def test_modelopt_nvfp4_moe_validates_activation_override(
     quant_method, activation, backend, error
 ):
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
-    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
 
     config = ModelOptNvFp4Config(
         quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
         quantization_args=QuantizationConfigArgs(moe={"activation": activation}),
     )
     expected = pytest.raises(ValueError, match=error) if error else nullcontext()
@@ -1201,8 +1201,10 @@ def test_modelopt_nvfp4_moe_validates_activation_override(
         ) as select_backend,
         expected,
     ):
-        method = ModelOptNvFp4FusedMoE(config, Mock())
+        method = build_moe_method(config, quant_method, "", Mock())
+        assert isinstance(method, ModelOptMoEMethod)
         assert method.per_token_activation
+        assert method.spec.activation == activation
         assert select_backend.call_args.kwargs["activation_key"] == activation
 
 

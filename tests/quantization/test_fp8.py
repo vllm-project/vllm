@@ -387,7 +387,7 @@ def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
     monkeypatch.setattr(
         dsv41_qc, "Mxfp4MoEMethod", lambda moe_config, **kwargs: "mxfp4"
     )
-    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+    monkeypatch.setattr(modelopt, "build_moe_method", lambda *args: "nvfp4")
 
     config = dsv41_qc.DeepseekV4FP8Config.from_config(
         {"quant_method": "fp8", "activation_scheme": "dynamic", **ckpt_quant_cfg}

@@ -251,12 +251,14 @@ class DeepseekV4FP8Config(Fp8Config):
             if self.expert_dtype == "fp4":
                 if self._is_nvfp4_expert_layer(prefix):
                     from vllm.model_executor.layers.quantization.modelopt import (
-                        ModelOptNvFp4FusedMoE,
+                        build_moe_method,
                     )
 
-                    return ModelOptNvFp4FusedMoE(
-                        quant_config=self._get_nvfp4_config(),
-                        moe_config=layer.moe_config,
+                    return build_moe_method(
+                        self._get_nvfp4_config(),
+                        "NVFP4",
+                        prefix,
+                        layer.moe_config,
                     )
                 return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
             # expert_dtype == "fp8": fall through to Fp8Config which

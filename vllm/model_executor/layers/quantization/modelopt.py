@@ -115,6 +115,7 @@ from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
@@ -1864,6 +1865,9 @@ class MoEQuantKeyScheme:
     def quant_config(self, layer, method) -> FusedMoEQuantConfig:
         raise NotImplementedError
 
+    def dequantize_weight(self, layer, method) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(f"ModelOpt MoE weight dequantization: {self.key}")
+
 
 class KFp8StaticTensorMoE(MoEQuantKeyScheme):
     """Per-tensor static FP8 experts (W8A8)."""
@@ -2031,20 +2035,51 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
     uses_weight_scale_2 = True
 
     def setup(self, method) -> None:
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
         method.use_a16 = method.quant_config.quant_method == "W4A16_NVFP4"
+        activation_key = None if method.use_a16 else kNvfp4Dynamic
+        override = method.quant_config.moe_activation_override
+        if override is not None:
+            if method.use_a16:
+                raise ValueError(
+                    "NVFP4 activation overrides require a W4A4 checkpoint."
+                )
+            activation_key = override
+            if activation_key not in (kNvfp4Dynamic, kNvfp4DynamicToken):
+                raise ValueError(
+                    "Unsupported ModelOpt NVFP4 MoE activation override: "
+                    f"{activation_key}. Use quantization_config.moe.activation="
+                    "'nvfp4_per_token' or omit the override."
+                )
+        method.spec = QuantSpec(weight=self.key, activation=activation_key)
+        method.per_token_activation = activation_key == kNvfp4DynamicToken
         method.nvfp4_backend, method.experts_cls = select_nvfp4_moe_backend(
             config=method.moe,
             weight_key=kNvfp4Static,
-            activation_key=None if method.use_a16 else kNvfp4Dynamic,
+            activation_key=activation_key,
         )
+        if (
+            method.per_token_activation
+            and method.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        ):
+            raise ValueError(
+                "Per-token NVFP4 activation for pre-quantized weights "
+                "requires the FlashInfer TRTLLM MoE backend."
+            )
         method.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             method.nvfp4_backend
+        )
+
+    def dequantize_weight(self, layer, method) -> tuple[torch.Tensor, torch.Tensor]:
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w13_weight_scale_2,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            layer.params_dtype,
+            group_size=method.quant_config.group_size,
+            invert_global_scales=False,
         )
 
     def create_weights(self, layer, ctx, shapes: MoEShapes, wl, method) -> None:
@@ -2143,6 +2178,17 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
+        # Keep dummy scales positive and gate/up global scales identical.
+        for param, value in (
+            (w13_weight_scale, 1.0),
+            (w2_weight_scale, 1.0),
+            (w13_weight_scale_2, 1e-3),
+            (w2_weight_scale_2, 1e-3),
+            (w13_input_scale, 1e-2),
+            (w2_input_scale, 1e-2),
+        ):
+            set_weight_attrs(param, {"dummy_weight_value": value})
+
     def process(self, layer, method) -> None:
         if is_weights_pre_processed():
             if method.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -2153,6 +2199,10 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer, method)
             return
+
+        if method.per_token_activation:
+            layer.w13_input_scale.data.fill_(1.0)
+            layer.w2_input_scale.data.fill_(1.0)
 
         if method.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
@@ -2185,6 +2235,10 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=method.moe.is_act_and_mul,
             use_a16=method.use_a16,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=method.per_token_activation,
+                is_act_and_mul=method.moe.is_act_and_mul,
+            ),
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -2218,6 +2272,7 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
             experts_cls=method.experts_cls,
             backend=method.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            per_token_activation=method.per_token_activation,
         )
         method.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -2447,6 +2502,11 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
     legacy shape-assert path.
     """
 
+    experts_cls: "type[FusedMoEExperts] | None"
+    nvfp4_backend: NvFp4MoeBackend
+    use_a16: bool
+    per_token_activation: bool
+
     def __init__(
         self,
         spec: QuantSpec,
@@ -2459,6 +2519,8 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
         self.ctx = ctx
         self.quant_config = quant_config
         self.supports_pre_processed_weights = spec.weight is kNvfp4Static
+        if spec.weight is None:
+            raise NotImplementedError(f"MoE spec {spec}")
         try:
             self.wsch = MOE_SCHEME_FOR[spec.weight]
         except KeyError:
@@ -2490,6 +2552,11 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         self.wsch.process(layer, self)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.wsch.dequantize_weight(layer, self)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return self.wsch.quant_config(layer, self)
