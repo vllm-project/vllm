@@ -1222,8 +1222,9 @@ class MLADualRMSPerTokenQuantPattern(
 class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
     """Fuse the MLA input projection ``fused_qkv_a_proj`` GEMM,
     q-latent RMSNorm + FP8 per-token quant and kv-latent RMSNorm into
-    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``. Other weight shapes
-    keep the GEMM and get ``fused_mla_dual_rms_norm_per_token_quant``.
+    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``. Weight shapes
+    without a tuned aiter Triton preshuffle GEMM config keep the GEMM and get
+    ``fused_mla_dual_rms_norm_per_token_quant``.
     """
 
     GEMM_OP = torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm.default
@@ -1275,7 +1276,7 @@ class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            if tuple(weight.shape) != (2112, 7168):
+            if not rocm_aiter_ops.is_triton_preshuffle_gemm_a8w8_tuned(*weight.shape):
                 projected = self.GEMM_OP(
                     x, weight, x_scale, weight_scale, None, torch.bfloat16
                 )
