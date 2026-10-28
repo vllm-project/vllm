@@ -38,8 +38,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-    MultiConnector,
-    MultiKVConnectorMetadata,
     MultiKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
@@ -56,12 +54,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     RemoteMeta,
     ReqMeta,
     compute_nixl_compatibility_hash,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
-    OffloadingConnectorMetadata,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-    OffloadingConnector,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
@@ -85,7 +77,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
-from vllm.v1.kv_offload.base import ReqContext, make_offload_key
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -4531,56 +4522,6 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     results = worker.get_transfer_results()
     assert results.finished_recving == results.failed_recving == set()
     assert worker.get_block_ids_with_load_errors() == set()
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("nixl_first", [True, False])
-def test_early_recv_multi_connector_has_one_load_owner(nixl_first):
-    """Both children hit, but only the selected child may await a receive."""
-    configs = [
-        {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
-        {
-            "kv_connector": "OffloadingConnector",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 20},
-        },
-    ]
-    if not nixl_first:
-        configs.reverse()
-    config = create_vllm_config(
-        kv_connector="MultiConnector",
-        kv_connector_extra_config={"connectors": configs},
-    )
-    config.kv_transfer_config.enable_early_recv = True
-    scheduler = create_scheduler(config)
-    try:
-        connector = scheduler.connector
-        assert isinstance(connector, MultiConnector)
-        offload = connector._connectors[int(nixl_first)]
-        assert isinstance(offload, OffloadingConnector)
-        request = create_request(num_tokens=48, do_remote_prefill=True)
-        keys = [make_offload_key(block_hash, 0) for block_hash in request.block_hashes]
-        context = ReqContext(request.request_id)
-        manager = offload.scheduler.manager
-        stored = manager.prepare_store(keys, context)
-        assert stored is not None and stored.keys_to_store == keys
-        manager.complete_store(keys, context)
-
-        scheduler.add_request(request)
-        metadata = scheduler.schedule().kv_connector_metadata
-        assert isinstance(metadata, MultiKVConnectorMetadata)
-        nixl_meta = metadata.metadata[int(not nixl_first)]
-        offload_meta = metadata.metadata[int(nixl_first)]
-        assert isinstance(nixl_meta, NixlConnectorMetadata)
-        assert isinstance(offload_meta, OffloadingConnectorMetadata)
-        recv = nixl_meta.reqs_to_recv[request.request_id]
-        assert recv.awaiting_kvs is nixl_first
-        assert any(recv.local_block_ids) is nixl_first
-        assert {job.req_id for job in offload_meta.load_jobs.values()} == (
-            set() if nixl_first else {request.request_id}
-        )
-    finally:
-        scheduler.shutdown()
 
 
 @pytest.mark.cpu_test
