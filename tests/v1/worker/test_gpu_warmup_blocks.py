@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
+    run_context_prefill_warmup,
     run_mixed_prefill_decode_warmup,
     warmup_kernels,
 )
@@ -106,7 +107,9 @@ def _make_runner(
             kv_cache_groups=kv_cache_groups, num_blocks=1024
         ),
         vllm_config=SimpleNamespace(
-            num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
+            num_lookahead_tokens=num_lookahead_tokens,
+            is_mm_encoder_only=False,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
@@ -244,6 +247,46 @@ def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks():
     assert recorder.steps == []
 
 
+def test_context_prefill_warmup_attends_to_the_requested_context():
+    """Full-length requests resume from a prefix hit until their cached
+    context covers the requested tokens, holding what the scheduler would."""
+    num_lookahead_tokens = NUM_SPEC_STEPS + 1
+    runner = _make_runner([_attention_group()], num_lookahead_tokens)
+    runner.extensible_kv_cache = cache = _StubExtensibleCache(1024)
+    recorder = _StepRecorder()
+
+    assert run_context_prefill_warmup(
+        runner,
+        recorder.execute_model,
+        recorder.sample_tokens,
+        num_context_tokens=2 * MAX_MODEL_LEN,
+    )
+
+    _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    # Each request fills the model length, so three cover twice the context.
+    assert len(recorder.steps) == 3
+    assert sum(num_computed for _, num_computed, _ in recorder.steps) >= (
+        2 * MAX_MODEL_LEN
+    )
+    for _, num_computed, num_scheduled in recorder.steps:
+        assert num_computed + num_scheduled < MAX_MODEL_LEN
+        assert num_scheduled == runner.decode_query_len + 1
+    assert cache.commits == [1 + 3 * cdiv(MAX_MODEL_LEN, BLOCK_SIZE)]
+
+
+def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    blocks_per_req = cdiv(MAX_MODEL_LEN, BLOCK_SIZE)
+    runner.extensible_kv_cache = _StubExtensibleCache(blocks_per_req)
+    recorder = _StepRecorder()
+
+    # The null block leaves one block short of a single full-length request.
+    assert not run_context_prefill_warmup(
+        runner, recorder.execute_model, recorder.sample_tokens, MAX_MODEL_LEN
+    )
+    assert recorder.steps == []
+
+
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
     """Mamba groups hold the running-state block plus the speculative tail.
@@ -365,6 +408,44 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     _step(1)
     _step(decode_query_len)
 
+    manager.free(request)
+
+
+def test_reserved_block_count_scales_dcp_sharded_blocks():
+    """Under DCP the scheduler's block of a sharded group spans every rank, so
+    a long prompt holds `dcp_world_size` times fewer blocks than locally."""
+    dcp_world_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=256, kv_cache_tensors=[], kv_cache_groups=[_attention_group()]
+    )
+    (spec,) = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=MAX_MODEL_LEN,
+        hash_block_size=BLOCK_SIZE,
+        enable_caching=False,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=BLOCK_SIZE * dcp_world_size,
+    )
+    num_tokens = MAX_MODEL_LEN - 1
+    (request,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, block_size=BLOCK_SIZE
+    )
+    computed_blocks, num_new_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(
+        request, num_tokens, num_new_computed, computed_blocks
+    )
+    (held,) = manager.get_block_ids(request.request_id)
+
+    assert len(held) == _reserved_block_count(
+        num_tokens,
+        spec,
+        num_lookahead_tokens=0,
+        max_model_len=MAX_MODEL_LEN,
+        max_encoder_len=0,
+        dcp_world_size=dcp_world_size,
+    )
+    assert len(held) == cdiv(num_tokens, BLOCK_SIZE * dcp_world_size)
     manager.free(request)
 
 

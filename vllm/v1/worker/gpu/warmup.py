@@ -46,12 +46,14 @@ def _reserved_block_count(
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
+    dcp_world_size: int = 1,
 ) -> int:
     """Number of blocks the scheduler would hold for a request of `num_tokens`.
 
     Warmup hand-builds its `SchedulerOutput`s, so it must reserve what
     `KVCacheManager.allocate_slots` reserves: the token range plus
     `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
+    A DCP-sharded block holds `dcp_world_size` times its tokens.
     """
     if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
         kvcache_spec = kvcache_spec.first_spec
@@ -68,8 +70,11 @@ def _reserved_block_count(
         num_speculative_blocks = kvcache_spec.num_speculative_blocks
         if kvcache_spec.mamba_cache_mode == "align":
             return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    block_size = kvcache_spec.block_size
+    if kvcache_spec.dcp_sharded:
+        block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    return cdiv(num_tokens, block_size) + num_speculative_blocks
 
 
 def _warmup_block_counter(
@@ -79,6 +84,9 @@ def _warmup_block_counter(
     num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
+    dcp_world_size = (
+        model_runner.vllm_config.parallel_config.decode_context_parallel_size
+    )
 
     def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
         return _reserved_block_count(
@@ -87,6 +95,7 @@ def _warmup_block_counter(
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
+            dcp_world_size=dcp_world_size,
         )
 
     return block_count
@@ -218,6 +227,82 @@ def run_mixed_prefill_decode_warmup(
         with context:
             worker_execute_model(mixed_output)
             worker_sample_tokens(None)
+        worker_execute_model(cleanup_output)
+    finally:
+        model_runner.kv_connector.set_disabled(False)
+    return True
+
+
+def run_context_prefill_warmup(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    num_context_tokens: int,
+) -> bool:
+    """Run a prefill step over about `num_context_tokens` of cached context.
+
+    A prefill that extends a prefix cache hit attends to KV it did not write.
+    MLA up-projects that context chunk by chunk, a transient that grows with
+    the context and that no step starting from an empty prefix reaches. The
+    queries are kept short: the full-budget step already measured theirs.
+    """
+    query_len = model_runner.decode_query_len + 1
+    # Leave room for a sampled token after the prompt.
+    context_len = model_runner.max_model_len - query_len - 1
+    if model_runner.is_pooling_model or context_len <= 0:
+        return False
+
+    kv_cache_specs = [
+        g.kv_cache_spec for g in model_runner.kv_cache_config.kv_cache_groups
+    ]
+    block_count = _warmup_block_counter(model_runner)
+    block_counts = [block_count(context_len + query_len, s) for s in kv_cache_specs]
+    blocks_per_req = max(sum(block_counts), 1)
+    num_reqs = min(
+        cdiv(num_context_tokens, context_len),
+        model_runner.max_num_reqs,
+        model_runner.scheduler_config.max_num_batched_tokens // query_len,
+        (num_committable_kv_blocks(model_runner) - 1) // blocks_per_req,
+    )
+    if num_reqs < 1:
+        return False
+    ensure_kv_cache_blocks(model_runner, 1 + num_reqs * blocks_per_req)
+
+    next_block_id = 1
+
+    def _alloc_blocks(num_blocks: int) -> list[int]:
+        nonlocal next_block_id
+        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+
+    req_ids = [f"_context_warmup_{i}_" for i in range(num_reqs)]
+    token_ids = list(range(context_len + query_len))
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    prefill_output = SchedulerOutput.make_empty()
+    prefill_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    prefill_output.scheduled_new_reqs = [
+        NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=token_ids,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=tuple(_alloc_blocks(n) for n in block_counts),
+            num_computed_tokens=context_len,
+            lora_request=None,
+            prefill_token_ids=token_ids,
+        )
+        for req_id in req_ids
+    ]
+    prefill_output.num_scheduled_tokens = dict.fromkeys(req_ids, query_len)
+    prefill_output.total_num_scheduled_tokens = num_reqs * query_len
+
+    cleanup_output = SchedulerOutput.make_empty()
+    cleanup_output.finished_req_ids = set(req_ids)
+
+    model_runner.kv_connector.set_disabled(True)
+    try:
+        worker_execute_model(prefill_output)
+        worker_sample_tokens(None)
         worker_execute_model(cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
