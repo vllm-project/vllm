@@ -465,9 +465,8 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
-- label: ":nvidia: (L4) Quantization Kernels"
+- label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
-  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -476,7 +475,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization
+    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 6
   mirror:
     amd:
       label: ":amd: (MI300) Quantization Kernels"
