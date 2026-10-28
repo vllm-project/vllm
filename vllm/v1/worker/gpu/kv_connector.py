@@ -16,7 +16,6 @@ from vllm.forward_context import (
     is_forward_context_available,
     set_forward_context,
 )
-from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
@@ -62,15 +61,12 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_caches_dict: dict[str, torch.Tensor],
-        layouts: dict[str, KVCacheTensorLayout] | None = None,
+        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
         # Register kv caches with KV Connector if applicable.
-        self.kv_connector.register_kv_caches_with_layouts(kv_caches_dict, layouts or {})
+        self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._pending_load_kwargs: dict[str, Any] | None = None
@@ -189,12 +185,10 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig,
-    kv_caches_dict: dict[str, torch.Tensor],
-    layouts: dict[str, KVCacheTensorLayout] | None = None,
+    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict, layouts)
+    return ActiveKVConnector(vllm_config, kv_caches_dict)

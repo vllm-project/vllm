@@ -154,7 +154,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
-from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -6917,8 +6916,6 @@ class GPUModelRunner(
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
         kv_cache_allocation_context: AbstractContextManager | None = None,
-        *,
-        tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Initialize the memory buffer for KV cache.
 
@@ -6927,8 +6924,6 @@ class GPUModelRunner(
             kernel_block_sizes: The kernel block sizes for each KV cache group.
             kv_cache_allocation_context: Context manager the allocation runs
                 inside, e.g. to place the KV cache in a specific memory pool.
-            tensor_layouts: Optional empty output mapping populated with axis
-                semantics when cache views are created.
 
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
@@ -6942,15 +6937,12 @@ class GPUModelRunner(
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
-                tensor_layouts=tensor_layouts,
             )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
-            if tensor_layouts is not None and target_layer_name in tensor_layouts:
-                tensor_layouts[layer_name] = tensor_layouts[target_layer_name]
 
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
@@ -7041,13 +7033,11 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config)
         # Capture warmup providers that depend on allocated KV-cache strides.
-        tensor_layouts: dict[str, KVCacheTensorLayout] = {}
         with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
                 kv_cache_config,
                 kernel_block_sizes,
                 kv_cache_allocation_context=kv_cache_allocation_context,
-                tensor_layouts=tensor_layouts,
             )
 
         if (
@@ -7061,7 +7051,7 @@ class GPUModelRunner(
 
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
-            kv_transfer_group.register_kv_caches_with_layouts(kv_caches, tensor_layouts)
+            kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:

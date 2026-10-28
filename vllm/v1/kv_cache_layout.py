@@ -1,62 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV cache axis semantics and physical layout descriptors.
+"""Physical KV cache layout descriptor.
 
 A leaf module so ``vllm.config`` can import the enum without pulling in the
 full KV cache interface.
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum
 
 # Logical dim indices in the 5D stride permutation [L, B, H, N, C] (see: RFC #42082).
 _DIM_L, _DIM_B, _DIM_H, _DIM_N, _DIM_C = 0, 1, 2, 3, 4
-
-
-class KVCacheAxis(IntEnum):
-    """Semantic tensor axes; KV orders K before V and STATE follows the spec."""
-
-    BLOCK = 0
-    KV = 1
-    HEAD = 2
-    STATE = 3
-    HEAD_DIM = 4
-    CONTENT = 5
-    SINGLETON = 6
-
-
-@dataclass(frozen=True)
-class KVCacheTensorLayout:
-    """Axis semantics in tensor indexing order, independent of strides.
-
-    STATE indexes token positions or recurrent states; the cache spec defines
-    their token granularity. CONTENT is opaque, with packing and encoding owned
-    by the spec. Shape, stride, dtype and storage offset come from the tensor.
-    """
-
-    axes: tuple[KVCacheAxis, ...]
-
-    def __post_init__(self) -> None:
-        named_axes = [axis for axis in self.axes if axis != KVCacheAxis.SINGLETON]
-        if len(set(named_axes)) != len(named_axes):
-            raise ValueError("KV cache axes must be unique except SINGLETON")
-
-    def axis_index(self, axis: KVCacheAxis) -> int:
-        """Return the tensor dimension for an axis; raise ValueError if absent."""
-        return self.axes.index(axis)
-
-    def validate_shape(self, shape: Sequence[int]) -> None:
-        """Check rank and fixed-size axes without reading tensor data."""
-        if len(shape) != len(self.axes):
-            raise ValueError(
-                f"KV cache rank {len(shape)} != layout rank {len(self.axes)}"
-            )
-        for axis, size in zip(self.axes, shape):
-            if axis == KVCacheAxis.KV and size != 2:
-                raise ValueError("KV axis must have size 2")
-            if axis == KVCacheAxis.SINGLETON and size != 1:
-                raise ValueError("SINGLETON axis must have size 1")
 
 
 class KVCacheLayout(Enum):

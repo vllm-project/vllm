@@ -382,7 +382,7 @@ def test_multi_example_connector_consistency():
     # deferred load starts after the forward pass.
     expected_worker_prefix = [
         "get_mem_pool_context",
-        "register_kv_caches_with_layouts",
+        "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
         "handle_preemptions",

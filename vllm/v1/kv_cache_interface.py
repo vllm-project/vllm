@@ -20,13 +20,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_layout import (
-    _DIM_B,
-    _DIM_L,
-    KVCacheAxis,
-    KVCacheLayout,
-    KVCacheTensorLayout,
-)
+from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
@@ -331,6 +325,26 @@ class KVCacheSpec:
             isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
         )
 
+    def get_kv_cache_transfer_regions(
+        self, kv_cache: torch.Tensor
+    ) -> dict[str, torch.Tensor] | None:
+        """Expose named storage-sharing regions in logical ``[B, H, N, C]`` order.
+
+        Backends with custom storage may override this before connector-specific
+        transfer planning. Preserve strides and storage offsets; content encoding
+        remains spec-owned. Dense attention exports ``"key"`` and ``"value"``.
+        Returning ``None`` preserves existing registration behavior.
+
+        Args:
+            kv_cache: The actual per-layer cache view being registered.
+
+        Returns:
+            Named region views aliasing ``kv_cache``, or ``None`` when this spec
+            does not export a region representation.
+
+        """
+        return None
+
     @property
     def has_layer_views(self) -> bool:
         """Whether generic allocation creates per-layer cache views.
@@ -428,14 +442,11 @@ def create_kv_cache_views(
     layout: KVCacheLayout,
     kv_cache_tensor: KVCacheTensor,
     kernel_block_size: int | None = None,
-    *,
-    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> list[torch.Tensor]:
     """View a flat int8 buffer as one 4D ``[B, H, N, C]`` view per layer.
 
     Block ``b`` of layer ``l`` starts at the tensor offset plus its layer and
     block stride contributions.
-    ``tensor_layouts``, when supplied, receives axis semantics for these views.
     """
     num_layers = len(kv_cache_tensor.layers)
     layer_stride = kv_cache_tensor.layer_stride
@@ -488,16 +499,6 @@ def create_kv_cache_views(
         if dtype is not None:
             cache_logical = cache_logical.view(dtype)
         views.append(cache_logical)
-    if tensor_layouts is not None:
-        tensor_layout = KVCacheTensorLayout(
-            (
-                KVCacheAxis.BLOCK,
-                KVCacheAxis.HEAD,
-                KVCacheAxis.STATE,
-                KVCacheAxis.CONTENT,
-            )
-        )
-        tensor_layouts.update((name, tensor_layout) for name in kv_cache_tensor.layers)
     return views
 
 

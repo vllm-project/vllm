@@ -39,7 +39,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
-from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
@@ -567,16 +566,12 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
-    *,
-    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
-    When supplied, ``tensor_layouts`` is populated as layer views are created;
-    raw storage is left unspecified. The output mapping must initially be empty.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -627,7 +622,6 @@ def allocate_kv_cache(
             layout,
             tensor,
             kernel_block_size=kernel_block_size,
-            tensor_layouts=tensor_layouts,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -922,12 +916,22 @@ def copy_kv_cache_blocks_inplace(
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
     indices: torch.Tensor | None = None
-    seen: set[tuple[torch.device, int]] = set()
+    seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
-        # once. data_ptr distinguishes per-layer views of a shared allocation.
-        key = (cache.device, cache.data_ptr())
+        # once. Hybrid models overlay layers of different kinds on one tensor,
+        # so views at the same address can differ in geometry (a Mamba state
+        # view spans only the leading bytes of a block that an attention view
+        # spans in full); each geometry must be copied, so the key covers the
+        # view's shape and strides and not just its address.
+        key = (
+            cache.device,
+            cache.data_ptr(),
+            tuple(cache.shape),
+            tuple(cache.stride()),
+            cache.element_size(),
+        )
         if key in seen:
             continue
         seen.add(key)

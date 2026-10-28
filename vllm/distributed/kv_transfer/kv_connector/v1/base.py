@@ -41,7 +41,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -51,7 +51,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -299,27 +298,6 @@ class KVConnectorBase_V1(ABC):
 
         """
         return
-
-    def register_kv_caches_with_layouts(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        layouts: Mapping[str, KVCacheTensorLayout],
-    ) -> None:
-        """Register caches with producer-declared per-tensor axis semantics.
-
-        Layouts describe the tensors passed here, before any connector-specific
-        normalization. Missing entries mean the producer has not described that
-        tensor; consumers must not interpret them as a default layout. Override
-        this hook to consume the descriptors. The default validates supplied
-        descriptors and calls the existing tensor-only hook for compatibility.
-        """
-        for layer_name, layout in layouts.items():
-            if layer_name not in kv_caches:
-                raise ValueError(
-                    f"Layout supplied for unregistered layer {layer_name!r}"
-                )
-            layout.validate_shape(kv_caches[layer_name].shape)
-        self.register_kv_caches(kv_caches)
 
     def unregister_kv_caches(self) -> None:
         """Drop KV cache registrations before sleep. Transfers are already

@@ -93,20 +93,23 @@ class AttentionConfig:
     indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
-    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend."""
+    indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
+    formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
+    backend."""
 
-    indexer_sparse_logits: bool = False
+    indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
-    the whole context and masking them. Requires `indexer_kv_dtype="mxfp4"`,
-    an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
-    (the top-k runs on the kernels' bf16 logits). The sparse path costs
-    O(candidate blocks) per query regardless of context length, so it pays off
-    for long contexts (roughly 32K tokens and beyond) and is slower below.
+    the whole context and masking them. Requires an SM100-class GPU (FP8 or
+    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
+    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
+    parallelism. The sparse path costs O(candidate blocks) per query regardless
+    of context length. None (default) enables it wherever these requirements
+    hold; True forces it (and errors where they do not); False disables it.
     On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
-    for steps whose contexts are too short for the pool to pay."""
+    for steps whose contexts are too short for the pool to pay; it is not
+    enabled by default there."""
 
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split
