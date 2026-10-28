@@ -598,7 +598,8 @@ class KVCacheManager:
             return None
 
         if self.mamba_aware_eviction_managers:
-            # Keep the first admission's hit; a resumed preemption hits deeper.
+            # Record the first admission's prefix-cache hit. Later calls pass
+            # the tokens computed so far, or a deeper hit after a preemption.
             self._prefix_hit_tokens.setdefault(
                 request.request_id, num_local_computed_tokens
             )

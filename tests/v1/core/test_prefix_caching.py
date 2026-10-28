@@ -6020,18 +6020,25 @@ def _run_finished_request(
 @pytest.mark.parametrize("policy", ["lru", "mamba_aware_lru"])
 def test_mamba_aware_lru_evicts_superseded_state_first(policy):
     """A turn that resumes from the previous turn's Mamba state and caches a
-    deeper one supersedes it. mamba_aware_lru evicts it first, before even
-    never-used blocks; lru keeps it until they run out."""
+    deeper one supersedes it. mamba_aware_lru evicts it before the blocks of an
+    older, unrelated request; lru evicts those first."""
     block_size = 16
     manager = _mamba_aware_lru_manager(block_size, policy)
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_finished_request(manager, older, [32, 40]) == 0
     turn1 = make_request("t1", [1] * 40, block_size, sha256)
     assert _run_finished_request(manager, turn1, [32, 40]) == 0
     turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
     assert _run_finished_request(manager, turn2, [64, 80]) == 32
 
-    manager.block_pool.get_new_blocks(1)
-    turn1_state = manager.block_pool.get_cached_block(turn1.block_hashes[1], [1])
+    # Use up the blocks that hold nothing cached, then evict one cached block.
+    pool = manager.block_pool
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    pool.get_new_blocks(sum(block.block_hash is None for block in free_blocks) + 1)
+    turn1_state = pool.get_cached_block(turn1.block_hashes[1], [1])
+    older_prefix = pool.get_cached_block(older.block_hashes[1], [0, 1])
     assert (turn1_state is None) == (policy == "mamba_aware_lru")
+    assert (older_prefix is None) == (policy == "lru")
 
 
 def test_mamba_aware_lru_keeps_shared_prefix_junction():
