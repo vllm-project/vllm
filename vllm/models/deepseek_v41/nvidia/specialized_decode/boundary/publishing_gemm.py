@@ -112,6 +112,7 @@ from ...ops.cute_dsl.primitives import (
     sanitize_negative_zero_u32x4,
     shuffle_sync_idx_u32,
     stmc_bf16x8,
+    stuc_bf16x8,
 )
 from .. import LOW_BATCH_MAX_ROWS
 from ..attention.mxfp8 import Tactic, mxfp8_eligible
@@ -162,6 +163,7 @@ class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel)
         rank: int,
         capacity_m: int,
         hidden: int,
+        unicast: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -173,6 +175,7 @@ class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel)
         self.mailbox_multicast = mailbox_multicast
         self.stage_state = stage_state
         self.tp = tp
+        self.unicast = unicast
         self.rank = rank
         self.capacity_m = capacity_m
         self.hidden = hidden
@@ -213,7 +216,15 @@ class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel)
                     (Int64(stage) * self.tp + self.rank) * self.capacity_m
                     + Int64(token)
                 ) * self.hidden + Int64(column)
-                stmc_bf16x8(Int64(self.mailbox_multicast) + element * 2, clean)
+                if cutlass.const_expr(self.unicast):
+                    stuc_bf16x8(
+                        Int64(self.mailbox_multicast),
+                        Int64(element) * 2,
+                        clean,
+                        self.tp,
+                    )
+                else:
+                    stmc_bf16x8(Int64(self.mailbox_multicast) + element * 2, clean)
 
     @cute.jit
     def epilog_warp(
@@ -536,6 +547,7 @@ class PublishingMxfp8Linear:
             mailbox_multicast=multicast,
             stage_state=stage_state,
             tp=all_reduce.tp,
+            unicast=all_reduce.unicast,
             rank=all_reduce.rank,
             capacity_m=all_reduce.capacity,
             hidden=all_reduce.hidden_size,

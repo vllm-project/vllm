@@ -3,7 +3,7 @@
 """Dispatch DSV4.1 mHC operations and overlap coefficient generation."""
 
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -27,8 +27,6 @@ from .mega_mhc import (
 )
 
 if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
-
     from .cute_dsl import AllReduceMHC
 
 logger = init_logger(__name__)
@@ -59,17 +57,14 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
 def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
-    if (
-        parallel.tensor_parallel_size != 4
-        or parallel.enable_expert_parallel
-        or config.hidden_size != 5120
-        or config.hc_mult != 4
-    ):
-        return False
-    # The custom all-reduce's MNNVL buffers succeed exactly when NVLink
-    # multicast does, which the fused kernel's own mailbox needs too.
-    comm = cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm
-    return comm is not None and bool(comm.mnnvl_lamport_ag_multicast_ptr)
+    # AllReduceMHC publishes over NVLink multicast when its mailbox gets a
+    # multicast mapping and with unicast stores otherwise.
+    return (
+        parallel.tensor_parallel_size == 4
+        and not parallel.enable_expert_parallel
+        and config.hidden_size == 5120
+        and config.hc_mult == 4
+    )
 
 
 def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:

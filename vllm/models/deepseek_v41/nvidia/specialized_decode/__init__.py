@@ -121,7 +121,7 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and vllm_config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
-        "DeepGEMM and NVLink multicast for the fused all-reduce + mHC": (
+        "DeepGEMM for the fused all-reduce + mHC": (
             supports_mhc_overlap(vllm_config) and supports_mhc_all_reduce(vllm_config)
         ),
     }
@@ -142,8 +142,7 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
         raise ValueError("Supported decode_backend values are auto/latency_specialized")
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
-    # The NVLink multicast check is rank-local (the custom all-reduce catches a
-    # failed setup on each rank), and ranks that disagree would hang.
+    # Ranks that disagree would issue different collectives and hang.
     dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=get_tp_group().cpu_group)
     if not supported.item():
         reason = "; ".join(missing) or "another tensor parallel rank to support it"
