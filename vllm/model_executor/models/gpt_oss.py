@@ -211,18 +211,29 @@ class GptOssRoutedExperts(RoutedExperts):
         available = loaded_weight.shape[dim] - start
         return loaded_weight.narrow(dim, start, min(size, max(available, 0)))
 
-    @staticmethod
-    def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    def _copy_to_expert(
+        self,
+        param: torch.nn.Parameter,
+        expert_data: torch.Tensor,
+        loaded_weight: torch.Tensor,
+    ) -> None:
         if expert_data.numel() == loaded_weight.numel() == 1:
             expert_data.copy_(loaded_weight.reshape(()))
             return
         while loaded_weight.ndim > expert_data.ndim and loaded_weight.shape[-1] == 1:
             loaded_weight = loaded_weight.squeeze(-1)
-        slices = tuple(slice(0, size) for size in loaded_weight.shape)
-        expert_data[slices].copy_(loaded_weight)
+        expert_data = self._narrow_and_mark_padding(
+            param,
+            expert_data,
+            loaded_weight,
+            hidden_dim=0,
+            shard_dim=1 if loaded_weight.ndim > 1 else None,
+        )
+        expert_data.copy_(loaded_weight)
 
     def _load_expert_bias(
         self,
+        param: torch.nn.Parameter,
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         shard_id: str,
@@ -234,10 +245,11 @@ class GptOssRoutedExperts(RoutedExperts):
             )
         elif tp_rank != 0:
             loaded_weight = torch.zeros_like(loaded_weight)
-        self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(param, expert_data, loaded_weight)
 
     def _load_unquantized_expert(
         self,
+        param: torch.nn.Parameter,
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         shard_id: str,
@@ -253,10 +265,11 @@ class GptOssRoutedExperts(RoutedExperts):
                 loaded_weight, 0, tp_rank, expert_data.shape[1]
             )
             loaded_weight = loaded_weight.t().contiguous()
-        self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(param, expert_data, loaded_weight)
 
     def _load_packed_expert(
         self,
+        param: torch.nn.Parameter,
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         weight_name: str,
@@ -279,7 +292,7 @@ class GptOssRoutedExperts(RoutedExperts):
                 loaded_weight, -1, tp_rank, expert_data.shape[-1]
             )
 
-        self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(param, expert_data, loaded_weight)
 
     @typing.overload
     def weight_loader(
@@ -341,7 +354,7 @@ class GptOssRoutedExperts(RoutedExperts):
         quant_method_name = self.quant_method.__class__.__name__
 
         if weight_name.endswith("_bias"):
-            self._load_expert_bias(expert_data, loaded_weight, shard_id)
+            self._load_expert_bias(param, expert_data, loaded_weight, shard_id)
         elif weight_dtype in (
             "gpt_oss_mxfp4",
             "mxfp4",
@@ -350,9 +363,11 @@ class GptOssRoutedExperts(RoutedExperts):
             "Nvfp4OnlineMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            self._load_packed_expert(expert_data, loaded_weight, weight_name, shard_id)
+            self._load_packed_expert(
+                param, expert_data, loaded_weight, weight_name, shard_id
+            )
         else:
-            self._load_unquantized_expert(expert_data, loaded_weight, shard_id)
+            self._load_unquantized_expert(param, expert_data, loaded_weight, shard_id)
         return True if return_success else None
 
 

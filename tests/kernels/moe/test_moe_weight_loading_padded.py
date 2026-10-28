@@ -141,7 +141,7 @@ class TestOrientFusedWeight:
         torch.testing.assert_close(result, scale.transpose(-1, -2))
 
 
-class TestNarrowExpertDataForPadding:
+class TestSplitPadding:
     """Unit tests for _split_padding."""
 
     def test_no_narrowing_when_shapes_match(self):
@@ -435,51 +435,50 @@ class TestPaddingFilledByPostProcessing:
         _narrow_and_mark_padding = RoutedExperts._narrow_and_mark_padding
         _load_w13 = RoutedExperts._load_w13
 
-        def __init__(self, experts: int, intermediate: int, hidden: int, init: float):
+        def __init__(self, name: str, experts: int, intermediate: int, hidden: int):
             super().__init__()
             self.moe_config = SimpleNamespace(
                 is_act_and_mul=True,
                 moe_parallel_config=SimpleNamespace(tp_size=1),
             )
-            self.w13_weight = torch.nn.Parameter(
-                torch.full((experts, 2 * intermediate, hidden), init),
-                requires_grad=False,
-            )
+            # Storage holding other bytes, as on a reload
+            param = torch.full((experts, 2 * intermediate, hidden), 7.0)
+            self.register_parameter(name, torch.nn.Parameter(param, False))
 
     @staticmethod
-    def _load_all(layer, loaded):
-        for expert in range(layer.w13_weight.shape[0]):
+    def _load_all(layer, param, loaded):
+        for expert in range(param.shape[0]):
             for shard_id in ("w1", "w3"):
                 layer._load_w13(
-                    expert_data=layer.w13_weight.data[expert],
+                    expert_data=param.data[expert],
                     shard_dim=0,
                     shard_id=shard_id,
                     loaded_weight=loaded,
                     tp_rank=0,
-                    param=layer.w13_weight,
+                    param=param,
                 )
 
-    @pytest.mark.parametrize("init", [0.0, 1.0])
-    def test_reload_restores_initial_padding(self, init):
+    @pytest.mark.parametrize(
+        "name,pad", [("w13_weight", 0.0), ("w13_weight_scale", 1.0)]
+    )
+    def test_loader_leaves_padding_to_post_processing(self, name, pad):
         # intermediate 3 of 4 and hidden 5 of 6 come from the checkpoint
-        layer = self._Experts(experts=3, intermediate=4, hidden=6, init=init)
+        layer = self._Experts(name, experts=3, intermediate=4, hidden=6)
+        param = getattr(layer, name)
         loaded = torch.randn(3, 5)
-        self._load_all(layer, loaded)
-        fill_padding(layer)
-        w13 = layer.w13_weight.data
-
-        w13.fill_(7)  # a reload into storage holding other bytes
-        self._load_all(layer, loaded)
+        self._load_all(layer, param, loaded)
+        w13 = param.data
         assert torch.equal(w13[:, 3], torch.full((3, 6), 7.0))  # left to the fill
+
         fill_padding(layer)
         for half in (slice(0, 3), slice(4, 7)):
             assert torch.equal(w13[:, half, :5], loaded.expand(3, 3, 5))
-        for pad in (w13[:, 3], w13[:, 7], w13[:, :, 5]):
-            assert torch.all(pad == init)
+        for padding in (w13[:, 3], w13[:, 7], w13[:, :, 5]):
+            assert torch.all(padding == pad)
 
     def test_fill_only_once_per_load(self):
-        layer = self._Experts(experts=2, intermediate=4, hidden=6, init=0.0)
-        self._load_all(layer, torch.randn(3, 5))
+        layer = self._Experts("w13_weight", experts=2, intermediate=4, hidden=6)
+        self._load_all(layer, layer.w13_weight, torch.randn(3, 5))
         fill_padding(layer)
         # post-load processing rewrote the tensor; a second fill must not touch it
         layer.w13_weight.data.fill_(3)
@@ -487,8 +486,8 @@ class TestPaddingFilledByPostProcessing:
         assert torch.all(layer.w13_weight.data == 3)
 
     def test_fill_skips_post_processed_layout(self):
-        layer = self._Experts(experts=2, intermediate=4, hidden=6, init=0.0)
-        self._load_all(layer, torch.randn(3, 5))
+        layer = self._Experts("w13_weight", experts=2, intermediate=4, hidden=6)
+        self._load_all(layer, layer.w13_weight, torch.randn(3, 5))
         # post-load processing ran before the fill and changed the layout
         layer.w13_weight.data = torch.full((2, 6, 8), 3.0)
         fill_padding(layer)

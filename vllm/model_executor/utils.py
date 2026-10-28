@@ -69,10 +69,7 @@ def set_weight_attrs(
 
 
 def mark_padding(
-    layer: torch.nn.Module,
-    name: str,
-    region: torch.Tensor,
-    value: float | None = None,
+    layer: torch.nn.Module, name: str, region: torch.Tensor, value: float
 ) -> None:
     """Record that ``region``, a view of ``layer.<name>`` left out by a loader,
     holds padding; `fill_padding` writes it before the next post-load processing.
@@ -80,9 +77,7 @@ def mark_padding(
     Loaders record padding instead of writing it, so post-load processing sees
     the same padding on every load: a reload may load into storage holding
     stale bytes (uninitialized layerwise tensors, or post-processed bytes when
-    loading in place). Unless ``value`` is given, it is the region's content
-    when first recorded, i.e. its ``create_weights`` initial value (0 if that
-    is not constant). A region of one expert (``param[e]``) is recorded for
+    loading in place). A region of one expert (``param[e]``) is recorded for
     every expert. Records live on the layer, which outlives the parameter
     tensors across reloads.
     """
@@ -95,15 +90,11 @@ def mark_padding(
         shape, stride = (param.shape[0], *shape), (param.stride(0), *stride)
     layout = (tuple(param.shape), tuple(param.stride()), param.dtype)
     layouts = layer.__dict__.setdefault("_padding_layouts", {})
-    regions = layer.__dict__.setdefault("_padding_regions", {}).setdefault(name, {})
-    if layouts.setdefault(name, layout) != layout:
-        raise ValueError(f"{name}: padding recorded for another layout")
-    key = (offset, shape, stride)
-    if value is not None:
-        regions[key] = value
-    elif key not in regions:
-        values = region.float().flatten()
-        regions[key] = values[0].item() if bool((values == values[0]).all()) else 0
+    regions = layer.__dict__.setdefault("_padding_regions", {})
+    if layouts.get(name) != layout:  # first record, or a new layout: start over
+        layouts[name] = layout
+        regions[name] = {}
+    regions[name][(offset, shape, stride)] = value
     layer._padding_pending = True
 
 

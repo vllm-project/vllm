@@ -754,6 +754,14 @@ def test_padded_moe_reload_releases_each_layer(
     record_metadata_for_reloading(model)
     original_params = [dict(layer.named_parameters()) for layer in model]
     shards = ["w1", "w3", "w2"] if is_gated else ["w1", "w2"]
+
+    # Rematerialized tensors hold other bytes, as uninitialized memory may
+    materialize = reload_meta.materialize_meta_tensor
+    monkeypatch.setattr(
+        reload_meta,
+        "materialize_meta_tensor",
+        lambda meta: materialize(meta).fill_(7),
+    )
     for cycle in range(2):
         initialize_layerwise_reload(model)
         for layer_index, layer in enumerate(model):
@@ -805,6 +813,8 @@ def test_padded_moe_reload_releases_each_layer(
                 # Kernel-specific tests cover padding, which is not checkpoint data.
                 mask = torch.isfinite(expected[name])
                 assert torch.equal(original[mask], expected[name][mask])
+                # Padding is filled before post-load processing on every reload
+                assert torch.all(original[~mask] == 0)
 
 
 def test_get_numel_loaded():

@@ -414,6 +414,7 @@ class RoutedExperts(PluggableLayer):
             start = min(tp_rank * shard_size, expected_size)
             size = min(shard_size, expected_size - start)
             loaded_weight = loaded_weight.narrow(shard_dim, start, size)
+            destination.fill_(1 if is_scale else 0)
         pad_value = (1 if is_scale else 0) if padded_tp else None
 
         if shard_id == "w2":
@@ -551,7 +552,8 @@ class RoutedExperts(PluggableLayer):
         pad_value: float | None = None,
     ) -> torch.Tensor:
         """`_split_padding`, recording the padding left out so post-load
-        processing fills it (see `mark_padding`)."""
+        processing fills it (see `mark_padding`): ``pad_value`` if given, else
+        1 for floating-point scales and 0 for everything else."""
         expert_data, padding = self._split_padding(
             expert_data, loaded_weight, hidden_dim, shard_dim
         )
@@ -559,6 +561,9 @@ class RoutedExperts(PluggableLayer):
         if padding and param is not None and not expert_data.is_meta:
             name = next((n for n, p in self._parameters.items() if p is param), None)
             if name is not None:  # a tensor of this layer, not a scratch copy
+                if pad_value is None:
+                    is_scale = "scale" in name and param.dtype.is_floating_point
+                    pad_value = 1 if is_scale else 0
                 for region in padding:
                     mark_padding(self, name, region, pad_value)
         return expert_data
