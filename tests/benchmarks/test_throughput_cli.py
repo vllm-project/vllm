@@ -324,7 +324,6 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
     assert not serve_args.enable_multimodal_chat
 
 
-@pytest.mark.benchmark
 def _parse_throughput_args(*argv: str) -> Namespace:
     parser = FlexibleArgumentParser()
     add_cli_args(parser)
@@ -368,16 +367,26 @@ def test_parsed_lengths_follow_flag_precedence(argv, expected) -> None:
     ) == expected
 
 
-def test_legacy_lengths_alone_do_not_warn() -> None:
-    """Passing only --input-len must not warn that --random-input-len is set."""
-    args = _parse_throughput_args("--input-len", "32", "--output-len", "1")
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--input-len", "32", "--output-len", "1", "--prefix-len", "8"],
+        ["--random-input-len", "32", "--random-output-len", "1"],
+        ["--random-prefix-len", "64"],
+        ["--random-prefix-len", "0"],
+    ],
+)
+def test_one_flag_per_length_does_not_warn(argv) -> None:
+    """Only the legacy or only the --random-* flag: no "Both ... are specified"."""
+    args = _parse_throughput_args(*argv)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         validate_args(args)
 
-    assert not [w for w in caught if "are specified" in str(w.message)]
+    assert not [str(w.message) for w in caught if "are specified" in str(w.message)]
 
 
+@pytest.mark.benchmark
 def test_get_requests_random_mm_with_mm_processor_args(
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
