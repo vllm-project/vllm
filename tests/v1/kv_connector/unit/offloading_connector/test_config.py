@@ -8,9 +8,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import GPT2Config
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -1106,21 +1113,53 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
 
 
+@pytest.fixture(scope="module")
+def _head_sharded_model_config(tmp_path_factory: pytest.TempPathFactory) -> ModelConfig:
+    model_path = tmp_path_factory.mktemp("head-sharded-gpt2")
+    GPT2Config(
+        n_embd=512,
+        n_layer=2,
+        n_head=4,
+        n_positions=128,
+        architectures=["GPT2LMHeadModel"],
+    ).save_pretrained(model_path)
+    return ModelConfig(
+        model=str(model_path),
+        max_model_len=32,
+        model_impl="transformers",
+    )
+
+
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("canonical", [False, True])
 def test_head_sharded_attention_requires_canonical_layout_for_portability(
-    tensor_parallel_size: int, canonical: bool
+    tensor_parallel_size: int,
+    canonical: bool,
+    _head_sharded_model_config: ModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    spec = replace(_full_attention_spec(), num_kv_heads=4 // tensor_parallel_size)
-    assert (
-        _parallelism_agnostic(
-            [KVCacheGroupSpec(["l0", "l1"], spec)],
-            canonical=canonical,
-            v2=False,
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = VllmConfig(
+        model_config=_head_sharded_model_config,
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(
             tensor_parallel_size=tensor_parallel_size,
-        )
-        is canonical
+            distributed_executor_backend="uni",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"canonical_layout": True} if canonical else {},
+        ),
     )
+    spec = replace(_full_attention_spec(), num_kv_heads=4 // tensor_parallel_size)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0", "l1"], spec)],
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.parallel.is_parallelism_agnostic is canonical
 
 
 _SWA_SPEC = SlidingWindowSpec(
