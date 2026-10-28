@@ -10,8 +10,8 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
-import threading
 import os
+import threading
 import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
@@ -823,6 +823,7 @@ class TestTieringOffloadingManager:
         events: list[threading.Event] = []
 
         def submit_deferring(job_metadata: TransferJob) -> None:
+            assert job_metadata.materialize()
             event = threading.Event()
             if preset:
                 event.set()
