@@ -253,14 +253,6 @@ fn empty_explicit_reasoning_suppresses_embedded_tag_parsing() {
 }
 
 #[test]
-fn chat_template_override_is_a_client_error() {
-    let mut request = ChatRequest::for_test();
-    request.chat_options.chat_template = Some("override".into());
-    let error = Glm5NextChatRenderer::default().render(&request).unwrap_err();
-    assert!(error.is_request_validation_error());
-}
-
-#[test]
 fn continue_final_message_matches_existing_hf_renderer() {
     let final_messages = [
         ChatMessage::assistant_text("  partial answer \n"),

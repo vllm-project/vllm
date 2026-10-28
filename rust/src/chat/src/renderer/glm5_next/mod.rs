@@ -11,7 +11,7 @@ use serde_json::Value;
 use vllm_text::tokenizer::DynTokenizer;
 
 use super::{ChatRenderer, RenderedPrompt};
-use crate::error::{Result, bail_chat_template_thrown};
+use crate::error::Result;
 use crate::request::ChatRequest;
 
 #[derive(Clone, Default)]
@@ -46,11 +46,6 @@ impl Glm5NextChatRenderer {
 impl ChatRenderer for Glm5NextChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
-        if request.chat_options.chat_template.is_some() {
-            bail_chat_template_thrown!(
-                "glm5_next does not accept a chat_template override; use tokenizer-mode hf for Jinja"
-            );
-        }
         let mut kwargs = self.default_template_kwargs.clone();
         kwargs.extend(request.chat_options.template_kwargs.clone());
         if let Some(effort) = &request.chat_options.reasoning_effort {
