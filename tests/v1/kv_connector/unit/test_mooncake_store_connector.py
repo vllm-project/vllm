@@ -941,6 +941,7 @@ def test_lookup_close_stops_running_rpc_and_cancels_unadopted_work():
         assert queued.future.cancelled()
         assert all(c.prefetch(48, []) is None for c in clients)
 
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_cached_token_estimate_preserves_first_hit_and_pending(nested):
     with _multi_store_lookup(nested=nested) as (connector, _, sockets, gates, started):

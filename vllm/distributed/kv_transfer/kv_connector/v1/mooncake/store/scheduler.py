@@ -236,7 +236,7 @@ class MooncakeStoreScheduler:
     def get_num_cached_tokens(self, request: Request) -> int | None:
         if (
             not self.enable_lookup
-            or request.skip_reading_prefix_cache
+            or request.skip_reading_external_kv
             or request.num_tokens < self._lookup_align()
         ):
             return 0

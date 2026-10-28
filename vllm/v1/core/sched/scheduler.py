@@ -2693,7 +2693,7 @@ class Scheduler(SchedulerInterface):
 
     def _get_residual_sjf_cost(self, request: Request) -> int:
         hit = request.num_computed_tokens
-        if not request.skip_reading_prefix_cache:
+        if request.prefix_cache_hit_limit != 0:
             signature = (
                 request.num_tokens,
                 request.num_preemptions,
@@ -2706,7 +2706,7 @@ class Scheduler(SchedulerInterface):
             else:
                 local_hit = cached[3]
             hit = max(hit, local_hit)
-            if self.connector is not None:
+            if self.connector is not None and not request.skip_reading_external_kv:
                 external_hit = self.connector.get_num_cached_tokens(
                     request, local_hit - local_hit % self.block_size
                 )

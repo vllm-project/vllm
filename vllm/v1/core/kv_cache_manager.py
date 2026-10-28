@@ -257,7 +257,7 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return 0
         _, hit_length, _ = self.coordinator.find_longest_cache_hit(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes, request.get_max_cache_hit_length()
         )
         return hit_length
 

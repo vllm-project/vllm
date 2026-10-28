@@ -7,6 +7,7 @@ import pytest
 
 from vllm.config import SchedulerConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.core.sched.request_queue import ResidualSJFRequestQueue
 from vllm.v1.outputs import ModelRunnerOutput
@@ -139,7 +140,7 @@ def test_residual_sjf_zero_local_hit_uses_prompt_length(enable_prefix_caching: b
 
     assert scheduler._get_residual_sjf_cost(long_request) == 2
     assert scheduler._get_residual_sjf_cost(short_request) == 1
-    short_request.skip_reading_prefix_cache = True
+    short_request.prefix_cache_hit_limit = 0
     assert scheduler._get_residual_sjf_cost(short_request) == 1
 
 
@@ -237,19 +238,30 @@ def test_connector_estimate_changes_order_but_does_not_replace_admission():
     assert output.num_scheduled_tokens[long_req.request_id] == 97
 
 
-def test_local_estimate_refreshes_after_cache_reset():
+@pytest.mark.parametrize("cache_limit,expected_cost", [(None, 1), (16, 2)])
+def test_local_estimate_respects_read_limit_and_cache_reset(cache_limit, expected_cost):
     scheduler = create_scheduler(
         scheduling_policy="residual_sjf",
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
     )
-    warm, waiting = create_requests(2, num_tokens=33, same_prompt=True)
+    warm, waiting = create_requests(
+        2,
+        num_tokens=33,
+        same_prompt=True,
+        sampling_params=SamplingParams(
+            prompt_logprobs=1 if cache_limit is not None else None,
+            prompt_logprob_start=cache_limit,
+        ),
+    )
     manager = scheduler.kv_cache_manager
     assert manager.allocate_slots(warm, 32) is not None
     manager.cache_blocks(warm, 32)
     manager.free(warm)
+    if cache_limit is not None:
+        waiting.kv_transfer_params = {"cached_tokens": 32}
     scheduler.add_request(waiting)
-    assert scheduler._get_residual_sjf_cost(waiting) == 1
-    assert scheduler._get_residual_sjf_cost(waiting) == 1
+    assert scheduler._get_residual_sjf_cost(waiting) == expected_cost
+    assert scheduler._get_residual_sjf_cost(waiting) == expected_cost
     assert scheduler.reset_prefix_cache()
     assert scheduler._get_residual_sjf_cost(waiting) == 3
