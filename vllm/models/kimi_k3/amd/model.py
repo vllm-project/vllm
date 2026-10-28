@@ -252,3 +252,8 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # The loader calls only the root model's hook; forward it so the text
+        # model's MLA layers build their folded q_b_proj / W_UK weight.
+        self.language_model.process_weights_after_loading()

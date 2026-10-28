@@ -93,3 +93,16 @@ def test_fold_through_aiter_gemm(num_tokens: int) -> None:
     ql_nope_ref, q_pe_ref = _split_fold_output(x.float() @ w_fold.float().T, num_heads)
     torch.testing.assert_close(ql_nope.float(), ql_nope_ref, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(q_pe.float(), q_pe_ref, rtol=2e-2, atol=2e-2)
+
+
+def test_root_model_builds_the_fold() -> None:
+    """The loader calls only the root model's post-load hook, so
+    KimiK3ForConditionalGeneration must forward it to the text model, whose hook
+    builds each MLA wrapper's W_fold (else _fused_decode asserts at DCP1)."""
+    from unittest.mock import MagicMock
+
+    from vllm.models.kimi_k3.amd.model import KimiK3ForConditionalGeneration
+
+    root = MagicMock()
+    KimiK3ForConditionalGeneration.process_weights_after_loading(root)
+    root.language_model.process_weights_after_loading.assert_called_once_with()
