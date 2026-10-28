@@ -286,23 +286,24 @@ def _make_capture_runner(
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(
-        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+        supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
     )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
+        capture_stream=object(),
     )
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    runner.input_buffers = object()
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = object()
+    runner.attn_groups = object()
+    runner.kv_cache_config = object()
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
@@ -328,6 +329,16 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+    assert runner.cudagraph_manager is not None
+    capture_inner_cudagraphs = runner.model_state.capture_inner_cudagraphs
+    assert isinstance(capture_inner_cudagraphs, Mock)
+    capture_inner_cudagraphs.assert_called_once_with(
+        runner.input_buffers,
+        runner.block_tables,
+        runner.attn_groups,
+        runner.kv_cache_config,
+        runner.cudagraph_manager.capture_stream,
+    )
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
