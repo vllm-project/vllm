@@ -77,7 +77,6 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
         "BeamForCausalLM",
-        "ColQwen3_5",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
@@ -94,11 +93,9 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "HYV4MTPModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
-        "InternS2PreviewForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiLinearForCausalLM",
-        "MiniCPMV4_6ForConditionalGeneration",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
         "MuseSpark1xForCausalLM",
@@ -114,6 +111,18 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpMTP",
         "Step5ForCausalLM",
         "Step5ForConditionalGeneration",
+    }
+)
+
+
+_QWEN3_5_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MTP",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeMTP",
     }
 )
 
@@ -138,9 +147,7 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     if not current_platform.is_cuda():
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
-        return frozenset(
-            a for a in DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES if "Qwen3_5" not in a
-        )
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 

@@ -3,10 +3,12 @@
 
 from unittest.mock import Mock, patch
 
+from vllm.config import CompilationMode
+
 
 def test_qwen3_5_models_use_platform_specific_implementation():
+    from vllm.model_executor.models.qwen3_5 import Qwen3_5ProcessingInfo
     from vllm.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MTP
-    from vllm.models.qwen3_5.common.mm_preprocess import Qwen3_5ProcessingInfo
     from vllm.platforms import current_platform
 
     # Only the NVIDIA variant drops torch.compile; ROCm and other platforms
@@ -20,9 +22,9 @@ def test_qwen3_5_models_use_platform_specific_implementation():
         mtp_module = "vllm.model_executor.models.qwen3_5_mtp"
     assert Qwen3_5ForCausalLM.__module__ == model_module
     assert Qwen3_5MTP.__module__ == mtp_module
-    assert (
-        Qwen3_5ProcessingInfo.__module__ == "vllm.models.qwen3_5.common.mm_preprocess"
-    )
+    # Shared processing-info classes stay in the legacy module, which the
+    # NVIDIA variant imports them from.
+    assert Qwen3_5ProcessingInfo.__module__ == "vllm.model_executor.models.qwen3_5"
 
 
 def test_qwen3_5_nvidia_models_do_not_use_torch_compile_wrapper():
@@ -108,6 +110,9 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
     mock_vllm_config = Mock()
     mock_vllm_config.model_config.hf_text_config = mock_hf_config
     mock_vllm_config.cache_config.mamba_cache_mode = "align"
+    # Off CUDA the dispatcher resolves to the legacy torch.compile-wrapped
+    # class, whose __init__ shim consults the compilation mode.
+    mock_vllm_config.compilation_config.mode = CompilationMode.NONE
     mock_vllm_config.quant_config = mock_quant_config
 
     mock_pp_group = Mock()

@@ -15,12 +15,11 @@ from transformers.models.qwen3_vl import Qwen3VLProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
-from vllm.models.qwen3_5.common.mm_preprocess import Qwen3_5ProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .adapters import as_seq_cls_model
 from .interfaces_base import default_pooling_type
+from .qwen3_5 import Qwen3_5ForConditionalGeneration, Qwen3_5ProcessingInfo
 from .qwen3_vl import Qwen3VLDummyInputsBuilder, Qwen3VLMultiModalProcessor
 from .utils import WeightsMapper
 

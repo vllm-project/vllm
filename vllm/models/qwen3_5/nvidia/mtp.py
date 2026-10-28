@@ -47,24 +47,6 @@ from .ops.fused_pre_fc_norms import fused_pre_fc_norms
 logger = init_logger(__name__)
 
 
-def _all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if residual is None:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        hidden_states = hidden_states[:full_num_tokens]
-        return hidden_states, None
-
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:full_num_tokens]
-    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-    return hidden_states, residual
-
-
 class Qwen3_5MultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper
 
@@ -129,12 +111,14 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Qwen3_5RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
+        )
         self.pre_fc_norm_hidden = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
         )
         self.pre_fc_norm_embedding = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
         )
         self.use_fused_pre_fc_norms = HAS_TRITON and current_platform.is_cuda()
 
@@ -191,14 +175,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if mtp_layer.use_attn_reduce_scatter_for_moe:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                positions.shape[-1],
-                self.config.hidden_size,
-            )
-
         if mtp_layer.mlp_output_is_partial:
             # The MTP layer's MLP/MoE output is an un-reduced TP partial;
             # fuse its all-reduce into the final norm.
@@ -207,6 +183,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             )
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[-1]]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

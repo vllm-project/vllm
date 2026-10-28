@@ -778,7 +778,7 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_gdn_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -807,7 +807,7 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         return cls.get_gdn_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
@@ -1090,7 +1090,7 @@ class Qwen4ExpForConditionalGeneration(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod

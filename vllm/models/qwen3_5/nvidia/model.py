@@ -50,7 +50,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -78,6 +78,10 @@ from vllm.model_executor.models.interfaces import (
     _require_is_multimodal,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
+)
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
@@ -101,10 +105,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
-)
-from vllm.models.qwen3_5.common.mm_preprocess import (
-    Qwen3_5MoeProcessingInfo,
-    Qwen3_5ProcessingInfo,
+    sequence_parallel_chunk,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -114,23 +115,55 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 logger = init_logger(__name__)
 
+try:
+    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+except ImportError:
+    gemma_rmsnorm = None
+    gemma_fused_add_rmsnorm = None
 
-def _all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if residual is None:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        hidden_states = hidden_states[:full_num_tokens]
-        return hidden_states, None
 
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:full_num_tokens]
-    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-    return hidden_states, residual
+class Qwen3_5RMSNorm(GemmaRMSNorm):
+    """GemmaRMSNorm backed by flashinfer's fused Gemma norm kernels on CUDA.
+
+    The native path recomputes ``weight.float() + 1`` in eager ops on every
+    call (the fp32 weight fails the vllm_c dtype check); flashinfer folds the
+    +1 into the kernel instead. flashinfer requires the weight to share the
+    activation dtype, so the parameter is created in the model dtype —
+    checkpoint norm weights are bf16-exact, making the load-time cast
+    lossless.
+    """
+
+    def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype) -> None:
+        super().__init__(hidden_size, eps)
+        self.weight.data = self.weight.data.to(dtype)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if (
+            gemma_rmsnorm is not None
+            and x.ndim == 2
+            and x.shape[0] > 0  # the cute kernel rejects empty launches
+            and x.stride(-1) == 1
+            # flashinfer's CUDA-norm backend only supports fp16/bf16; the
+            # cute path is untested for fp32, so keep fp32 on the native path
+            and x.dtype in (torch.float16, torch.bfloat16)
+        ):
+            if residual is None:
+                return gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
+            if (
+                residual.shape == x.shape
+                and residual.dtype == x.dtype
+                and residual.stride(-1) == 1
+            ):
+                # gemma_fused_add_rmsnorm mutates x and residual in place.
+                gemma_fused_add_rmsnorm(
+                    x, residual, self.weight.data, self.variance_epsilon
+                )
+                return x, residual
+        return self.forward_native(x, residual)
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -236,10 +269,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             raise ValueError(f"Invalid model_type {config.model_type}")
 
         self.input_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
         )
         self.post_attention_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
         )
 
         self.layer_scale = getattr(config, "layer_scale", False)
@@ -379,7 +412,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = Qwen3_5RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+                dtype=vllm_config.model_config.dtype,
+            )
         else:
             self.norm = PPMissingLayer()
 
@@ -388,6 +425,10 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    @property
+    def use_sequence_parallel(self) -> bool:
+        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+
     def _maybe_add_hidden_state(
         self,
         aux_hidden_states: list[torch.Tensor],
@@ -395,6 +436,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
+        if residual is None and layer_idx in self.aux_hidden_state_layers:
+            # The layer-0 capture aliases the embeddings, which become the
+            # first residual and are mutated in place by the next layer's
+            # fused-add norm; capture by value.
+            hidden_states = hidden_states.clone()
         if (
             residual is not None
             and self.mlp_output_is_partial
@@ -426,35 +472,20 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
+        if self.use_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if (
-                hidden_states.shape[0] != full_num_tokens
-                and not layer.use_attn_reduce_scatter_for_moe
-            ):
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -462,13 +493,6 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
-            )
-        if hidden_states.shape[0] != full_num_tokens:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                full_num_tokens,
-                self.config.hidden_size,
             )
         if self.mlp_output_is_partial:
             # The last layer's MLP/MoE output is an un-reduced TP partial;
@@ -478,6 +502,18 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+        if self.use_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = hidden_states.split(
+                    hidden_size, dim=-1
+                )
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

@@ -25,7 +25,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.models.qwen3_5 import Qwen3_5ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -64,6 +63,7 @@ from .minicpmv import (
     _image_kwargs_from_video,
 )
 from .module_mapping import MultiModelKeys
+from .qwen3_5 import Qwen3_5ForCausalLM
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
