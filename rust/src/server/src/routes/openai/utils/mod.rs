@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 pub mod logprobs;
+pub mod metrics;
 pub mod structured_outputs;
 pub mod types;
 pub mod usage;
@@ -27,6 +28,27 @@ pub(crate) fn validate_generation_prompt_truncation(
         bail_invalid_request!(
             param = "echo",
             "`echo=true` is not supported with `truncate_prompt_tokens`."
+        );
+    }
+    Ok(())
+}
+
+/// Reject an output budget larger than the whole context window, like
+/// Python's `TokenizeParams` check for chat and completions. A budget that
+/// fits the window is still clamped to the room the prompt leaves when the
+/// request is lowered; `/inference/v1/generate` only clamps, as in Python.
+pub(crate) fn validate_max_output_tokens(
+    param: &'static str,
+    max_tokens: Option<u32>,
+    max_model_len: u32,
+) -> Result<(), ApiError> {
+    if let Some(max_tokens) = max_tokens
+        && max_tokens > max_model_len
+    {
+        bail_invalid_request!(
+            param = param,
+            "{param}={max_tokens} cannot be greater than max_model_len={max_model_len}. \
+             Please request fewer output tokens."
         );
     }
     Ok(())

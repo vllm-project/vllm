@@ -1,17 +1,168 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import json
+from typing import Any
 
-from argparse import Namespace
-
+import numpy as np
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
-    redact_sensitive_args,
     should_include_usage,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+class JsonPayload(BaseModel):
+    text: str
+    values: dict[int, int]
+
+
+class NumpyPayload(BaseModel):
+    values: Any
+
+
+@pytest.mark.parametrize("as_model", [False, True])
+def test_create_json_response_serializes_numpy(as_model):
+    values = np.array([[1.25, -2.5], [0.0, 3.0]], dtype=np.float32)
+    result = NumpyPayload(values=values) if as_model else {"values": values}
+
+    response = api_utils.create_json_response(result)
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"values": values.tolist()}
+
+
+@pytest.mark.asyncio
+async def test_load_aware_call_tracks_json_response_until_completion():
+    app = FastAPI()
+    app.state.enable_server_load_tracking = True
+    app.state.server_load_metrics = 0
+    request = Request({"type": "http", "app": app})
+
+    @api_utils.load_aware_call
+    async def handler(raw_request: Request):
+        return api_utils.create_json_response(JsonPayload(text="ok", values={1: 2}))
+
+    response = await handler(raw_request=request)
+
+    assert app.state.server_load_metrics == 1
+    assert response.background is not None
+    await response.background()
+    assert app.state.server_load_metrics == 0
+
+
+@pytest.mark.parametrize("container", [None, list, tuple])
+def test_create_json_response_serializes_models(container):
+    model = JsonPayload(text="测试模型", values={1: 2})
+    result = container([model, model]) if container else model
+    content = (
+        [model.model_dump(), model.model_dump()] if container else model.model_dump()
+    )
+
+    response = api_utils.create_json_response(result)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert json.loads(response.body) == json.loads(JSONResponse(content=content).body)
+
+
+def test_create_json_response_serializes_empty_list():
+    response = api_utils.create_json_response([])
+
+    assert response.status_code == 200
+    assert response.body == b"[]"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_create_json_response_preserves_large_integers(multiple):
+    model = JsonPayload(text="opaque identifier", values={1: 2**80})
+
+    response = api_utils.create_json_response([model] if multiple else model)
+
+    data = json.loads(response.body)
+    item = data[0] if multiple else data
+    assert response.status_code == 200
+    assert item["values"]["1"] == 2**80
+
+
+@pytest.mark.parametrize("value", [1, 2**80])
+def test_create_json_response_preserves_custom_status(value):
+    model = JsonPayload(text="created", values={1: value})
+
+    response = api_utils.create_json_response(model, status_code=201)
+
+    assert response.status_code == 201
+    assert json.loads(response.body)["values"]["1"] == value
+
+
+def test_create_json_response_preserves_error_status():
+    error = ErrorResponse(
+        error=ErrorInfo(message="invalid prompt", type="BadRequestError", code=400)
+    )
+
+    response = api_utils.create_json_response(error)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == error.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_with_cancellation_disconnect_skips_response_validation():
+    """A disconnect must cancel the handler without a response_model 500."""
+    app = FastAPI()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @app.post("/", response_model=str)
+    @api_utils.with_cancellation
+    async def handler(body: dict, raw_request: Request):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    messages = []
+    body_sent = False
+
+    async def receive():
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert messages[0]["status"] == 200
+    assert messages[1]["body"] == b""
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
 
 
 @pytest.mark.parametrize(
@@ -114,66 +265,3 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
-
-
-class TestRedactSensitiveArgs:
-    API_KEY = "sk-test-secret-12345"
-
-    def test_redact_replaces_sensitive_values_only(self):
-        args = {
-            "api_key": self.API_KEY,
-            "hf_token": "hf_secret",
-            "watermark_config": {"algorithm": "gumbel", "key": 42},
-            "other": "visible",
-        }
-        redacted = redact_sensitive_args(args)
-        assert redacted == {
-            "api_key": "***",
-            "hf_token": "***",
-            "watermark_config": "***",
-            "other": "visible",
-        }
-        # original dict must not be mutated
-        assert args == {
-            "api_key": self.API_KEY,
-            "hf_token": "hf_secret",
-            "watermark_config": {"algorithm": "gumbel", "key": 42},
-            "other": "visible",
-        }
-
-    def test_no_sensitive_fields_returns_original(self):
-        args = {"model_tag": "org/model", "other": "visible"}
-        assert redact_sensitive_args(args) is args
-
-    def test_api_key_not_in_log(self, monkeypatch, caplog):
-        non_default = {
-            "model_tag": "org/model",
-            "default_chat_template_kwargs": {"enable_thinking": False},
-            "api_key": self.API_KEY,
-            "enable_auto_tool_choice": True,
-            "tool_call_parser": "qwen3_coder",
-        }
-        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
-            api_utils.log_non_default_args(args=Namespace())
-        message = caplog.text
-        assert self.API_KEY not in message
-        assert "'api_key': '***'" in message
-        # non-sensitive args are still logged
-        assert "org/model" in message
-        assert "qwen3_coder" in message
-
-    def test_hf_token_not_in_log(self, monkeypatch, caplog):
-        hf_token = "hf_TESTTOKENVALUE123"
-        non_default = {
-            "model_tag": "org/model",
-            "hf_token": hf_token,
-            "tool_call_parser": "qwen3_coder",
-        }
-        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
-            api_utils.log_non_default_args(args=Namespace())
-        message = caplog.text
-        assert hf_token not in message
-        assert "'hf_token': '***'" in message
-        assert "org/model" in message

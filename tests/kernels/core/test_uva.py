@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
+
 import numpy as np
 import pytest
 import torch
@@ -21,6 +23,9 @@ DEVICES = [
 @pytest.mark.parametrize("device", DEVICES)
 def test_cpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
@@ -44,6 +49,9 @@ def test_cpu_write(device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_gpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
@@ -65,32 +73,34 @@ def test_gpu_write(device):
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", DEVICES)
-def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
-    def fail_async_tensor_h2d(*args, **kwargs):
-        pytest.fail("UVA-backed targets should not copy write contents to the GPU")
+@pytest.mark.parametrize("uva_target", [False, True])
+def test_staged_write_uses_uva_contents(device, uva_target):
+    """Both GPU and UVA targets read their contents from the UVA pool."""
+    device = torch.device(device)
+    # Earlier tests leave another device current; a GPU target needs its own.
+    with torch.accelerator.device_index(device.index):
+        staged = StagedWriteTensor(
+            (3, 4096),
+            dtype=torch.int32,
+            device=device,
+            max_concurrency=2,
+            uva_instead_of_gpu=uva_target,
+        )
+        assert staged.write_contents is not None
 
-    monkeypatch.setattr(buffer_utils, "async_tensor_h2d", fail_async_tensor_h2d)
-    staged = StagedWriteTensor(
-        (3, 4096),
-        dtype=torch.int32,
-        device=torch.device(device),
-        max_concurrency=2,
-        uva_instead_of_gpu=True,
-    )
+        staged.stage_write(2, 3, [11, 12, 13])
+        staged.apply_write()
+        torch.accelerator.synchronize()
+        staged.stage_write(1, 7, [21, 22])
+        staged.apply_write()
+        torch.accelerator.synchronize()
+        staged.stage_write(0, 1020, range(1500))
+        staged.apply_write()
+        torch.accelerator.synchronize()
 
-    staged.stage_write(2, 3, [11, 12, 13])
-    staged.apply_write()
-    torch.accelerator.synchronize()
-    staged.stage_write(1, 7, [21, 22])
-    staged.apply_write()
-    torch.accelerator.synchronize()
-    staged.stage_write(0, 1020, range(1500))
-    staged.apply_write()
-    torch.accelerator.synchronize()
-
-    assert staged.gpu[2, 3:6].tolist() == [11, 12, 13]
-    assert staged.gpu[1, 7:9].tolist() == [21, 22]
-    assert staged.gpu[0, 1020:2520].tolist() == list(range(1500))
+        assert staged.gpu[2, 3:6].tolist() == [11, 12, 13]
+        assert staged.gpu[1, 7:9].tolist() == [21, 22]
+        assert staged.gpu[0, 1020:2520].tolist() == list(range(1500))
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
@@ -175,7 +185,8 @@ def test_staged_write_inflight(uva_target, dtype):
             max_concurrency=2,
             uva_instead_of_gpu=uva_target,
         )
-        assert (state.write_contents is not None) == uva_target
+        # Contents are staged in the UVA pool for both target kinds.
+        assert state.write_contents is not None
         stream = torch.Stream(device=device)
         stream.wait_stream(torch.accelerator.current_stream())
         pending: list[tuple[torch.Event, torch.Tensor, torch.Tensor]] = []
@@ -205,6 +216,85 @@ def test_staged_write_inflight(uva_target, dtype):
         for event, snapshot, reference in pending:
             event.synchronize()
             torch.testing.assert_close(snapshot.cpu(), reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("uva_target", [False, True])
+def test_staged_write_input_types(uva_target):
+    """Lists, other iterables, arrays and NumPy arrays of any dtype stage the same
+    values, in any interleaving."""
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with torch.accelerator.device_index(device.index):
+        state = StagedWriteTensor(
+            (5, 8), torch.int32, device, uva_instead_of_gpu=uva_target
+        )
+        # Twice, to reuse the staging state and both pool slots.
+        for b in (0, 100):
+            state.stage_write(0, 1, [b + 1, b + 2, b + 3])
+            state.stage_write(2, 0, np.arange(b + 6, b + 9, dtype=np.int64))
+            state.stage_write(1, 2, range(b + 4, b + 6))
+            # Non-contiguous int32 view.
+            state.stage_write(3, 3, np.arange(b + 9, b + 13, dtype=np.int32)[::2])
+            state.stage_write(3, 0, np.array([], dtype=np.int64))
+            state.stage_write_elem(4, b + 14)
+            state.stage_write(4, 1, array.array("i", [b + 15, b + 16]))
+            state.stage_write(4, 3, [b + 17])
+            state.apply_write()
+            torch.accelerator.synchronize()
+
+            assert state.gpu.tolist() == [
+                [0, b + 1, b + 2, b + 3, 0, 0, 0, 0],
+                [0, 0, b + 4, b + 5, 0, 0, 0, 0],
+                [b + 6, b + 7, b + 8, 0, 0, 0, 0, 0],
+                [0, 0, 0, b + 9, b + 11, 0, 0, 0],
+                [b + 14, b + 15, b + 16, b + 17, 0, 0, 0, 0],
+            ]
+
+
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="No accelerator.")
+@pytest.mark.parametrize("fused", [False, True])
+def test_staged_write_without_uva(monkeypatch, fused):
+    """Without pinned memory, staged writes go through NonUvaBuffer copies."""
+    monkeypatch.setattr(buffer_utils, "is_uva_available", lambda: False)
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with torch.accelerator.device_index(device.index):
+        # uva_instead_of_gpu falls back to a device-resident target.
+        tables = [
+            StagedWriteTensor((3, 2048), torch.int32, device, uva_instead_of_gpu=uva)
+            for uva in (False, True)
+        ]
+        for t in tables:
+            assert t.gpu.device.type == DEVICE_TYPE
+            assert isinstance(t.write_contents._uva_bufs[0], buffer_utils.NonUvaBuffer)
+        writer = buffer_utils.FusedStagedWriter(device, max_writes=8)
+        ptrs = torch.tensor(
+            [t.gpu.data_ptr() for t in tables], dtype=torch.uint64, device=device
+        )
+        strides = torch.tensor(
+            [t.gpu.stride(0) for t in tables], dtype=torch.int64, device=device
+        )
+        expected = [torch.zeros((3, 2048), dtype=torch.int32) for _ in tables]
+        # Rounds of varying size reuse and grow both pool slots.
+        for step, length in enumerate([5, 2000, 3, 1500]):
+            for i, t in enumerate(tables):
+                base = step * 10000 + i * 5000
+                values = np.arange(base, base + length, dtype=np.int64)
+                t.stage_write(0, 1, values.tolist())
+                t.stage_write(1, 0, values)
+                t.stage_write(2, 3, array.array("i", [base, base + 1]))
+                t.stage_write_elem(2, base + 2)
+                expected[i][0, 1 : 1 + length] = torch.from_numpy(values)
+                expected[i][1, :length] = torch.from_numpy(values)
+                expected[i][2, 3:5] = torch.tensor([base, base + 1])
+                expected[i][2, 0] = base + 2
+            if fused:
+                writer.apply(tables, ptrs, strides)
+            else:
+                for t in tables:
+                    t.apply_write()
+            torch.accelerator.synchronize()
+            for t, ref in zip(tables, expected):
+                torch.testing.assert_close(t.gpu.cpu(), ref, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")

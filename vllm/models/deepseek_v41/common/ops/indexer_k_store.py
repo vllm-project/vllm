@@ -17,6 +17,8 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+from vllm.v1.attention.ops.common import pack_ue8m0_x4
 
 from . import MXFP4_BLOCK_SIZE, _fp32x2_to_fp4x2
 
@@ -51,7 +53,8 @@ def indexer_k_norm_rope_store(
         kv_slot_mapping: [num_tokens] slots in the indexer cache (-1 = skip).
         compress_ratio: group size; keys are emitted at group boundaries.
         use_fp4_cache: MXFP4 (2 nibbles/byte + ue8m0 per 32) when True, else
-            per-token FP8 with a single fp32 scale.
+            per-token FP8 with a single fp32 scale (four packed ue8m0 bytes
+            under `mqa_logits_use_mx_scales`).
 
     """
     num_tokens = kv_slot_mapping.numel()
@@ -111,6 +114,7 @@ def indexer_k_norm_rope_store(
         KV_BLOCK_STRIDE=k_cache.stride(0),
         FP8_MAX=448.0,
         USE_FP4=use_fp4_cache,
+        MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
         SHUFFLE=shuffle,
         BLOCK_TILE_SIZE=_BLOCK_TILE_SIZE,
         HEAD_TILE_SIZE=_HEAD_TILE_SIZE,
@@ -139,6 +143,7 @@ def _indexer_k_norm_rope_quant_store_kernel(
     KV_BLOCK_STRIDE: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FP4: tl.constexpr,
+    MX_SCALE: tl.constexpr,
     SHUFFLE: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
@@ -252,4 +257,10 @@ def _indexer_k_norm_rope_quant_store_kernel(
             tl.store(val_ptr + tiled, x_uint8)
         else:
             tl.store(val_ptr + block, x_uint8)
-        tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), tl.exp2(exponent))
+        if MX_SCALE:
+            tl.store(
+                scale_ptr.to(tl.pointer_type(tl.int32)),
+                pack_ue8m0_x4(tl.exp2(exponent)),
+            )
+        else:
+            tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), tl.exp2(exponent))
