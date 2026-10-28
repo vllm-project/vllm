@@ -497,6 +497,15 @@ def make_mxfp4_weights(
     return w1, w2, w1_s, w2_s, w1_bf16, w2_bf16
 
 
+def _fp4_supported() -> bool:
+    from vllm.platforms import current_platform
+
+    return is_deep_gemm_supported() and (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(120)
+    )
+
+
 def _bf16_moe_reference(x, w1, w2, topk_weights, topk_ids):
     """BF16 token-loop MoE reference for correctness testing."""
     import torch.nn.functional as F
@@ -639,6 +648,116 @@ def test_deepgemm_fp4_vs_triton(
         )
 
 
+@pytest.mark.skipif(not _fp4_supported(), reason="Requires DeepGEMM FP4 kernels")
+def test_compressed_tensors_mxfp4_uses_deepgemm_weight_format():
+    """Compressed-tensors MXFP4 weights reach DeepGEMM without Marlin repacking."""
+    from types import SimpleNamespace
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+
+    weights = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "group",
+        "group_size": 32,
+        "symmetric": True,
+        "dynamic": False,
+    }
+    activations = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "group",
+        "group_size": 32,
+        "symmetric": True,
+        "dynamic": True,
+    }
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": [r"re:.*experts\.\d+\.w\d+$"],
+                    "weights": weights,
+                    "input_activations": activations,
+                }
+            },
+        }
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=128,
+        intermediate_size=128,
+    )
+    moe_config.moe_backend = "deep_gemm"
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=moe_config.max_num_tokens,
+        top_k=moe_config.experts_per_token,
+        global_num_experts=moe_config.num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(quantization_config=None)
+    with torch.device("cuda"), set_current_vllm_config(vllm_config):
+        layer = RoutedExperts(
+            "model.layers.0.ffn.experts",
+            torch.bfloat16,
+            moe_config,
+            quant_config,
+            expert_map_manager,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+        )
+        method = layer.quant_method
+        assert isinstance(method, CompressedTensorsW4A4Mxfp4MoEMethod)
+        assert method.mxfp4_backend is Mxfp4MoeBackend.DEEPGEMM_MXFP4
+
+        with torch.no_grad():
+            layer.w13_weight_packed.zero_()
+            layer.w2_weight_packed.zero_()
+            layer.w13_weight_scale.fill_(127)
+            layer.w2_weight_scale.fill_(127)
+
+        expected = convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+            layer=layer,
+            w13_weight=layer.w13_weight_packed,
+            w2_weight=layer.w2_weight_packed,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
+        )
+
+        method.process_weights_after_loading(layer)
+
+    assert method.moe_kernel is not None and isinstance(
+        method.moe_kernel.fused_experts, DeepGemmFP4Experts
+    )
+    torch.testing.assert_close(layer.w13_weight_scale, expected[2], rtol=0, atol=0)
+    torch.testing.assert_close(layer.w2_weight_scale, expected[3], rtol=0, atol=0)
+
+
 # ---------------------------------------------------------------------------
 # FP4 padded-decode tests (DeepEP v2 decode/cudagraph path)
 # ---------------------------------------------------------------------------
@@ -655,9 +774,7 @@ def _fp4_decode_supported() -> bool:
     from vllm.platforms import current_platform
 
     # SM100 is the only SM the nvfp4 grouped GEMM runs on in practice.
-    return is_deep_gemm_supported() and current_platform.is_device_capability_family(
-        100
-    )
+    return _fp4_supported() and current_platform.is_device_capability_family(100)
 
 
 def _make_decode_meta(m: int, device: torch.device) -> mk.ExpertTokensMetadata:

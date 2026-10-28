@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsModular,
+    TrtLlmMxfp4Mxfp8ExpertsModular,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -167,7 +168,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             self.experts.routed_experts.quant_method, "experts_cls", None
         )
         if (
-            experts_cls is TrtLlmMxfp4ExpertsModular
+            experts_cls in (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
             and self.experts.routed_scaling_factor == 1.0
         ):
             moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)

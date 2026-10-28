@@ -4,7 +4,7 @@
 
 At concurrency 1 with DSpark, every target MoE layer applies its routed experts
 to six rows (384 experts, top-6; at TP4 every rank holds all experts at
-intermediate 576, padded to 640). ``TrtLlmMxfp4ExpertsModular`` runs FlashInfer's
+intermediate 576, padded to 640). The modular TRTLLM experts run FlashInfer's
 TRT-LLM-gen routing kernel and two batched MXFP8 x MXFP4 GEMMs; at this size they
 stream the weights of about 22 experts per layer, so their cost is HBM time plus
 fixed per-kernel latency. This module computes the same values from the same
@@ -475,11 +475,14 @@ def _unsupported_reason(runner: torch.nn.Module) -> str | None:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
         TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4Mxfp8ExpertsModular,
     )
 
     kernel = runner.routed_experts.quant_method.moe_kernel
     impl = kernel.fused_experts if kernel is not None else None
-    if not isinstance(impl, TrtLlmMxfp4ExpertsModular):
+    if not isinstance(
+        impl, (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
+    ):
         return f"experts kernel {type(impl).__name__}"
     config = impl.moe_config
     quant = impl.quant_config

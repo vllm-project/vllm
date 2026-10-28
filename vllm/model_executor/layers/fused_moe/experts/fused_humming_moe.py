@@ -892,7 +892,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
