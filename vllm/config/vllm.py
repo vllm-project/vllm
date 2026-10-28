@@ -729,6 +729,18 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        speculative_config = getattr(self, "speculative_config", None)
+        if (
+            speculative_config is not None
+            and getattr(speculative_config, "method", None) == "longspark"
+        ):
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "LongSpark requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
@@ -3073,7 +3085,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "longspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 

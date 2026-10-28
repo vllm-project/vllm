@@ -62,6 +62,65 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize("block_size", [3, 7, 16])
+@pytest.mark.parametrize("width", [None, 1, 2, "maximum", 0, "too_large"])
+def test_longspark_speculative_width(tmp_path, block_size, width):
+    from transformers import Qwen3Config
+
+    from vllm.transformers_utils.configs.longspark import LongSparkConfig
+
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=128,
+        max_position_embeddings=1024,
+        rope_theta=1_000_000.0,
+    ).save_pretrained(target_path)
+    LongSparkConfig(
+        architectures=["DraftFreeKVModel"],
+        hidden_size=64,
+        qwen_intermediate_size=128,
+        num_target_layers=2,
+        qwen_num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=128,
+        target_layer_ids=[0],
+        mask_token_id=127,
+        block_size=block_size,
+        local_draft_rows=block_size,
+        max_accepted_tokens=block_size + 1,
+        parallel_mixer_layers=1,
+    ).save_pretrained(draft_path)
+    if width == "maximum":
+        width = block_size
+    elif width == "too_large":
+        width = block_size + 1
+    kwargs = dict(
+        method="longspark",
+        model=str(draft_path),
+        num_speculative_tokens=width,
+        target_model_config=ModelConfig(str(target_path), dtype="bfloat16"),
+        target_parallel_config=ParallelConfig(),
+    )
+    if width is None:
+        kwargs.pop("num_speculative_tokens")
+    if width is not None and not 1 <= width <= block_size:
+        with pytest.raises(ValueError, match="num_speculative_tokens"):
+            SpeculativeConfig(**kwargs)
+    else:
+        config = SpeculativeConfig(**kwargs)
+        assert config.num_speculative_tokens == (block_size if width is None else width)
+        assert config.draft_model_config.hf_config.block_size == block_size
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 
@@ -2247,6 +2306,7 @@ def test_draft_parallel_config_preserves_ep_without_model(
         pytest.param("eagle3", True, 7, id="p-eagle"),
         pytest.param("dflash", True, 0, id="dflash"),
         pytest.param("dspark", True, 0, id="dspark"),
+        pytest.param("longspark", True, 0, id="longspark"),
         pytest.param("mtp", False, 0, id="mtp"),
         pytest.param("ngram", False, 0, id="ngram"),
         pytest.param("draft_model", False, 1, id="draft-model"),
@@ -3714,7 +3774,13 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 @pytest.mark.parametrize(
     ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    [
+        ("eagle3", True),
+        ("mtp", True),
+        ("dflash", False),
+        ("dspark", False),
+        ("longspark", False),
+    ],
 )
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(

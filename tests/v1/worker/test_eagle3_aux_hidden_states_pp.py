@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
         ("eagle3", {}, True),
         ("dflash", {"eagle_config": {"use_aux_hidden_state": False}}, True),
         ("dspark", {"eagle_config": {"use_aux_hidden_state": False}}, True),
+        ("longspark", {"eagle_config": {"use_aux_hidden_state": False}}, True),
         ("extract_hidden_states", {}, True),
         ("mtp", {}, False),
     ],

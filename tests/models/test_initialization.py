@@ -239,7 +239,9 @@ def can_initialize(
             speculative_config={
                 "model": model_info.speculative_model,
                 "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": (
+                    model_info.speculative_num_speculative_tokens
+                ),
             }
             if model_info.speculative_model
             else None,

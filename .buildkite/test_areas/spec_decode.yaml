@@ -34,6 +34,20 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200 MIG 35GB) LongSpark draft width"
+  device: h200_35gb
+  key: longspark-draft-width
+  timeout_in_minutes: 20
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/model_executor/models/qwen3_longspark.py
+    - vllm/transformers_utils/configs/longspark.py
+    - vllm/v1/worker/gpu/spec_decode/longspark/
+    - tests/v1/spec_decode/test_longspark_model.py
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/spec_decode/test_longspark_model.py -m slow_test
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
   timeout_in_minutes: 25
