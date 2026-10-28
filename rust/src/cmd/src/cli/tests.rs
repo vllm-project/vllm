@@ -253,6 +253,8 @@ fn serve_args_forward_python_flags_with_separator() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -986,6 +988,50 @@ fn frontend_args_json_passes_output_logging_into_config() {
 }
 
 #[test]
+fn frontend_args_json_passes_access_log_flags_into_config() {
+    let config_for = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().access_log
+    };
+
+    expect![[r#"
+        AccessLogConfig {
+            enabled: true,
+            excluded_paths: [],
+        }
+    "#]]
+    .assert_debug_eq(&config_for(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    // Like Python, the endpoint list is split on commas and trimmed.
+    expect![[r#"
+        AccessLogConfig {
+            enabled: false,
+            excluded_paths: [
+                "/health",
+                "/metrics",
+            ],
+        }
+    "#]]
+    .assert_debug_eq(&config_for(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_uvicorn_access_log":true,"disable_access_log_for_endpoints":"/health, /metrics,"}"#,
+    ));
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1563,6 +1609,8 @@ fn frontend_args_accept_json() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -2484,6 +2532,8 @@ fn serve_args_accept_handshake_aliases() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_uvicorn_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -2649,6 +2699,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 ],
                 allow_credentials: false,
             },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
+            },
             tls: None,
             api_keys: [],
             disable_log_stats: false,
@@ -2762,6 +2816,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     "*",
                 ],
                 allow_credentials: false,
+            },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
             },
             tls: None,
             api_keys: [],
@@ -2964,6 +3022,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     "*",
                 ],
                 allow_credentials: false,
+            },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
             },
             tls: None,
             api_keys: [],

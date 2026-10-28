@@ -267,6 +267,7 @@ fn build_router_with_options(
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
+    let enable_access_log = state.access_log.enabled;
     let mut router = router
         .with_state(state.clone())
         .layer(match state.api_server_options.request_body_limit_bytes {
@@ -292,6 +293,11 @@ fn build_router_with_options(
     // Later layers wrap earlier ones. Keep tracing outside auth so rejected
     // requests are visible, while metrics/load only see authenticated traffic.
     router = router.layer(TraceLayer::new_for_http());
+
+    // Like uvicorn, log every response, including rejected and unrouted ones.
+    if enable_access_log {
+        router = router.layer(from_fn_with_state(state.clone(), middleware::log_access));
+    }
 
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));

@@ -63,7 +63,7 @@ use super::{
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
 use crate::config::{
-    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
 };
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
@@ -9591,6 +9591,128 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+/// Captures the access-log lines as `LEVEL message`.
+#[derive(Clone, Default)]
+struct AccessLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "vllm_server::middleware::access_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
+                if field.name() == "message" {
+                    line.push_str(&format!(" {value:?}"));
+                }
+            },
+        );
+        self.0.lock().expect("access log lock").push(line);
+    }
+}
+
+/// Send each request to an app with an API key and `access_log`, and return
+/// the access-log lines. The middleware runs on the test's own task, so a
+/// thread-local subscriber sees its events.
+async fn access_log_lines(
+    access_log: AccessLogConfig,
+    requests: Vec<Request<Body>>,
+) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat)
+            .with_api_keys(vec!["secret".to_string()])
+            .with_access_log(access_log),
+    ));
+    let capture = AccessLogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("call app");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    }
+
+    engine_task.abort_and_join().await;
+    capture.0.lock().expect("access log lock").clone()
+}
+
+/// Like uvicorn's access log in Python: one INFO line per response, with the
+/// client address, request line including the query string, and status,
+/// including rejected and unrouted requests; excluded paths match without the
+/// query string.
+#[tokio::test]
+#[serial]
+async fn access_log_records_each_response_like_uvicorn() {
+    let get = |uri: &str, authorized: bool| {
+        let mut request = Request::builder().method("GET").uri(uri);
+        if authorized {
+            request = request.header("authorization", "Bearer secret");
+        }
+        request.body(Body::empty()).expect("build request")
+    };
+    let mut with_client = get("/v1/models?limit=1", true);
+    with_client
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            52344,
+        ))));
+    let access_log = AccessLogConfig {
+        enabled: true,
+        excluded_paths: vec!["/version".to_string()],
+    };
+
+    let lines = access_log_lines(
+        access_log,
+        vec![
+            with_client,
+            get("/v1/models", false),
+            get("/missing", true),
+            get("/version?verbose=1", false),
+        ],
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        [
+            "INFO 127.0.0.1:52344 - \"GET /v1/models?limit=1 HTTP/1.1\" 200 OK",
+            "INFO  - \"GET /v1/models HTTP/1.1\" 401 Unauthorized",
+            "INFO  - \"GET /missing HTTP/1.1\" 404 Not Found",
+        ]
+    "#]]
+    .assert_debug_eq(&lines);
+}
+
+/// `--disable-uvicorn-access-log` removes the access log.
+#[tokio::test]
+#[serial]
+async fn access_log_disabled_logs_nothing() {
+    let lines = access_log_lines(
+        AccessLogConfig {
+            enabled: false,
+            excluded_paths: Vec::new(),
+        },
+        vec![
+            Request::builder()
+                .method("GET")
+                .uri("/version")
+                .body(Body::empty())
+                .expect("build request"),
+        ],
+    )
+    .await;
+
+    assert_eq!(lines, Vec::<String>::new());
 }
 
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
