@@ -316,7 +316,7 @@ def fi_chunk_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    initial_state: torch.Tensor,
+    initial_state: torch.Tensor | None,
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
@@ -325,6 +325,8 @@ def fi_chunk_gated_delta_rule(
     checkpoint_every_n_tokens: int = 0,
     use_cp: Literal["auto"] | bool = "auto",
     output: torch.Tensor | None = None,
+    output_state: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -341,7 +343,10 @@ def fi_chunk_gated_delta_rule(
 
     g = g.squeeze(0).contiguous()
     beta = beta.squeeze(0).contiguous()
-    fi_state = initial_state.to(torch.float32)
+    # With state_indices, initial_state/output_state are the cache pool, read
+    # and written in place in their own dtype.
+    if initial_state is not None and state_indices is None:
+        initial_state = initial_state.to(torch.float32)
     # Like FlashInfer's own API, g is the already-exponentiated gate;
     # fused_post_conv_prep emits it directly (output_g_exp=True).
     fi_g = g.to(torch.float32)
@@ -353,10 +358,12 @@ def fi_chunk_gated_delta_rule(
         v=v,
         g=fi_g,
         beta=fi_beta,
-        initial_state=fi_state,
+        initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         output=output,
+        output_state=output_state,
+        state_indices=state_indices,
         state_checkpoints=state_checkpoints,
         checkpoint_cu_starts=checkpoint_cu_starts,
         checkpoint_every_n_tokens=checkpoint_every_n_tokens,
@@ -1497,6 +1504,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         sequences) and its regular route, each with and without checkpoint
         output. A single sequence under ``use_cp="auto"`` takes the CP route
         wherever the heuristic can pick it; ``use_cp=False`` forces the other.
+        Each also has state-pool variants (``state_indices``) with and without
+        an initial state.
         """
         # g arrives in log space (from _warmup_prefill_kernels); FlashInfer
         # takes exp(g).
@@ -1509,8 +1518,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             checkpoint_buffers.append(state_checkpoints[:1])
         cu_seqlens = torch.tensor([0, q.shape[1]], device=q.device, dtype=torch.int32)
         checkpoint_cu_starts = torch.tensor([0, 1], device=q.device)
-        for use_cp, state_checkpoints in itertools.product(
-            ("auto", False), checkpoint_buffers
+        state_indices = torch.zeros(1, dtype=torch.int32, device=q.device)
+        state_routes = (
+            dict(initial_state=state),
+            dict(initial_state=None, output_state=state, state_indices=state_indices),
+            dict(initial_state=state, output_state=state, state_indices=state_indices),
+        )
+        for use_cp, state_checkpoints, state_route in itertools.product(
+            ("auto", False), checkpoint_buffers, state_routes
         ):
             has_checkpoint = state_checkpoints is not None
             fi_chunk_gated_delta_rule(
@@ -1519,7 +1534,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 v=v,
                 g=g,
                 beta=beta,
-                initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=False,
@@ -1527,6 +1541,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 state_checkpoints=state_checkpoints,
                 checkpoint_cu_starts=checkpoint_cu_starts if has_checkpoint else None,
                 checkpoint_every_n_tokens=q.shape[1] if has_checkpoint else 0,
+                **state_route,
             )
 
     def _forward_core_rocm(
@@ -1895,7 +1910,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if last_recurrent_state is not None:
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
@@ -1952,20 +1970,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         conv_state: torch.Tensor,
         conv_input: torch.Tensor | None,
         output: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """FlashInfer chunked prefill of the batch's prefill rows.
 
         Writes the output into ``output`` when given and exports the
         batch's internal prefill checkpoints. Returns the output and the
-        rows' final states.
+        rows' final states, or None when they were already stored to the
+        cache.
         """
-        has_initial_state = attn_metadata.prefill_has_initial_state
-        assert has_initial_state is not None
-        initial_state = ssm_state[attn_metadata.prefill_state_indices]
-        initial_state[~has_initial_state, ...] = 0
+        state_indices = attn_metadata.prefill_state_indices
+        mode = attn_metadata.prefill_initial_state_mode
+        if mode == "mixed":
+            has_initial_state = attn_metadata.prefill_has_initial_state
+            assert has_initial_state is not None
+            initial_state = ssm_state[state_indices]
+            initial_state[~has_initial_state, ...] = 0
+            pool_kwargs = {}
+        else:
+            # Every row starts from zero or from its own cache slot, so
+            # FlashInfer reads and writes the slots in place instead of the
+            # caller gathering them and scattering the final states back.
+            initial_state = None if mode == "none" else ssm_state
+            pool_kwargs = dict(output_state=ssm_state, state_indices=state_indices)
         plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
-            return fi_chunk_gated_delta_rule(
+            core_out, final_state = fi_chunk_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -1976,7 +2005,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 use_qk_l2norm_in_kernel=False,
                 output=output,
+                **pool_kwargs,
             )
+            return core_out, final_state if mode == "mixed" else None
 
         (state_checkpoints,) = current_workspace_manager().get_simultaneous(
             self._checkpoint_buffer_spec
@@ -1996,6 +2027,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             state_checkpoints=state_checkpoints,
             checkpoint_cu_starts=plan.cu_starts,
             checkpoint_every_n_tokens=plan.every_n_tokens,
+            **pool_kwargs,
         )
         assert attn_metadata.checkpoint is not None
         assert attn_metadata.non_spec_query_start_loc is not None
@@ -2009,7 +2041,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             cu_seqlens=attn_metadata.non_spec_query_start_loc,
             recurrent_rows=plan.rows,
         )
-        return core_out, final_state
+        return core_out, final_state if mode == "mixed" else None
 
     def _forward_core_decode_aiter(
         self,
