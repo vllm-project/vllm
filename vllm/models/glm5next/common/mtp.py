@@ -143,7 +143,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             # rows would break.
             self_attn.mla_attn.mla_attn.use_shardq = False
             if self_attn.indexer is not None:
-                self_attn.indexer.indexer_op.shardq_layer_name = ""
+                self_attn.indexer.k_cache.shardq_layer_name = ""
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):

@@ -52,8 +52,7 @@ from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.shardq import (
     ShardQSplit,
-    indexer_rows,
-    maybe_build_shardq_split,
+    build_shardq_split,
     shard_q,
     unshard_out,
 )
@@ -168,10 +167,6 @@ class SparseMLAShardQ:
     # Request of each of this rank's prefill tokens.
     req_id_per_token: torch.Tensor
     num_decode_tokens: int
-    # Rows the indexer scores, ascending, on the host and the device
-    # (see vllm.v1.attention.ops.shardq.indexer_rows).
-    indexer_rows_cpu: np.ndarray
-    indexer_rows: torch.Tensor
 
 
 @dataclass(kw_only=True)
@@ -286,14 +281,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.use_shardq = any(
             getattr(layers.get(name), "use_shardq", False) for name in layer_names
         )
-        self.shardq_min_tokens = (
-            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
-        )
         if self.use_shardq:
             logger.info_once(
                 "Sharding sparse MLA prefill steps of >= %d tokens across TP "
                 "ranks by token (sparse_mla_shard_q).",
-                self.shardq_min_tokens,
+                vllm_config.attention_config.sparse_mla_shard_q_min_tokens,
             )
 
     def _init_reorder_batch_threshold(
@@ -458,29 +450,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self._prefill_backend.prepare_metadata(prefill)
 
         shardq = None
-        if (
-            self.use_shardq
-            and num_prefills > 0
-            and not (prefill is not None and prefill.use_dense_mha)
-        ):
-            # Split the prefill tokens; decode tokens stay head-sharded.
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            split = maybe_build_shardq_split(
-                query_start_loc_cpu[num_decodes : common_attn_metadata.num_reqs + 1]
-                - num_decode_tokens,
-                num_prefills,
-                common_attn_metadata.num_actual_tokens - num_decode_tokens,
-                self.shardq_min_tokens,
-                self.device,
+        # Dense MHA reads no top-k, so its steps keep the indexer replicated.
+        if self.use_shardq and not (prefill is not None and prefill.use_dense_mha):
+            built = build_shardq_split(
+                common_attn_metadata, self.vllm_config, self.device
             )
-            if split is not None:
-                rows_cpu, rows = indexer_rows(split, num_decode_tokens)
+            if built is not None:
+                shardq_decode_tokens, split = built
                 shardq = SparseMLAShardQ(
                     split,
-                    req_id_per_token[split.local_idx + num_decode_tokens],
-                    num_decode_tokens,
-                    rows_cpu,
-                    rows,
+                    req_id_per_token[split.local_idx + shardq_decode_tokens],
+                    shardq_decode_tokens,
                 )
 
         return self.metadata_cls(  # type: ignore[call-arg]

@@ -645,6 +645,9 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.cache_config = cache_config
         self.dtype = dtype
+        # The main MLA layer that reads this indexer's top-k under ShardQ, or
+        # "". Its metadata builder then narrows prefill chunks to ShardQ rows.
+        self.shardq_layer_name = ""
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

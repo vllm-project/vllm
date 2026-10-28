@@ -4,7 +4,6 @@
 
 import math
 
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -551,16 +550,11 @@ def sparse_attn_indexer(
                 # unnecessary work.
                 return topk_indices_buffer
 
-    # The main MLA layer owns the ShardQ decision; follow its split so both
-    # sides agree on which top-k rows exist.
-    shardq = None
+    # The main MLA layer decides per step whether ShardQ applies (not under
+    # dense MHA); the builder already narrowed the chunks to this rank's rows.
+    mla_shardq = None
     if shardq_layer_name:
         mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
-        if mla_shardq is not None:
-            shardq = mla_shardq
-            # The MLA decode threshold is at least the indexer's, so rows the
-            # indexer treats as prefill may be MLA decodes; those stay in place.
-            assert num_decode_tokens <= shardq.num_decode_tokens
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -603,7 +597,12 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        assert shardq is None or candidate_blocks is None
+        if mla_shardq is not None:
+            assert candidate_blocks is None
+            assert (
+                prefill_metadata.shardq_num_decode_tokens
+                == mla_shardq.num_decode_tokens
+            )
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -638,19 +637,15 @@ def sparse_attn_indexer(
 
             q_rows: slice | torch.Tensor = slice(chunk.token_start, chunk.token_end)
             topk_rows = q_rows
-            if shardq is not None:
-                # Score MLA decode rows and this rank's prefill tokens. KV
-                # gathers above stay unconditional for continuation chunks
+            if mla_shardq is not None:
+                # KV gathers above stay unconditional for continuation chunks
                 # that reuse the workspace. The top-k is written compactly, in
                 # token order, for the token-sharded attention.
-                lo, hi = np.searchsorted(
-                    shardq.indexer_rows_cpu, (chunk.token_start, chunk.token_end)
-                )
-                q_rows = shardq.indexer_rows[lo:hi]
-                topk_rows = slice(int(lo), int(hi))
-                chunk_rows = q_rows - chunk.token_start
-                cu_seqlen_ks = cu_seqlen_ks[chunk_rows]
-                cu_seqlen_ke = cu_seqlen_ke[chunk_rows]
+                assert chunk.shardq is not None
+                q_rows = chunk.shardq.q_rows
+                topk_rows = chunk.shardq.topk_rows
+                cu_seqlen_ks = chunk.shardq.cu_seqlen_ks
+                cu_seqlen_ke = chunk.shardq.cu_seqlen_ke
             q_slice = q_quant[q_rows]
             q_scale_slice = q_scale[q_rows] if q_scale is not None else None
             chunk_weights = weights[q_rows]

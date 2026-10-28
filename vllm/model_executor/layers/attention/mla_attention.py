@@ -609,7 +609,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and getattr(indexer_op, "supports_shardq", False)
         ):
             self.use_shardq = True
-            indexer_op.shardq_layer_name = self.layer_name
+            indexer_op.k_cache.shardq_layer_name = self.layer_name
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)

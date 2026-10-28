@@ -238,6 +238,8 @@ class DeepseekV32Attention(MLAAttention):
         # MTP draft steps reuse top-k rows by token slot, which ShardQ's
         # compact per-rank rows would break.
         self.use_shardq = not is_mtp_layer and getattr(self.impl, "use_shardq", False)
+        if self.use_shardq and indexer is not None:
+            indexer.k_cache.shardq_layer_name = self.layer_name
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
@@ -520,7 +522,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
-                shardq_layer_name=self.layer_name if self.use_shardq else "",
+                shardq_layer_name=self.indexer.k_cache.shardq_layer_name,
             )
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 

@@ -3,6 +3,7 @@
 """ShardQ token split and exchanges (vllm/v1/attention/ops/shardq.py)."""
 
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,8 +11,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.attention.ops import shardq
 from vllm.v1.attention.ops.shardq import (
+    build_shardq_split,
     fold_split,
     indexer_rows,
     make_shardq_split,
@@ -37,6 +41,36 @@ def test_fold_split_partitions_tokens(world, lens):
         for idx in per_rank
     ]
     assert max(positions) - min(positions) <= sum(4 * n for n in lens)
+
+
+@pytest.mark.parametrize("num_spec", [0, 2])
+def test_build_split_after_indexer_decodes(monkeypatch, num_spec):
+    """The MLA and indexer builders derive the same split from the batch:
+    requests of at most 1 + num_spec tokens stay head-sharded, and the tokens
+    after them are split once they reach sparse_mla_shard_q_min_tokens."""
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
+    )
+    query_lens = [1 + num_spec] * 3 + [100, 5000, 4000]
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 300 for q in query_lens], query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    attention_config = SimpleNamespace(sparse_mla_shard_q_min_tokens=9100)
+    vllm_config = SimpleNamespace(
+        speculative_config=(
+            SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
+        ),
+        attention_config=attention_config,
+    )
+    built = build_shardq_split(metadata, vllm_config, torch.device("cpu"))
+    assert built is not None
+    num_decode_tokens, split = built
+    assert num_decode_tokens == 3 * (1 + num_spec)
+    assert sum(split.counts) == 9100
+    attention_config.sparse_mla_shard_q_min_tokens = 9101
+    assert build_shardq_split(metadata, vllm_config, torch.device("cpu")) is None
 
 
 @pytest.mark.parametrize("num_decode_tokens", [0, 1, 37])

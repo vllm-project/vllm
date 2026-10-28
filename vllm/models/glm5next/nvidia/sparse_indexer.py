@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
-import numpy as np
 import torch
 
 import vllm.envs as envs
@@ -259,17 +258,11 @@ def sparse_attn_indexer_kpool(
                 "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
             )
 
-    # ShardQ step: score MLA decode rows and this rank's prefill tokens, with
-    # the prefill top-k compactly after the decode rows, as the token-sharded
-    # attention reads them.
-    shardq = None
+    # See sparse_attn_indexer: the main MLA layer decides per step whether
+    # ShardQ applies, and the builder narrowed the chunks to this rank's rows.
+    mla_shardq = None
     if shardq_layer_name:
         mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
-        if mla_shardq is not None:
-            shardq = mla_shardq
-            # See sparse_attn_indexer: MLA decodes the indexer treats as
-            # prefill stay in place.
-            assert num_decode_tokens <= shardq.num_decode_tokens
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -285,7 +278,14 @@ def sparse_attn_indexer_kpool(
         # positions[prefill_slice].max() + 1, so this replaces a
         # positions.max().item() device sync per layer. -1 (unknown metadata)
         # falls back to the device-side check.
-        if prefill_metadata.max_prefill_seq_len >= 0:
+        # The causal fill writes rows in place, so a ShardQ step scores them.
+        if mla_shardq is not None:
+            assert (
+                prefill_metadata.shardq_num_decode_tokens
+                == mla_shardq.num_decode_tokens
+            )
+            short_prefill = False
+        elif prefill_metadata.max_prefill_seq_len >= 0:
             short_prefill = (
                 n_prefill_sf > 0
                 and positions is not None
@@ -336,17 +336,16 @@ def sparse_attn_indexer_kpool(
             cu_seqlen_ks, cu_seqlen_ke = chunk.cu_seqlen_ks, chunk.cu_seqlen_ke
             q_rows: slice | torch.Tensor = slice(row_start, row_end)
             topk_rows = q_rows
-            if shardq is not None:
+            if mla_shardq is not None:
                 # KV gathers above stay unconditional for continuation chunks
                 # that reuse the workspace.
-                lo, hi = np.searchsorted(shardq.indexer_rows_cpu, (row_start, row_end))
-                if lo == hi:
+                assert chunk.shardq is not None
+                if chunk.shardq.q_rows.shape[0] == 0:
                     continue
-                q_rows = shardq.indexer_rows[lo:hi]
-                topk_rows = slice(int(lo), int(hi))
-                chunk_rows = q_rows - row_start
-                cu_seqlen_ks = cu_seqlen_ks[chunk_rows]
-                cu_seqlen_ke = cu_seqlen_ke[chunk_rows]
+                q_rows = chunk.shardq.q_rows
+                topk_rows = chunk.shardq.topk_rows
+                cu_seqlen_ks = chunk.shardq.cu_seqlen_ks
+                cu_seqlen_ke = chunk.shardq.cu_seqlen_ke
 
             q_slice = q_quant[q_rows]
             q_scale_slice = q_scale[q_rows] if q_scale is not None else None
@@ -730,8 +729,6 @@ class SparseAttnIndexerKpool(CustomOp):
         super().__init__()
         self.k_cache = k_cache
         self.tail_cache = tail_cache
-        # Set by the MLA layer that consumes this op's top-k under ShardQ.
-        self.shardq_layer_name = ""
         self.quant_block_size = quant_block_size
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
@@ -846,5 +843,5 @@ class SparseAttnIndexerKpool(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
-            self.shardq_layer_name,
+            self.k_cache.shardq_layer_name,
         )
