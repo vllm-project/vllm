@@ -2874,6 +2874,13 @@ class MooncakeConnectorWorker:
             # and the pull later, can reach P's workers.
             await self._query_bootstrap(heartbeat.remote_bootstrap_addr)
             if remote_engine_id not in self._remote_agents:
+                logger.warning(
+                    "Skipping KV lease renewal for %d requests: remote "
+                    "engine_id %s not found from bootstrap server %s.",
+                    len(heartbeat.transfer_ids),
+                    remote_engine_id,
+                    heartbeat.remote_bootstrap_addr,
+                )
                 return
         payload = self._encoder.encode(
             MooncakeLeaseHeartbeat(lease_transfer_ids=heartbeat.transfer_ids)
