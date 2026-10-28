@@ -10,7 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import eagle_proof_margin, is_mamba_align_group
+from vllm.v1.core.kv_cache_utils import is_mamba_align_group
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -44,9 +44,6 @@ class GroupOffloadConfig(NamedTuple):
     # Partial-tail data for this group comes from the scheduler's CoW hand-off
     # rather than the request block table.
     requires_cow_source: bool = False
-    # True for EAGLE/MTP draft-model attention groups. Connectors using legacy
-    # hashes exclude their trailing chunk from store and load scheduling.
-    is_eagle_group: bool = False
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:
@@ -107,13 +104,9 @@ class SchedulerOffloadConfig(NamedTuple):
     # KV bytes per token on one worker, summed over the offloaded groups.
     kv_bytes_per_token: int = 0
 
-    # Per group, the tokens past a partial-tail boundary whose hash keys the
-    # group's partial-tail block. Non-zero only for EAGLE groups.
-    eagle_proof_margins: tuple[int, ...] = ()
     # Lookahead block hashes already cover positions past the computed tokens.
     num_hash_lookahead_tokens: int = 0
     cache_hit_alignment_tokens: int | None = None
-    drop_eagle_checkpoint_block: bool = False
 
     @property
     def supports_handoff(self) -> bool:
@@ -126,16 +119,6 @@ class SchedulerOffloadConfig(NamedTuple):
             return 0
         assert self.alignment_tokens is not None
         return self.alignment_tokens
-
-    @property
-    def max_eagle_proof_margin(self) -> int:
-        return max(self.eagle_proof_margins, default=0)
-
-    def partial_tail_key_tokens(self, config_idx: int, boundary: int) -> int:
-        """Token position whose hash keys a group's partial-tail block."""
-        if not self.eagle_proof_margins:
-            return boundary
-        return boundary + self.eagle_proof_margins[config_idx]
 
     @classmethod
     def from_spec(
@@ -173,38 +156,6 @@ class SchedulerOffloadConfig(NamedTuple):
 
         retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
 
-        eagle_groups = {
-            group.group_id
-            for group in spec.config.groups
-            if kv_cache_config.kv_cache_groups[group.group_id].is_eagle_group
-        }
-
-        use_eagle_block_drop = (
-            vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.use_eagle_block_drop()
-        )
-        if use_eagle_block_drop and not eagle_groups:
-            # No group is annotated as holding drafter layers. This happens
-            # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
-            # the model runner does not tag draft layers' KV cache specs.
-            # Treating every group as a drafter group here makes
-            # the volatile-tail pop apply to ALL groups, which can zero the
-            # whole request's offload hit whenever any group's servable
-            # window is a single chunk (issue #52735). Drafter KV served one
-            # chunk stale can only lower speculative acceptance rates — the
-            # target model verifies every draft — so fail toward serving.
-            logger.info_once(
-                "KV offloading: speculative decoding is enabled but no "
-                "KV-cache group is annotated as a drafter group; treating "
-                "all groups as non-draft for offloading."
-            )
-
-        if eagle_groups:
-            logger.info(
-                "KV offloading: EAGLE/MTP draft attention groups %s detected.",
-                sorted(eagle_groups),
-            )
-
         kv_group_configs_list: list[GroupOffloadConfig] = []
         for group in spec.config.groups:
             group_id = group.group_id
@@ -223,7 +174,6 @@ class SchedulerOffloadConfig(NamedTuple):
                     block_size=kv_cache_group.block_size,
                     manager_config=kv_cache_group.manager_config,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
-                    is_eagle_group=group_id in eagle_groups,
                     requires_cow_source=is_mamba_align_group(kv_cache_group),
                 )
             )
@@ -233,7 +183,6 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         # Store sub-block tails only when core can reuse them. Recurrent blocks
         # stay unsharded under DCP and must divide the full-attention chunk.
-        # EAGLE proof positions are not validated under DCP yet.
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         cache_hit_alignment = kv_cache_config.cache_hit_alignment_tokens
         supports_partial_tail = (
@@ -252,35 +201,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for config in kv_group_configs
             )
             and spec.tokens_per_hash % dcp_world_size == 0
-            and (
-                dcp_world_size == 1
-                or not any(config.is_eagle_group for config in kv_group_configs)
-            )
         )
-
-        # Core's prefix cache matches an EAGLE group this many tokens past a
-        # hit and then drops them. A partial tail stores and looks up EAGLE
-        # groups at that proof position, with the margin rule of the core
-        # coordinator. Lookahead block hashes already key that position, so
-        # the groups need no margin.
-        eagle_proof_margins: tuple[int, ...] = ()
-        if supports_partial_tail and vllm_config.num_hash_lookahead_tokens == 0:
-            assert alignment_tokens is not None
-            partial_hash_hits = (
-                cache_hit_alignment is not None
-                and cache_hit_alignment < alignment_tokens
-            )
-            eagle_proof_margins = tuple(
-                eagle_proof_margin(
-                    alignment_tokens,
-                    spec.tokens_per_hash,
-                    partial_hash_hits
-                    and config.manager_cls.supports_fine_grained_hash_lookup,
-                )
-                if config.is_eagle_group and not config.requires_cow_source
-                else 0
-                for config in kv_group_configs
-            )
 
         if retention_interval is not None:
             if retention_interval < 0:
@@ -318,12 +239,8 @@ class SchedulerOffloadConfig(NamedTuple):
                 // g.tokens_per_block
                 for g in spec.config.groups
             ),
-            eagle_proof_margins=eagle_proof_margins,
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             cache_hit_alignment_tokens=cache_hit_alignment,
-            drop_eagle_checkpoint_block=(
-                use_eagle_block_drop and vllm_config.num_hash_lookahead_tokens == 0
-            ),
         )
 
 
@@ -361,8 +278,6 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
-    # True once a load from the offload tier was scheduled for this request.
-    loaded_from_offload: bool = False
     # Loaded attention keys cover their token positions. Recurrent state
     # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
@@ -436,34 +351,9 @@ class RequestOffloadState:
         group_config: "GroupOffloadConfig",
         group_state: RequestGroupState,
         num_offloadable_tokens: int,
-        apply_eagle_drop: bool,
     ) -> int:
-        """Number of allocated and keyed leading chunks eligible for store.
-
-        With legacy hashes, the volatile trailing chunk of an EAGLE/MTP group
-        is excluded while decoding: the draft-layer KV of the last accepted
-        position may be rewritten after spec-token rejection. During prefill
-        the trailing chunk is stable (the draft input for a chunk's last
-        position is the next prompt token), so it is stored immediately.
-        Once the request has finished, no further spec-token rejection can
-        rewrite the tail, so the exclusion is lifted and the final chunk
-        becomes storable (issue #52735). The exclusion must be applied
-        consistently everywhere the ON_COMPUTE progress is derived:
-        otherwise the trailing chunk of each step is skipped on collection but
-        jumped over by the progress, so it is never re-considered
-        and a permanent hole breaks prefix-reuse lookup. `is_finished` is
-        monotonic, so the finish-time calls all see the lifted exclusion.
-        """
+        """Number of allocated and keyed leading chunks eligible for store."""
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
-        is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        # Finished requests have no pending speculation.
-        if (
-            apply_eagle_drop
-            and group_config.is_eagle_group
-            and is_decoding
-            and not self.req.is_finished()
-        ):
-            num_chunks = max(0, num_chunks - 1)
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
         )
@@ -471,12 +361,12 @@ class RequestOffloadState:
         return min(num_chunks, num_allocated_chunks, num_keyed_chunks)
 
     def num_offloadable_tokens(self, num_computed_tokens: int) -> int:
-        num = min(num_computed_tokens, self.req.num_tokens)
-        if self.config.num_hash_lookahead_tokens:
-            num = min(
-                num,
-                len(self.req.block_hashes) * self.config.tokens_per_hash,
-            )
+        # Only hashed tokens can be keyed; lookahead hashes lag the tokens.
+        num = min(
+            num_computed_tokens,
+            self.req.num_tokens,
+            len(self.req.block_hashes) * self.config.tokens_per_hash,
+        )
         if self.max_offload_tokens is not None:
             num = min(num, self.max_offload_tokens)
         if self.config.offload_prompt_only:

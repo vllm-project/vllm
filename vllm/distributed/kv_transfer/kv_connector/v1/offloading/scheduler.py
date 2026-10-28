@@ -43,7 +43,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, get_reusable_prefix_length
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
@@ -233,7 +233,6 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        self.use_lookahead_block_hashes = self.num_hash_lookahead_tokens > 0
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -532,9 +531,6 @@ class OffloadingConnectorScheduler:
         for state in req_status.group_states:
             state.lookup_hit_end_chunk_idx = 0
 
-        # Tracks which legacy EAGLE groups already popped their volatile tail
-        # in this convergence iteration. A non-EAGLE constraint resets it.
-        eagle_verified: set[int] = set()
         full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
@@ -554,13 +550,6 @@ class OffloadingConnectorScheduler:
                     len(req_status.req.block_hashes) * self.config.tokens_per_hash
                 )
                 assert len(offload_keys) >= num_keyed_tokens // tokens_per_chunk
-
-                apply_eagle_drop = (
-                    group_config.is_eagle_group and not self.use_lookahead_block_hashes
-                )
-                is_eagle_unverified = (
-                    apply_eagle_drop and group_idx not in eagle_verified
-                )
 
                 # Constrain to a chunk-aligned boundary for this group.
                 max_hit_size_tokens = min(
@@ -589,20 +578,9 @@ class OffloadingConnectorScheduler:
                         max_hit_size_tokens if self._full_attention_groups else 0
                     )
 
-                # For legacy EAGLE groups, query one extra chunk that will be
-                # popped. Widening applies to every group type: without it, the
-                # pop below shrinks max_hit_size_tokens past what was queried,
-                # which can push the confirmed boundary under a coarser
-                # sibling group's chunk granularity and zero the whole
-                # request's hit (issue #52735).
-                query_max = max_hit_size_tokens
-                if is_eagle_unverified:
-                    query_max = min(
-                        max_hit_size_tokens + tokens_per_chunk,
-                        len(offload_keys) * tokens_per_chunk,
-                    )
-
-                num_chunks = min(cdiv(query_max, tokens_per_chunk), len(offload_keys))
+                num_chunks = min(
+                    cdiv(max_hit_size_tokens, tokens_per_chunk), len(offload_keys)
+                )
                 start_chunk_idx = num_computed_tokens // tokens_per_chunk
                 offload_keys = offload_keys[start_chunk_idx:num_chunks]
 
@@ -624,11 +602,9 @@ class OffloadingConnectorScheduler:
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
-                    if is_eagle_unverified:
-                        required_window += 1
                     candidate_end = min(
                         max_hit_size_tokens,
-                        (num_chunks - int(is_eagle_unverified)) * tokens_per_chunk,
+                        num_chunks * tokens_per_chunk,
                     )
                     initial_window = group_config.load_window_size_in_chunks(
                         candidate_end
@@ -638,7 +614,7 @@ class OffloadingConnectorScheduler:
                         offload_keys,
                         required_window,
                         req_status.req_context,
-                        initial_window + int(is_eagle_unverified),
+                        initial_window,
                     )
                 if num_hit_chunks == 0:
                     return 0, full_attention_hit_boundary
@@ -646,10 +622,6 @@ class OffloadingConnectorScheduler:
                 if num_hit_chunks is None:
                     defer_lookup = True
                 else:
-                    if is_eagle_unverified:
-                        num_hit_chunks -= 1
-                        eagle_verified.add(group_idx)
-
                     max_hit_size_tokens = min(
                         max_hit_size_tokens,
                         tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
@@ -661,8 +633,6 @@ class OffloadingConnectorScheduler:
                     return 0, full_attention_hit_boundary
 
                 if new_num_hit_tokens < num_hit_tokens:
-                    if not apply_eagle_drop:
-                        eagle_verified.clear()
                     if defer_lookup:
                         # make another iteration on all groups to check
                         # if we still need to defer lookup
@@ -751,7 +721,6 @@ class OffloadingConnectorScheduler:
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
         block_size = self.config.partial_tail_block_size
-        max_eagle_proof_margin = self.config.max_eagle_proof_margin
         # A recurrent group holds state only at a producer's tail, so the
         # full-attention prefix, not the complete hit, bounds the search.
         anchor_boundary = max(complete_boundary, full_attention_hit_boundary or 0)
@@ -767,14 +736,15 @@ class OffloadingConnectorScheduler:
         )
         if anchor_pending:
             anchor_boundary = complete_boundary
-        # A partial tail carries its own EAGLE proof, so it may also lie in
-        # the block after the chunk that the complete-chunk lookup pops.
-        num_search_blocks = 2 if max_eagle_proof_margin else 1
-        block_end = anchor_boundary + num_search_blocks * block_size
+        block_end = anchor_boundary + block_size
         max_boundary = min(
-            req_status.req.num_prompt_tokens - 1,
+            get_reusable_prefix_length(
+                req_status.req.num_prompt_tokens,
+                tokens_per_hash,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            ),
+            len(req_status.req.block_hashes) * tokens_per_hash,
             block_end - 1,
-            len(req_status.req.block_hashes) * tokens_per_hash - max_eagle_proof_margin,
         )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -856,10 +826,9 @@ class OffloadingConnectorScheduler:
         req = req_status.req
         req_context = req_status.req_context
         pending = bridge_pending
-        boundary_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
-        for config_idx, group_config in enumerate(self.config.kv_group_configs):
-            key_tokens = self.config.partial_tail_key_tokens(config_idx, boundary)
-            key = req_status.register_boundary_key(group_config.group_idx, key_tokens)
+        boundary_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
+        for group_config in self.config.kv_group_configs:
+            key = req_status.register_boundary_key(group_config.group_idx, boundary)
             # The offload manager can report HIT as soon as the source chunk
             # is ready, while its earlier GPU load is still in flight.  Do
             # not schedule the same partial-tail transfer twice.
@@ -868,14 +837,12 @@ class OffloadingConnectorScheduler:
             if result is LookupResult.MISS:
                 return False, False
             pending |= result is not LookupResult.HIT
-            boundary_keys.append((group_config, key_tokens, key))
+            boundary_keys.append((group_config, key))
 
         if pending:
             return False, True
-        for group_config, key_tokens, key in boundary_keys:
-            self._events_tracker.record_partial_lookup(
-                req, group_config, key_tokens, key
-            )
+        for group_config, key in boundary_keys:
+            self._events_tracker.record_partial_lookup(req, group_config, boundary, key)
         return True, False
 
     def _maybe_register_shared_prefix_junction(
@@ -957,7 +924,7 @@ class OffloadingConnectorScheduler:
             )
             return None, False
 
-        if request.resumable and self.use_lookahead_block_hashes:
+        if request.resumable and self.num_hash_lookahead_tokens:
             # Core may have recomputed block hashes after preemption.
             for group_state in req_status.group_states:
                 group_state.offload_keys.clear()
@@ -1077,7 +1044,6 @@ class OffloadingConnectorScheduler:
         self._acquire_step()
 
         req_status = self._req_status[request.request_id]
-        req_status.loaded_from_offload = True
         sync_load = request.request_id in self._current_batch_sync_loads
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
@@ -1092,8 +1058,8 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
-        for config_idx, (group_config, group_state) in enumerate(
-            zip(self.config.kv_group_configs, req_status.group_states)
+        for group_config, group_state in zip(
+            self.config.kv_group_configs, req_status.group_states
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
             tokens_per_block = group_config.tokens_per_block
@@ -1140,10 +1106,7 @@ class OffloadingConnectorScheduler:
                 if partial_tail_boundary is not None:
                     group_keys_to_load.append(
                         req_status.register_boundary_key(
-                            group_config.group_idx,
-                            self.config.partial_tail_key_tokens(
-                                config_idx, partial_tail_boundary
-                            ),
+                            group_config.group_idx, partial_tail_boundary
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
