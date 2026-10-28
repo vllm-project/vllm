@@ -384,7 +384,7 @@ class Step5PrimsTSSWA:
                     head_dim=head_dim,
                     page_size=cache.shape[2],
                     max_kv_len=model_len,
-                    max_seq_len_q=qlen,
+                    max_q_len=qlen,
                     q_data_type=query.dtype,
                     o_data_type=torch.bfloat16,
                     mask_type="causal",
@@ -397,7 +397,7 @@ class Step5PrimsTSSWA:
                 wrapper.plan(
                     device=query.device,
                     batch_size=requests,
-                    max_seq_len_q=q_capacity,
+                    max_q_len=q_capacity,
                     max_kv_len=model_len,
                     num_qo_heads=query.shape[1],
                     num_kv_heads=cache.shape[1],
