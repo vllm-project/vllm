@@ -3,7 +3,7 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
@@ -33,6 +33,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -178,6 +179,9 @@ class CudaGraphManager:
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
+        # The stream of the last capture; graphs replayed inside these ones (in
+        # their eager breaks) can capture on it to share the pool's free blocks.
+        self.capture_stream: torch.cuda.Stream | None = None
 
         self._graphs_captured = False
 
@@ -424,6 +428,7 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -434,9 +439,11 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
             progress_bar_desc: Description shown on the capture progress bar.
+            stream: Capture on this stream instead of a new one.
 
         """
-        with graph_capture(device=self.device), ExitStack() as stack:
+        with graph_capture(self.device, stream) as context, ExitStack() as stack:
+            self.capture_stream = context.stream
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
@@ -566,10 +573,12 @@ class CudaGraphManager:
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
 
-    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+    def init_breakable_cg_runner(
+        self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
+    ) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config
+                model, self.vllm_config, key_fn=key_fn
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
@@ -690,7 +699,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             }
             if not self.is_first_pp_rank:
                 # Update for non-first PP ranks.
-                model_inputs["input_ids"] = None
+                if not requires_raw_input_tokens(model):
+                    model_inputs["input_ids"] = None
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
@@ -931,7 +941,10 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     partition reclaims the storages of earlier cudagraph recordings once the
     real capture records new ones, leading to use-after-free crashes).
     """
-    if runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+    if (
+        runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        and not runner.needs_cudagraph_capture()
+    ):
         return 0
 
     gc.collect()
@@ -966,7 +979,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         speculator = getattr(runner, "speculator", None)
         spec_manager_names: list[str] = []
         try:
-            if not manager.needs_capture():
+            if not runner.needs_cudagraph_capture():
                 return 0
             manager.pool = throwaway_pool
             if manager.use_breakable_cg:
@@ -1034,26 +1047,22 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_config_from_groups,
-        get_kv_cache_groups,
-    )
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
     kv_cache_spec = runner.get_kv_cache_spec()
-    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
+    builder = get_kv_cache_config_builder(runner.vllm_config)
+    kv_cache_groups = get_kv_cache_groups_from_builder(
+        builder, runner.vllm_config, kv_cache_spec
+    )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
         min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
         or 1
     )
-    saved_override = runner.cache_config.num_gpu_blocks_override
-    runner.cache_config.num_gpu_blocks_override = min_blocks
-    try:
-        minimal_config = get_kv_cache_config_from_groups(
-            runner.vllm_config, kv_cache_groups, available_memory=0
-        )
-    finally:
-        runner.cache_config.num_gpu_blocks_override = saved_override
+    minimal_config = builder.get_kv_cache_config_from_groups(
+        runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
+    )
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)
     runner.cache_config.num_gpu_blocks = minimal_config.num_blocks

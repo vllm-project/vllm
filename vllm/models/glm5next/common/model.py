@@ -90,6 +90,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -100,6 +101,16 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+
+def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
+    """Reserve the incomplete pool tail and align sparse MLA tiles."""
+    topk = config.index_topk
+    assert topk is not None
+    kpool = config.index_kpool
+    assert kpool is not None
+    return round_up(topk + kpool - 1, 128)
+
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -700,20 +711,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
         self.is_v32 = config.index_topk is not None
         if self.is_v32:
-            topk_tokens = config.index_topk
-            assert topk_tokens is not None
-            # Reserve room for the incomplete pool tail.
-            kpool = config.index_kpool
-            assert kpool is not None
-            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
-            # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
-            sparse_topk_block_n = 128
-            buffer_width = (
-                (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
-            ) * sparse_topk_block_n
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
-                buffer_width,
+                get_sparse_topk_buffer_width(config),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -874,6 +874,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
+            # KDA: fuse the q, k, v short convs into one conv1d
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
         ]
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales

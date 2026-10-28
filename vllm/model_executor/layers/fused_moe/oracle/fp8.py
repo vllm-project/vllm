@@ -841,6 +841,11 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        # TRTLLM fp8-block consumes activation scales as [K/128, M]; emit them
+        # transposed from the quant kernel instead of copying afterwards.
+        is_scale_transposed=(
+            fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and block_shape == [128, 128]
+        ),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
@@ -861,6 +866,14 @@ def make_fp8_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        # CUTLASS block-FP8 experts quantize inside the kernel, so all-to-all
+        # carries BF16/FP16 activations rather than FP8 values and scales.
+        input_dtype=(
+            moe_config.in_dtype
+            if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and moe_quant_config.is_block_quantized
+            else None
+        ),
     )
     assert prepare_finalize is not None
 

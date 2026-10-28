@@ -60,6 +60,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
@@ -82,6 +83,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
@@ -91,14 +93,6 @@ from .qsa import Qwen4ExpQSAAttention
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
 _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
-
-
-def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
-    """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
-    parallel_config = vllm_config.parallel_config
-    return parallel_config.tensor_parallel_size > 1 and (
-        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
-    )
 
 
 def without_modelopt_fp4(
@@ -433,7 +427,13 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
             layer_idx = extract_layer_index(prefix)
@@ -700,8 +700,11 @@ class Qwen4ExpForCausalLM(
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
+    # The QSA indexer is not listed: quant configs read this mapping before the
+    # model is built, and `Qwen4ExpQSAAttention` fuses `indexer.index_qk_proj`
+    # into `qkv_proj` only when it is quantized like q/k/v.
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -720,12 +723,6 @@ class Qwen4ExpForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
@@ -734,11 +731,15 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | PPMissingLayer
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -970,12 +971,6 @@ class Qwen4ExpForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:
@@ -1041,7 +1036,9 @@ class Qwen4ExpForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if not get_pp_group().is_first_rank and self.use_deepstack:
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
             assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (
