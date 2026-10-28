@@ -10,7 +10,6 @@ in ``tests/basic_correctness/memory/``.
 from unittest.mock import MagicMock
 
 import pytest
-
 from vllm.device_allocator.sleep_mode_backend import (
     CuMemBackend,
     SleepModeBackend,

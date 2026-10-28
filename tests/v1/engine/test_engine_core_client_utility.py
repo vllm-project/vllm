@@ -16,7 +16,6 @@ from vllm.v1.engine.core_client import AsyncMPClient, MPClient, SyncMPClient
 @pytest.mark.parametrize("explicit_shutdown", [False, True])
 def test_utility_waiters_fail_when_sync_receiver_stops(monkeypatch, explicit_shutdown):
     import zmq
-
     from vllm.v1.engine.exceptions import EngineDeadError
 
     ctx = zmq.Context()

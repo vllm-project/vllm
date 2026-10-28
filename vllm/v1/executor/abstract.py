@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -161,6 +161,23 @@ class Executor(ABC):
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
 
+    def get_simple_cpu_offload_num_blocks(self) -> int | None:
+        values: list[int | None] = self.collective_rpc(
+            "get_simple_cpu_offload_num_cpu_blocks"
+        )
+        nums = [value for value in values if value is not None]
+        if not nums:
+            return None
+        aligned = min(nums)
+        if len(set(nums)) > 1:
+            logger.warning(
+                "SimpleCPUOffload workers reported mismatched num_cpu_blocks %s; "
+                "using min=%d",
+                nums,
+                aligned,
+            )
+        return aligned
+
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
@@ -168,9 +185,13 @@ class Executor(ABC):
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
-    def set_kv_cache_layout(self, layout_name: str) -> None:
-        """Publish the resolved KV cache layout to the workers."""
-        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+    def set_kv_cache_layout(
+        self, layout_name: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Publish the resolved KV cache layout and CP interleave size."""
+        self.collective_rpc(
+            "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
+        )
 
     @overload
     def collective_rpc(
@@ -288,12 +309,15 @@ class Executor(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
-        kwargs: dict[str, int] = {}
+        kwargs: dict[str, Any] = {}
         if delay_iterations is not None:
             kwargs["delay_iterations"] = delay_iterations
         if max_iterations is not None:
             kwargs["max_iterations"] = max_iterations
+        if profiler_kwargs is not None:
+            kwargs["profiler_kwargs"] = profiler_kwargs
         if kwargs:
             # Reject before dispatch: a failing collective_rpc may leave
             # unread worker replies queued.
