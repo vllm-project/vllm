@@ -41,9 +41,9 @@ logger = init_logger(__name__)
 def is_rdna() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_rdna
 
-    return on_gfx1x()
+    return on_rdna()
 
 
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -178,10 +178,10 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             kv_sharing_target_layer_name,
             sinks,
         )
-        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+        from vllm.platforms.rocm import on_gfx12x, on_rdna
 
         fp8 = kv_cache_dtype in ("fp8", "fp8_e4m3")
-        arch_supported = on_gfx12x() if fp8 else on_gfx1x()
+        arch_supported = on_gfx12x() if fp8 else on_rdna()
         gqa_ratio_supported = (
             num_kv_heads > 0
             and num_heads % num_kv_heads == 0
@@ -196,7 +196,7 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             and alibi_slopes is None
         ):
             raise ValueError(
-                "ROCM_SEGMENTED_ATTN requires decoder attention on gfx1x "
+                "ROCM_SEGMENTED_ATTN requires decoder attention on RDNA "
                 "(gfx12 for FP8), head size 64, 128, 256 or 512, GQA ratio 1-16, and "
                 "does not support ALiBi."
             )

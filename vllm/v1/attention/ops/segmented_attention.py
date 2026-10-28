@@ -869,11 +869,11 @@ def segmented_attention(
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+    from vllm.platforms.rocm import on_gfx12x, on_rdna
 
     segmented_pattern = (
         isinstance(causal, bool)
-        and (on_gfx12x() if key_cache.element_size() == 1 else on_gfx1x())
+        and (on_gfx12x() if key_cache.element_size() == 1 else on_rdna())
         and not softcap
         and output_scale is None
         and (

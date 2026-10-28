@@ -1831,13 +1831,13 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     ):
         return
 
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    if not on_gfx1x():
+    if not on_rdna():
         return
     layers = []
     for layer in worker.vllm_config.compilation_config.static_forward_context.values():
