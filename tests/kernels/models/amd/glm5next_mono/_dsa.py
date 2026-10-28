@@ -10,6 +10,8 @@ its tail fit, the sparse attention and W_UV, then the FFN seam on the TP sum of 
 o_proj partials and the MoE. Rows mix short (every token), long (scored), pool
 completing and padding rows."""
 
+import math
+
 import torch
 
 from ._ffn import (
@@ -273,6 +275,41 @@ def _box(rt, name, n, packed=False):
     return words[: 2 * n : 2].contiguous().view(torch.float32)
 
 
+_E2M1_MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
+def _mxfp4_unexplained(got, want, ref):
+    """Differing codes and scales between packed ``mxfp4_mla`` rows ``got`` and
+    ``want`` (``want`` stored from the bf16 rows ``ref``) that one bf16 ulp of
+    ``ref`` cannot explain. A scale may differ where its group's amax / 6 is
+    within an ulp of a power of two, and then every code of the group may too;
+    a code may differ where its scaled value is within an ulp of an E2M1
+    midpoint, or between +0 and -0."""
+    n, dims = ref.shape
+    groups = dims // 32
+    rel = 2.0**-7
+    ref = ref.float()
+    amax = ref.abs().view(n, groups, 32).amax(-1) / 6.0
+    lg = torch.log2(amax.clamp_min(2.0**-126))
+    scale_edge = (lg - lg.round()).abs() <= rel / math.log(2)
+    s_got, s_want = got[:, dims // 2 :], want[:, dims // 2 :]
+    scale_off = s_got != s_want
+    bad = int((scale_off & ~scale_edge).sum())
+
+    def codes(rows):
+        data = rows[:, : dims // 2]
+        return torch.stack([data & 15, data >> 4], -1).view(n, dims)
+
+    c_got, c_want = codes(got), codes(want)
+    scaled = ref.abs() / torch.exp2(s_want.float() - 127.0).repeat_interleave(32, 1)
+    mids = torch.tensor(_E2M1_MIDPOINTS, device=ref.device)
+    code_edge = ((scaled[..., None] - mids).abs() <= rel * mids).any(-1)
+    zeros = ((c_got & 7) == 0) & ((c_want & 7) == 0)
+    group_off = scale_off.repeat_interleave(32, 1)
+    code_off = (c_got != c_want) & ~group_off & ~code_edge & ~zeros
+    return bad + int(code_off.sum())
+
+
 def _rms(x, w, eps=1e-5):
     x = x.float()
     return (
@@ -416,13 +453,18 @@ def _check(
 
             # vLLM's store on the reference norm, which may differ from the
             # kernel's in a last bf16 bit and so move a code across a midpoint
+            # or a scale across a power of two; any other difference fails
             slots = rows[:live, 1].long()
             ref_kv = before.clone()
             store_mxfp4_mla(kv_want[:live], slots, ref_kv.kv)
             want_rows = ref_kv.kv.view(-1, flat_kv.shape[-1])[slots]
             got_rows = flat_kv[slots]
             off = (got_rows != want_rows).float().mean().item()
-            assert off < 1e-2, f"S={S}: {off:.2%} mxfp4_mla bytes differ"
+            bad = _mxfp4_unexplained(got_rows, want_rows, kv_want[:live])
+            assert bad == 0, (
+                f"S={S}: {bad} mxfp4_mla codes/scales differ off a rounding "
+                f"boundary ({off:.2%} of bytes differ)"
+            )
             e = _rel(cache.deq(got_rows), cache.deq(want_rows))
             assert e < 1e-2, f"S={S}: mxfp4_mla rows {e}"
         else:
