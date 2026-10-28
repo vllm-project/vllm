@@ -29,6 +29,10 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.reload.direct import (
+    record_checkpoint_layout,
+    record_runtime_layout,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
@@ -153,6 +157,7 @@ def process_weights_after_loading(
     )
 
     maybe_retie_word_embeddings(model, model_config)
+    record_checkpoint_layout(model)
 
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
@@ -213,6 +218,8 @@ def process_weights_after_loading(
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":
         set_torchao_reload_attrs(model, model_config)
+
+    record_runtime_layout(model)
 
 
 @contextmanager

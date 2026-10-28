@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_WEIGHT_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
@@ -1737,6 +1738,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": lambda: bool(
         int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))
     ),
+    # How weight updates (NCCL / IPC weight transfer and `reload_weights`) are
+    # applied:
+    # - "layerwise": rebuild each layer in temporary memory, post-process it and
+    #   copy it back into the live storage.
+    # - "direct": write a full checkpoint straight into the live parameters,
+    #   then rerun post-processing once at finish. Every update must send every
+    #   parameter; a failed update requires a restart.
+    "VLLM_WEIGHT_RELOAD_MODE": env_with_choices(
+        "VLLM_WEIGHT_RELOAD_MODE", "layerwise", ["layerwise", "direct"]
+    ),
     # Temporary: skip adding random suffix to internal request IDs. May be
     # needed for KV connectors that match request IDs across instances.
     "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
@@ -2382,6 +2393,7 @@ def compile_factors() -> dict[str, object]:
     hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_WEIGHT_RELOAD_MODE",
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
