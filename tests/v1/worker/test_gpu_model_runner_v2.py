@@ -249,6 +249,7 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
+    block_tables.fixed_rows = [False]
     # append_block_ids only touches .gpu and .stage_write on each table.
     block_tables.block_tables = [_BlockTable()]  # type: ignore[list-item]  # duck-typed stub
     block_tables.num_blocks = SimpleNamespace(
@@ -266,6 +267,37 @@ def test_append_block_ids_rejects_write_past_row_capacity():
         )
 
     assert block_tables.num_blocks.np[0, 1] == 3
+
+
+def test_append_block_ids_rewrites_fixed_rows():
+    """A Mamba fixed-slot row is sent whole whenever one of its slots changes,
+    and an empty update leaves it as it is."""
+    writes = []
+
+    class _BlockTable:
+        gpu = torch.empty((1, 8), dtype=torch.int32)
+
+        def stage_write(self, req_index, start, block_ids):
+            writes.append((self, req_index, int(start), list(block_ids)))
+
+    block_tables = BlockTables.__new__(BlockTables)
+    block_tables.num_kv_cache_groups = 2
+    block_tables.fixed_rows = [False, True]
+    attn, mamba = _BlockTable(), _BlockTable()
+    block_tables.block_tables = [attn, mamba]  # type: ignore[list-item]  # duck-typed stub
+    block_tables.num_blocks = SimpleNamespace(
+        np=torch.tensor([[2], [4]], dtype=torch.int32)
+    )
+
+    block_tables.append_block_ids(0, ([7], [1, 2, 3, 9]), overwrite=False)
+    block_tables.append_block_ids(0, ([8], []), overwrite=False)
+
+    assert writes == [
+        (attn, 0, 2, [7]),
+        (mamba, 0, 0, [1, 2, 3, 9]),
+        (attn, 0, 3, [8]),
+    ]
+    assert block_tables.num_blocks.np[:, 0].tolist() == [4, 4]
 
 
 @contextlib.contextmanager

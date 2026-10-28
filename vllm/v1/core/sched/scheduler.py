@@ -440,6 +440,11 @@ class Scheduler(SchedulerInterface):
             or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
         )
+        self.mamba_fixed_state_slots = any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            and group.kv_cache_spec.fixed_state_slots
+            for group in kv_cache_config.kv_cache_groups
+        )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
         # Split there only if the backend cannot save it within the final chunk.
         self.mamba_partial_cache_hit = (
@@ -589,6 +594,7 @@ class Scheduler(SchedulerInterface):
                 hash_block_size=self.hash_block_size,
                 mamba_block_size=block_size,
                 checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
+                fixed_state_slots=self.mamba_fixed_state_slots,
             )
         )
         if use_internal_checkpoint:
@@ -1679,6 +1685,7 @@ class Scheduler(SchedulerInterface):
             # have run.
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
+        mamba_state_exports = self.kv_cache_manager.take_mamba_state_exports()
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1717,6 +1724,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            mamba_state_exports=mamba_state_exports or None,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,

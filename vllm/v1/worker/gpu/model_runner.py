@@ -668,6 +668,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mapping_enabled = []
         dcp_sharded = []
         sliding_window_reach = []
+        fixed_rows = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -680,6 +681,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 layer_spec.num_retained_tokens
                 if isinstance(layer_spec, SlidingWindowSpec)
                 else 0
+            )
+            fixed_rows.append(
+                isinstance(layer_spec, MambaSpec) and layer_spec.fixed_state_slots
             )
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
@@ -746,6 +750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mapping_enabled=slot_mapping_enabled,
             dcp_sharded=dcp_sharded,
             sliding_window_reach=sliding_window_reach,
+            fixed_rows=fixed_rows,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -1896,6 +1901,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables,
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
+                scheduler_output,
             )
 
             if self.lora_config:

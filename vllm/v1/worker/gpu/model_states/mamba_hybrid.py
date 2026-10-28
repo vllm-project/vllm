@@ -9,15 +9,17 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.mamba.abstract import use_mamba_fixed_state_slots
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadataBuilder,
     ShortConvAttentionMetadataBuilder,
 )
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -42,11 +44,17 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    mamba_checkpoint_positions: np.ndarray | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        kwargs: dict[str, Any] = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.mamba_checkpoint_positions is not None:
+            kwargs["mamba_checkpoint_positions"] = self.mamba_checkpoint_positions[
+                :num_reqs
+            ]
+        return kwargs
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -91,6 +99,13 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        # Align mode over fixed state slots: no state migrates between block
+        # columns; the step's prefix-cache states are exported instead.
+        self.fixed_state_slots = use_mamba_fixed_state_slots(vllm_config)
+        # This step's export positions, by batch row (0 for none), staged by
+        # preprocess_state and consumed by the same step.
+        self.checkpoint_positions: np.ndarray | None = None
+        self.boundary_positions: torch.Tensor | None = None
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -113,7 +128,7 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
-        if self._align_mode:
+        if self._align_mode and not self.fixed_state_slots:
             # Seed the running state block from the resumed/prefilled position.
             # The column is in mamba blocks. cache_config.block_size is the
             # min over prefix-cacheable groups, so a drafter group with its own
@@ -134,6 +149,7 @@ class MambaHybridModelState(DefaultModelState):
                 spec.block_size == mamba_spec.block_size
                 and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
                 and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
+                and spec.fixed_state_slots == self.fixed_state_slots
                 for spec in mamba_groups
             ), "all mamba groups must share cache scheduling parameters"
             self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
@@ -183,14 +199,21 @@ class MambaHybridModelState(DefaultModelState):
         block_tables: tuple[torch.Tensor, ...],
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
+        scheduler_output: SchedulerOutput,
     ) -> None:
         """Migrate each request's mamba state across block boundaries before the
         forward (V1 align semantics, done on GPU). Runs on real batches only
         (dummy DP/profiling runs skip preprocess_state), and before
         ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
         is visible to the forward kernels.
+
+        Fixed state slots keep the running state in place, so this only stages
+        the step's export positions.
         """
         if not self._align_mode:
+            return
+        if self.fixed_state_slots:
+            self.stage_state_exports(input_batch, scheduler_output)
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
@@ -226,6 +249,26 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
         )
+
+    def stage_state_exports(
+        self, input_batch: InputBatch, scheduler_output: SchedulerOutput
+    ) -> None:
+        self.checkpoint_positions = None
+        self.boundary_positions = None
+        exports = scheduler_output.mamba_state_exports
+        if not exports:
+            return
+        checkpoint_positions = np.zeros(input_batch.num_reqs_after_padding, np.int64)
+        boundary_positions = np.zeros(input_batch.num_reqs, np.int32)
+        for i, req_id in enumerate(input_batch.req_ids):
+            if req_id in exports:
+                checkpoint_positions[i], boundary_positions[i] = exports[req_id]
+        if checkpoint_positions.any():
+            self.checkpoint_positions = checkpoint_positions
+        if boundary_positions.any():
+            self.boundary_positions = async_tensor_h2d(
+                boundary_positions, device=self.device
+            )
 
     def prepare_attn(
         self,
@@ -301,7 +344,26 @@ class MambaHybridModelState(DefaultModelState):
             )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self._align_mode:
+        checkpoint_positions = None
+        if self.fixed_state_slots:
+            assert self._mamba_ctx is not None
+            aligned_state_indices = self._mamba_ctx.aligned_state_indices
+            assert aligned_state_indices is not None
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            num_state_slots = aligned_state_indices.shape[2]
+            for group_idx, group_id in enumerate(mamba_group_ids):
+                # The running and speculative states lead the row; keep the
+                # contiguous indices the positional layout hands the kernels.
+                group_indices = aligned_state_indices[group_idx, :num_reqs]
+                group_indices.copy_(block_tables[group_id][:num_reqs, :num_state_slots])
+                for group in attn_groups[group_id]:
+                    builder = group.get_metadata_builder(0)
+                    if hasattr(builder, "mamba_aligned_state_indices"):
+                        builder.mamba_aligned_state_indices = group_indices
+            if not for_capture:
+                checkpoint_positions = self.checkpoint_positions
+                self.checkpoint_positions = None
+        elif self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
             for group_idx, group_id in enumerate(mamba_group_ids):
@@ -321,6 +383,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            mamba_checkpoint_positions=checkpoint_positions,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -382,6 +445,21 @@ class MambaHybridModelState(DefaultModelState):
             )
 
         if not num_reqs:
+            return
+
+        if self.fixed_state_slots:
+            boundary_positions = self.boundary_positions
+            self.boundary_positions = None
+            if boundary_positions is not None and num_computed_tokens is not None:
+                assert self._mamba_ctx is not None and self._mamba_spec is not None
+                self._mamba_ctx.run_boundary_export(
+                    num_reqs,
+                    boundary_positions,
+                    self.num_accepted_tokens_gpu,
+                    num_computed_tokens,
+                    idx_mapping,
+                    self._mamba_spec.boundary_slot,
+                )
             return
 
         # Align: save the running state to the block-aligned position when

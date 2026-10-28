@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -2135,6 +2136,319 @@ class MambaManager(SingleTypeKVCacheManager):
         return partial_hash
 
 
+@dataclass
+class MambaStateExport:
+    """A state exported into a fixed slot; cached once its tokens are."""
+
+    position: int
+    # Scheduler step that allocated the block. The block can be released
+    # from a later step on, after the step writing it has run.
+    step: int
+    cached: bool = False
+
+
+class MambaFixedSlotManager(MambaManager):
+    """Mamba "align" prefix caching over fixed state slots.
+
+    A request's block-table row is ``[running, spec_1..spec_n, checkpoint,
+    boundary]`` for its whole lifetime (``MambaSpec.fixed_state_slots``), so
+    no slot depends on how many Mamba blocks a step spans. The running slots
+    never hold a cached state: a prefix-cache hit is copied into the running
+    slot, and a reusable state is exported into a fresh block, by the prefill
+    kernel inside a chunk (checkpoint slot) or by a copy once the step has
+    computed its tokens (boundary slot), then cached at its exact position.
+    """
+
+    def __init__(
+        self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
+    ) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        assert self.mamba_cache_mode == "align"
+        self.checkpoint_slot = kv_cache_spec.checkpoint_slot
+        self.boundary_slot = kv_cache_spec.boundary_slot
+        self.step = 0
+        # Prefix-cache hit block to copy into the running slot.
+        self.hit_blocks: dict[str, KVCacheBlock] = {}
+        # (checkpoint, boundary) positions planned for the next allocation.
+        self.planned_exports: dict[str, tuple[int, int]] = {}
+        # Exports holding a block in the request's row, by slot.
+        self.exports: dict[str, dict[int, MambaStateExport]] = {}
+        # (checkpoint, boundary) positions the worker exports this step.
+        self.step_exports: dict[str, tuple[int, int]] = {}
+
+    def _is_retained(
+        self,
+        request: Request,
+        position: int,
+        tail: int,
+        retention_interval: int | None,
+        replay_boundaries: Sequence[int],
+    ) -> bool:
+        if position <= 0 or position % self.cache_hit_alignment_tokens:
+            return False
+        junction = request.shared_prefix_boundary
+        if position == tail or (
+            self.shared_prefix_checkpoint
+            and position == junction
+            and position <= request.num_prompt_tokens
+        ):
+            return True
+        if position % self.block_size:
+            return False
+        # Same retention as positional caching applies to the block ending here.
+        reachable_boundaries = [*replay_boundaries]
+        if junction:
+            reachable_boundaries.append(junction)
+            if self.use_eagle:
+                reachable_boundaries.append(junction - self.block_size)
+        block_idx = position // self.block_size - 1
+        mask = self.reachable_block_mask(
+            block_idx,
+            block_idx + 1,
+            self.cache_hit_alignment_tokens,
+            self.kv_cache_spec,
+            self.use_eagle,
+            retention_interval=retention_interval,
+            reachable_boundaries=reachable_boundaries,
+            dcp_world_size=self.dcp_world_size,
+        )
+        return mask is None or mask[0]
+
+    def plan_state_exports(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_tokens: int,
+        retention_interval: int | None,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        """Plan the states the step computing tokens
+        ``[num_computed_tokens, num_tokens)`` exports for prefix caching.
+
+        Called before the step's blocks are counted and allocated.
+        """
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        request_id = request.request_id
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        tail = get_mamba_prefill_checkpoint_position(
+            prefill_end,
+            self.cache_hit_alignment_tokens,
+            self.drop_eagle_checkpoint_block,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+        )
+        checkpoint = 0
+        if (
+            self.has_prefill_checkpoint_blocks
+            and num_computed_tokens < prefill_end
+            and is_mamba_prefill_checkpoint_valid(
+                query_start=num_computed_tokens,
+                query_end=num_tokens,
+                checkpoint_position=tail,
+                hash_block_size=self.block_pool.hash_block_size,
+                mamba_block_size=self.block_size,
+                checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+                fixed_state_slots=True,
+            )
+        ):
+            checkpoint = tail
+
+        boundary = 0
+        armed = self.exports.get(request_id, {}).get(self.boundary_slot)
+        if armed is not None and not armed.cached:
+            # Under async scheduling or speculative decoding a step may not
+            # reach the boundary it was armed for; keep it until one does.
+            boundary = armed.position
+        elif num_computed_tokens < prefill_end:
+            # A prefill row only leaves its final state behind.
+            if num_tokens <= prefill_end and self._is_retained(
+                request, num_tokens, tail, retention_interval, replay_boundaries
+            ):
+                boundary = num_tokens
+        else:
+            # A decode step leaves the state after each accepted token. The
+            # window starts past every earlier step's end, so no step that ran
+            # before this one can have reached the position.
+            for block_idx in range(
+                num_computed_tokens // self.block_size + 1,
+                num_tokens // self.block_size + 1,
+            ):
+                position = block_idx * self.block_size
+                if self._is_retained(
+                    request, position, tail, retention_interval, replay_boundaries
+                ):
+                    boundary = position
+                    break
+        self.planned_exports[request_id] = (checkpoint, boundary)
+
+    def _num_export_blocks(self, request_id: str) -> int:
+        exports = self.exports.get(request_id, {})
+        planned = zip(
+            (self.checkpoint_slot, self.boundary_slot),
+            self.planned_exports.get(request_id, (0, 0)),
+        )
+        return sum(
+            position > 0 and (slot not in exports or exports[slot].cached)
+            for slot, position in planned
+        )
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+        prefill_end: int = 0,
+    ) -> int:
+        if (
+            len(new_computed_blocks) > 0
+            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
+        ):
+            # The hit's state is written by this step: retry next step.
+            return self.block_pool.num_gpu_blocks + 1
+        num_blocks = self._num_export_blocks(request_id)
+        if not self.req_to_blocks[request_id]:
+            num_blocks += 1 + self.num_speculative_blocks
+        return num_blocks + self._get_num_evictable_blocks(new_computed_blocks[-1:])
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        assert num_external_computed_tokens == 0
+        assert not self.req_to_blocks[request_id]
+        self.num_cached_block[request_id] = 0
+        if new_computed_blocks:
+            hit_block = new_computed_blocks[-1]
+            assert not hit_block.is_null
+            self.block_pool.touch([hit_block])
+            self.hit_blocks[request_id] = hit_block
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
+    ) -> None:
+        raise NotImplementedError(
+            "Mamba fixed state slots do not support KV connector loads"
+        )
+
+    def _release_exports(self, request_id: str) -> None:
+        """Free the export blocks of earlier steps, which have run by now,
+        except a boundary still waiting for its tokens."""
+        exports = self.exports.get(request_id)
+        if not exports:
+            return
+        row = self.req_to_blocks[request_id]
+        for slot, export in list(exports.items()):
+            if export.step == self.step:
+                continue
+            if export.cached or slot == self.checkpoint_slot:
+                self.block_pool.free_blocks([row[slot]])
+                row[slot] = self._null_block
+                del exports[slot]
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        row = self.req_to_blocks[request_id]
+        changed = not row
+        if not row:
+            row.extend(self.block_pool.get_new_blocks(1 + self.num_speculative_blocks))
+            row.extend((self._null_block, self._null_block))
+            hit_block = self.hit_blocks.pop(request_id, None)
+            if hit_block is not None:
+                # As with a CoW: the hit's touch and an extra running-slot
+                # reference are released once the copy has run.
+                self._pending_cow_copies.append((hit_block, row[0]))
+                row[0].ref_cnt += 1
+        self._release_exports(request_id)
+
+        checkpoint, boundary = self.planned_exports.pop(request_id, (0, 0))
+        exports = self.exports.setdefault(request_id, {})
+        for slot, position in (
+            (self.checkpoint_slot, checkpoint),
+            (self.boundary_slot, boundary),
+        ):
+            if position == 0:
+                continue
+            export = exports.get(slot)
+            if export is not None:
+                # Only an armed boundary carries over between steps.
+                assert export.position == position and not export.cached
+                continue
+            assert row[slot].is_null
+            row[slot] = self.block_pool.get_new_blocks(1)[0]
+            exports[slot] = MambaStateExport(position, self.step)
+            changed = True
+        if checkpoint or boundary:
+            self.step_exports[request_id] = (checkpoint, boundary)
+        # The worker overwrites a fixed-slot row whenever it is sent.
+        return list(row) if changed else []
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        exports = self.exports.get(request.request_id)
+        if not exports:
+            return
+        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
+        row = self.req_to_blocks[request.request_id]
+        for slot, export in exports.items():
+            if export.cached or export.position > min(num_tokens, num_hashed_tokens):
+                continue
+            export.cached = True
+            block_hash = self.block_pool.cache_partial_block(
+                request=request,
+                block=row[slot],
+                num_tokens=export.position,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
+            if block_hash is not None:
+                self.cached_blocks_this_step.add(block_hash)
+
+    def take_state_exports(self) -> dict[str, tuple[int, int]]:
+        """Drain the (checkpoint, boundary) positions to export this step."""
+        step_exports = self.step_exports
+        self.step_exports = {}
+        return step_exports
+
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
+        return None
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        hit_block = self.hit_blocks.pop(request_id, None)
+        self.planned_exports.pop(request_id, None)
+        self.exports.pop(request_id, None)
+        self.step_exports.pop(request_id, None)
+        blocks = super().pop_blocks_for_free(request_id)
+        if hit_block is not None:
+            blocks.append(hit_block)
+        return blocks
+
+    def new_step_starts(self) -> None:
+        super().new_step_starts()
+        self.step += 1
+
+
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
@@ -2633,6 +2947,12 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
+    if (
+        manager_class is MambaManager
+        and isinstance(kv_cache_spec, MambaSpec)
+        and kv_cache_spec.fixed_state_slots
+    ):
+        manager_class = MambaFixedSlotManager
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
     # the runtime admission cap must match the recycling-aware bound the
     # startup pool sizer uses (single source of truth: the spec method).

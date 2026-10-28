@@ -31,6 +31,7 @@ class BlockTables:
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
         sliding_window_reach: list[int] | None = None,
+        fixed_rows: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -61,6 +62,12 @@ class BlockTables:
         assert len(sliding_window_reach) == self.num_kv_cache_groups
         self._sliding_window_reach = sliding_window_reach
         self.has_sliding_window_groups = any(r > 0 for r in sliding_window_reach)
+        # Groups whose rows are a fixed set of slots (Mamba fixed state slots):
+        # the scheduler sends the whole row whenever a slot changes.
+        if fixed_rows is None:
+            fixed_rows = [False] * self.num_kv_cache_groups
+        assert len(fixed_rows) == self.num_kv_cache_groups
+        self.fixed_rows = fixed_rows
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
@@ -129,8 +136,14 @@ class BlockTables:
         overwrite: bool,
     ) -> None:
         for i in range(self.num_kv_cache_groups):
-            start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
+            if self.fixed_rows[i] and not block_ids:
+                continue
+            start = (
+                0
+                if overwrite or self.fixed_rows[i]
+                else self.num_blocks.np[i, req_index]
+            )
             if self.redirect_writes_to_null_block:
                 block_ids = [0] * len(block_ids)
             end = start + len(block_ids)

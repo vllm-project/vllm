@@ -473,6 +473,11 @@ class CommonAttentionMetadata:
     at the current decode run's last full-state write. write_pos counts from
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
+    mamba_checkpoint_positions: np.ndarray | None = None
+    """(batch_size,) Mamba fixed state slots: the token position whose state the
+    prefill kernel exports to the request's checkpoint slot this step, 0 for
+    none. Decided by the scheduler (``SchedulerOutput.mamba_state_exports``)."""
+
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 

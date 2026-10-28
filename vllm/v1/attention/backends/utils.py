@@ -1310,12 +1310,15 @@ def mamba_get_block_table_tensor(
 
     - "align": input  (#requests, cdiv(max_model_len, block_size));
                output (#requests, 1 + num_speculative_blocks), which are the last
-               1 + num_speculative_blocks of each request.
+               1 + num_speculative_blocks of each request. With fixed state
+               slots (``MambaSpec.fixed_state_slots``) they are the first ones.
     """
     if mamba_cache_mode == "none":
         return block_table
+    assert isinstance(kv_cache_spec, MambaSpec)
+    if kv_cache_spec.fixed_state_slots:
+        return block_table[:, : 1 + kv_cache_spec.num_speculative_blocks].contiguous()
     else:
-        assert isinstance(kv_cache_spec, MambaSpec)
         # The arithmetic here is trivial -- a divide, a clamp, an arange, an
         # add, a cast and a gather -- but as PyTorch ops it was seven kernel
         # launches over a (num_reqs,) tensor, which holds a single element in a

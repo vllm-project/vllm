@@ -1105,6 +1105,21 @@ class MambaSpec(KVCacheSpec):
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
+    # "align" mode only. True: a request's block-table row is a fixed set of
+    # slots, [running, spec_1..spec_n, checkpoint, boundary], instead of one
+    # column per Mamba block. Prefix-cache states are exported to the last two
+    # slots and never share a block with the running state.
+    fixed_state_slots: bool = False
+
+    @property
+    def checkpoint_slot(self) -> int:
+        """Fixed-slot column the prefill kernel exports its checkpoint to."""
+        return 1 + self.num_speculative_blocks
+
+    @property
+    def boundary_slot(self) -> int:
+        """Fixed-slot column that receives the state at a step boundary."""
+        return 2 + self.num_speculative_blocks
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -1143,6 +1158,8 @@ class MambaSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         # Mamba state is replicated across DCP/PCP ranks, never sharded, so
         # no CP scaling applies.
+        if self.fixed_state_slots:
+            return self.boundary_slot + 1
         if vllm_config.cache_config.mamba_cache_mode == "align":
             # Block table rows are position-indexed over the full sequence
             # even though only 2 + num_speculative_blocks state blocks are
@@ -1162,6 +1179,7 @@ class MambaSpec(KVCacheSpec):
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
             and spec.tp_replicated == self.tp_replicated
+            and spec.fixed_state_slots == self.fixed_state_slots
             for spec in kv_cache_specs.values()
         )
 
@@ -1193,8 +1211,14 @@ def is_mamba_prefill_checkpoint_valid(
     hash_block_size: int,
     mamba_block_size: int,
     checkpoint_alignment: int | None,
+    fixed_state_slots: bool = False,
 ) -> bool:
-    """Whether a backend can export the checkpoint in this query."""
+    """Whether a backend can export the checkpoint in this query.
+
+    Without fixed state slots the checkpoint goes to block-table column
+    ``cdiv(query_end, mamba_block_size) - 2``, which must not be the column the
+    initial state is read from.
+    """
     if checkpoint_alignment is None:
         return False
     assert checkpoint_alignment > 0
@@ -1203,7 +1227,7 @@ def is_mamba_prefill_checkpoint_valid(
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        and (fixed_state_slots or checkpoint_col > initial_state_col)
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0
