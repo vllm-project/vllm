@@ -1344,15 +1344,15 @@ def get_spec_layer_idx_from_weight_name(
 def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
     """AITER has fused-MoE configs tuned for the fused shared-expert shape
     (one more expert and one more top-k slot than the routed MoE) only on
-    gfx950, with every expert on each rank and its weights split by TP4 or
-    TP8. Data, prefill context and expert parallelism change that split, so
+    gfx950, with every expert on each rank and its weights split by TP2, TP4
+    or TP8. Data, prefill context and expert parallelism change that split, so
     any other GPU or parallel layout would run untuned fallback kernels."""
     from vllm.platforms.rocm import on_gfx950
 
     reasons: list[str] = []
     if not on_gfx950():
         reasons.append("the GPU is not gfx950")
-    if parallel_config.tensor_parallel_size not in (4, 8):
+    if parallel_config.tensor_parallel_size not in (2, 4, 8):
         reasons.append(
             f"tensor_parallel_size is {parallel_config.tensor_parallel_size}"
         )
@@ -1371,7 +1371,7 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
     logger.warning_once(
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is ignored for GLM-5.3-Flash: "
         "%s. AITER has tuned configs for its fused shared-expert MoE only on "
-        "gfx950 at TP4 and TP8, without data, prefill context or expert "
+        "gfx950 at TP2, TP4 and TP8, without data, prefill context or expert "
         "parallelism. Running the shared experts as a separate MLP.",
         "; ".join(reasons),
     )
