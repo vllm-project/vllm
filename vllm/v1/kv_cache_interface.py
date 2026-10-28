@@ -659,9 +659,6 @@ class KVCacheLayerConfig:
 
     manager_config: ManagerConfig
     spec: KVCacheSpec
-    is_draft: bool = field(default=False, kw_only=True, compare=False)
-    """Whether a draft model owns this layer; excluded from equality so it never
-    affects grouping."""
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:
@@ -691,8 +688,6 @@ class KVCacheGroup:
     block_size: int
     # Whether DCP shards the group's token positions across ranks
     dcp_sharded: bool = False
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
-    is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.

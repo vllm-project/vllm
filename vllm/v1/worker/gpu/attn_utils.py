@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -148,8 +148,6 @@ def get_kv_cache_layer_configs(
             layer_config = customize_layer_config(
                 attn_module.get_attn_backend(), layer_config, layer_name
             )
-            if attn_module.is_draft_layer:
-                layer_config = replace(layer_config, is_draft=True)
             layer_configs[layer_name] = layer_config
     if vllm_config.attention_config.hisparse_config is not None:
         layer_configs = resolve_hisparse_specs(vllm_config, layer_configs, attn_layers)
