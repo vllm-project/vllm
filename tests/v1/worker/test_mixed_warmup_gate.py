@@ -76,6 +76,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     rejection_sampler = SimpleNamespace(enable_adaptive_verification=True)
     runner = SimpleNamespace(
         adaptive_verification=manager,
+        speculator=None,
         rejection_sampler=rejection_sampler,
         speculative_config=SimpleNamespace(),
     )
@@ -116,6 +117,7 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
         rounds.clear()
         runner = SimpleNamespace(
             adaptive_verification=None,
+            speculator=None,
             speculative_config=SimpleNamespace() if speculative else None,
             rejection_sampler=(
                 SimpleNamespace(enable_adaptive_verification=False)
