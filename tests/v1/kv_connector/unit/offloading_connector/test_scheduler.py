@@ -1487,6 +1487,26 @@ def test_cache_reset_without_in_flight_jobs_holds_nothing():
         scheduler.shutdown()
 
 
+def test_cache_reset_twice_before_a_step_still_flushes():
+    """A second reset before the engine steps must not assert: RL loops call
+    reset_prefix_cache(reset_connector=True) every iteration, and EngineCore
+    drains every queued utility call before it steps again."""
+    scheduler, _ = _make_tiering_engine_scheduler([])
+    try:
+        flushed = _store_in_flight(scheduler)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        output = scheduler.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert meta.jobs_to_flush == flushed
+        _report_jobs(scheduler, output, flushed)
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
 def test_cache_reset_fence_held_too_long_warns_on_idle_steps(monkeypatch):
     """The warning must fire on the empty steps an idle engine takes while the
     fence is held, since no lookup runs there."""
@@ -3734,42 +3754,6 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     for req_status in runner.connector_scheduler._req_status.values():
         for group_state in req_status.group_states:
             assert group_state.next_stored_chunk_idx == 0
-
-
-def test_reset_cache_flush_is_delivered_when_idle_and_reset_is_reentrant(
-    request_runner,
-):
-    """A reset that discards an in-flight store after the last request
-    finished must keep the engine stepping until its flush set reaches the
-    workers, and a second reset before that step must not assert (RL loops
-    call reset_prefix_cache(reset_connector=True) every iteration, and
-    EngineCore drains all queued utility calls before it steps again)."""
-    runner = request_runner(
-        block_size=4, num_gpu_blocks=100, async_scheduling=False, blocks_per_chunk=1
-    )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    runner.manager.has_pending_work.return_value = False
-    runner.new_request(token_ids=[0] * 8)
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
-    cs = runner.connector_scheduler
-    store_job_ids = set(cs._jobs)
-    assert store_job_ids
-    assert not runner.scheduler.has_unfinished_requests()
-
-    cs.reset_cache()
-    cs.reset_cache()
-
-    assert cs._current_batch_jobs_to_flush == store_job_ids
-    assert cs.has_pending_push_work()
-    assert runner.scheduler.has_requests()
-
-    scheduler_output = runner.scheduler.schedule()
-    meta = scheduler_output.kv_connector_metadata
-    assert isinstance(meta, OffloadingConnectorMetadata)
-    assert meta.jobs_to_flush == store_job_ids
-    assert not cs.has_pending_push_work()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
