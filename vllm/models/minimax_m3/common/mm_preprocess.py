@@ -533,14 +533,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
             indices.append(target_frame)
             prev_kept_ts = target_frame / video_fps
 
-        # Always keep the last frame when it is far enough (>= 1/fps, up to
-        # eps) from the previously kept frame, matching the SFT frame
-        # sampler's constant-mode behavior.
-        last_frame_idx = total_frames - 1
-        last_ts = last_frame_idx / video_fps
-        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
-            indices.append(last_frame_idx)
-
         if not indices:
             indices = [0]
         return indices
