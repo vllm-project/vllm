@@ -28,6 +28,19 @@ _ESCAPE_LEN = len(_ESCAPE)
 _CALL_END = "<end_function_call>"
 
 
+def _argument_json(arguments: dict, *, finished: bool) -> str:
+    """Serialize arguments so streamed deltas concatenate.
+
+    A later key is inserted before the object's closing brace. While the
+    call is still open, hold that brace back. The finished payload then
+    extends the text already sent instead of slicing through the brace.
+    """
+    text = json.dumps(arguments, ensure_ascii=False)
+    if not finished and text.endswith("}"):
+        return text[:-1]
+    return text
+
+
 def _coerce_bare(raw: str):
     """JSON-decode a bare FunctionGemma scalar. Unquoted text stays a string."""
     try:
@@ -439,14 +452,16 @@ class FunctionGemmaToolParser(ToolParser):
                                 args_part, partial=True
                             )
                             if current_args:
-                                current_args_json = json.dumps(
-                                    current_args, ensure_ascii=False
+                                current_args_json = _argument_json(
+                                    current_args, finished=False
                                 )
                                 prev_streamed = self.streamed_args_for_tool[
                                     self.current_tool_id
                                 ]
 
-                                if len(current_args_json) > len(prev_streamed):
+                                if current_args_json.startswith(prev_streamed) and len(
+                                    current_args_json
+                                ) > len(prev_streamed):
                                     diff = current_args_json[len(prev_streamed) :]
                                     self.streamed_args_for_tool[
                                         self.current_tool_id
@@ -483,11 +498,13 @@ class FunctionGemmaToolParser(ToolParser):
                         )
 
                     if args:
-                        args_json = json.dumps(args, ensure_ascii=False)
+                        args_json = _argument_json(args, finished=True)
                         prev_streamed = self.streamed_args_for_tool[
                             self.current_tool_id
                         ]
-                        if len(args_json) > len(prev_streamed):
+                        if args_json.startswith(prev_streamed) and len(args_json) > len(
+                            prev_streamed
+                        ):
                             diff = args_json[len(prev_streamed) :]
                             self.streamed_args_for_tool[self.current_tool_id] = (
                                 args_json

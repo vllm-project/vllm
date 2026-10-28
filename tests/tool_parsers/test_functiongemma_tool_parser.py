@@ -193,10 +193,19 @@ class TestTemplateGrammarStreaming:
             "enabled:true,hour:7,label:<escape>Wake up<escape>,"
             "snooze:{minutes:5}}<end_function_call>"
         )
+        # Name first, then a partial argument body, then the rest of the call.
+        # Argument deltas must concatenate to one JSON object.
+        cuts = (
+            len("<start_function_call>"),
+            text.index("{") + 1,
+            text.index("hour:"),
+            len(text),
+        )
         previous = ""
-        for end in (len("<start_function_call>"), text.index("hour:"), len(text)):
+        argument_deltas: list[str] = []
+        for end in cuts:
             chunk = text[len(previous) : end]
-            parser.extract_tool_calls_streaming(
+            delta = parser.extract_tool_calls_streaming(
                 previous,
                 previous + chunk,
                 chunk,
@@ -205,8 +214,12 @@ class TestTemplateGrammarStreaming:
                 [],
                 mock_request,
             )
+            if delta and delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments:
+                        argument_deltas.append(tool_call.function.arguments)
             previous = text[:end]
-        assert parser.prev_tool_call_arr[0]["arguments"] == {
+        assert json.loads("".join(argument_deltas)) == {
             "days": ["mon", "tue"],
             "enabled": True,
             "hour": 7,
