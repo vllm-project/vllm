@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -360,6 +361,22 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
+    "deepseek_ocr2": VitCudagraphTestConfig(
+        model=os.environ.get("DEEPSEEK_OCR2_TEST_MODEL", "deepseek-ai/DeepSeek-OCR-2"),
+        modalities=["image"],
+        image_prompt="<image>\nFree OCR.",
+        marks=[pytest.mark.core_model],
+        max_model_len=2048,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [288],
+            "mode": 0,
+            "cudagraph_mode": 0,
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "gpu_memory_utilization": 0.7,
+        },
+    ),
     "deepseek_vl2": VitCudagraphTestConfig(
         model="deepseek-ai/deepseek-vl2-tiny",
         modalities=["image"],
@@ -595,6 +612,92 @@ def _check_eonly_encoder_outputs(worker, batches):
     assert stats[5]["graph_hits"] > stats[4]["graph_hits"]
     assert stats[6]["graph_hits"] > stats[5]["graph_hits"]
     return {"max_abs_error": max_error, "stats": stats}
+
+
+def _check_deepseek_ocr2_encoder_outputs(worker, batches):
+    import torch
+
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+    runner = worker.model_runner
+    assert isinstance(runner, MMEncoderModelRunner)
+    manager = runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None and manager.is_captured()
+    assert manager.path_token_budgets == {
+        "global": [256, 288],
+        "local": [0, 144, 288],
+    }
+
+    hits = [manager.get_cumulative_stats()["graph_hits"]]
+    with torch.inference_mode():
+        for batch in batches:
+            kwargs = {
+                key: value.to(
+                    device=runner.device,
+                    dtype=runner.dtype
+                    if key in ("pixel_values", "images_crop")
+                    else value.dtype,
+                )
+                for key, value in batch.items()
+            }
+            actual = manager.execute(kwargs)
+            reference = runner.model.embed_multimodal(**kwargs)
+            assert len(actual) == len(reference) == 1
+            assert actual[0].shape == reference[0].shape
+            torch.testing.assert_close(actual[0], reference[0], rtol=0.016, atol=0.016)
+            hits.append(manager.get_cumulative_stats()["graph_hits"])
+
+    assert [b - a for a, b in zip(hits[:-1], hits[1:])] == [1, 2, 1, 2]
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+def test_deepseek_ocr2_encoder_cudagraph_paths(vllm_runner, monkeypatch):
+    """Match eager embeddings for untiled, tiled, and local-fallback images."""
+    from PIL import Image
+    from transformers import AutoTokenizer
+
+    from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    model_name = os.environ.get(
+        "DEEPSEEK_OCR2_TEST_MODEL", "deepseek-ai/DeepSeek-OCR-2"
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=False)
+    processor = DeepseekOCRProcessor(
+        tokenizer=tokenizer, image_size=768, base_size=1024, strategy="v2"
+    )
+    sizes = [(600, 600), (1200, 600), (1200, 1200), (1200, 600)]
+    batches = []
+    for i, size in enumerate(sizes):
+        image = Image.new("RGB", size, color=(20 + i * 40, 80, 160))
+        processed = processor(prompt="<image>\nFree OCR.", images=[image])
+        batches.append(
+            {
+                key: processed[key]
+                for key in ("pixel_values", "images_crop", "images_spatial_crop")
+            }
+        )
+    batches[1]["images_crop"].zero_()
+
+    with vllm_runner(
+        model_name,
+        mm_encoder_only=True,
+        dtype="bfloat16",
+        max_model_len=4096,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config={
+            "cudagraph_mode": "NONE",
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_token_budgets": [288],
+            "encoder_cudagraph_max_vision_items_per_batch": 1,
+        },
+    ) as model:
+        model.llm.collective_rpc(
+            partial(_check_deepseek_ocr2_encoder_outputs, batches=batches)
+        )
 
 
 @pytest.mark.parametrize(

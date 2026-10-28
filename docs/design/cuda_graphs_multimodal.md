@@ -12,6 +12,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `DeepseekOCR2ForCausalLM` | `DeepSeek-OCR-2` | ✅︎ | ❌︎ | ✅︎ |
 | `DeepseekVLV2ForCausalLM` | `DeepSeek-VL2` | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekV41ForCausalLM` | `DeepSeek-V4.1-Flash` | ✅︎ | ❌︎ | ❌︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
@@ -96,6 +97,12 @@ Both lists are capped at the same `max_budget`.
 **Buffer keys per path.** Global and local paths use different buffer keys. For DeepSeek-OCR, the global path uses `pixel_values` (full images, shape `[B, 3, 1280, 1280]`) while the local path uses `images_crop` (patches, shape `[P, 3, 1024, 1024]`). The manager iterates over each captured graph's own `input_buffers.keys()` rather than a shared `buffer_keys` list, so both paths can use different buffers.
 
 **Post-processing.** The `postprocess_encoder_output` method receives an `outputs` dictionary keyed by path name. The model is responsible for assembling global and local features into the final per-image embedding. For DeepSeek-OCR, it reshapes the global output into `[B, 272, n_embed]`, reshapes the local output into `[P, 100, n_embed]`, assembles patch grids with newline tokens, and concatenating `[patches_grid, global, view_separator]` for each image.
+
+DeepSeek-OCR-2 uses the same two-path capture policy with 256 output tokens per
+global image and 144 per local tile. The local path is skipped for images that
+do not need tiling. Its post-processing concatenates the local tiles in image
+order, the global image features, and the view separator; unlike DeepSeek-OCR,
+it does not insert newline tokens.
 
 !!! note
     The dual-path design enables partial CUDA graph coverage — one path can hit while the other falls back to eager. This avoids wasted compute on zero-padded patch buffers for untiled images and avoids graph invalidation caused by variable `crop_shape` per image.
@@ -195,6 +202,15 @@ With explicit budgets:
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
   --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_vision_items_per_batch": 8}'
+```
+
+For DeepSeek-OCR-2, a small capture configuration covers one untiled image or
+one image with up to two local tiles. Larger tile counts use eager execution
+for the local path while the global path can still replay its graph:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-OCR-2 \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [288], "encoder_cudagraph_max_vision_items_per_batch": 1}'
 ```
 
 Python example:
