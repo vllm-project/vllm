@@ -39,6 +39,7 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="auto"`: Use the model's default data type
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+- `kv_cache_dtype="mxfp4"`: MiniMax-M3 sparse attention on ROCm gfx950 (MI350 and MI355X). K, V and the indexer's key cache are stored as MXFP4 (e2m1 values with one e8m0 scale per 32 values), 68 bytes per token and head against 128 for fp8. It needs `--attention-config '{"indexer_kv_dtype": "mxfp4"}'`, `--block-size 128`, `VLLM_ROCM_USE_AITER=1` with an AITER that has the MXFP4 FlyDSL ops, and tensor parallel size 4 (one KV head per rank).
 
 ### Skipping Specific Layers from KV-Cache Quantization
 

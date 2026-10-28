@@ -199,10 +199,11 @@ def _build_sparse_block_table_prefill_kernel(
 
 def minimax_m3_alloc_sparse_block_table(
     topk_idx: torch.Tensor,
+    pages_per_block: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert topk_idx.shape[0] == 1, "AITER sparse PA requires num_kv_heads == 1"
     total_q = topk_idx.shape[1]
-    width = topk_idx.shape[-1] * PAGES_PER_SPARSE_BLOCK
+    width = topk_idx.shape[-1] * pages_per_block
     return (
         torch.empty((total_q, width), dtype=torch.int32, device=topk_idx.device),
         torch.empty((total_q,), dtype=torch.int32, device=topk_idx.device),
@@ -216,9 +217,15 @@ def minimax_m3_build_sparse_block_table_prefill(
     query_req_id: torch.Tensor,  # [total_q]
     query_abs_pos: torch.Tensor,  # [total_q]
     block_page_stride: int = PAGES_PER_SPARSE_BLOCK,
+    pages_per_block: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build one page-16 sparse block table row per prefill query token."""
-    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(topk_idx)
+    """Build one sparse block table row per prefill query token.
+
+    ``pages_per_block`` is 8 for the page-16 cache and 1 for a page-128 one.
+    """
+    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(
+        topk_idx, pages_per_block
+    )
     topk = topk_idx.shape[-1]
     _build_sparse_block_table_prefill_kernel[(topk_idx.shape[1],)](
         topk_idx,
@@ -233,7 +240,7 @@ def minimax_m3_build_sparse_block_table_prefill(
         block_table.stride(0),
         sparse_bt.stride(0),
         SPARSE_BLOCK_SIZE_C=SPARSE_BLOCK_SIZE,
-        PAGES_PER_BLOCK=PAGES_PER_SPARSE_BLOCK,
+        PAGES_PER_BLOCK=pages_per_block,
         BLOCK_PAGE_STRIDE=block_page_stride,
         BLOCK_SIZE_T=triton.next_power_of_2(topk),
     )
@@ -247,15 +254,18 @@ def minimax_m3_build_sparse_block_table_decode(
     seq_lens: torch.Tensor,  # [batch]
     decode_query_len: int = 1,
     block_page_stride: int = PAGES_PER_SPARSE_BLOCK,
+    pages_per_block: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build one page-16 sparse block table row per decode query token."""
+    """Build one sparse block table row per decode query token."""
     total_q = topk_idx.shape[1]
     expected_q = block_table.shape[0] * decode_query_len
     assert total_q == expected_q, (
         "MiniMax-M3 decode top-k rows must equal batch * decode_query_len: "
         f"{total_q} != {expected_q}"
     )
-    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(topk_idx)
+    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(
+        topk_idx, pages_per_block
+    )
     topk = topk_idx.shape[-1]
     _build_sparse_block_table_kernel[(total_q,)](
         topk_idx,
@@ -269,7 +279,7 @@ def minimax_m3_build_sparse_block_table_decode(
         block_table.stride(0),
         sparse_bt.stride(0),
         SPARSE_BLOCK_SIZE_C=SPARSE_BLOCK_SIZE,
-        PAGES_PER_BLOCK=PAGES_PER_SPARSE_BLOCK,
+        PAGES_PER_BLOCK=pages_per_block,
         BLOCK_PAGE_STRIDE=block_page_stride,
         BLOCK_SIZE_T=triton.next_power_of_2(topk),
         DECODE_QUERY_LEN=decode_query_len,
