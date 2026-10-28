@@ -5,6 +5,7 @@ default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
 exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
+# Revs are frozen to commit SHAs, bump them with `pre-commit autoupdate --freeze [--repo <url>]`
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: f9351c924055bf6c7b4a4670237d3ce141e9f57c  # frozen: v0.14.0
