@@ -226,7 +226,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.ir_lowering = VllmIRLoweringPass(config)
             self.post_lowering_noop_elimination: NoOpEliminationPass | None = None
             if self.pass_config.eliminate_noops:
-                self.post_lowering_noop_elimination = NoOpEliminationPass(config)
+                self.post_lowering_noop_elimination = NoOpEliminationPass(
+                    config, graph_may_mutate=True
+                )
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)

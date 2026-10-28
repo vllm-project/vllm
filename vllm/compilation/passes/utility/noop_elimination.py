@@ -5,8 +5,10 @@ from collections.abc import Iterable
 
 import torch.fx
 from torch import SymInt
+from torch._prims_common import is_contiguous_or_false
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from ..fx_utils import is_func
@@ -63,6 +65,12 @@ class NoOpEliminationPass(VllmInductorPass):
     out: "f16[s0, 4096]" = at[1]
     """
 
+    def __init__(self, config: VllmConfig, graph_may_mutate: bool = False) -> None:
+        super().__init__(config)
+        # After vLLM IR lowering the graph may contain in-place ops, so a reshape
+        # chain may only be collapsed through reshapes that alias their input.
+        self.graph_may_mutate = graph_may_mutate
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph) -> None:
         count = 0
@@ -72,7 +80,7 @@ class NoOpEliminationPass(VllmInductorPass):
                 # Case 1: rewrite reshape chains to reshapes on the base tensor
                 input = node.args[0]
                 # If the input is a reshape, rebind to that node
-                if self.is_reshape(input):
+                if self.is_reshape(input) and self.can_bypass(input):
                     # The new input is guaranteed not to be a reshape,
                     # because we process nodes in order
                     node.update_arg(0, input.args[0])
@@ -100,6 +108,16 @@ class NoOpEliminationPass(VllmInductorPass):
                     count += 1
 
         logger.debug("Removed %s no-op reshapes and slices", count)
+
+    def can_bypass(self, reshape: torch.fx.Node) -> bool:
+        """Whether users of `reshape` may read its input directly. A reshape of
+        a non-contiguous tensor copies, so an in-place op on its result must not
+        be redirected to the base."""
+        if not self.graph_may_mutate or is_func(reshape, torch.ops.aten.view.default):
+            return True
+        base = reshape.args[0]
+        assert isinstance(base, torch.fx.Node)
+        return is_contiguous_or_false(base.meta["val"])
 
     @staticmethod
     def is_reshape(node: torch.fx.Node) -> bool:

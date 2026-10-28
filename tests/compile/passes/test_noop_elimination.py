@@ -148,3 +148,39 @@ def test_view_chain_eliminated():
 
     assert len(gm.graph.find_nodes(op="call_function", target=view)) == 1
     torch.testing.assert_close(gm(x), f(x))
+
+
+def test_copying_reshape_not_bypassed():
+    """After IR lowering the graph may hold in-place ops. A reshape of a
+    non-contiguous tensor copies, so a later view must keep reading the mutated
+    copy instead of being rebound to the base."""
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    def f(x):
+        a = x.t().reshape(32)
+        a.add_(1)
+        return a.view(8, 4)
+
+    x = torch.randn(4, 8)
+    gm = make_fx(f, tracing_mode="fake", pre_dispatch=True)(x)
+    (reshape,) = gm.graph.find_nodes(
+        op="call_function", target=torch.ops.aten.reshape.default
+    )
+    (view,) = gm.graph.find_nodes(
+        op="call_function", target=torch.ops.aten.view.default
+    )
+    # As in lowered graphs, read the mutated tensor via its producer node.
+    view.update_arg(0, reshape)
+    gm.recompile()
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(eliminate_noops=True),
+        )
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        NoOpEliminationPass(vllm_config, graph_may_mutate=True)(gm.graph)
+    gm.recompile()
+
+    assert view.args[0] is reshape
+    torch.testing.assert_close(gm(x), f(x))

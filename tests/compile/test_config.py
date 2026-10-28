@@ -155,35 +155,35 @@ def test_reject_contradictory_custom_ops(custom_ops, config_kwargs, match):
     not current_platform.is_rocm(), reason="RoPE+KV-cache fusions are ROCm-only"
 )
 @pytest.mark.parametrize(
-    ("custom_ops", "pass_kwargs", "expected"),
+    ("custom_ops", "pass_kwargs", "qk_norm_fused", "rope_kv_fused"),
     [
-        (["none"], {}, False),
-        (["none", "+rotary_embedding"], {}, True),
-        (["none"], {"fuse_rope_kvcache": True}, True),
-        (["none"], {"enable_qk_norm_rope_fusion": True}, True),
+        ([], {}, False, False),
+        (["+rotary_embedding"], {}, True, True),
+        ([], {"fuse_rope_kvcache": True}, True, True),
+        ([], {"enable_qk_norm_rope_fusion": True}, True, True),
+        (["-rotary_embedding"], {"enable_qk_norm_rope_fusion": True}, False, True),
     ],
 )
 def test_rope_fusion_defaults_follow_rope_opt_in(
-    custom_ops, pass_kwargs, expected, monkeypatch
+    custom_ops, pass_kwargs, qk_norm_fused, rope_kv_fused, monkeypatch
 ):
     """An explicit RoPE fusion still turns on the sibling RoPE fusion defaults,
-    as it did when it forced the RoPE custom op."""
+    and a defaulted QK-norm+RoPE+KV-cache fusion brings the RoPE custom op its
+    MRoPE patterns match, unless the user disabled it."""
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.config.vllm import (
-        enable_qk_norm_rope_kvcache,
-        enable_rope_kvcache_fusion,
-    )
 
     monkeypatch.setattr(rocm_aiter_ops, "is_enabled", staticmethod(lambda: True))
-    cfg = SimpleNamespace(
+    cfg = VllmConfig(
         compilation_config=CompilationConfig(
-            custom_ops=custom_ops,
+            custom_ops=list(custom_ops),
             use_inductor_graph_partition=True,
             pass_config=PassConfig(**pass_kwargs),
         )
     )
-    assert enable_qk_norm_rope_kvcache(cfg) is expected
-    assert enable_rope_kvcache_fusion(cfg) is expected
+    pass_config = cfg.compilation_config.pass_config
+    assert pass_config.fuse_qk_norm_rope_kvcache is qk_norm_fused
+    assert pass_config.fuse_rope_kvcache is rope_kv_fused
+    assert ("+rotary_embedding" in cfg.compilation_config.custom_ops) is qk_norm_fused
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073

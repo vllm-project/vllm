@@ -249,9 +249,10 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
 
     if not rocm_aiter_ops.is_enabled():
         return False
-    # The RoPE custom op or another RoPE fusion opts in, as before RoPE fusions
-    # stopped forcing the custom op.
-    return cfg.compilation_config.uses_rope_kernel()
+    cc = cfg.compilation_config
+    # Any RoPE fusion opt-in implies the RoPE kernel path. MRoPE still needs the
+    # RoPE custom op (added after defaults), so respect an explicit disable.
+    return cc.uses_rope_kernel() and "-rotary_embedding" not in cc.custom_ops
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -1856,6 +1857,13 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        cc = self.compilation_config
+        if (
+            cc.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in cc.custom_ops
+        ):
+            # MRoPE is not an IR op yet; its fusion matches the RoPE custom op.
+            cc.custom_ops.append("+rotary_embedding")
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
