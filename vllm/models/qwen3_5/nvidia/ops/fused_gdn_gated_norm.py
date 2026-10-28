@@ -8,7 +8,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _fused_gdn_gated_rms_norm_kernel(
     x_ptr,
     z_ptr,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the fused dual-GemmaRMSNorm + concat kernel used by the
-Qwen3_5 MTP drafter (``vllm.models.qwen3_5.nvidia.ops.fused_pre_fc_norms``).
+Qwen3.5 MTP drafter.
 
 The kernel must match the eager 3-op reference: two Gemma-style RMSNorms
 (scale by ``1 + weight``, fp32 accumulation) followed by a last-dim concat.
@@ -10,7 +10,7 @@ The kernel must match the eager 3-op reference: two Gemma-style RMSNorms
 import pytest
 import torch
 
-from vllm.models.qwen3_5.nvidia.ops.fused_pre_fc_norms import fused_pre_fc_norms
+from vllm.kernels.triton.fused_pre_fc_norms import fused_pre_fc_norms
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 

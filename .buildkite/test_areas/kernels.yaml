@@ -39,7 +39,6 @@ steps:
   - csrc/
   - tests/kernels/core
   - vllm/kernels/triton/
-  - vllm/models/qwen3_5/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
@@ -63,7 +62,6 @@ steps:
       - csrc/
       - tests/kernels/core
       - vllm/kernels/triton/
-      - vllm/models/qwen3_5/
       - tests/kernels/test_top_k_per_row.py
       - tests/kernels/test_concat_mla_q.py
       - tests/kernels/test_rocm_fp32_router_gemm.py

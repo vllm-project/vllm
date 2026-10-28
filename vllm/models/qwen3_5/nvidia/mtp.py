@@ -11,6 +11,7 @@ from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.kernels.triton.fused_pre_fc_norms import fused_pre_fc_norms
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
@@ -40,7 +41,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
-from .ops.fused_pre_fc_norms import fused_pre_fc_norms
 
 logger = init_logger(__name__)
 
