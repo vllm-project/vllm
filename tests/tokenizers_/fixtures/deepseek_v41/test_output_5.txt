@@ -1,0 +1,11 @@
+<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 100 (range 1-100, the higher the value, the more thorough the reasoning)
+
+You are a helpful vision assistant.<｜User｜>请按“第一张、第二张”的顺序回答：第一张图
+
+<｜deepseek_image｜>
+
+和第二张图
+
+<｜deepseek_image｜>
+
+中分别是什么食材？它们通常食用的部位分别是什么？<｜Assistant｜><think>

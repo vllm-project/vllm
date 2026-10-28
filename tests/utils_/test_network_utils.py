@@ -13,6 +13,7 @@ from vllm.utils.network_utils import (
     get_open_ports_list,
     get_tcp_uri,
     join_host_port,
+    make_zmq_listener,
     make_zmq_path,
     make_zmq_socket,
     split_host_port,
@@ -205,9 +206,55 @@ def test_make_zmq_socket_ipv6():
     ctx.term()
 
 
+@pytest.mark.parametrize("scheme", ["tcp", "ipc"])
+def test_make_zmq_socket_adopts_listener(tmp_path, scheme):
+    path = (
+        "tcp://127.0.0.1:0" if scheme == "tcp" else f"ipc://{tmp_path}/inherited.sock"
+    )
+    listener = make_zmq_listener(path, zmq.ROUTER)
+    ctx = zmq.Context()
+    router = dealer = None
+    try:
+        router = make_zmq_socket(
+            ctx,
+            listener.address,
+            zmq.ROUTER,
+            bind=True,
+            listener=listener.socket,
+        )
+        assert listener.socket.fileno() == -1
+        dealer = make_zmq_socket(
+            ctx, listener.address, zmq.DEALER, bind=False, identity=b"client"
+        )
+        dealer.send(b"ping")
+        assert router.recv_multipart() == [b"client", b"ping"]
+    finally:
+        if router is not None:
+            router.close(linger=0)
+        if dealer is not None:
+            dealer.close(linger=0)
+        ctx.term()
+        listener.cleanup()
+
+
+def test_make_zmq_listener_failed_ipc_bind_keeps_existing_path(tmp_path):
+    path = tmp_path / "taken.sock"
+    owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    owner.bind(str(path))
+    owner.listen()
+    try:
+        with pytest.raises(OSError, match="Address already in use"):
+            make_zmq_listener(f"ipc://{path}", zmq.ROUTER)
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(path))
+    finally:
+        owner.close()
+
+
 def test_make_zmq_path():
-    assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
-    assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+    assert make_zmq_path("tcp", "127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
+    assert make_zmq_path("tcp", "::1", 5555) == "tcp://[::1]:5555"
 
 
 def test_get_tcp_uri():

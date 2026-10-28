@@ -4,7 +4,10 @@ from collections.abc import Mapping
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.cache import (
+    BaseMultiModalProcessorCache,
+    processor_only_cache_from_config,
+)
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
@@ -57,9 +60,7 @@ class MultiModalBudget:
 
         with set_default_torch_num_threads():  # Avoid hang during startup
             cache = (
-                mm_registry.processor_only_cache_from_config(vllm_config)
-                if enable_cache
-                else None
+                processor_only_cache_from_config(vllm_config) if enable_cache else None
             )
             processor = mm_registry.create_processor(model_config)
 

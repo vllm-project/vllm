@@ -61,12 +61,6 @@ def aiter_triton_kernel_w4a8_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    # gfx1250: aiter's in-kernel gather is numerically broken
-    if on_gfx1250():
-        gather_src = gather_idx.to(torch.long) // topk
-        hidden_states = hidden_states[gather_src]
-        gather_idx = None
-
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
         hidden_states,
@@ -130,11 +124,11 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
         weight_mx_scale,
     )
 
-    _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    _swizzle_mx_scale = get_aiter_mx_scale_swizzle()
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
@@ -246,7 +240,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_all2all_kernels
+            not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )
@@ -289,6 +283,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.moe_config.intermediate_size_per_partition_unpadded is not None
         assert self.moe_config.hidden_dim_unpadded is not None

@@ -1307,7 +1307,6 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         # ``_merge_mm_kwargs`` restricts caller ``mm_processor_kwargs`` to known
         # processor args and wraps values as hashable for the lru_cache.
         merged = _merge_mm_kwargs(model_config, AutoProcessor, **kwargs)
-        merged.setdefault("use_fast", True)
         return _load_ov2_processor(
             model_config.model,
             model_config.revision,

@@ -6,24 +6,38 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
-    """Share when the draft has no own copy, or its copy matches the target."""
-    if not getattr(eagle, flag, False) or draft is None:
+    """Share unless the draft declares its own copy that differs from the target.
+
+    A draft that declares its own copy but has no top-level one (e.g. MTP
+    heads stored per layer) keeps it.
+    """
+    if not getattr(eagle, flag, False):
         return True
-    if target is None:
+    if draft is None or target is None:
+        return False
+    # A quantized layer registers packed weights (`weight_packed`, `qweight`,
+    # ...) instead of `weight`, so the two copies cannot be compared. Keep the
+    # draft's own copy rather than assuming it matches the target.
+    w = getattr(draft, "weight", None)
+    target_w = getattr(target, "weight", None)
+    if not isinstance(w, torch.Tensor) or not isinstance(target_w, torch.Tensor):
         return False
     # torch.equal on GPU allocates a bool mask the size of the input.
     # Use the faster GPU path when there is plenty of headroom;
     # otherwise compare on CPU.
-    w = draft.weight
     if w.is_cuda and torch.accelerator.get_memory_info(w.device)[0] < w.numel() * 2:
-        return torch.equal(w.cpu(), target.weight.cpu())
-    return torch.equal(w, target.weight)
+        return torch.equal(w.cpu(), target_w.cpu())
+    return torch.equal(w, target_w)
 
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
@@ -75,35 +89,10 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
-    if speculative_config.moe_backend is not None:
-        # Otherwise the draft inherits the target's --moe-backend, which
-        # fails when the draft is unquantized and that backend is not.
-        vllm_config = replace(
-            vllm_config,
-            kernel_config=replace(
-                vllm_config.kernel_config,
-                moe_backend=speculative_config.moe_backend,
-            ),
-        )
-    if speculative_config.kv_cache_dtype is not None:
-        vllm_config = replace(
-            vllm_config,
-            cache_config=replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            ),
-        )
-    if speculative_config.attention_backend is not None:
-        # Before get_model(): the backend is read off the constructed layers.
-        # Only when set, so the draft keeps a KV cache layout the target shares.
-        vllm_config = replace(
-            vllm_config,
-            attention_config=replace(
-                vllm_config.attention_config,
-                backend=speculative_config.attention_backend,
-            ),
-        )
-    draft_load_config = get_pp_safe_draft_load_config(vllm_config.load_config)
+    vllm_config = speculative_config.apply_draft_overrides(vllm_config)
+    draft_load_config = get_pp_safe_draft_load_config(
+        get_draft_load_config(vllm_config)
+    )
     if draft_load_config is not vllm_config.load_config:
         vllm_config = replace(vllm_config, load_config=draft_load_config)
     with set_model_tag("eagle_head"):
@@ -126,9 +115,14 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
+        draft_head = target_lm_head
+        if speculative_config.draft_lm_head_quantization is not None:
+            draft_head = quantized_lm_head_copy(
+                target_lm_head, speculative_config.draft_lm_head_quantization
+            )
         if draft_lm_head is not None:
             del eagle_model.lm_head
-        eagle_model.lm_head = target_lm_head
+        eagle_model.lm_head = draft_head
 
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.
@@ -139,7 +133,11 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 sh = getattr(layer, "shared_head", None)
                 if sh is not None and hasattr(sh, "head"):
                     del sh.head
-                    sh.head = target_lm_head
+                    sh.head = draft_head
+    elif speculative_config.draft_lm_head_quantization is not None:
+        raise ValueError(
+            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
+        )
 
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that
