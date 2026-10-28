@@ -176,6 +176,91 @@ class TestAutoAWQConfigOverrideLogic:
         ), "from_config should set quant_method='awq' in full_config"
 
 
+@pytest.mark.parametrize(
+    "allow_fallback,input_size,error",
+    [
+        (True, 128, None),
+        (False, 128, "WNA16 linear layer"),
+        (True, 127, "input size is not aligned"),
+    ],
+)
+def test_auto_awq_fallback_weight_creation(
+    dist_init,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_fallback: bool,
+    input_size: int,
+    error: str | None,
+) -> None:
+    from vllm.model_executor.kernels.linear import _POSSIBLE_KERNELS
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQConfig,
+        AutoAWQLinearMethod,
+        AutoAWQMarlinLinearMethod,
+    )
+
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        ",".join(k.__name__ for k in _POSSIBLE_KERNELS[current_platform._enum]),
+    )
+    config = AutoAWQConfig(4, 128, True, False)
+    layer = torch.nn.Module()
+    method = AutoAWQMarlinLinearMethod(config, allow_legacy_fallback=allow_fallback)
+    layer.quant_method = method
+
+    def create_weights() -> None:
+        method.create_weights(layer, input_size, [64], input_size, 64, torch.float16)
+
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            create_weights()
+        assert layer.quant_method is method
+        assert list(layer.parameters()) == []
+    else:
+        create_weights()
+        assert isinstance(layer.quant_method, AutoAWQLinearMethod)
+        assert layer.qweight.shape == (128, 8)
+        assert layer.qweight.packed_dim == 1
+        assert layer.qzeros.shape == (1, 8)
+        assert layer.scales.shape == (1, 64)
+
+
+@pytest.mark.parametrize(
+    "kernel_options",
+    [
+        {"linear_backend": "triton"},
+        {"linear_backend_per_quant": {"mixed_precision": "triton"}},
+    ],
+)
+def test_auto_awq_explicit_backend_does_not_fallback(
+    dist_init, monkeypatch: pytest.MonkeyPatch, kernel_options: dict
+) -> None:
+    from vllm.config import VllmConfig
+    from vllm.config.kernel import KernelConfig
+    from vllm.model_executor.kernels.linear import (
+        _POSSIBLE_KERNELS,
+        NoCompatibleMPLinearKernelError,
+    )
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        ",".join(k.__name__ for k in _POSSIBLE_KERNELS[current_platform._enum]),
+    )
+    config = VllmConfig(kernel_config=KernelConfig(**kernel_options))
+    with (
+        set_current_vllm_config(config),
+        pytest.raises(NoCompatibleMPLinearKernelError, match="WNA16 linear layer"),
+    ):
+        ReplicatedLinear(
+            128,
+            64,
+            bias=False,
+            params_dtype=torch.float16,
+            quant_config=AutoAWQConfig(4, 128, True, False),
+        )
+
+
 # =============================================================================
 # End-to-end integration tests (require GPU environment)
 # =============================================================================
