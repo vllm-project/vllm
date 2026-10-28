@@ -60,6 +60,7 @@ variants:
     precision: fp8
     vram_minimum_gb: 9
     description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    supported_hardware: [trillium]
     extra_args:
       - "--kv-cache-dtype"
       - "fp8"
