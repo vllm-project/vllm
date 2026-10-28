@@ -1338,7 +1338,7 @@ class FusedMoEConfig:
     # Use the allocated width as the checkpoint TP stride, including for scales.
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
-    aiter_fmoe_shared_expert_enabled: bool = False
+    is_fused_shared_expert_requested: bool = False
     # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
     # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
     # for any other model type. Resolved here, not in the forward path,
@@ -1371,7 +1371,7 @@ class FusedMoEConfig:
 
         if self.is_act_and_mul:
             self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-            self.aiter_fmoe_shared_expert_enabled = (
+            self.is_fused_shared_expert_requested = bool(
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
@@ -1402,7 +1402,7 @@ class FusedMoEConfig:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
             )
-            assert not self.aiter_fmoe_shared_expert_enabled, (
+            assert not self.is_fused_shared_expert_requested, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
