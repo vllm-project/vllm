@@ -9,6 +9,7 @@ import time
 
 import pytest
 import zmq
+from zmq.utils.monitor import recv_monitor_message
 
 from vllm.v1.kv_offload.tiering.p2p.control import zmq as zmq_module
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
@@ -350,6 +351,48 @@ class TestZmqReconnect:
             msgs = _wait_for_messages(transport_a, new_conns[0], 1)
             assert msgs == [{"type": "connect", "seq": 2}]
         finally:
+            transport_a.close()
+            transport_b.close()
+
+    def test_reconnect_before_old_connection_retired(self):
+        """A reconnect reusing a routing id the ROUTER still holds gets through.
+
+        Every DEALER of a transport uses its local_id as routing id, and the
+        ROUTER frees an id only once it has read the old connection to its end.
+        A reconnect that lands earlier must take the id over instead of being
+        dropped, and the old connection's unread messages must not break poll().
+        B's ROUTER is not touched until the reconnect has completed its
+        handshake, so the old connection still holds the id at that point.
+        """
+        transport_a, _ = _make_transport()
+        transport_b, port_b = _make_transport()
+        monitor = transport_b._router.get_monitor_socket(
+            zmq.EVENT_HANDSHAKE_SUCCEEDED | zmq.EVENT_DISCONNECTED
+        )
+
+        def wait_event(event: int) -> None:
+            assert monitor.poll(2000), f"no ROUTER monitor event {event:#x}"
+            assert recv_monitor_message(monitor)["event"] == event
+
+        try:
+            peer_b = f"127.0.0.1:{port_b}"
+            old = transport_a.connect(peer_b)
+            old.send({"type": "connect", "seq": 1})
+            wait_event(zmq.EVENT_HANDSHAKE_SUCCEEDED)
+            old.mark_dead()
+            transport_a.poll()
+            wait_event(zmq.EVENT_DISCONNECTED)
+
+            new = transport_a.connect(peer_b)
+            new.send({"type": "connect", "seq": 2})
+            wait_event(zmq.EVENT_HANDSHAKE_SUCCEEDED)
+
+            new_conns = _wait_for_inbound(transport_b)
+            assert len(new_conns) == 1
+            msgs = _wait_for_messages(transport_b, new_conns[0], 1)
+            assert msgs == [{"type": "connect", "seq": 2}]
+        finally:
+            monitor.close(linger=0)
             transport_a.close()
             transport_b.close()
 
