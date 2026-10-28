@@ -791,6 +791,9 @@ _TRANSFORMERS_BACKEND_MODELS = {
     # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    # Multi-token prediction draft models
+    "TransformersForMTP": ("transformers", "TransformersForMTP"),
+    "TransformersMoEForMTP": ("transformers", "TransformersMoEForMTP"),
     # Multimodal models
     "TransformersMultiModalForCausalLM": (
         "transformers",
