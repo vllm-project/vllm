@@ -121,9 +121,7 @@ class ReasoningConfig:
         self._reasoning_start_token_ids = _resolve_token_ids(
             tokenizer, reasoning_start_str
         )
-        self._reasoning_end_token_ids = _resolve_token_ids(
-            tokenizer, reasoning_end_str
-        )
+        self._reasoning_end_token_ids = _resolve_token_ids(tokenizer, reasoning_end_str)
         self._natural_reasoning_end_token_ids = _resolve_token_ids(
             tokenizer, natural_reasoning_end_str
         )
