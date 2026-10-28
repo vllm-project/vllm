@@ -5,8 +5,9 @@
 The reservation must cover the largest ``attn_logits`` that ``forward_mqa``
 asks the workspace manager for. A windowed layer (a DSpark draft layer) splits
 at most its window, so reserving for ``max_model_len`` instead holds GPU memory
-that the profiling run then takes from the KV cache. The workspace manager and
-the decode kernel are replaced by recorders, so these tests need no GPU.
+that the profiling run then takes from the KV cache. The decode kernel is
+replaced by a recorder and the workspace manager by a recorder or a CPU
+manager, so these tests need no GPU.
 """
 
 from collections.abc import Iterator
@@ -23,6 +24,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
+)
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    init_workspace_manager,
+    lock_workspace,
+    reset_workspace_manager,
+    use_workspace_lane,
 )
 
 MODULE = "vllm.v1.attention.backends.mla.triton_mla"
@@ -106,8 +114,11 @@ def _workspace_requests() -> Iterator[list[tuple[int, ...]]]:
         yield requests
 
 
-def _run_longest_draft_decode(impl: TritonMLAImpl) -> None:
-    """forward_mqa on a full batch of draft blocks at max_model_len context."""
+def _run_longest_draft_decode(impl: TritonMLAImpl) -> torch.Tensor:
+    """forward_mqa on a full batch of draft blocks at max_model_len context.
+
+    Returns the ``attn_logits`` scratch passed to the decode kernel.
+    """
     metadata = SimpleNamespace(
         max_seq_len=MAX_MODEL_LEN,
         causal=False,
@@ -120,8 +131,23 @@ def _run_longest_draft_decode(impl: TritonMLAImpl) -> None:
     q = torch.zeros(num_rows, NUM_HEADS, HEAD_SIZE, dtype=torch.bfloat16)
     kv_cache = torch.zeros(1, PAGE_SIZE, HEAD_SIZE, dtype=torch.bfloat16)
     layer = SimpleNamespace(_k_scale=torch.ones(1))
-    with patch(f"{MODULE}.decode_attention_fwd"):
+    with patch(f"{MODULE}.decode_attention_fwd") as decode_attention_fwd:
         impl.forward_mqa(q, kv_cache, metadata, layer)
+    return decode_attention_fwd.call_args.args[7]
+
+
+@pytest.fixture
+def undersized_locked_workspace() -> Iterator[None]:
+    """Both lanes hold a one-split logits reservation when the manager locks."""
+    init_workspace_manager(torch.device("cpu"), num_lanes=2)
+    for lane in (0, 1):
+        with use_workspace_lane(lane):
+            current_workspace_manager().get_simultaneous(
+                (_logits_shape(1), torch.float32)
+            )
+    lock_workspace()
+    yield
+    reset_workspace_manager()
 
 
 @pytest.mark.parametrize(
@@ -138,7 +164,7 @@ def test_profiling_reservation_follows_the_attended_kv(sliding_window, num_kv_sp
 
 @pytest.mark.parametrize("sliding_window", [DRAFT_WINDOW, None])
 def test_reservation_covers_the_largest_forward_mqa_request(sliding_window):
-    """Once the workspace is locked, a larger request falls back to allocating."""
+    """Once the workspace is locked, a larger request fails outside the draft."""
     impl = _make_impl(sliding_window)
     with _workspace_requests() as requests:
         impl.reserve_workspace()
@@ -146,6 +172,22 @@ def test_reservation_covers_the_largest_forward_mqa_request(sliding_window):
 
     reserved, requested = requests
     assert requested == reserved
+
+
+@pytest.mark.usefixtures("undersized_locked_workspace")
+def test_undersized_default_lane_fails_loudly():
+    """Outside the DSpark draft lane, an undersized reservation is a bug."""
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        _run_longest_draft_decode(_make_impl(DRAFT_WINDOW))
+
+
+@pytest.mark.usefixtures("undersized_locked_workspace")
+def test_undersized_draft_lane_allocates_the_logits():
+    """Only the draft's captures size its lane, so it may outgrow it."""
+    with use_workspace_lane(1):
+        attn_logits = _run_longest_draft_decode(_make_impl(DRAFT_WINDOW))
+
+    assert attn_logits.shape == _logits_shape(DRAFT_WINDOW_SPLITS)
 
 
 @pytest.mark.parametrize(
