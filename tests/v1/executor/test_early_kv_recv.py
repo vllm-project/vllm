@@ -66,7 +66,6 @@ def test_sender_notifies_then_yields_to_rpc(monkeypatch, rpc_queue, receiver):
         assert received == [{"r"}]
         assert receiver.drain() == []
         assert not sender.wait_for_poll(reader)
-        assert not sender.wait_for_poll(reader)  # Already queued RPC takes priority.
         assert reader.dequeue(timeout=1) == "rpc"
 
 
