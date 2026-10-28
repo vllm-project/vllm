@@ -194,6 +194,21 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
+def hc_stream_mean(streams: torch.Tensor) -> torch.Tensor:
+    """Mean over the hc streams of a [tokens, hc, hidden] tensor.
+
+    Under batch invariance aten::mean is a Triton kernel with one program per
+    output element (~10 ms for 8192 tokens); a fixed-order FP32 sum is row
+    invariant and elementwise.
+    """
+    if not envs.VLLM_BATCH_INVARIANT:
+        return streams.mean(dim=1)
+    acc = streams[:, 0].float()
+    for i in range(1, streams.shape[1]):
+        acc = acc + streams[:, i].float()
+    return (acc / streams.shape[1]).to(streams.dtype)
+
+
 def mhc_shifted_post_pre(
     x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,

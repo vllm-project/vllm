@@ -982,6 +982,50 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         torch.cuda.current_stream().wait_stream(stream)
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 6, 30, 300])
+def test_bi_capture_aux_keeps_target_mhc_outputs(num_tokens, monkeypatch):
+    """Drafter aux capture must not change target mHC outputs under BI."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
+
+    hidden_size, hc_mult = 5120, 4
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # Other tests here leave a concrete envs attribute behind; shadow it and
+    # drop the shadow afterwards instead of restoring a stale value.
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    args = (
+        x,
+        residual,
+        torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    kwargs = dict(
+        pre_mix=torch.rand(num_tokens, hc_mult, device=DEVICE),
+        norm_weight=torch.empty(
+            hidden_size, dtype=torch.bfloat16, device=DEVICE
+        ).uniform_(0.9, 1.1),
+        norm_eps=7e-6,
+    )
+    *plain, _ = mhc_shifted_post_pre(*args, **kwargs, capture_aux=False)
+    *captured, aux = mhc_shifted_post_pre(*args, **kwargs, capture_aux=True)
+    for result, ref in zip(captured, plain, strict=True):
+        torch.testing.assert_close(result, ref, atol=0, rtol=0)
+    torch.testing.assert_close(aux, plain[0].mean(dim=1), atol=0, rtol=0)
+
+
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
     x = x.softmax(-1) + eps
     x = x / (x.sum(-2, keepdim=True) + eps)

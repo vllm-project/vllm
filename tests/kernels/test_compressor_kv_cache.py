@@ -1674,7 +1674,7 @@ def test_v41_compressor_bi_declaration_stays_scoped(monkeypatch, major, supporte
     assert not UnprovenCompressor.supports_batch_invariance()
 
 
-@pytest.mark.parametrize("speculative_tokens,state_dim", [(1, 1024), (0, 512)])
+@pytest.mark.parametrize("speculative_tokens,state_dim", [(7, 1024), (0, 512)])
 def test_v41_bi_compressor_rejects_unproven_ring_geometry(
     monkeypatch, speculative_tokens, state_dim
 ):
