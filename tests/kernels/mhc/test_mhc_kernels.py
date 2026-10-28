@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
+    mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
@@ -1158,6 +1160,69 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
 
 
+def _mhc_fused_post_pre_inputs(
+    num_tokens: int, hidden_size: int, hc_mult: int = 4
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        float,
+        float,
+        float,
+        float,
+        int,
+    ],
+    torch.Tensor,
+]:
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    mixes = (
+        torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32),
+        torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32),
+        torch.randn((hc_mult3, hc_mult * hidden_size), dtype=torch.float32) * 1e-4,
+        torch.randn((3,), dtype=torch.float32) * 0.1,
+        torch.randn((hc_mult3,), dtype=torch.float32) * 0.1,
+        1e-6,
+        1e-6,
+        1e-6,
+        1.0,
+        20,
+    )
+    norm_weight = torch.randn(hidden_size, dtype=torch.bfloat16)
+    return x, residual, mixes, norm_weight
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [8, 33, 1024])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+def test_mhc_fused_post_pre_reuse_residual_is_exact(num_tokens, hidden_size):
+    """Writing the next residual into the dead input residual changes no
+    output, and the unfused path then allocates no new residual."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    x, residual, mixes, norm_weight = _mhc_fused_post_pre_inputs(
+        num_tokens, hidden_size
+    )
+
+    untouched = residual.clone()
+    expected = mhc_fused_post_pre_tilelang(x, residual, *mixes, norm_weight=norm_weight)
+    assert torch.equal(residual, untouched)
+
+    actual = mhc_fused_post_pre_tilelang_reuse_residual(
+        x, residual, *mixes, norm_weight=norm_weight
+    )
+    for got, want in zip(actual, expected):
+        assert torch.equal(got, want)
+    unfused = mhc_fused_post_pre_split_config(num_tokens, hidden_size, 4) is None
+    assert (actual[0].data_ptr() == residual.data_ptr()) == unfused
+
+
 def _rocm_mhc_inputs(num_tokens=2, hidden_size=256, hc_mult=4):
     residual = torch.randn(
         (num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16, device=DEVICE
@@ -1777,6 +1842,58 @@ def _patch_first_rank_pp_group(monkeypatch):
         "vllm.models.deepseek_v4.nvidia.model.get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True),
     )
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("carried", [False, True])
+def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
+    """reuse_residual changes no output and never writes the caller's x, even
+    when a first layer starts from ``residual = x``."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    hc_mult, hidden_size, num_tokens = 4, 4096, 64
+    layer = _make_mhc_decoder_layer(hc_mult=hc_mult, hidden_size=hidden_size)
+    _, _, mixes, norm_weight = _mhc_fused_post_pre_inputs(num_tokens, hidden_size)
+    _, _, fn, hc_scale, hc_base, *_ = mixes
+    layer.hc_attn_fn.data.copy_(fn)
+    layer.hc_attn_scale, layer.hc_attn_base = hc_scale, hc_base
+    layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base = fn, hc_scale, hc_base
+    norm = SimpleNamespace(weight=norm_weight, variance_epsilon=1e-6)
+    layer.attn_norm = layer.ffn_norm = norm
+    layer.rms_norm_eps, layer.hc_eps, layer.hc_post_alpha = 1e-6, 1e-6, 1.0
+    layer.hc_sinkhorn_iters = 20
+    layer.use_sequence_parallel = False
+    layer.attn = lambda positions, x, _: x * 0.5
+    layer.ffn = lambda x, input_ids, metadata: x * 2.0
+    positions = torch.arange(num_tokens)
+
+    x = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    if carried:
+        residual = torch.randn_like(x)
+        x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+        post_mix = torch.rand((num_tokens, hc_mult, 1), dtype=torch.float32)
+        res_mix = torch.rand((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+    else:
+        residual = post_mix = res_mix = None
+
+    def run(reuse_residual):
+        return DeepseekV4DecoderLayer.forward(
+            layer,
+            x.clone() if carried else x,
+            positions,
+            None,
+            post_mix,
+            res_mix,
+            None if residual is None else residual.clone(),
+            reuse_residual=reuse_residual,
+        )
+
+    x_before = x.clone()
+    expected = run(False)
+    actual = run(True)
+    assert torch.equal(x, x_before)
+    for got, want in zip(actual, expected):
+        assert torch.equal(got, want)
 
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
