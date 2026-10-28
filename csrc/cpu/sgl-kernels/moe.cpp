@@ -1465,7 +1465,8 @@ void fused_experts_cpu_local_skip(
     const std::optional<at::Tensor>& w2_bias,
     const std::optional<double>& alpha,
     const std::optional<double>& limit,
-    bool is_vnni) {
+    bool is_vnni,
+    int64_t act_method) {
   CHECK_INPUT(out);
   CHECK_INPUT(hidden_states);
   CHECK_INPUT(topk_weights);
@@ -1553,7 +1554,8 @@ void fused_experts_cpu_local_skip(
       w2_bias,
       alpha,
       limit,
-      is_vnni);
+      is_vnni,
+      act_method);
 
   out.zero_();
   AT_DISPATCH_REDUCED_FLOATING_TYPES(hidden_states.scalar_type(), "scatter_add_local_expert_outputs", [&] {
