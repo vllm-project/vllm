@@ -235,6 +235,7 @@ class RankLocalStoreLayout(StoreLayout):
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.block_stride: list[int] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -262,8 +263,15 @@ class RankLocalStoreLayout(StoreLayout):
     def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
         self.kv_caches_base_addr = base_addrs
 
-    def set_block_len(self, block_lens: list[int]) -> None:
+    def set_block_len(
+        self, block_lens: list[int], block_strides: list[int] | None = None
+    ) -> None:
+        if block_strides is None:
+            block_strides = list(block_lens)
+        if len(block_strides) != len(block_lens):
+            raise ValueError("block_strides must have one entry per block_len")
         self.block_len = block_lens
+        self.block_stride = block_strides
 
     def register_kv_caches(
         self,
@@ -273,10 +281,12 @@ class RankLocalStoreLayout(StoreLayout):
         seen_region_ptrs: set[int] = set()
         base_addrs: list[int] = []
         block_lens: list[int] = []
+        block_strides: list[int] = []
         for cache in kv_caches:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             storage_len = storage.nbytes()
+            element_size = cache.element_size()
             if not is_non_overlapping_and_dense(cache[0]):
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
@@ -286,22 +296,26 @@ class RankLocalStoreLayout(StoreLayout):
                         continue
                     seen_region_ptrs.add(region_addr)
                     base_addrs.append(region_addr)
-                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
-            elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
+                    block_lens.append(head_cache[0].numel() * element_size)
+                    block_strides.append(head_cache.stride(0) * element_size)
+            elif cache.stride(0) * element_size * num_blocks == storage_len:
                 if storage_addr in seen_region_ptrs:
                     continue
                 seen_region_ptrs.add(storage_addr)
                 base_addrs.append(storage_addr)
                 block_lens.append(storage_len // num_blocks)
+                block_strides.append(storage_len // num_blocks)
             else:
                 region_addr = cache.data_ptr()
                 if region_addr in seen_region_ptrs:
                     continue
                 seen_region_ptrs.add(region_addr)
                 base_addrs.append(region_addr)
-                block_lens.append(cache.stride(0) * cache.element_size())
+                block_lens.append(cache.stride(0) * element_size)
+                block_strides.append(cache.stride(0) * element_size)
         self.kv_caches_base_addr = base_addrs
         self.block_len = block_lens
+        self.block_stride = block_strides
 
     def prepare_values(
         self,
@@ -320,6 +334,10 @@ class RankLocalStoreLayout(StoreLayout):
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
         )
+        bstride = np.asarray(
+            [self.block_stride[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
         n = len(chunks)
         starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
         spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
@@ -329,8 +347,13 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        addrs = base[None, :] + bids[:, None] * bstride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
+        if np.any(block_counts > 1) and np.any(bstride != blen):
+            raise ValueError(
+                "Multi-block chunks need contiguous blocks; this KV layout "
+                "interleaves a region's blocks with other heads' pages"
+            )
         sizes = blen[None, :] * block_counts[:, None]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
@@ -338,7 +361,7 @@ class RankLocalStoreLayout(StoreLayout):
         length = len(self.block_len)
         return (
             [
-                base_addr + block_id * self.block_len[index % length]
+                base_addr + block_id * self.block_stride[index % length]
                 for index, base_addr in enumerate(self.kv_caches_base_addr)
             ],
             [
@@ -584,6 +607,10 @@ class ChunkedTokenDatabase:
     def block_len(self) -> list[int]:
         return self._rank_local_layout().block_len
 
+    @property
+    def block_stride(self) -> list[int]:
+        return self._rank_local_layout().block_stride
+
     def _rank_local_layout(self) -> RankLocalStoreLayout:
         if not isinstance(self.store_layout, RankLocalStoreLayout):
             raise RuntimeError("This operation requires a rank-local Store layout")
@@ -595,8 +622,10 @@ class ChunkedTokenDatabase:
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
         self._rank_local_layout().set_kv_caches_base_addr(kv_caches_base_addr)
 
-    def set_block_len(self, block_len: list[int]):
-        self._rank_local_layout().set_block_len(block_len)
+    def set_block_len(
+        self, block_len: list[int], block_stride: list[int] | None = None
+    ):
+        self._rank_local_layout().set_block_len(block_len, block_stride)
 
     def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
         """Return addresses and sizes for one physical block slot."""

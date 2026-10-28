@@ -1802,6 +1802,7 @@ class MooncakeStoreWorker:
             seen_group_ptrs: set[int] = set()
             addrs: list[int] = []
             block_lens: list[int] = []
+            block_strides: list[int] = []
             for layer_name, value in group_caches:
                 cache = _repr_tensor(value)
                 is_host_resident = group.host_resident
@@ -1840,7 +1841,8 @@ class MooncakeStoreWorker:
                         f"region sizes: {registered_len} and {region_len}."
                     )
 
-                regions: list[tuple[int, int]] = []
+                regions: list[tuple[int, int, int]] = []
+                element_size = cache.element_size()
                 if not is_non_overlapping_and_dense(cache[0]):
                     for head_idx in range(cache.shape[1]):
                         head_cache = cache[:, head_idx]
@@ -1848,29 +1850,31 @@ class MooncakeStoreWorker:
                         regions.append(
                             (
                                 head_cache.data_ptr(),
-                                head_cache.stride(0) * head_cache.element_size(),
+                                head_cache[0].numel() * element_size,
+                                head_cache.stride(0) * element_size,
                             )
                         )
-                elif cache.stride(0) * cache.element_size() * num_blocks == region_len:
-                    regions.append((base_addr, region_len // num_blocks))
+                elif cache.stride(0) * element_size * num_blocks == region_len:
+                    block_len = region_len // num_blocks
+                    regions.append((base_addr, block_len, block_len))
                 else:
-                    regions.append(
-                        (cache.data_ptr(), cache.stride(0) * cache.element_size())
-                    )
+                    block_len = cache.stride(0) * element_size
+                    regions.append((cache.data_ptr(), block_len, block_len))
 
-                for region_addr, block_len in regions:
+                for region_addr, block_len, block_stride in regions:
                     if region_addr in seen_group_ptrs:
                         continue
                     seen_group_ptrs.add(region_addr)
                     addrs.append(region_addr)
                     block_lens.append(block_len)
+                    block_strides.append(block_stride)
                     if is_host_resident:
                         num_host_segments += 1
                     else:
                         num_device_segments += 1
 
             db.set_kv_caches_base_addr(addrs)
-            db.set_block_len(block_lens)
+            db.set_block_len(block_lens, block_strides)
 
         logger.info(
             "Registered KV caches: num_groups=%d, num_segments=%d (host=%d, device=%d)",
