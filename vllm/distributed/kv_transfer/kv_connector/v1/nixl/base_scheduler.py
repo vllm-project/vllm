@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -438,10 +439,15 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
-            # The removed tokens may be part of a block's lookahead hash.
-            request.block_hashes.clear()
+            _, hash_block_size = resolve_kv_cache_block_sizes(
+                self.kv_cache_config, self.vllm_config
+            )
+            num_valid_hashes = (
+                max(0, request.num_tokens - self.vllm_config.num_hash_lookahead_tokens)
+                // hash_block_size
+            )
+            del request.block_hashes[num_valid_hashes:]
             request._prompt_embeds_per_block_hashes.clear()
-            request.update_block_hashes()
             params["_p_side_truncated"] = True
 
     def _build_save_meta(

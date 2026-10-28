@@ -9,6 +9,7 @@ validated by this test module.
 
 import asyncio
 from collections import OrderedDict
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -154,7 +155,10 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("num_lookahead", [0, 1, 5])
+@pytest.mark.parametrize(
+    "hash_block_size, num_lookahead, nixl_kept",
+    [(16, 0, 2), (16, 1, 2), (16, 5, 2), (4, 9, 1), (4, 17, 0)],
+)
 @pytest.mark.parametrize("use_embeds", [False, True])
 @pytest.mark.parametrize(
     "scheduler_cls, connector_name",
@@ -165,7 +169,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     ],
 )
 def test_lookahead_hashes_follow_truncated_prefill(
-    scheduler_cls, connector_name, num_lookahead, use_embeds
+    scheduler_cls, connector_name, hash_block_size, num_lookahead, nixl_kept, use_embeds
 ):
     """P-side hashes must describe the shortened prompt and actual sampled token."""
     block_size = 16
@@ -179,12 +183,14 @@ def test_lookahead_hashes_follow_truncated_prefill(
         spec.method = "mtp"
         spec.draft_model_config = config.model_config
         config.speculative_config = spec
-    scheduler = scheduler_cls(
-        config, "test-engine", make_hybrid_gdn_kv_cache_config(block_size)
-    )
+    config.cache_config.prefix_match_unit = hash_block_size
+    kv_config = make_hybrid_gdn_kv_cache_config(block_size)
+    group = kv_config.kv_cache_groups[1]
+    group.kv_cache_spec = replace(group.kv_cache_spec, mamba_cache_mode="align")
+    scheduler = scheduler_cls(config, "test-engine", kv_config)
     init_none_hash(sha256)
-    hasher = get_request_block_hasher(block_size, sha256, num_lookahead)
-    tokens = list(range(2 * block_size + num_lookahead))
+    hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
+    tokens = list(range(3 * hash_block_size + num_lookahead))
     request = Request(
         request_id="prefill",
         prompt_token_ids=None if use_embeds else tokens,
@@ -197,11 +203,13 @@ def test_lookahead_hashes_follow_truncated_prefill(
     )
     request.kv_transfer_params = {"do_remote_decode": True}
     original_hashes = request.block_hashes.copy()
-    assert len(original_hashes) == 2
+    assert len(original_hashes) == 3
 
     scheduler.on_new_request(request)
 
-    assert request.block_hashes == original_hashes[:1]
+    kept = 2 if scheduler_cls is MooncakeConnectorScheduler else nixl_kept
+    assert request.block_hashes == original_hashes[:kept]
+    assert all(a is b for a, b in zip(request.block_hashes, original_hashes))
     shortened_tokens = list(request.all_token_ids)
     request.append_output_token_ids(999)
     reference = Request(

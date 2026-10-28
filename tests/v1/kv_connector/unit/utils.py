@@ -565,7 +565,13 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
-    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
+    sched.vllm_config = SimpleNamespace(
+        num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -637,7 +643,10 @@ def make_nixl_push_scheduler(
     # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.

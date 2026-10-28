@@ -65,6 +65,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1040,10 +1041,15 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
-            # The removed tokens may be part of a block's lookahead hash.
-            request.block_hashes.clear()
+            _, hash_block_size = resolve_kv_cache_block_sizes(
+                self.kv_cache_config, self.vllm_config
+            )
+            num_valid_hashes = (
+                max(0, request.num_tokens - self.vllm_config.num_hash_lookahead_tokens)
+                // hash_block_size
+            )
+            del request.block_hashes[num_valid_hashes:]
             request._prompt_embeds_per_block_hashes.clear()
-            request.update_block_hashes()
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
