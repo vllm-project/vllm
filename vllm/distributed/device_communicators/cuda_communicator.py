@@ -114,6 +114,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
+        # QuickReduce for the DP MoE combine only; generic all-reduces on the
+        # DP group must not pick up its quantization.
+        self.moe_qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
@@ -195,6 +198,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # On ROCm, 'use_custom_allreduce==True' means it must currently be
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+
+        if (
+            envs.VLLM_ROCM_DP_MOE_QUICK_REDUCE
+            and unique_name.split(":")[0] == "dp"
+            and self.world_size > 1
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            self.moe_qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+            if self.moe_qr_comm.disabled:
+                self.moe_qr_comm = None
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()

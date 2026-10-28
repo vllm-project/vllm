@@ -269,6 +269,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_DP_MOE_QUICK_REDUCE: bool = False
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1421,6 +1422,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16": lambda: (
         os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower()
         in ("true", "1")
+    ),
+    # ROCm only, default off. With data parallelism and the default
+    # allgather_reducescatter all2all backend, combine the MoE output with a
+    # QuickReduce all-reduce over the DP group plus this rank's slice instead
+    # of an RCCL reduce-scatter. The codec is VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
+    # (INT4 recommended); tensors QuickReduce cannot take keep the
+    # reduce-scatter. Faster on 2-GPU MI355X pairs; lossy with a quantized codec.
+    "VLLM_ROCM_DP_MOE_QUICK_REDUCE": lambda: (
+        os.getenv("VLLM_ROCM_DP_MOE_QUICK_REDUCE", "0").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards.
     # Controls the maximum allowed number of data bytes(MB) for custom quick
