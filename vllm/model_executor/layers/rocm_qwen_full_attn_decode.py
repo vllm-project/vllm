@@ -21,6 +21,8 @@ and resets the counter, so no program waits on another and the counters are
 back at zero after every launch (HIP-graph safe).
 """
 
+from typing import cast
+
 import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -36,7 +38,10 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
+from vllm.v1.attention.backends.rocm_attn import (
+    RocmAttentionImpl,
+    RocmAttentionMetadata,
+)
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 
 MAX_ROWS = 32
@@ -376,23 +381,23 @@ def _attn_kernel(
             si = tl.arange(0, NSP2)
             ml = pml_ptr + ((grp * NSPLIT + si)[:, None] * GQA + g[None, :]) * 2
             pm = (si < n_active)[:, None] & gmask[None, :]
-            mt = tl.max(tl.load(ml, mask=pm, other=float("-inf")), axis=0)
-            mt = tl.where(mt == float("-inf"), 0.0, mt)
-            lt = tl.zeros([GP], dtype=tl.float32)
-            ot = tl.zeros([GP, HD], dtype=tl.float32)
+            m_max = tl.max(tl.load(ml, mask=pm, other=float("-inf")), axis=0)
+            m_max = tl.where(m_max == float("-inf"), 0.0, m_max)
+            l_tot = tl.zeros([GP], dtype=tl.float32)
+            o_tot = tl.zeros([GP, HD], dtype=tl.float32)
             for s in range(n_active):
                 row = (grp * NSPLIT + s) * GQA + g
                 ms = tl.load(pml_ptr + row * 2, mask=gmask, other=float("-inf"))
                 ls = tl.load(pml_ptr + row * 2 + 1, mask=gmask, other=0.0)
-                wgt = tl.exp(ms - mt)
-                lt += ls * wgt
-                os_ = tl.load(
+                wgt = tl.exp(ms - m_max)
+                l_tot += ls * wgt
+                o_s = tl.load(
                     po_ptr + row[:, None] * HD + d[None, :],
                     mask=gmask[:, None],
                     other=0.0,
                 )
-                ot += os_ * wgt[:, None]
-            o = ot / tl.where(lt > 0, lt, 1.0)[:, None]
+                o_tot += o_s * wgt[:, None]
+            o = o_tot / tl.where(l_tot > 0, l_tot, 1.0)[:, None]
             o = o * tl.sigmoid(gt)
             tl.store(
                 out_ptr + gofs, o.to(out_ptr.dtype.element_ty), mask=gmask[:, None]
@@ -525,10 +530,12 @@ def fused_front(
     nqk = (num_heads + num_kv_heads) * head_dim
     qk_scr = _scratch("qk", MAX_ROWS * nqk, hidden.dtype, hidden.device)
     cnt = _scratch("front_cnt", num_heads + num_kv_heads, torch.int32, hidden.device)
-    has_mrope = positions.ndim == 2 and bool(mrope_section)
-    if positions.ndim == 2 and not has_mrope:
-        positions = positions[0]
-    mrope_h, mrope_w = (mrope_section[1], mrope_section[2]) if has_mrope else (0, 0)
+    has_mrope, mrope_h, mrope_w = False, 0, 0
+    if positions.ndim == 2:
+        if mrope_section:
+            has_mrope, mrope_h, mrope_w = True, mrope_section[1], mrope_section[2]
+        else:
+            positions = positions[0]
 
     res_mid = torch.empty_like(residual)
     q = hidden.new_empty(n, num_heads * head_dim)
@@ -678,11 +685,11 @@ def rocm_qwen_full_attn_front(
     attn_layer = sa.attn
     eps = layer.input_layernorm.variance_epsilon
     mrope_section = getattr(sa.rotary_emb, "mrope_section", None)
-    slot_mapping = get_forward_context().slot_mapping
-    slot_mapping = slot_mapping.get(name) if isinstance(slot_mapping, dict) else None
+    slot_maps = get_forward_context().slot_mapping
+    slot_mapping = slot_maps.get(name) if isinstance(slot_maps, dict) else None
     n = hidden_states.shape[0]
-    interleaved_v = getattr(attn_layer.impl, "_use_interleaved_v_cache", False)
-    if n <= MAX_ROWS and not interleaved_v:
+    impl = cast(RocmAttentionImpl, attn_layer.impl)
+    if n <= MAX_ROWS and not impl._use_interleaved_v_cache:
         if slot_mapping is None:
             slot_mapping = torch.full(
                 (n,), -1, dtype=torch.int64, device=hidden_states.device
@@ -718,7 +725,7 @@ def rocm_qwen_full_attn_front(
     )
     v = v.contiguous()
     if slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(
+        impl.do_kv_cache_update(
             attn_layer,
             k.view(-1, sa.num_kv_heads, sa.head_dim),
             v.view(-1, sa.num_kv_heads, sa.head_dim),
@@ -756,7 +763,7 @@ def rocm_qwen_full_attn_core(
     if md is None:
         output.fill_(0)
         return
-    impl = attn_layer.impl
+    impl = cast(RocmAttentionImpl, attn_layer.impl)
     n = q.shape[0]
     if (
         isinstance(md, RocmAttentionMetadata)

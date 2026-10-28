@@ -471,6 +471,8 @@ class Qwen3NextAttention(nn.Module):
 
 
 class Qwen3NextDecoderLayer(nn.Module):
+    fused_full_attn_decode = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -565,7 +567,7 @@ class Qwen3NextDecoderLayer(nn.Module):
     ):
         full_num_tokens = positions.shape[-1]
 
-        if residual is not None and getattr(self, "fused_full_attn_decode", False):
+        if residual is not None and self.fused_full_attn_decode:
             sa = self.self_attn
             name = _encode_layer_name(sa.attn.layer_name)
             q, gate, k, v, residual = torch.ops.vllm.rocm_qwen_full_attn_front(

@@ -170,7 +170,7 @@ def test_fused_full_attn_decode_matches_stock(n, nseq, block, pad, ctx, mrope):
 
     cs = rope.cos_sin_cache.to(DEV)
     x, res = _fused(h, r, pos3, slot, kc, vc, bt, sl, w, cs)
-    # bf16 rounding of intermediates differs from the stock chain by <= 1 ulp.
+    # The fused path rounds intermediates to bf16 at different points.
     assert _rel(x[:nseq], x_ref[:nseq]) < 5e-3
     assert _rel(res[:nseq], r_ref[:nseq]) < 5e-3
     assert _rel(raw, raw_ref) < 1e-3
