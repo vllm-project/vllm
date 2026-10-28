@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
@@ -377,6 +378,7 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
@@ -1127,7 +1129,7 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
-                        if request.skip_reading_prefix_cache:
+                        if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1709,6 +1711,9 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_input_updates=self._get_encoder_input_updates(
+                num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+            ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
@@ -1785,6 +1790,7 @@ class Scheduler(SchedulerInterface):
             self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
+        self._pending_encoder_input_ids.pop(request.request_id, None)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1879,6 +1885,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
@@ -2736,6 +2743,62 @@ class Scheduler(SchedulerInterface):
             assert request.num_output_placeholders >= 0
         return new_token_ids, stopped
 
+    def _get_encoder_input_updates(
+        self,
+        scheduled: dict[str, int],
+        new_requests: list[NewRequestData],
+        scheduled_encoder_inputs: dict[str, list[int]],
+    ) -> dict[str, dict[int, MultiModalKwargsItem | None]]:
+        if not self.use_v2_model_runner:
+            return {}
+        # Installations (including resume/streaming) replace worker features.
+        # SHM descriptors follow the processor cache's separate ACK protocol;
+        # EngineCore cannot replay their resolved tensors.
+        for new_request in new_requests:
+            if not new_request.mm_features:
+                continue
+            self._pending_encoder_input_ids[new_request.req_id] = {
+                i
+                for i, feature in enumerate(new_request.mm_features)
+                if feature.data is not None and "address" not in feature.data
+            }
+
+        updates: dict[str, dict[int, MultiModalKwargsItem | None]] = {}
+        for req_id in scheduled:
+            request = self.requests[req_id]
+            pending = self._pending_encoder_input_ids.get(req_id)
+            if pending is None:
+                continue
+            encoding = scheduled_encoder_inputs.get(req_id, ())
+            if not pending and not encoding:
+                continue
+            for input_id in encoding:
+                data = request.mm_features[input_id].data
+                if (
+                    input_id not in pending
+                    and data is not None
+                    and "address" not in data
+                ):
+                    # A running request may rewind without being reinstalled.
+                    updates.setdefault(req_id, {})[input_id] = data
+                    pending.add(input_id)
+
+            # schedule() advances progress before execution. Exclude in-flight
+            # prefill and speculative placeholders to obtain confirmed progress.
+            computed = request.num_computed_tokens - max(
+                request.num_output_placeholders, request.num_in_flight_tokens
+            )
+            for input_id in list(pending):
+                if input_id in encoding:
+                    continue
+                position = request.mm_features[input_id].mm_position
+                if position.offset + position.length <= computed or (
+                    self.is_encoder_decoder and computed > 0
+                ):
+                    updates.setdefault(req_id, {})[input_id] = None
+                    pending.remove(input_id)
+        return updates
+
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
             request
@@ -2787,7 +2850,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+            request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
             )
 
@@ -2814,10 +2877,7 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
-            # Filter out spec tokens which do not adhere to the grammar.
-            spec_token_ids = self.structured_output_manager.validate_tokens(
-                request, spec_token_ids
-            )
+            # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
@@ -2958,6 +3018,7 @@ class Scheduler(SchedulerInterface):
             connector_delay_free_blocks |= ec_delay_free
 
         self.encoder_cache_manager.free(request)
+        self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
