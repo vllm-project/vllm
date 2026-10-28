@@ -21,6 +21,8 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 
 from ..utils import get_spec_decode_metric_value
 
+pytestmark = pytest.mark.usefixtures("enable_pickle")
+
 MODEL = "XiaomiMiMo/MiMo-7B-RL"
 REVISION = "6299b5a2c45daf0c429285c92b8e61a5bd011c0d"
 
@@ -1386,6 +1388,7 @@ def test_remote_mtp_rejects_short_draft_context_through_llm(
             max_model_len=64,
             max_num_seqs=2,
             max_num_batched_tokens=32,
+            enable_chunked_prefill=True,
             enforce_eager=True,
             enable_prefix_caching=False,
             async_scheduling=False,
@@ -1438,6 +1441,7 @@ def test_separate_mtp_checkpoint_settings_reach_public_llm(
         max_model_len=128,
         max_num_seqs=2,
         max_num_batched_tokens=32,
+        enable_chunked_prefill=True,
         enforce_eager=True,
         enable_prefix_caching=False,
         async_scheduling=False,
