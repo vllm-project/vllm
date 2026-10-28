@@ -14,8 +14,9 @@ processor inserts ``mm:ss`` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import itertools
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -37,6 +38,11 @@ from transformers.models.gemma4.configuration_gemma4 import (
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -85,6 +91,11 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    scatter_output_slices,
+)
+from .vision import (
+    get_load_balance_assignment,
+    is_vit_use_data_parallel,
 )
 
 if TYPE_CHECKING:
@@ -1073,6 +1084,9 @@ class Gemma4ForConditionalGeneration(
         self._enable_mm_lora = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
+        self.use_data_parallel = is_vit_use_data_parallel(
+            config.vision_config.num_attention_heads
+        )
 
         # Only quantize towers when the quant method supports their
         # dimensions.  BNB/torchao handle arbitrary sizes; other methods
@@ -1294,10 +1308,118 @@ class Gemma4ForConditionalGeneration(
         return max(1, budget // cost) if cost > 0 else 1
 
     # ------------------------------------------------------------------ #
+    # Data-parallel ViT execution
+    # ------------------------------------------------------------------ #
+
+    def _dp_execute_and_gather(
+        self,
+        mm_kwargs: dict[str, Any],
+        process_fn: Callable[[dict[str, Any]], list[torch.Tensor]],
+    ) -> list[torch.Tensor]:
+        item_specs = self.get_encoder_cudagraph_item_specs(mm_kwargs)
+        total_items = len(item_specs)
+        if total_items == 0:
+            return []
+
+        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
+        per_item_input_sizes = [spec.input_size for spec in item_specs]
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        (image_rank_assignment, images_per_rank, _) = get_load_balance_assignment(
+            per_item_input_sizes, tp_size
+        )
+
+        cum_images_per_rank = [0, *itertools.accumulate(images_per_rank)]
+        local_indices = image_rank_assignment[
+            cum_images_per_rank[tp_rank] : cum_images_per_rank[tp_rank + 1]
+        ]
+
+        local_mm_kwargs = self.select_encoder_cudagraph_items(mm_kwargs, local_indices)
+        local_outputs = process_fn(local_mm_kwargs)
+
+        hidden_size = self.config.text_config.hidden_size
+        max_output_tokens_per_rank = max(
+            sum(
+                per_item_out_tokens[i]
+                for i in image_rank_assignment[
+                    cum_images_per_rank[r] : cum_images_per_rank[r + 1]
+                ]
+            )
+            for r in range(tp_size)
+        )
+
+        if len(local_outputs) > 0:
+            local_concat = torch.cat(local_outputs, dim=0)
+        else:
+            local_concat = torch.empty(
+                (0, hidden_size),
+                device=next(self.parameters()).device,
+                dtype=self.model_dtype,
+            )
+
+        current_len = local_concat.shape[0]
+        if current_len < max_output_tokens_per_rank:
+            padding = torch.empty(
+                (max_output_tokens_per_rank - current_len, hidden_size),
+                dtype=self.model_dtype,
+                device=local_concat.device,
+            )
+            local_padded = torch.cat([local_concat, padding], dim=0)
+        else:
+            local_padded = local_concat
+
+        gathered = tensor_model_parallel_all_gather(local_padded, dim=0)
+
+        rank_outputs: list[torch.Tensor] = []
+        current_idx = 0
+        for rank in range(tp_size):
+            start = rank * max_output_tokens_per_rank
+            rank_count = images_per_rank[rank]
+            rank_indices = image_rank_assignment[current_idx : current_idx + rank_count]
+            rank_tokens = sum(per_item_out_tokens[i] for i in rank_indices)
+            current_idx += rank_count
+            rank_outputs.append(gathered[start : start + rank_tokens])
+
+        result: list[torch.Tensor | None] = [None] * total_items
+        current_idx = 0
+        for rank in range(tp_size):
+            count = images_per_rank[rank]
+            if count > 0:
+                rank_items = image_rank_assignment[current_idx : current_idx + count]
+                scatter_output_slices(
+                    rank_outputs[rank],
+                    rank_items,
+                    per_item_out_tokens,
+                    result,
+                )
+                current_idx += count
+
+        return [res for res in result if res is not None]
+
+    # ------------------------------------------------------------------ #
     # Image processing
     # ------------------------------------------------------------------ #
 
     def _process_image_input(
+        self,
+        image_input: Gemma4ImageInputs,
+    ) -> list[torch.Tensor]:
+        if self.use_data_parallel and get_tensor_model_parallel_world_size() > 1:
+            raw_kwargs = {
+                "pixel_values": image_input["pixel_values"],
+                "pixel_position_ids": image_input["pixel_position_ids"],
+            }
+            return self._dp_execute_and_gather(
+                raw_kwargs,
+                lambda local_kwargs: self._process_image_input_local(
+                    Gemma4ImagePixelInputs(**local_kwargs)
+                ),
+            )
+        return self._process_image_input_local(image_input)
+
+    def _process_image_input_local(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
@@ -1324,6 +1446,8 @@ class Gemma4ForConditionalGeneration(
             if isinstance(pixel_values, list)
             else pixel_values.shape[0]
         )
+        if total_images == 0:
+            return []
         pool_position_ids = pixel_position_ids
 
         if self._enable_mm_lora:
@@ -1466,6 +1590,24 @@ class Gemma4ForConditionalGeneration(
         self,
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
+        if self.use_data_parallel and get_tensor_model_parallel_world_size() > 1:
+            raw_kwargs = {
+                "pixel_values_videos": video_input["pixel_values_videos"],
+                "pixel_position_ids_videos": video_input["pixel_position_ids_videos"],
+                "video_frame_counts": video_input["video_frame_counts"],
+            }
+            return self._dp_execute_and_gather(
+                raw_kwargs,
+                lambda local_kwargs: self._process_video_input_local(
+                    Gemma4VideoInputs(**local_kwargs)
+                ),
+            )
+        return self._process_video_input_local(video_input)
+
+    def _process_video_input_local(
+        self,
+        video_input: Gemma4VideoInputs,
+    ) -> list[torch.Tensor]:
         """Batch-encode video frames through the vision tower.
 
         Gemma4 has no separate video tower; video frames are images at
@@ -1493,6 +1635,8 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
+        if total_frames == 0 or len(fc_list) == 0:
+            return []
         free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
