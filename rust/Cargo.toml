@@ -44,7 +44,7 @@ easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
-fastokens = { version = "0.2.1", default-features = false }
+fastokens = { version = "0.3.5", default-features = false }
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
@@ -57,7 +57,7 @@ hyper-util = { version = "0.1.20", features = [
     "tokio",
 ] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
-indexmap = "2.13.0"
+indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
