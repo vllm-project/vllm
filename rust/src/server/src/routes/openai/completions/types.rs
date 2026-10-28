@@ -287,6 +287,8 @@ pub(super) struct CompletionStreamResponse {
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl CompletionStreamResponse {
@@ -297,6 +299,7 @@ impl CompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            kv_transfer_params: None,
         }
     }
 }
