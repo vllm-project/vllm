@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x Triton post-expert finalize kernel."""
+"""MuseSpark1x post-expert finalize kernels: CuTe-DSL and Triton."""
 
 import pytest
 import torch
 
 from vllm.models.muse_spark.common.ops.fused_finalize import (
     fused_post_expert_finalize,
+)
+from vllm.models.muse_spark.nvidia.ops.cute_dsl.moe_finalize_rmsnorm import (
+    moe_finalize_with_rmsnorm,
+    supports_moe_finalize,
+)
+from vllm.platforms import current_platform
+
+requires_cutedsl_finalize = pytest.mark.skipif(
+    not (
+        current_platform.has_device_capability(100)
+        and supports_moe_finalize(torch.bfloat16, 4096)
+    ),
+    reason="Requires the SM100+ CuTe-DSL MoE finalize",
 )
 
 
@@ -20,6 +33,97 @@ def _ref_finalize(rows, norm_weight, weights, eps, weight_first, gain_center=1.0
     if not weight_first:
         y = y * gain
     return (y * weights.float()[..., None]).sum(1)
+
+
+# 2048 is the widest row served by a single warp; wider rows reduce through
+# shared memory. MuseSpark1x's compressed MoE hidden dim is 4096.
+@requires_cutedsl_finalize
+@pytest.mark.parametrize("hidden_dim", [2048, 4096])
+@pytest.mark.parametrize("weight_before_norm", [False, True])
+def test_masked_slots_never_produce_nan(
+    hidden_dim: int, weight_before_norm: bool
+) -> None:
+    """An EP rank that owns no expert in the batch must contribute exactly zero.
+
+    Its unwritten workspace holds arbitrary bits and ``NaN * 0`` is NaN, so
+    zero-weighting the rows is not enough.
+    """
+    dtype = torch.bfloat16
+    topk = 8
+    num_tokens, rows_total = 5, 40
+    # Uniform bf16 bit patterns: ~0.4% are NaN/Inf, so a row this wide almost
+    # surely holds one.
+    gemm2_output = (
+        torch.randint(
+            0, 65536, (rows_total, hidden_dim), device="cuda", dtype=torch.int32
+        )
+        .to(torch.int16)
+        .view(dtype)
+    )
+    expert_weights = torch.randn((num_tokens, topk), device="cuda", dtype=dtype)
+    permuted_idx = torch.full((num_tokens, topk), -1, device="cuda", dtype=torch.int32)
+    rms_norm_weight = torch.randn(hidden_dim, device="cuda", dtype=dtype) * 0.1
+    output = torch.empty((num_tokens, hidden_dim), device="cuda", dtype=dtype)
+
+    moe_finalize_with_rmsnorm(
+        gemm2_output,
+        expert_weights,
+        permuted_idx,
+        rms_norm_weight,
+        output,
+        topk=topk,
+        eps=1e-6,
+        weight_before_norm=weight_before_norm,
+    )
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(output, torch.zeros_like(output), rtol=0, atol=0)
+
+
+@requires_cutedsl_finalize
+@pytest.mark.parametrize("weight_before_norm", [False, True])
+def test_fp32_routing_weights_match_bf16(weight_before_norm: bool) -> None:
+    """fp32 routing weights are read as-is, not rounded to the activation dtype."""
+    dtype = torch.bfloat16
+    hidden_dim, topk, rows = 4096, 8, 17
+    torch.manual_seed(0)
+    gemm2_output = torch.randn(rows * topk, hidden_dim, device="cuda", dtype=dtype)
+    weights_fp32 = torch.rand((rows, topk), device="cuda", dtype=torch.float32)
+    permuted_idx = torch.arange(rows * topk, device="cuda", dtype=torch.int32).view(
+        rows, topk
+    )
+    rms_norm_weight = torch.randn(hidden_dim, device="cuda", dtype=dtype) * 0.1
+
+    def run(weights: torch.Tensor) -> torch.Tensor:
+        out = torch.empty((rows, hidden_dim), device="cuda", dtype=dtype)
+        moe_finalize_with_rmsnorm(
+            gemm2_output,
+            weights,
+            permuted_idx,
+            rms_norm_weight,
+            out,
+            topk=topk,
+            eps=1e-6,
+            weight_before_norm=weight_before_norm,
+        )
+        return out
+
+    got = run(weights_fp32)
+    rounded = run(weights_fp32.to(dtype))
+    ref = _ref_finalize(
+        gemm2_output.view(rows, topk, hidden_dim),
+        rms_norm_weight,
+        weights_fp32,
+        1e-6,
+        weight_before_norm,
+        gain_center=0.0,
+    )
+
+    err_fp32 = (got.float() - ref).abs().max().item()
+    err_rounded = (rounded.float() - ref).abs().max().item()
+    # bf16 weights carry ~3 decimal digits, so rounding them is the larger error.
+    assert err_fp32 <= err_rounded, f"fp32 {err_fp32} should beat bf16 {err_rounded}"
+    torch.testing.assert_close(got, ref.to(dtype), rtol=0.02, atol=0.02)
 
 
 _SHAPES = [(4096, 8), (8192, 9), (513, 3)]  # tiled, looped, masked-column kernel
