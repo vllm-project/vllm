@@ -328,6 +328,41 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
     assert scheduled_chunks == [8192, 3200, 8192, 3200, 7216]
 
 
+def test_mamba_align_split_fills_the_step_budget_with_large_blocks():
+    """With a block over a third of the budget, a second prefill takes what the
+    first leaves short of its boundary, and re-aligns on its next step."""
+    block_size = 3000
+    token_budget = 8192
+    mock = SimpleNamespace(
+        block_size=block_size,
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=token_budget,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
+        hash_block_size=32,
+        mamba_partial_cache_hit=False,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=False,
+    )
+    first = make_request("0", [0] * 20000, 32, sha256)
+    second = make_request("1", [0] * 20000, 32, sha256)
+    split = Scheduler._mamba_block_aligned_split
+
+    first_tokens = split(self=mock, request=first, num_new_tokens=token_budget)
+    assert first_tokens == 2 * block_size
+    second_tokens = split(
+        self=mock, request=second, num_new_tokens=token_budget - first_tokens
+    )
+    assert first_tokens + second_tokens == token_budget
+
+    second.num_computed_tokens = second_tokens
+    assert (
+        split(self=mock, request=second, num_new_tokens=token_budget)
+        == block_size - second_tokens
+    )
+
+
 def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
     """A long-prefill cap below the block size permits sub-block progress."""
     block_size = 512
