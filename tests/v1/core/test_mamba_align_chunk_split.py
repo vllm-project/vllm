@@ -19,7 +19,10 @@ from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import init_none_hash
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler import (
+    MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR,
+    Scheduler,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -192,15 +195,15 @@ def test_internal_checkpoint_split(
     ("token_budget", "expected"),
     [
         (16384, 0),
-        (4 * MAMBA_BLOCK_SIZE, 0),
-        (4 * MAMBA_BLOCK_SIZE - 1, 512),
+        (MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR * MAMBA_BLOCK_SIZE, 0),
+        (MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR * MAMBA_BLOCK_SIZE - 1, 512),
     ],
 )
-def test_sub_block_chunk_only_when_block_exceeds_quarter_of_budget(
+def test_sub_block_chunk_only_when_block_exceeds_budget_fraction(
     token_budget: int, expected: int
 ) -> None:
     """A chunk that cannot reach its block boundary is deferred unless the block
-    is more than a quarter of the prefill budget."""
+    is more than 1 / MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR of the prefill budget."""
     (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
     assert (
         _split(request, 512, use_eagle=False, max_num_scheduled_tokens=token_budget)
