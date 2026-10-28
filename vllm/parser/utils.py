@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.parser.engine.parser_engine_config import ArgValueExtender
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
@@ -98,19 +99,14 @@ def scan_json_object_end(raw: str, start: int) -> int | None:
     return None
 
 
-def extract_json_member_object(raw: str, key: str) -> str | None:
-    """Extract the raw text span of the top-level object-valued member ``key``
-    from a (possibly incomplete) ``{...}`` JSON wrapper.
+def _find_json_member_object_start(raw: str, key: str) -> int | None:
+    """Return the start index of the top-level object member ``key`` in ``raw``,
+    or ``None`` when the member's value has not started.
 
-    Returns the verbatim substring (prefix-stable as the input grows, which
-    the engine's argument-delta diffing relies on), possibly an unterminated
-    object prefix; ``None`` when the value has not started. Raises
-    ``ValueError`` when the member is present but its value is not a JSON
-    object. A verbatim substring (not re-serialized JSON) is required because
-    the engine diffs successive converter outputs and expects each to extend
-    the previous one; the scanner is string/escape-aware so a matching literal
-    inside another value cannot mislead it, and it recovers a partial span when
-    the wrapper is truncated (where ``json.loads`` would fail)."""
+    Raises:
+        ValueError: If ``key`` is present at top level with a non-object value.
+
+    """
     depth = 0
     in_string = False
     escape = False
@@ -139,12 +135,130 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
                 return None
             if raw[value_start] != "{":
                 raise ValueError(f"member {key!r} must be a JSON object")
-            value_end = scan_json_object_end(raw, value_start)
-            if value_end is None:
-                return raw[value_start:]
-            return raw[value_start:value_end]
+            return value_start
         elif ch in "{[":
             depth += 1
         elif ch in "}]":
             depth -= 1
     return None
+
+
+def extract_json_member_object(raw: str, key: str) -> str | None:
+    """Extract the raw text span of the top-level object-valued member ``key``
+    from a (possibly incomplete) ``{...}`` JSON wrapper.
+
+    Returns the verbatim substring (prefix-stable as the input grows, which
+    the engine's argument-delta diffing relies on), possibly an unterminated
+    object prefix; ``None`` when the value has not started. Raises
+    ``ValueError`` when the member is present but its value is not a JSON
+    object. A verbatim substring (not re-serialized JSON) is required because
+    the engine diffs successive converter outputs and expects each to extend
+    the previous one; the scanner is string/escape-aware so a matching literal
+    inside another value cannot mislead it, and it recovers a partial span when
+    the wrapper is truncated (where ``json.loads`` would fail)."""
+    value_start = _find_json_member_object_start(raw, key)
+    if value_start is None:
+        return None
+    value_end = scan_json_object_end(raw, value_start)
+    if value_end is None:
+        return raw[value_start:]
+    return raw[value_start:value_end]
+
+
+def scan_json_value_extender(raw: str, start: int = 0) -> ArgValueExtender | None:
+    """Return an ``O(|delta|)`` extender when the JSON object starting at
+    ``raw[start]`` is still open and ends inside a string value.
+
+    While streaming inside a top-level string value of the object, raw delta
+    characters up to an unescaped closing ``"`` extend the safe prefix
+    directly; inside a nested string at ``depth >= 2`` (where
+    ``open_value_streams`` is ``False``), the same extender skips per-character
+    conversion until the string closes.
+
+    Args:
+        raw: Buffer containing the (possibly incomplete) JSON text.
+        start: Index of the opening ``{`` of the JSON object in ``raw``.
+
+    Returns:
+        An ``ArgValueExtender`` closure if ``raw`` ends inside an open string
+        value of the object at ``raw[start:]``, or ``None`` otherwise.
+
+    """
+    if start >= len(raw) or raw[start] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    after_colon = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+                if depth == 1:
+                    after_colon = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                return None
+            if depth == 1:
+                after_colon = False
+        elif depth == 1:
+            if ch == ":":
+                after_colon = True
+            elif ch not in _JSON_WS:
+                after_colon = False
+
+    if not (depth >= 1 and after_colon and in_string):
+        return None
+
+    pending_escape = escape
+
+    def extend(delta: str) -> str | None:
+        nonlocal pending_escape
+        esc = pending_escape
+        for ch in delta:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                return None
+        pending_escape = esc
+        return delta
+
+    return extend
+
+
+def json_member_value_extender(raw: str, key: str) -> ArgValueExtender | None:
+    """Return an ``O(|delta|)`` extender when the top-level object member
+    ``key`` in ``raw`` ends inside an open JSON string value.
+
+    Args:
+        raw: Tool-call wrapper JSON prefix (e.g. ``{"name":..,"arguments":{..``).
+        key: Top-level member name whose JSON object holds the tool arguments.
+
+    Returns:
+        An ``ArgValueExtender`` closure if ``key``'s object value is open inside
+        a string value, or ``None`` otherwise.
+
+    """
+    try:
+        value_start = _find_json_member_object_start(raw, key)
+    except ValueError:
+        return None
+    if value_start is None:
+        return None
+    return scan_json_value_extender(raw, value_start)

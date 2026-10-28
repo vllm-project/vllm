@@ -9,6 +9,7 @@ engine's ``tool_call_body_array`` mode splits the array into one call per
 element and ``_granite_arg_converter`` carves each element's ``arguments``.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -21,6 +22,7 @@ from vllm.parser.granite import (
     _granite_arg_value_extender,
     granite_config,
 )
+from vllm.parser.utils import scan_json_value_extender
 
 TOOL_TOKEN = "<|tool_call|>"
 TOOL_STRING = "<tool_call>"
@@ -143,47 +145,95 @@ class TestArgConverter:
             _granite_arg_converter('{"name": "x", "arguments": [1]}', False)
 
 
-class TestArgValueExtender:
-    def test_unit_positions(self):
-        # Not inside an argument value string -> None.
-        assert _granite_arg_value_extender("") is None
-        assert _granite_arg_value_extender('{"name": "fn') is None
-        assert _granite_arg_value_extender('{"name": "fn", "arguments": {') is None
-        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k') is None
-        assert (
-            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": "v", "k2')
-            is None
-        )
-        assert (
-            _granite_arg_value_extender(
-                '{"name": "fn", "arguments": {"k": {"a": "b"}, "k2'
-            )
-            is None
-        )
-        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ') is None
-        assert (
-            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": 12') is None
-        )
-        assert (
-            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": "v"}}')
-            is None
-        )
-        assert _granite_arg_value_extender('{"name": "fn", "arguments": [1') is None
+_EXTENDER_EQUIVALENCE_OUTPUTS = [
+    (
+        f'{TOOL_TOKEN} [{{"name": "get_weather", '
+        f'"arguments": {{"city": "San Francisco", "unit": "celsius"}}}}]'
+    ),
+    (
+        f'{TOOL_TOKEN} [{{"name": "write", '
+        f'"arguments": {{"path": "a.py", '
+        f'"content": "line 1\\nprint(\\"hello\\\\world\\")\\n", '
+        f'"mode": "w"}}}}]'
+    ),
+    (
+        f'{TOOL_TOKEN} [{{"name": "edit", '
+        f'"arguments": {{"edits": [{{"path": "a.py", "text": "x = \\"1\\""}}], '
+        f'"dry_run": false, "count": 2}}}}]'
+    ),
+    (
+        f'{TOOL_TOKEN} [{{"name": "get_weather", "arguments": {{"city": "Tokyo"}}}}, '
+        f'{{"name": "get_time", "arguments": {{"timezone": "Asia/Tokyo"}}}}]'
+    ),
+    (
+        f"Let me check.\n{TOOL_STRING} "
+        f'[{{"name": "get_weather", "arguments": {{"city": "SF"}}}}]'
+    ),
+    f'{TOOL_TOKEN} [{{"arguments": {{"query": "select * from t"}}, "name": "sql"}}]',
+    (
+        f'{TOOL_TOKEN} [{{"name": "write", '
+        f'"arguments": {{"content": "partial with \\"escape\\" and trailing'
+    ),
+    (
+        f'{TOOL_TOKEN} [{{"name": "edit", '
+        f'"arguments": {{"edits": [{{"text": "nested partial'
+    ),
+]
 
-        # Open nested strings at depth >= 2 also return an extender so
-        # per-character streaming does not re-scan the full buffer; the engine
-        # drops its output because ``open_value_streams`` is False there.
-        for nested_raw in (
+
+class TestArgValueExtender:
+    @staticmethod
+    def _make_parser(mock_tokenizer, *, use_extender: bool) -> GraniteParser:
+        config = granite_config()
+        if not use_extender:
+            config = dataclasses.replace(config, arg_value_extender=None)
+        return GraniteParser(mock_tokenizer, parser_engine_config=config)
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            "",
+            '{"name": "fn',
+            '{"name": "fn", "arguments": {',
+            '{"name": "fn", "arguments": {"k',
+            '{"name": "fn", "arguments": {"k": "v", "k2',
+            '{"name": "fn", "arguments": {"k": {"a": "b"}, "k2',
+            '{"name": "fn", "arguments": {"k": ',
+            '{"name": "fn", "arguments": {"k": 12',
+            '{"name": "fn", "arguments": {"k": "v"}}',
+            '{"name": "fn", "arguments": [1',
+        ],
+        ids=[
+            "empty",
+            "open_wrapper_name",
+            "open_arguments_object",
+            "open_top_level_key",
+            "open_second_key_after_string",
+            "open_second_key_after_nested_object",
+            "after_colon_before_value",
+            "numeric_value",
+            "closed_arguments_object",
+            "non_object_arguments",
+        ],
+    )
+    def test_returns_none_outside_open_value_string(self, raw_args):
+        assert _granite_arg_value_extender(raw_args) is None
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
             '{"name": "fn", "arguments": {"k": {"nested": "v',
             '{"name": "fn", "arguments": {"k": ["v',
-        ):
-            nested_ext = _granite_arg_value_extender(nested_raw)
-            assert nested_ext is not None
-            assert nested_ext("more") == "more"
-            assert nested_ext('end"') is None
+        ],
+        ids=["nested_object", "nested_array"],
+    )
+    def test_extends_open_nested_string_value(self, raw_args):
+        nested_ext = _granite_arg_value_extender(raw_args)
+        assert nested_ext is not None
+        assert nested_ext("more") == "more"
+        assert nested_ext('end"') is None
 
-        # Open top-level string value -> extender handles plain text & escapes,
-        # bail-outs on unescaped closing quote.
+    def test_extends_open_top_level_string_value_and_escapes(self):
         ext = _granite_arg_value_extender(
             '{"name": "fn", "arguments": {"code": "hello '
         )
@@ -194,55 +244,115 @@ class TestArgValueExtender:
         assert ext('"still_escaped') == '"still_escaped'
         assert ext('done"') is None
 
+    def test_scan_json_value_extender_rejects_non_object_start(self):
+        assert scan_json_value_extender("") is None
+        assert scan_json_value_extender('["x', 0) is None
+
+    @pytest.mark.parametrize("nested", [False, True], ids=["top_level", "nested"])
     def test_long_string_arg_calls_converter_constantly(
-        self, mock_tokenizer, mock_request, monkeypatch
+        self, mock_tokenizer, mock_request, nested
     ):
-        calls = 0
+        base = granite_config()
+        counts: dict[int, int] = {}
+        for n_lines in (20, 200):
+            calls = 0
 
-        def counting_converter(raw: str, partial: bool) -> str:
-            nonlocal calls
-            calls += 1
-            return _granite_arg_converter(raw, partial)
+            def counting_converter(raw: str, partial: bool) -> str:
+                nonlocal calls
+                calls += 1
+                return _granite_arg_converter(raw, partial)
 
-        granite_config.cache_clear()
-        monkeypatch.setattr(
-            "vllm.parser.granite._granite_arg_converter", counting_converter
+            body = "\\n".join(
+                f"line {i}: x = {i} + \\\"quoted\\\" + 'single'" for i in range(n_lines)
+            )
+            expected_body = "\n".join(
+                f"line {i}: x = {i} + \"quoted\" + 'single'" for i in range(n_lines)
+            )
+            if nested:
+                text = (
+                    f'{TOOL_TOKEN} [{{"name": "edit", '
+                    f'"arguments": {{"edits": '
+                    f'[{{"path": "a.py", "text": "{body}"}}]}}}}]'
+                )
+                expected = {"edits": [{"path": "a.py", "text": expected_body}]}
+            else:
+                text = (
+                    f'{TOOL_TOKEN} [{{"name": "write", '
+                    f'"arguments": {{"content": "{body}", "mode": "w"}}}}]'
+                )
+                expected = {"content": expected_body, "mode": "w"}
+            p = GraniteParser(
+                mock_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            results = _stream(p, mock_request, text, chunk_size=1)
+            args = _collect_args(results)
+            assert json.loads(args[0]) == expected
+            counts[n_lines] = calls
+        assert counts[200] == counts[20]
+
+    @pytest.mark.parametrize("text", _EXTENDER_EQUIVALENCE_OUTPUTS)
+    def test_parse_matches_without_extender(self, mock_tokenizer, mock_request, text):
+        with_ext = self._make_parser(mock_tokenizer, use_extender=True)
+        without_ext = self._make_parser(mock_tokenizer, use_extender=False)
+
+        r_with, c_with, tools_with = with_ext.parse(text, mock_request)
+        r_without, c_without, tools_without = without_ext.parse(text, mock_request)
+        assert r_with == r_without
+        assert c_with == c_without
+        assert [(t.name, t.arguments) for t in (tools_with or [])] == [
+            (t.name, t.arguments) for t in (tools_without or [])
+        ]
+
+        ext_with = with_ext.extract_tool_calls(text, mock_request)
+        ext_without = without_ext.extract_tool_calls(text, mock_request)
+        assert ext_with.tools_called == ext_without.tools_called
+        assert ext_with.content == ext_without.content
+        assert [
+            (t.function.name, t.function.arguments) for t in ext_with.tool_calls
+        ] == [(t.function.name, t.function.arguments) for t in ext_without.tool_calls]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 5, 13])
+    @pytest.mark.parametrize("text", _EXTENDER_EQUIVALENCE_OUTPUTS)
+    def test_streaming_matches_without_extender(
+        self, mock_tokenizer, mock_request, text, chunk_size
+    ):
+        with_ext = _stream(
+            self._make_parser(mock_tokenizer, use_extender=True),
+            mock_request,
+            text,
+            chunk_size,
         )
-        try:
-            for nested in (False, True):
-                counts: dict[int, int] = {}
-                for n_lines in (20, 200):
-                    calls = 0
-                    body = "\\n".join(
-                        f"line {i}: x = {i} + \\\"quoted\\\" + 'single'"
-                        for i in range(n_lines)
-                    )
-                    expected_body = "\n".join(
-                        f"line {i}: x = {i} + \"quoted\" + 'single'"
-                        for i in range(n_lines)
-                    )
-                    if nested:
-                        text = (
-                            f'{TOOL_TOKEN} [{{"name": "edit", '
-                            f'"arguments": {{"edits": '
-                            f'[{{"path": "a.py", "text": "{body}"}}]}}}}]'
-                        )
-                        expected = {"edits": [{"path": "a.py", "text": expected_body}]}
-                    else:
-                        text = (
-                            f'{TOOL_TOKEN} [{{"name": "write", '
-                            f'"arguments": {{"content": "{body}", "mode": "w"}}}}]'
-                        )
-                        expected = {"content": expected_body, "mode": "w"}
-                    p = GraniteParser(mock_tokenizer)
-                    results = _stream(p, mock_request, text, chunk_size=1)
-                    args = _collect_args(results)
-                    assert json.loads(args[0]) == expected
-                    counts[n_lines] = calls
-                # A 10x longer string value must not trigger any extra converter calls.
-                assert counts[200] == counts[20]
-        finally:
-            granite_config.cache_clear()
+        without_ext = _stream(
+            self._make_parser(mock_tokenizer, use_extender=False),
+            mock_request,
+            text,
+            chunk_size,
+        )
+
+        assert _collect_content(with_ext) == _collect_content(without_ext)
+        assert _collect_names(with_ext) == _collect_names(without_ext)
+        assert _collect_args(with_ext) == _collect_args(without_ext)
+
+        def normalize_deltas(deltas):
+            return [
+                None
+                if d is None
+                else (
+                    d.reasoning,
+                    d.content,
+                    [
+                        (tc.index, tc.function.name, tc.function.arguments)
+                        for tc in (d.tool_calls or [])
+                        if tc.function
+                    ],
+                )
+                for d in deltas
+            ]
+
+        assert normalize_deltas(with_ext) == normalize_deltas(without_ext)
 
 
 class TestNonStreaming:
