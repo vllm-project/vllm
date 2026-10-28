@@ -360,6 +360,9 @@ def test_context_attention_non_contiguous_heads(D: int):
         q, k, v, o, b_start_loc, seq_lens, S, is_causal=True, sliding_window_q=None
     )
 
+    # SDPA's flash backend on CUDA assumes 16-byte aligned strides, so the
+    # reference gets contiguous copies; only the kernel sees the padded views.
+    q, k, v = (t.contiguous() for t in (q, k, v))
     o_ref = torch.zeros_like(o)
     for i in range(B):
         start = b_start_loc[i].item()
