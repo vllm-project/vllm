@@ -11,6 +11,7 @@ single Triton launch. See :func:`fused_qk_rmsnorm_rope_gate`.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -135,7 +136,7 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
         tl.store(gate_out_base + head_offs, g, mask=head_mask)
 
 
-def fused_qk_rmsnorm_rope_gate(
+def _fused_qk_rmsnorm_rope_gate(
     q_gate: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
@@ -147,7 +148,7 @@ def fused_qk_rmsnorm_rope_gate(
     num_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
-    mrope_section: list[int] | tuple[int, int, int] | None = None,
+    mrope_section: list[int] | None = None,
     norm_beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused split + QK-RMSNorm + (partial) RoPE + gate copy for Qwen attn.
@@ -277,3 +278,33 @@ def fused_qk_rmsnorm_rope_gate(
         num_stages=2,
     )
     return q_out, k_out, gate_out
+
+
+def _fused_qk_rmsnorm_rope_gate_fake(
+    q_gate: torch.Tensor,
+    k: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    eps: float,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    mrope_section: list[int] | None = None,
+    norm_beta: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    q_out = q_gate.new_empty((q_gate.shape[0], num_q_heads * head_dim))
+    k_out = k.new_empty((k.shape[0], num_kv_heads * head_dim))
+    return q_out, k_out, torch.empty_like(q_out)
+
+
+# Registered as a custom op so compiled graphs reference it by name instead of
+# a per-process Triton kernel side-table index, which breaks AOT cache loading.
+direct_register_custom_op(
+    op_name="fused_qk_rmsnorm_rope_gate",
+    op_func=_fused_qk_rmsnorm_rope_gate,
+    fake_impl=_fused_qk_rmsnorm_rope_gate_fake,
+)
+fused_qk_rmsnorm_rope_gate = torch.ops.vllm.fused_qk_rmsnorm_rope_gate
