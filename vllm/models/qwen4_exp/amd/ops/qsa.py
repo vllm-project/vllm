@@ -889,18 +889,21 @@ def qsa_sparse_paged_attention(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
     mxfp4_dot_scaled: bool | None = None,
     mxfp4_hw_cvt: bool | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16, FP8, or mxfp4_qsa K/V caches.
 
-    An mxfp4_qsa cache is one ``[blocks, tokens, heads, record_bytes]`` uint8
-    view holding both K and V; pass it as ``k_cache`` and ``v_cache``.
+    An mxfp4_qsa cache (``is_mxfp4=True``) is one ``[blocks, tokens, heads,
+    record_bytes]`` uint8 view holding both K and V; pass it as ``k_cache`` and
+    ``v_cache``.
     """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA sparse attention requires a GPU and Triton")
-    is_mxfp4 = k_cache.dtype == torch.uint8
     if is_mxfp4:
+        if k_cache.dtype != torch.uint8:
+            raise ValueError("an mxfp4_qsa cache is a uint8 view")
         if v_cache is not k_cache:
             raise ValueError("an mxfp4_qsa cache holds K and V in one view")
         mxfp4_records = block_records(k_cache)

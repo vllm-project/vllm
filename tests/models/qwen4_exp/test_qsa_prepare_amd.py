@@ -118,6 +118,7 @@ def _make_main_inputs(num_tokens: int, main_kv: str = "auto") -> dict:
         main_k_norm_weight=norm_weights[1],
         main_eps=EPS,
         main_kv_cache=cache,
+        main_is_mxfp4=main_kv == "mxfp4_qsa",
         main_slot_mapping=slots,
         main_k_scale=0.5 if main_fp8 else 1.0,
         main_v_scale=2.0 if main_fp8 else 1.0,

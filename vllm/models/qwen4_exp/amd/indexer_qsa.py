@@ -348,6 +348,7 @@ class QSAIndexer(nn.Module):
             main_k_norm_weight=attn.k_norm.weight,
             main_eps=attn.q_norm.variance_epsilon,
             main_kv_cache=main_kv_cache,
+            main_is_mxfp4=attn.kv_cache_dtype == "mxfp4_qsa",
             main_slot_mapping=slot_mapping[:num_tokens],
             main_k_scale=attn._k_scale_float,
             main_v_scale=attn._v_scale_float,

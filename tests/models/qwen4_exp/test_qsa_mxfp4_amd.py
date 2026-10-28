@@ -265,6 +265,7 @@ def test_sparse_attention_matches_dequantized_reference(
         logical_indices,
         block_table,
         token_to_req,
+        is_mxfp4=True,
         mxfp4_dot_scaled=dot_scaled,
         mxfp4_hw_cvt=hw_cvt,
     )

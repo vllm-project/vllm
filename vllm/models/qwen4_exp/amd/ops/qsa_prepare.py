@@ -630,16 +630,19 @@ def qsa_prepare(
     main_k_scale: float,
     main_v_scale: float,
     main_gate_out: torch.Tensor | None = None,
+    main_is_mxfp4: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
     and returns its Q and gate. ``main_gate_out`` lets the gate land in a
     caller-owned buffer, e.g. one that outlives an opaque custom op.
+    ``main_is_mxfp4`` marks ``main_kv_cache`` as an mxfp4_qsa uint8 view.
     """
     num_tokens = q.shape[0]
-    main_mxfp4 = main_kv_cache.dtype == torch.uint8
-    if main_mxfp4:
+    # A uint8 cache is mxfp4_qsa only when flagged; fp8 callers pass an fp8 view.
+    assert (main_kv_cache.dtype == torch.uint8) == main_is_mxfp4
+    if main_is_mxfp4:
         main_head_dim = head_dim_from_record_bytes(main_kv_cache.shape[-1])
         main_block_records = block_records(main_kv_cache)
     else:
@@ -754,7 +757,7 @@ def qsa_prepare(
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
-        MAIN_MXFP4=main_mxfp4,
+        MAIN_MXFP4=main_is_mxfp4,
         MAIN_BLOCK_RECORDS=main_block_records,
         num_warps=1,
     )

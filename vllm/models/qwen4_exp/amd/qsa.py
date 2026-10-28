@@ -420,6 +420,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 attn_metadata.block_table,
                 token_to_req,
                 output[:num_tokens],
+                is_mxfp4=True,
             )
             return output
         if self.octave_fmt is not None:
