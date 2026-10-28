@@ -29,14 +29,16 @@
 //! with `<|eom|>`, e.g. writing `to=FUNCTION<|message|>` straight after its
 //! reasoning when calling a tool with empty arguments. Since `<|start|>` and
 //! `<|message|>` never occur inside a body, either one also ends the current
-//! segment and starts the next.
+//! segment and starts the next. It sometimes omits the last
+//! `</atem:parameter>` too, so a parameter value can also end where its invoke
+//! closes.
 
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, peek, preceded, repeat, seq};
+use winnow::combinator::{alt, delimited, eof, peek, preceded, repeat, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::Partial;
@@ -464,12 +466,25 @@ fn atem_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: (ws0, literal(PARAMETER_OPEN), ws1, literal("name"), literal("=")),
         atem_attr_value,
         _: (take_until(0.., ">"), literal(">")),
-        take_until(0.., PARAMETER_CLOSE),
-        _: literal(PARAMETER_CLOSE),
+        atem_parameter_value,
     )
     .parse_next(input)?;
 
     Ok((name, raw.to_string()))
+}
+
+/// Parse one parameter value through `</atem:parameter>`, or up to
+/// `</atem:invoke>` when that tag is missing. A value that ends at the invoke
+/// drops one trailing newline.
+fn atem_parameter_value<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
+    alt((
+        terminated(
+            take_until(0.., PARAMETER_CLOSE).verify(|value: &str| !value.contains(INVOKE_CLOSE)),
+            literal(PARAMETER_CLOSE),
+        ),
+        take_until(0.., INVOKE_CLOSE).map(|value: &str| value.strip_suffix('\n').unwrap_or(value)),
+    ))
+    .parse_next(input)
 }
 
 /// Parse one ATEM attribute value, double/single-quoted or bare.
@@ -732,6 +747,81 @@ mod tests {
                 "hours": [8, 20],
                 "note": "not json {",
             })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_ends_at_invoke_close() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             </atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_after_closed_one() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             <atem:parameter name=\"limit\">10\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket", "limit": 10 })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_parameter_stays_inside_its_invoke() {
+        let text = format!(
+            " to=cite{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"cite\">\n\
+             <atem:parameter name=\"chunk_ids\">[\"07657059-389d-4601\"]</atem:invoke>\n\
+             <atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket</atem:parameter>\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({ "chunk_ids": ["07657059-389d-4601"] })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[1].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
+        );
+    }
+
+    #[test]
+    fn muse_unclosed_last_string_parameter_drops_separator_newline() {
+        let text = format!(
+            " to=search{MESSAGE}<atem:function_calls>\n<atem:invoke name=\"search\">\n\
+             <atem:parameter name=\"query\">foosball bracket\n\
+             </atem:invoke>\n</atem:function_calls>{EOT}"
+        );
+
+        let output = test_parser().parse_complete(&text).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "query": "foosball bracket" })
         );
     }
 

@@ -601,6 +601,8 @@ The parsers route `to=self` and recipient-less messages to reasoning,
 `to=user` and `to=commentary` messages to content, and tool recipients to
 ATEM tool-call extraction. `to=developer` messages are omitted. Framing
 special tokens are preserved for parsing and removed from surfaced content.
+When a call's last parameter has no closing `</atem:parameter>`, its value
+ends at `</atem:invoke>`.
 
 The Rust frontend also provides a Muse unified parser under `muse` and
 `musespark1x`, and selects it automatically for Muse Spark model names.
