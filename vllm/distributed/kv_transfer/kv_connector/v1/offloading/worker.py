@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
+    TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
@@ -61,6 +62,7 @@ class OffloadingConnectorWorker:
         # job_id -> req_id for in-flight loads (None for sync loads).
         self._load_jobs: dict[int, ReqId | None] = {}
         self._failed_recving: set[ReqId] = set()
+        self._unsubmitted_load_jobs: dict[int, TransferJob] = {}
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -246,6 +248,7 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+        assert not self._unsubmitted_load_jobs
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
@@ -253,19 +256,15 @@ class OffloadingConnectorWorker:
 
         sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
+            if not entry.sync:
+                self._unsubmitted_load_jobs[job_id] = entry
+                continue
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            if entry.sync:
-                # Its request already runs this step: no finished_recving.
-                sync_job_ids.add(job_id)
-                self._load_jobs[job_id] = None
-                success = self.worker.submit_load(
-                    job_id, entry.src_spec, entry.dst_spec, expedited=True
-                )
-            else:
-                self._load_jobs[job_id] = entry.req_id
-                success = self.worker.submit_load(
-                    job_id, entry.src_spec, entry.dst_spec
-                )
+            sync_job_ids.add(job_id)
+            self._load_jobs[job_id] = None
+            success = self.worker.submit_load(
+                job_id, entry.src_spec, entry.dst_spec, expedited=True
+            )
             assert success
         if sync_job_ids:
             self.worker.wait(sync_job_ids)
@@ -295,6 +294,12 @@ class OffloadingConnectorWorker:
 
         """
         assert self.worker is not None
+        for job_id, entry in self._unsubmitted_load_jobs.items():
+            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            self._load_jobs[job_id] = entry.req_id
+            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+            assert success
+        self._unsubmitted_load_jobs.clear()
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             job_id = transfer_result.job_id
@@ -344,6 +349,7 @@ class OffloadingConnectorWorker:
         return meta
 
     def shutdown(self) -> None:
+        self._unsubmitted_load_jobs.clear()
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
         self._failed_recving.clear()
