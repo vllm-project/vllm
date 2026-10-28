@@ -10,6 +10,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
+- [AdaFlash](https://huggingface.co/AdaFlash/Qwen3-8B-AdaFlash) (DFlash drafter for Qwen3-8B, served with `method: dflash`)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
@@ -190,7 +191,6 @@ vllm serve <target-model> \
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
 - `use_heterogeneous_vocab` currently supports greedy draft sampling only. Probabilistic acceptance (temperature > 0 draft sampling) is not yet supported and will be added in a future release.
-- [AdaFlash](https://huggingface.co/AdaFlash/Qwen3-8B-AdaFlash) drafters (`Qwen/Qwen3-8B`) are served with `method: dflash`. Verification uses the fixed `num_speculative_tokens`.
 
 ## Lossless guarantees of Speculative Decoding
 
