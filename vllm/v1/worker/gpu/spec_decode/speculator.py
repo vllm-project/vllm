@@ -612,6 +612,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
+            max_query_len=num_query_per_req,
             eager=False,
         ), num_batch_tokens
 
