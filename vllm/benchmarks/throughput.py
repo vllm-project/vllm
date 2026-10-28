@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     BenchmarkDataset,
+    RandomDataset,
     SampleRequest,
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
@@ -539,16 +540,22 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     """
     d = vars(args).copy()
-    # random_*: prefer --random-* over legacy --input/output/prefix-len.
-    # Callers without the legacy flags (e.g. bench mm-processor) omit them, so
-    # read them optionally. Identity checks, not truthiness: an explicit 0
-    # (the default of --random-prefix-len) must not fall through to them.
+    # random_*: prefer --random-* over legacy --input/output/prefix-len, then
+    # the RandomDataset defaults. Callers without the legacy flags (e.g. bench
+    # mm-processor) omit them, so read them optionally. Identity checks, not
+    # truthiness: an explicit 0 must not fall through to them.
     input_len = getattr(args, "input_len", None)
     output_len = getattr(args, "output_len", None)
     prefix_len = getattr(args, "prefix_len", None)
-    d["random_input_len"] = getattr(args, "random_input_len", input_len)
-    d["random_output_len"] = getattr(args, "random_output_len", output_len)
-    d["random_prefix_len"] = getattr(args, "random_prefix_len", prefix_len)
+    for name, legacy, default in (
+        ("random_input_len", input_len, RandomDataset.DEFAULT_INPUT_LEN),
+        ("random_output_len", output_len, RandomDataset.DEFAULT_OUTPUT_LEN),
+        ("random_prefix_len", prefix_len, RandomDataset.DEFAULT_PREFIX_LEN),
+    ):
+        value = getattr(args, name, None)
+        if value is None:
+            value = legacy if legacy is not None else default
+        d[name] = value
     # --output-len maps to the per-dataset output-len entry points get_samples
     # reads. None passes through (each dataset applies its own default),
     # matching prior throughput behaviour of omitting output_len when unset.
@@ -642,12 +649,6 @@ def validate_args(args):
     if not args.dataset_path and args.dataset_name != "prefix_repetition":
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
-        random_input_len = getattr(args, "random_input_len", None)
-        if args.input_len is None and random_input_len is None:
-            raise ValueError(
-                "Either --input-len or --random-input-len must be provided "
-                "for a random dataset"
-            )
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
@@ -975,6 +976,11 @@ def add_cli_args(parser: FlexibleArgumentParser):
 
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
+    # Unset unless passed, so the legacy --input-len/--output-len/--prefix-len
+    # apply when given; _to_serve_args falls back to the RandomDataset defaults.
+    parser.set_defaults(
+        random_input_len=None, random_output_len=None, random_prefix_len=None
+    )
     add_random_multimodal_dataset_args(parser)
 
     # ASR dataset

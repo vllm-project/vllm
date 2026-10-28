@@ -9,6 +9,7 @@ serve-side dataset coverage.
 """
 
 import subprocess
+import warnings
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from vllm.benchmarks.throughput import (
     add_cli_args,
     assign_loras,
     get_requests,
+    validate_args,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -323,6 +325,59 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
 
 
 @pytest.mark.benchmark
+def _parse_throughput_args(*argv: str) -> Namespace:
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    return parser.parse_args(["--model", MODEL_NAME, *argv])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Neither flag: the RandomDataset defaults.
+        ([], (1024, 128, 0)),
+        # Legacy flags alone are honored.
+        (
+            ["--input-len", "2048", "--output-len", "512", "--prefix-len", "64"],
+            (2048, 512, 64),
+        ),
+        # Explicit --random-* wins, including an explicit 0.
+        (
+            [
+                "--input-len",
+                "2048",
+                "--random-input-len",
+                "300",
+                "--prefix-len",
+                "64",
+                "--random-prefix-len",
+                "0",
+            ],
+            (300, 128, 0),
+        ),
+    ],
+)
+def test_parsed_lengths_follow_flag_precedence(argv, expected) -> None:
+    """Lengths from the real parser: --random-* > legacy flags > defaults."""
+    serve_args = _to_serve_args(_parse_throughput_args(*argv))
+
+    assert (
+        serve_args.random_input_len,
+        serve_args.random_output_len,
+        serve_args.random_prefix_len,
+    ) == expected
+
+
+def test_legacy_lengths_alone_do_not_warn() -> None:
+    """Passing only --input-len must not warn that --random-input-len is set."""
+    args = _parse_throughput_args("--input-len", "32", "--output-len", "1")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        validate_args(args)
+
+    assert not [w for w in caught if "are specified" in str(w.message)]
+
+
 def test_get_requests_random_mm_with_mm_processor_args(
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
