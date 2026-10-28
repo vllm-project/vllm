@@ -470,8 +470,8 @@ class MiniMaxM3MoE(nn.Module):
         # trivial single group (num_expert_group=topk_group=1) reduces to plain
         # top-k while applying the sigmoid + bias correction and appending the
         # always-on shared expert; aiter applies the routed scaling internally.
-        # Every other path (vLLM top-k bias router, or no fusion) applies the
-        # routed scaling to the MoE output here.
+        # The vLLM router weights a fused shared expert by 1 / scale, so the
+        # scale goes on the MoE output; unfused, it is folded into top-k.
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -489,7 +489,9 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=config.swiglu_beta,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
+            apply_routed_scale_to_output=(
+                self.is_fused_shared_expert_enabled and not self.use_aiter_moe_fse
+            ),
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
