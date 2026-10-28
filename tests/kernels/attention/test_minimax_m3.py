@@ -2035,10 +2035,10 @@ def test_aiter_sparse_pa_fp8_kv_matches_fp32_reference(context_len):
         ASM_PAGE_SIZE,
         minimax_m3_sparse_attn_decode_aiter,
     )
-    from vllm.platforms.rocm import on_mi3xx
+    from vllm.platforms.rocm import get_cdna_version
 
-    if not on_mi3xx():
-        pytest.skip("AITER Gluon paged attention needs gfx942 or gfx950")
+    if get_cdna_version() not in (3, 4):
+        pytest.skip("AITER Gluon paged attention needs CDNA3 or CDNA4")
     set_random_seed(0)
     fp8 = current_platform.fp8_dtype()
     num_tokens, num_heads, x = 4, 16, 16
