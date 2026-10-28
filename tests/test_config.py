@@ -2279,14 +2279,18 @@ def test_draft_eplb_uses_target_or_explicit_redundant_expert_count(
         draft_num_redundant_experts=draft_redundant,
     )
 
-    base_vllm_config = SimpleNamespace(
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
         parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
     )
-    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
+    draft_vllm_config = speculative_config.apply_draft_overrides(base_vllm_config)
 
     expected_redundant = (
         target_redundant if draft_redundant is None else draft_redundant
     )
+    assert isinstance(draft_vllm_config, VllmConfig)
     assert (
         draft_vllm_config.parallel_config.eplb_config.num_redundant_experts
         == expected_redundant
@@ -2402,11 +2406,16 @@ def test_dspark_draft_eplb_uses_draft_expert_count(
         target_parallel_config=target_parallel_config,
         draft_num_redundant_experts=draft_redundant,
     )
-    draft_model_config = speculative_config.apply_draft_eplb_overrides(
-        SimpleNamespace(parallel_config=target_parallel_config)
+    base_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
     )
+    draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
 
-    assert draft_model_config.parallel_config.eplb_config.num_redundant_experts == 4
+    assert isinstance(draft_vllm_config, VllmConfig)
+    assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 4
     assert target_parallel_config.eplb_config.num_redundant_experts == 0
 
 

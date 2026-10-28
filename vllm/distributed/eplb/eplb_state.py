@@ -63,45 +63,6 @@ from .rebalance_execute import (
 logger = init_logger(__name__)
 
 
-def expert_topologies_differ(
-    existing_model: MixtureOfExperts,
-    new_model: MixtureOfExperts,
-) -> bool:
-    """Return whether two MoE models have different EPLB topology fields."""
-    return (
-        existing_model.num_routed_experts != new_model.num_routed_experts
-        or existing_model.num_redundant_experts != new_model.num_redundant_experts
-        or existing_model.num_physical_experts != new_model.num_physical_experts
-        or existing_model.num_logical_experts != new_model.num_logical_experts
-        or existing_model.num_expert_groups != new_model.num_expert_groups
-    )
-
-
-def _log_heterogeneous_topology_if_needed(
-    existing_model: MixtureOfExperts,
-    new_model: MixtureOfExperts,
-) -> None:
-    if not expert_topologies_differ(existing_model, new_model):
-        return
-    logger.info_once(
-        "Registering EPLB model %s with a different expert topology than "
-        "the existing model %s: routed %s vs %s, redundant %s vs %s, "
-        "physical %s vs %s, logical %s vs %s, groups %s vs %s.",
-        type(new_model),
-        type(existing_model),
-        new_model.num_routed_experts,
-        existing_model.num_routed_experts,
-        new_model.num_redundant_experts,
-        existing_model.num_redundant_experts,
-        new_model.num_physical_experts,
-        existing_model.num_physical_experts,
-        new_model.num_logical_experts,
-        existing_model.num_logical_experts,
-        new_model.num_expert_groups,
-        existing_model.num_expert_groups,
-    )
-
-
 def _compute_eplb_load_stats(
     num_tokens_per_rank: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -356,16 +317,6 @@ class EplbState:
         ]
         return global_physical_to_logical_map
 
-    def validate_ep_configuration(self, new_model: MixtureOfExperts):
-        """Log when a newly registered model differs from existing models.
-
-        Multimodel EPLB supports heterogeneous draft/target topologies. Each
-        model keeps its own load tensors and rearranges independently.
-        """
-        if len(self.model_states) > 0:
-            model = next(iter(self.model_states.values())).model
-            _log_heterogeneous_topology_if_needed(model, new_model)
-
     def add_model(
         self,
         model: MixtureOfExperts,
@@ -373,7 +324,6 @@ class EplbState:
         model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
-        self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
@@ -1061,24 +1011,14 @@ class EplbState:
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
-        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
-        if all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list):
-            # Concatenate, all_reduce, then unpack to original shapes.
-            shapes = [t.shape for t in tensor_list]
-            concat_tensor = torch.cat(tensor_list, dim=0)
 
-            all_reduce(concat_tensor, group=ep_group)
-
-            all_reduce_list = []
-            offset = 0
-            for shape in shapes:
-                all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
-                offset += shape[0]
-            return all_reduce_list
-
-        for tensor in tensor_list:
-            all_reduce(tensor, group=ep_group)
-        return tensor_list
+        flat = torch.cat([tensor.flatten() for tensor in tensor_list])
+        all_reduce(flat, group=ep_group)
+        sizes = [tensor.numel() for tensor in tensor_list]
+        return [
+            chunk.view_as(tensor)
+            for chunk, tensor in zip(flat.split(sizes), tensor_list)
+        ]
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
         """Sync the expert load pass across all ranks for log stats.
