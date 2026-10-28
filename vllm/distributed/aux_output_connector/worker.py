@@ -356,7 +356,11 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            namespace = str(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = routed_experts_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = routed_experts_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -384,7 +388,6 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
                 keys = routed_experts_keys(block_hashes, str(self._generation))

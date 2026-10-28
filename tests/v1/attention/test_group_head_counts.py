@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
@@ -29,11 +30,12 @@ def _layers(layer_num_heads: list[int]):
     """Stand-in attention layers, one per head count, as one attention group."""
     return {
         f"layer_{i}": SimpleNamespace(
+            attn_type=AttentionType.DECODER,
             impl=MagicMock(
                 spec=CPUAttentionBackendImpl,
                 num_heads=num_heads,
                 sliding_window=None,
-            )
+            ),
         )
         for i, num_heads in enumerate(layer_num_heads)
     }
@@ -132,6 +134,7 @@ def _request_group(
         metadata = builder.build(0, common).scheduler_metadata
 
     # Workitem count is at byte 68; 48-byte items start at byte 192.
+    assert metadata is not None
     words = metadata.view(torch.int32)
     workitem_count = words[68 // 4].item()
     workitems = words[192 // 4 : 192 // 4 + workitem_count * 12].reshape(-1, 12)

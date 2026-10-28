@@ -5,12 +5,13 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -69,8 +70,27 @@ def test_background_store_publishes_without_blocking_caller():
     underlying.close.assert_called_once_with()
 
 
+def _kv_cache_manager(
+    cached: dict, hashes_per_block: int = 1, num_blocks: int = 0
+) -> SimpleNamespace:
+    block_pool = SimpleNamespace(
+        get_cached_block=lambda block_hash, _: cached.get(block_hash),
+        hash_block_size=_BLOCK_SIZE,
+    )
+    manager = SimpleNamespace(
+        block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
+    )
+    return SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[manager], scheduler_block_size=manager.block_size
+        ),
+        block_pool=block_pool,
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+    )
+
+
 def _make_connector():
-    return AuxOutputSchedulerConnector(_BLOCK_SIZE)
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
 
 
 @dataclass
@@ -1294,22 +1314,18 @@ def test_worker_fails_when_cached_aux_output_is_missing():
     worker.close()
 
 
-def test_store_rejects_oversized_batch_without_partial_write():
+def test_store_grows_with_a_warning_when_every_object_is_referenced():
     store = _make_store(max_bytes=6, object_nbytes=3)
-    store.put([BlockObject("retained", b"rrr")])
+    store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
+    store.put([], retain_keys=["kept"])
 
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put(
-            [
-                BlockObject("first", b"111"),
-                BlockObject("second", b"222"),
-                BlockObject("third", b"333"),
-            ]
-        )
+    with patch.object(store_module.logger, "warning") as warning:
+        store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
 
-    assert store.get_concatenated(["retained"]) == b"rrr"
+    warning.assert_called_once()
+    assert store.get_concatenated(["kept", "first", "second"]) == b"kkk111222"
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["first"])
+        store.get_concatenated(["unused"])
     store.close()
 
 
@@ -1321,8 +1337,20 @@ def test_store_lru_and_immutable_put():
     store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
+    store.close()
+
+
+def test_store_replaces_only_unreferenced_aux_outputs():
+    store = _make_store(max_bytes=8)
+    store.put([BlockObject("block", b"1111")], retain_keys=["block"])
+    store.put([], release_keys=["block"])
+    store.put([BlockObject("block", b"2222")], retain_keys=["block"])
+    assert store.get_concatenated(["block"]) == b"2222"
+
+    store.put([BlockObject("block", b"3333")])
+    assert store.get_concatenated(["block"]) == b"2222"
     store.close()
 
 
@@ -2141,3 +2169,78 @@ def test_large_aux_snapshot_survives_worker_shm_slot_reuse():
     finally:
         writer.shutdown()
         reader.shutdown()
+
+
+_HASHES = [bytes([index]) * 32 for index in range(4)]
+
+
+def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    retained, released = metadata.retained_block_hashes, metadata.released_block_hashes
+    return list(retained or ()), list(released or ())
+
+
+def _finished_request_with_cached_blocks(num_blocks: int = 1):
+    cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == (_HASHES, [])
+    return cached, connector, request
+
+
+def _finish_empty_request(connector: AuxOutputSchedulerConnector):
+    connector.request_finished(_SchedulerRequest("empty", [], 1))
+    return _kv_cache_metadata(connector)
+
+
+def test_connector_releases_oldest_uncached_blocks_past_capacity():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    del cached[_HASHES[3]]
+    assert _finish_empty_request(connector) == ([], _HASHES[2:])
+    assert connector.max_cache_hit(request) == 8
+
+    del cached[_HASHES[1]]
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 8
+
+
+def test_connector_releases_retained_blocks_on_reset():
+    cached, connector, _ = _finished_request_with_cached_blocks()
+    connector.reset()
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    assert metadata.generation == 1
+    assert list(metadata.released_block_hashes) == _HASHES
+
+
+def test_connector_keeps_pending_load_blocks_retained():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    connector.request_loading(request, 16)
+    cached.clear()
+    assert _finish_empty_request(connector) == ([], [])
+
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == ([], _HASHES[:2])
+
+
+def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
+    worker = _make_worker(1)
+    store = worker._store
+    keys = routed_experts_keys(_HASHES[:2], "0")
+    step = _metadata(0, [], {})
+    step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
+    _begin_step(worker, step)
+    assert all(store._references[key] == 1 for key in keys)
+
+    step = _metadata(0, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[0], 32)
+    _begin_step(worker, step)
+    assert keys[0] not in store._references
+
+    step = _metadata(1, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
+    _begin_step(worker, step)
+    assert not store._references
