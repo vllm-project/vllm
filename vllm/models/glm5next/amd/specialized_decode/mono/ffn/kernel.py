@@ -2906,11 +2906,53 @@ def build_flash_ffn_kernel(
         UG8_UNITS = (HIDDEN // 128) // WAVES
         XW = HIDDEN // 4
         stamp("ug")
+        NC8 = expert_inter // UG8
+        assert NC8 <= G, "a CTA's shared-expert chunk is in its first round"
+        u0 = start("ug")
+
+        def ug8_units(cw, e, sample, shared_live=None):
+            w_rg = ((lane % 16) // 8) * (expert_inter // 16) + cw // 2
+            w_ln = (lane & -16) | ((cw % 2) * 8 + lane % 8)
+            if const_expr(shared_live is None):
+                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
+                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
+            else:
+                rw = bo.create_buffer_resource_from_addr(
+                    w_sh_ug,
+                    num_records_bytes=shared_live.select(
+                        fx.Int32(UG_W_BYTES), fx.Int32(0)
+                    ),
+                )
+                rs = bo.create_buffer_resource_from_addr(
+                    s_sh_ug,
+                    num_records_bytes=shared_live.select(
+                        fx.Int32(UG_S_BYTES), fx.Int32(0)
+                    ),
+                )
+            sn = n_sel() if sample is None else fx.Int32(sample)
+            units = []
+            for cc in range_constexpr(UG8_UNITS):
+                unit = wave * UG8_UNITS + cc
+                units.append(
+                    unit_native_mxfp4(
+                        rw,
+                        rs,
+                        w_rg,
+                        unit,
+                        HIDDEN,
+                        sn * XW + unit * 32,
+                        8 + sn * XQ_GROUPS + unit * 4 + lane // 16,
+                        ln=w_ln,
+                    )
+                )
+            return units
+
+        # the shared expert needs no routing: its weights stream in the top-8 wait
+        sh_pre = ug8_units(fx.Int32(u0) % NC8, None, None, fx.Int32(u0) < NC8)
         dn_route(load_bias())
         gpu.barrier()
         stage_xq(list(range(S)))
         gpu.barrier()
-        NC8 = expert_inter // UG8
 
         def mid8_publish(slot, grp):
             """Quantize every row's finished 32-column group (staged in misc) of
@@ -2930,7 +2972,6 @@ def build_flash_ffn_kernel(
                     if g16 == 0:
                         put(mb("mid8s"), k // 32, qs)
 
-        u0 = start("ug")
         for task_round in range_constexpr(ug_task_rounds(expert_inter)):
             u = fx.Int32(u0 + task_round * G)
             if u < expert_inter:
@@ -2944,44 +2985,6 @@ def build_flash_ffn_kernel(
                 else:
                     c = c_sh
                     slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // NC8)
-
-                def ug8_units(e, sample, shared_live=None):
-                    cw = c if shared_live is None else c_sh
-                    w_rg = ((lane % 16) // 8) * (expert_inter // 16) + cw // 2
-                    w_ln = (lane & -16) | ((cw % 2) * 8 + lane % 8)
-                    if const_expr(shared_live is None):
-                        rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
-                        rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
-                    else:
-                        rw = bo.create_buffer_resource_from_addr(
-                            w_sh_ug,
-                            num_records_bytes=shared_live.select(
-                                fx.Int32(UG_W_BYTES), fx.Int32(0)
-                            ),
-                        )
-                        rs = bo.create_buffer_resource_from_addr(
-                            s_sh_ug,
-                            num_records_bytes=shared_live.select(
-                                fx.Int32(UG_S_BYTES), fx.Int32(0)
-                            ),
-                        )
-                    sn = n_sel() if sample is None else fx.Int32(sample)
-                    units = []
-                    for cc in range_constexpr(UG8_UNITS):
-                        unit = wave * UG8_UNITS + cc
-                        units.append(
-                            unit_native_mxfp4(
-                                rw,
-                                rs,
-                                w_rg,
-                                unit,
-                                HIDDEN,
-                                sn * XW + unit * 32,
-                                8 + sn * XQ_GROUPS + unit * 4 + lane // 16,
-                                ln=w_ln,
-                            )
-                        )
-                    return units
 
                 def ug8_emit(sample, shared):
                     cs = c_sh if shared else c
@@ -3027,8 +3030,12 @@ def build_flash_ffn_kernel(
                             lds_ld(dnw, sn * MOE_SLOTS + sl),
                         )
 
-                shared_pre = ug8_units(None, None, has_sh)
-                cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
+                shared_pre = (
+                    sh_pre
+                    if const_expr(task_round == 0)
+                    else ug8_units(c_sh, None, None, has_sh)
+                )
+                cur = ug8_units(c, _uniform(lds_ld(keys, slot)), 0)
                 if has_sh:
                     reduce_rows(
                         1,
@@ -3041,6 +3048,7 @@ def build_flash_ffn_kernel(
                     pre = cur
                     if const_expr(sample + 1 < S):
                         cur = ug8_units(
+                            c,
                             _uniform(lds_ld(keys, (sample + 1) * MOE_SLOTS + slot)),
                             sample + 1,
                         )
