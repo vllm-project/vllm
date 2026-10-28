@@ -994,7 +994,11 @@ async fn responses_streaming_emits_ordered_event_sequence() {
     let created = &payloads[0]["response"];
     assert_eq!(created["status"], "in_progress");
     assert_eq!(created["output"], json!([]));
-    assert!(created.get("usage").is_none(), "{text}");
+    assert_eq!(
+        created.get("usage"),
+        Some(&serde_json::Value::Null),
+        "{text}"
+    );
     assert!(
         created["id"].as_str().expect("id").starts_with("resp_"),
         "{text}"

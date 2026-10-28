@@ -627,9 +627,9 @@ pub struct IncompleteDetails {
 /// The top-level response object returned by non-streaming requests and
 /// carried by lifecycle streaming events.
 ///
-/// Mirrors the Python vLLM `ResponsesResponse` class. Sampling fields use
+/// Mirrors the Python vLLM `ResponsesResponse` class, which serializes unset
+/// optional fields as `null` rather than omitting them. Sampling fields use
 /// explicit request values or the model defaults resolved by the handler.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResponsesResponse {
     pub id: String,
@@ -674,6 +674,7 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub user: Option<String>,
     /// vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<PerRequestMetrics>,
     pub presence_penalty: f32,
     pub frequency_penalty: f32,
@@ -859,9 +860,13 @@ mod tests {
               "object": "response",
               "created_at": 1,
               "status": "completed",
+              "error": null,
               "background": false,
+              "incomplete_details": null,
               "instructions": "be terse",
               "max_output_tokens": 16,
+              "max_tool_calls": null,
+              "metadata": null,
               "model": "test-model",
               "output": [
                 {
@@ -879,11 +884,16 @@ mod tests {
                 }
               ],
               "parallel_tool_calls": true,
+              "previous_response_id": null,
+              "prompt": null,
+              "reasoning": null,
               "service_tier": "auto",
               "temperature": 1.0,
+              "text": null,
               "tool_choice": "auto",
               "tools": [],
               "top_p": 1.0,
+              "top_logprobs": null,
               "truncation": "disabled",
               "usage": {
                 "input_tokens": 3,
@@ -901,8 +911,11 @@ mod tests {
                 },
                 "total_tokens": 5
               },
+              "user": null,
               "presence_penalty": 0.0,
-              "frequency_penalty": 0.0
+              "frequency_penalty": 0.0,
+              "kv_transfer_params": null,
+              "ec_transfer_params": null
             }"#]]
         .assert_eq(&serde_json::to_string_pretty(&response).unwrap());
     }
