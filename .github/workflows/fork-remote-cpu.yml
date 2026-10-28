@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/fork-remote-cpu.yml'
+      - '.github/workflows/scripts/remote_cpu_regressions.py'
       - '.pre-commit-config.yaml'
       - 'pyproject.toml'
       - 'vllm/**'
@@ -17,6 +18,7 @@ on:
       - 'feat/unified-speculation-runtime'
     paths:
       - '.github/workflows/fork-remote-cpu.yml'
+      - '.github/workflows/scripts/remote_cpu_regressions.py'
       - '.pre-commit-config.yaml'
       - 'pyproject.toml'
       - 'vllm/**'
@@ -41,6 +43,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: ''
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
+      HF_HUB_OFFLINE: '1'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -51,12 +54,13 @@ jobs:
           python-version: '3.12'
       - name: Install CPU test dependencies
         run: |
-          uv venv .venv
+          uv venv --python 3.12 .venv
           uv pip install --python .venv/bin/python \
             pytest==8.4.2 pytest-timeout==2.4.0 msgspec==0.19.0 ruff==0.14.0 \
-            numpy==2.5.4 regex==2026.9.29
+            numpy==2.3.5 regex==2026.9.29
           uv pip install --python .venv/bin/python \
-            torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu
+            torch==2.14.0+cpu torchvision==0.29.1+cpu \
+            --index-url https://download.pytorch.org/whl/cpu
       - name: Lint changed Python files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -104,3 +108,25 @@ jobs:
             tests/v1/spec_decode/remote/test_server.py \
             tests/v1/spec_decode/remote/test_state.py \
             tests/v1/spec_decode/remote/test_transport.py
+      - name: Select runtime regressions for this branch
+        id: regressions
+        run: |
+          nodes="$(.venv/bin/python .github/workflows/scripts/remote_cpu_regressions.py --list)"
+          if [ -n "$nodes" ]; then
+            printf '%s\n' "$nodes"
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install native configuration and loader dependencies
+        if: steps.regressions.outputs.enabled == 'true'
+        run: |
+          uv pip install --python .venv/bin/python \
+            transformers==5.20.2 'pydantic>=2.12.0,<3' safetensors \
+            cachetools cloudpickle blake3 psutil py-cpuinfo pyzmq sentencepiece \
+            cbor2 einops requests aiohttp oss-harmony 'mcp>=2,<3' openai \
+            partial-json-parser pillow==12.3.0 compressed-tensors==0.17.0 depyf==0.20.0 \
+            opencv-python-headless 'fastapi>=0.133.0,<0.137.0' pybase64 \
+            uvloop prometheus-client xgrammar==0.2.8 'llguidance>=1.7,<1.8' \
+            tiktoken 'mistral-common[image]>=1.11.6'
+      - name: Test socket cleanup, native loading, and resolved configuration
+        if: steps.regressions.outputs.enabled == 'true'
+        run: .venv/bin/python .github/workflows/scripts/remote_cpu_regressions.py
