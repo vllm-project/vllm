@@ -22,8 +22,11 @@ class UBatchAbortedError(RuntimeError):
 
 
 class _UBatchAbortState:
-    def __init__(self, cpu_events: list[threading.Event]):
+    def __init__(
+        self, cpu_events: list[threading.Event], ready_barrier: threading.Barrier
+    ):
         self.cpu_events = cpu_events
+        self.ready_barrier = ready_barrier
         self.lock = threading.Lock()
         self.failure: tuple[int, BaseException] | None = None
 
@@ -33,6 +36,7 @@ class _UBatchAbortState:
                 self.failure = (ubatch_id, error)
             for event in self.cpu_events:
                 event.set()
+            self.ready_barrier.abort()
 
     def check(self) -> None:
         failure = self.failure
@@ -76,10 +80,9 @@ class UBatchContext:
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
-        _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
-        _CURRENT_CONTEXTS[self.id] = self
-        # _NUM_UBATCHES is set in make_ubatch_contexts
         try:
+            _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
+            _CURRENT_CONTEXTS[self.id] = self
             self.ready_barrier.wait()
             self._wait_for_turn()
             self._restore_context()
@@ -87,16 +90,15 @@ class UBatchContext:
             self.update_stream(self.compute_stream)
         except BaseException as error:
             # A failed __enter__ does not invoke __exit__ automatically.
-            self.__exit__(type(error), error, error.__traceback__)
+            self.abort_state.abort(self.id, error)
+            self._unregister()
             raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
         if exc_val is not None:
             self.abort_state.abort(self.id, exc_val)
-        _CURRENT_CONTEXTS[self.id] = None
-        del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        self._unregister()
         try:
             self.maybe_run_recv_hook()
         except BaseException as error:
@@ -106,6 +108,10 @@ class UBatchContext:
             self.cpu_wait_event.clear()
             self.cpu_signal_event.set()
         return False
+
+    def _unregister(self):
+        _CURRENT_CONTEXTS[self.id] = None
+        _THREAD_ID_TO_CONTEXT.pop(threading.get_ident(), None)
 
     def _wait_for_turn(self):
         self.abort_state.check()
@@ -265,6 +271,8 @@ def make_ubatch_contexts(
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
     _NUM_UBATCHES = num_micro_batches
+    if ready_barrier.broken:
+        ready_barrier.reset()
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
@@ -273,7 +281,7 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    abort_state = _UBatchAbortState(cpu_events)
+    abort_state = _UBatchAbortState(cpu_events, ready_barrier)
     gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
     gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 

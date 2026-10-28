@@ -10,9 +10,11 @@ threaded execution of the microbatches.
 """
 
 import faulthandler
+import linecache
 import multiprocessing
 import os
 import signal
+import threading
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
@@ -38,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
+from vllm.v1.worker import ubatching
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -679,6 +682,11 @@ def test_merge_keeps_aux_hidden_states_per_layer():
         torch.testing.assert_close(merged, expected)
 
 
+def _assert_ubatch_cleanup():
+    assert not ubatching.dbo_enabled()
+    assert all(context is None for context in ubatching._CURRENT_CONTEXTS)
+
+
 def _run_failing_ubatch(connection, failed_ubatch, yield_before_failure, fail_in_hook):
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     vllm_config = _make_dbo_config()
@@ -719,12 +727,14 @@ def _run_failing_ubatch(connection, failed_ubatch, yield_before_failure, fail_in
         finish()
     assert isinstance(error.value.__cause__, ValueError)
     assert str(error.value.__cause__) == "boom"
+    _assert_ubatch_cleanup()
 
     trace: list[tuple[str, int]] = []
     output = runner.run(_YieldingModel(trace), model_inputs, ubatch_state)
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 3
     assert torch.equal(output, expected)
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    _assert_ubatch_cleanup()
     connection.send("recovered")
 
 
@@ -738,11 +748,17 @@ def test_ubatch_runner_names_the_microbatch_that_failed(
     failed_ubatch, yield_before_failure, fail_in_hook
 ):
     """Unwind parked siblings, preserve the original failure, and allow reuse."""
+    _run_ubatch_subprocess(
+        _run_failing_ubatch, failed_ubatch, yield_before_failure, fail_in_hook
+    )
+
+
+def _run_ubatch_subprocess(target, *args):
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
     process = ctx.Process(
-        target=_run_failing_ubatch,
-        args=(sender, failed_ubatch, yield_before_failure, fail_in_hook),
+        target=target,
+        args=(sender, *args),
     )
     process.start()
     sender.close()
@@ -761,6 +777,139 @@ def test_ubatch_runner_names_the_microbatch_that_failed(
             process.kill()
             process.join(timeout=5)
         receiver.close()
+
+
+def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    config = _make_dbo_config()
+    runner = _make_execution_runner(config)
+    inputs = _make_model_inputs(8, torch.device("cuda:0"))
+    state = _make_ubatch_state(
+        config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+    torch.cuda.synchronize()
+    connection.send("ready")
+    entry_points = {
+        "before_registration": "_THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id",
+        "registered": "_CURRENT_CONTEXTS[self.id] = self",
+        "barrier": "self.ready_barrier.wait()",
+        "stream": "self.update_stream(self.compute_stream)",
+        "worker": "torch.accelerator.set_device_index(",
+    }
+
+    def run_stage(stage):
+        faults = []
+        returned = []
+        hook_failures = []
+        both_hooks = threading.Barrier(2)
+        secondary_done = threading.Event()
+
+        def trace(frame, event, arg):
+            function = frame.f_code.co_name
+            if function not in ("__enter__", "run_ubatch"):
+                return None
+            if not frame.f_code.co_filename.endswith(
+                (
+                    "/worker/ubatching.py",
+                    "/worker/gpu/ubatch_utils.py",
+                )
+            ):
+                return None
+            if function == "__enter__":
+                context = frame.f_locals["self"]
+            else:
+                context = frame.f_locals.get(
+                    "ubatch_context", frame.f_locals.get("context")
+                )
+                if context is None:
+                    return trace
+            if event == "return" and function != "__enter__" and concurrent:
+                returned.append(context.id)
+                if context.id != failed_ubatch:
+                    secondary_done.set()
+            if event == "line" and not concurrent and not faults:
+                line = linecache.getline(
+                    frame.f_code.co_filename, frame.f_lineno
+                ).strip()
+                in_target = (function != "__enter__") == (stage == "worker")
+                if (
+                    in_target
+                    and context.id == failed_ubatch
+                    and line.startswith(entry_points[stage])
+                ):
+                    faults.append(
+                        (
+                            threading.get_ident() in ubatching._THREAD_ID_TO_CONTEXT,
+                            ubatching._CURRENT_CONTEXTS[context.id] is context,
+                        )
+                    )
+                    raise ValueError("entry failure")
+            return trace
+
+        class Model(torch.nn.Module):
+            def forward(self, input_ids, positions, **kwargs):
+                i = dbo_current_ubatch_id()
+                if concurrent:
+                    peer = 1 - i
+
+                    def fail_hook():
+                        both_hooks.wait(timeout=5)
+                        if peer == failed_ubatch:
+                            assert secondary_done.wait(timeout=5)
+                        hook_failures.append(peer)
+                        raise KeyError(f"secondary hook {peer}")
+
+                    dbo_register_recv_hook(fail_hook)
+                dbo_yield()
+                if concurrent and i == failed_ubatch:
+                    raise ValueError("original failure")
+                dbo_yield()
+                return input_ids.float().unsqueeze(-1)
+
+        threading.settrace(trace)
+        try:
+            with pytest.raises(
+                RuntimeError, match=f"Microbatch {failed_ubatch}"
+            ) as error:
+                runner.run(Model(), inputs, state)
+        finally:
+            threading.settrace(None)
+        assert isinstance(error.value.__cause__, ValueError)
+        assert str(error.value.__cause__) == (
+            "original failure" if concurrent else "entry failure"
+        )
+        if concurrent:
+            assert sorted(hook_failures) == [0, 1]
+            assert returned == [1 - failed_ubatch, failed_ubatch]
+        else:
+            expected = {
+                "before_registration": (False, False),
+                "registered": (True, False),
+                "barrier": (True, True),
+                "stream": (True, True),
+                "worker": (False, False),
+            }
+            assert faults == [expected[stage]]
+        _assert_ubatch_cleanup()
+        output = runner.run(_YieldingModel([]), inputs, state)
+        assert torch.equal(output, inputs["input_ids"].float().unsqueeze(-1) * 3)
+        _assert_ubatch_cleanup()
+
+    for stage in ("concurrent",) if concurrent else entry_points:
+        run_stage(stage)
+    connection.send("recovered")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+@pytest.mark.parametrize("concurrent", [False, True], ids=["entry", "concurrent"])
+def test_ubatch_initialization_and_concurrent_failures(failed_ubatch, concurrent):
+    """Release broken startup barriers and retain roots across concurrent cleanup."""
+    _run_ubatch_subprocess(_run_ubatch_boundaries, failed_ubatch, concurrent)
 
 
 # DCP x DBO: each microbatch recomputes DCP-local seq_lens from its own

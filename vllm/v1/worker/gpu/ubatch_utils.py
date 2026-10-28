@@ -4,7 +4,7 @@
 
 import threading
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -521,6 +521,7 @@ class UBatchRunner:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
                 # Recorded so the join below can report which microbatch broke.
+                ubatch_context.abort_state.abort(ubatch_context.id, e)
                 errors[ubatch_context.id] = e
 
         # Threads own the forward context; keep it cleared and SMs reserved
@@ -542,7 +543,9 @@ class UBatchRunner:
             thread.start()
 
         # Park all threads before the caller starts capture.
-        self.ready_barrier.wait()
+        # finish joins workers and reports any startup failure.
+        with suppress(threading.BrokenBarrierError):
+            self.ready_barrier.wait()
 
         def finish() -> Any:
             try:
