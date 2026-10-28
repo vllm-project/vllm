@@ -90,6 +90,9 @@ pub async fn chat_completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
+    // Like Python, report reasoning-token details only when a reasoning parser
+    // is configured to count them.
+    let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
     let chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
@@ -106,6 +109,7 @@ pub async fn chat_completions(
             prepared.response_model,
             created,
             api_server_options,
+            count_reasoning_tokens,
             prepared.options,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
@@ -118,6 +122,7 @@ pub async fn chat_completions(
             prepared.response_model,
             created,
             api_server_options,
+            count_reasoning_tokens,
             prepared.options,
         )
         .instrument(request_span.clone())
@@ -144,6 +149,7 @@ async fn collect_chat_completion(
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
+    count_reasoning_tokens: bool,
     ResponseOptions {
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
@@ -226,7 +232,11 @@ async fn collect_chat_completion(
         usage.output_token_count,
         spec_decode_metrics,
     );
-    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+    let usage = Usage::from_token_usage(
+        usage.engine,
+        enable_prompt_tokens_details,
+        count_reasoning_tokens.then_some(usage.reasoning_tokens),
+    );
 
     if enable_log_requests {
         info!(
@@ -313,6 +323,7 @@ async fn chat_completion_chunk_stream(
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
+    count_reasoning_tokens: bool,
     ResponseOptions {
         include_usage,
         include_continuous_usage,
@@ -342,7 +353,7 @@ async fn chat_completion_chunk_stream(
     // starts or ends, omit its token metadata as well as its visible delta.
     let mut inside_hidden_reasoning = false;
     let mut suppress_current_update_metadata = false;
-    let mut continuous_usage = ContinuousUsage::default();
+    let mut continuous_usage = ContinuousUsage::new(count_reasoning_tokens);
     let mut delta_log = log_outputs.logs_deltas().then(StreamDeltaLog::default);
 
     /// Yield a chunk with optional continuous usage attached.
@@ -574,7 +585,11 @@ async fn chat_completion_chunk_stream(
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
-                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
+                        Usage::from_token_usage(
+                            final_usage.engine,
+                            enable_prompt_tokens_details,
+                            count_reasoning_tokens.then_some(final_usage.reasoning_tokens),
+                        ),
                         metrics,
                     ))
                     .await;
@@ -1218,6 +1233,7 @@ mod tests {
                 enable_per_request_metrics: true,
                 ..Default::default()
             },
+            false,
             ResponseOptions {
                 include_usage: true,
                 requested_logprobs: true,
@@ -1308,6 +1324,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 requested_logprobs: true,
                 include_reasoning: true,
@@ -1358,6 +1375,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 include_usage: true,
                 ..Default::default()
@@ -1421,6 +1439,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions::default(),
         )
         .collect::<Vec<_>>()
@@ -1503,6 +1522,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
@@ -1637,6 +1657,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
@@ -1717,6 +1738,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 include_reasoning: true,
                 ..Default::default()
@@ -1780,6 +1802,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            false,
             ResponseOptions {
                 return_token_ids: true,
                 ..Default::default()
@@ -1809,7 +1832,8 @@ mod tests {
         chunk
             .usage
             .as_ref()
-            .map(|usage| usage.completion_tokens_details.reasoning_tokens)
+            .and_then(|usage| usage.completion_tokens_details.as_ref())
+            .map(|details| details.reasoning_tokens)
     }
 
     #[tokio::test]
@@ -1860,6 +1884,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            true,
             ResponseOptions {
                 include_usage: true,
                 include_continuous_usage: true,
@@ -1933,6 +1958,7 @@ mod tests {
             "model".to_string(),
             1,
             ApiServerOptions::default(),
+            true,
             ResponseOptions {
                 include_usage: true,
                 include_continuous_usage: true,
@@ -1956,58 +1982,63 @@ mod tests {
         assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
         let final_usage = chunks.last().unwrap().usage.as_ref().expect("final usage chunk");
         assert_eq!(final_usage.completion_tokens, Some(2));
-        assert_eq!(final_usage.completion_tokens_details.reasoning_tokens, 2);
+        assert_eq!(chunk_reasoning_tokens(chunks.last().unwrap()), Some(2));
     }
 
+    /// Like Python, a configured reasoning parser reports zero reasoning tokens
+    /// for output without reasoning, while a server without one reports the
+    /// details as `null`.
     #[tokio::test]
-    async fn chunk_stream_reports_zero_reasoning_tokens_without_reasoning() {
-        let stream = stream::iter(vec![
-            Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
-                prompt_logprobs: None,
-            }),
-            Ok(ChatEvent::BlockDelta {
-                index: 0,
-                kind: AssistantBlockKind::Text,
-                delta: "answer".to_string(),
-                token_count: None,
-            }),
-            Ok(ChatEvent::Done {
-                message: Default::default(),
-                usage: done_usage(1, 1, 0),
-                timestamps: Default::default(),
-                spec_decode_metrics: None,
-                finish_reason: FinishReason::stop_eos(),
-                kv_transfer_params: None,
-                ec_transfer_params: None,
-            }),
-        ]);
+    async fn chunk_stream_reports_reasoning_token_details_only_with_reasoning_parser() {
+        for (count_reasoning_tokens, expected) in
+            [(true, json!({"reasoning_tokens": 0})), (false, json!(null))]
+        {
+            let stream = stream::iter(vec![
+                Ok(ChatEvent::Start {
+                    prompt_token_ids: vec![].into(),
+                    prompt_logprobs: None,
+                }),
+                Ok(ChatEvent::BlockDelta {
+                    index: 0,
+                    kind: AssistantBlockKind::Text,
+                    delta: "answer".to_string(),
+                    token_count: None,
+                }),
+                Ok(ChatEvent::Done {
+                    message: Default::default(),
+                    usage: done_usage(1, 1, 0),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
+                    finish_reason: FinishReason::stop_eos(),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                }),
+            ]);
 
-        let chunks = chat_completion_chunk_stream(
-            stream,
-            "chatcmpl-1".to_string(),
-            "model".to_string(),
-            1,
-            ApiServerOptions::default(),
-            ResponseOptions {
-                include_usage: true,
-                include_continuous_usage: true,
-                ..Default::default()
-            },
-        )
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("stream chunks");
+            let chunks = chat_completion_chunk_stream(
+                stream,
+                "chatcmpl-1".to_string(),
+                "model".to_string(),
+                1,
+                ApiServerOptions::default(),
+                count_reasoning_tokens,
+                ResponseOptions {
+                    include_usage: true,
+                    include_continuous_usage: true,
+                    ..Default::default()
+                },
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("stream chunks");
 
-        // Reasoning-token details are always reported; a stream without
-        // reasoning simply reports 0 on every usage payload.
-        for chunk in &chunks {
-            let usage = chunk.usage.as_ref().expect("usage");
-            assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
-            let json = serde_json::to_value(usage).expect("usage serializes");
-            assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+            for chunk in &chunks {
+                let usage = chunk.usage.as_ref().expect("usage");
+                let json = serde_json::to_value(usage).expect("usage serializes");
+                assert_eq!(json["completion_tokens_details"], expected);
+            }
         }
     }
 }

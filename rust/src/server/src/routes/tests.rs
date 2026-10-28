@@ -3224,6 +3224,7 @@ async fn non_stream_chat_returns_json_response() {
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
     let message = choice["message"].as_object().expect("message object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -3240,6 +3241,8 @@ async fn non_stream_chat_returns_json_response() {
         (message, "audio"),
         (message, "function_call"),
         (message, "reasoning"),
+        // No reasoning parser is configured, so reasoning tokens are unknown.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -4739,6 +4742,7 @@ async fn non_stream_completions_return_json_response() {
     // non-streaming responses.
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -4750,6 +4754,8 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_token_ids"),
         (choice, "routed_experts"),
         (choice, "weight_versions"),
+        // Completions never count reasoning tokens.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -6559,6 +6565,11 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     // responses.
     assert!(
         json["choices"][0]["message"]["reasoning"].is_null(),
+        "{text}"
+    ); // The auto-selected reasoning parser still counts the hidden reasoning.
+    assert_eq!(
+        json["usage"]["completion_tokens_details"],
+        json!({"reasoning_tokens": 5}),
         "{text}"
     );
 }
