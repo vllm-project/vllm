@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -381,3 +384,19 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+@pytest.mark.parametrize("reported", [None, True, False])
+@pytest.mark.parametrize("frontend", [True, False])
+def test_engine_core_watermarking_overrides_frontend_flag(frontend, reported):
+    """EngineCore's flag replaces the frontend's guess; None keeps it."""
+    req_stats = RequestStateStats(is_watermarked=frontend)
+    IterationStats().update_from_output(
+        EngineCoreOutput(request_id="r", new_token_ids=[1], watermarking=reported),
+        engine_core_timestamp=0.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+    assert req_stats.is_watermarked == (frontend if reported is None else reported)
