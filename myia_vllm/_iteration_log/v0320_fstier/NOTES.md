@@ -3953,3 +3953,24 @@ J'ai présenté ce matin le tier RAM 24 → 32 GiB comme un plafond « **13 → 
 VRAM : GPU 0 **22 871-22 872 MiB** — **redescendue sous la ligne 23 000 toute seule** depuis les 23 034 du 07:2xZ (le desktop a rendu ~160 MiB), ce qui **confirme expérimentalement** l'hypothèse desktop : GPU 1 reste plat à 21 650, GPU 2 à 98 MiB (CoursIA libre). `/dev/shm` **24G/63G = 39 %**. Prefix cache since-boot : 664,5 M queries / 519,3 M hits = **78,2 %** ; `external_prefix_cache_hits_total` **108,5 M**. Condensation nominale hors incident. nbaudit **ok 08:06:00Z**, 0 échec, 5 séries. Commit hôte **76,1 %** (marge 91,9 Go). G: OK (82 %, 705 G libres).
 
 Sécurité : aucune IP inconnue en 200. `92.184.141.58` (1×200) **attribuée par son contenu** — prompt système « expert en synthèse de communications inter-agents » ⇒ condensation RSM, même famille que Q40, **pas une alerte**. `fp=1f7f6080cb65` ×20 = clé morte en boucle de 401 (connue) ; `NONE` ×2. WARN RSM « concurrent instance possible (myia-ai-01) » : `CronList` ne montre **qu'un** cron `d6ab14d5` — pas de doublon de mon côté, c'est une autre lane de la machine.
+
+### Suivi 08:4xZ — l'épisode est retombé seul : repli **suspendu**, et un critère ajouté au protocole
+
+**Contre-mesure ~20 min après la demande** : sonde **0,37 s** puis **0,34 s** (contre 10-90 s au plus fort), **KV GPU 97,5 % → 69,4 %**, file **3 running / 0 waiting**, **préemptions figées à 27** (+0 depuis la demande). Le moteur n'a pas été touché entre-temps : **il s'est vidé seul**.
+
+**Décision** : [REPLY] posté à claudish — **repli po-2024 SUSPENDU, rien à exécuter**. Un repli de siège est une action durable ; il est disproportionné pour une fenêtre de 30-60 min qui se résorbe d'elle-même. J'ai demandé sur la foi de deux batteries espacées de 5 min, ce qui prouvait l'**impact** mais pas la **persistance**.
+
+**⚠ Critère ajouté au protocole (leçon du jour, 2 épisodes 🟠 en 28/10 : 02:2xZ et 08:1xZ, tous deux retombés seuls)** : un 🟠 n'est **confirmé** que si les sondes restent lentes **≥ 30 min après la première sonde lente**. Une batterie courte établit l'impact, jamais la durée. Corollaire : deux batteries espacées de 5 min ne valent pas une mesure de persistance — c'est l'erreur que j'ai commise ce matin en montant en 🟠.
+
+### Ce que l'épisode coûte réellement : le disjoncteur de condensation RSM
+
+En lisant le log RSM, la conséquence de la famine des petits callers est **quantifiée** :
+
+| Heure | Événement |
+|---|---|
+| 05:39:51 | `Condensation circuit breaker OPENED` |
+| 06:21:00 | `HALF-OPEN (cooldown elapsed), retrying LLM` |
+| **06:59:32** | `OPENED` — **la seconde même du WEDGE de 06:59:30** |
+| 07:33:32 | `HALF-OPEN` après ~34 min |
+
+**Chaque épisode ouvre le disjoncteur et le laisse ouvert ~35-40 min**, pendant lesquels toute condensation part en cloud (`deepseek-v4-flash`) — c'est-à-dire en PAYG, pour un travail que le moteur local devrait faire gratuitement. Pendant mon propre post de clôture, la condensation a littéralement timeouté à 90 s sur `localhost:5002` avant de basculer. **C'est le prix mesurable des épisodes**, et c'est ce qui devra être mis en balance avec le coût d'un repli de siège si les épisodes se multiplient. À surveiller : la fréquence d'ouverture du disjoncteur est un meilleur indicateur de gêne réelle que la VRAM.
