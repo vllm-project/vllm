@@ -79,6 +79,9 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    # Hash-routing table, owned by the gate.
+    hash_indices_table: torch.Tensor | None = None
+
     def __init__(
         self,
         layer_name: str,
@@ -107,6 +110,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -152,6 +156,8 @@ class RoutedExperts(PluggableLayer):
         # Set by bind_routed_experts_capturer for monolithic kernels.
         self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        # The gate owns this Parameter: keep it out of this module's parameters.
+        object.__setattr__(self, "hash_indices_table", hash_indices_table)
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
         self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
@@ -700,12 +706,29 @@ class RoutedExperts(PluggableLayer):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        quant_method_name = self.quant_method.__class__.__name__
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+
+        base_quant_method = self.quant_method
+
+        # In case online MOE re-quantization is used, loading is handled
+        # by the original quant method.
+        if (
+            isinstance(base_quant_method, OnlineMoEMethodBase)
+            and base_quant_method.requantization_source is not None
+        ):
+            assert isinstance(
+                base_quant_method.requantization_source, FusedMoEMethodBase
+            )
+            base_quant_method = base_quant_method.requantization_source
+
+        quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
+            getattr(base_quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
         )
 
@@ -842,7 +865,7 @@ class RoutedExperts(PluggableLayer):
         if "ModelOpt" in quant_method_name:
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = base_quant_method.uses_weight_scale_2_pattern()
             quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
@@ -921,7 +944,7 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
-                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                scale_refine = getattr(base_quant_method, "weight_scale_refine", None)
                 if (
                     quant_method == FusedMoeWeightScaleSupported.BLOCK.value
                     and scale_refine is not None
@@ -1307,6 +1330,13 @@ class RoutedExperts(PluggableLayer):
             )
 
         weights = list(self.named_parameters())
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor

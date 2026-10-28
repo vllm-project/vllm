@@ -28,6 +28,11 @@ from vllm.parser.engine.events import EventType
 # value, or returns None when the delta may change anything else.
 ArgValueExtender = Callable[[str], str | None]
 
+# Validates a complete non-streaming output. True means a valid tool-call
+# candidate, False means a malformed candidate that must fall back to content,
+# and None means the output is not a tool-call candidate.
+CompleteToolCallValidator = Callable[[str], bool | None]
+
 
 class ParserState(Enum):
     CONTENT = auto()
@@ -37,6 +42,11 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+
+
+class ToolCallBodyCollection(Enum):
+    JSON_ARRAY = auto()
+    SEMICOLON_SEQUENCE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,21 +92,31 @@ class ParserEngineConfig:
 
     arg_converter: Callable[[str, bool], str] | None = None
 
+    complete_tool_call_validator: CompleteToolCallValidator | None = None
+
     stream_arg_deltas: bool = True
 
     tool_args_json: bool = True
 
-    # The tool region body is a single JSON array of ``{"name", "arguments"}``
-    # objects (one marker → N calls, no closing terminal). The engine splits
-    # the array into one tool call per element; the array's ``]`` ends the
-    # region and any trailing text becomes content. Used by Granite.
-    tool_call_body_array: bool = False
+    # Framing for a tool region containing multiple top-level JSON objects.
+    # The engine emits one tool call per object. JSON_ARRAY is used by Granite;
+    # SEMICOLON_SEQUENCE handles Llama's ``{...}; {...}`` format.
+    # ...
+    tool_call_body_collection: ToolCallBodyCollection | None = None
 
     arg_structural_chars: frozenset[str] | None = None
 
-    # Called with the raw argument text when its converted JSON ends in an
-    # open value; returns an extender for that value, or None. Streaming
-    # skips ``arg_converter`` for every delta the extender accepts.
+    # Called with the raw argument text after each streaming conversion whose
+    # prefix-safe JSON extends the JSON streamed so far; returns an extender
+    # when the text ends in an open value that is the last value in the
+    # converted JSON, else None. While live, the extender receives every delta
+    # in place of ``arg_converter`` until it returns None, meaning the delta
+    # closed the value. Returned text is streamed as is, so it must match what
+    # ``arg_converter`` would serialise for those raw characters. Deltas are
+    # lexer output: a terminal is never split across deltas, but the lexer
+    # flushes a held partial terminal as text at the end of the stream or
+    # before a terminal matched by token ID, so a truncated value may end in
+    # a terminal prefix. Requires ``arg_converter`` and ``stream_arg_deltas``.
     arg_value_extender: Callable[[str], ArgValueExtender | None] | None = None
 
     # Special tokens exempt from auto-drop but not state-machine terminals.
@@ -117,6 +137,15 @@ class ParserEngineConfig:
 
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
+
+    def __post_init__(self) -> None:
+        if self.arg_value_extender is not None and (
+            self.arg_converter is None or not self.stream_arg_deltas
+        ):
+            raise ValueError(
+                f"{self.name}: arg_value_extender requires arg_converter "
+                "and stream_arg_deltas=True"
+            )
 
     def terminal_literal(self, name: str) -> str | None:
         """Canonical spelling of terminal *name*, or ``None`` if undeclared."""

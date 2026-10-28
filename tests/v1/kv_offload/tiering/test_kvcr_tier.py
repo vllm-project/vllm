@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import mmap
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import msgspec
 import numpy as np
@@ -18,6 +20,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemoryRef,
     OpEntryResult,
     OpEntryStatus,
@@ -79,6 +82,7 @@ class RecordingKVCR:
         self.stats: OffloadingConnectorStats | None = None
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
+        self.align_sequence_calls: list[tuple[list[BlockKey], bool]] = []
         self.deliver_calls: list[
             tuple[OpHandle, dict[BlockKey, list[MemoryRef]], str | None]
         ] = []
@@ -91,6 +95,11 @@ class RecordingKVCR:
 
     def discard_hint(self, request_id: str) -> None:
         self.discard_hint_calls.append(request_id)
+
+    def align_sequence(
+        self, keys: list[BlockKey], use_current_time: bool = False
+    ) -> None:
+        self.align_sequence_calls.append((list(keys), use_current_time))
 
     def query(
         self,
@@ -172,6 +181,8 @@ def _make_tier(
     monkeypatch,
     kvcr: RecordingKVCR,
     *,
+    startup_error: BaseException | None = None,
+    primary_kv_view: memoryview | None = None,
     enable_telemetry: bool = False,
     secondary_g2_slots: int = 0,
     kvcr_service_socket_path: str | None = None,
@@ -195,6 +206,8 @@ def _make_tier(
         kvcr.constructor_bindings = bindings
         kvcr.framework_control = bindings.framework_control
         kvcr.inventory_sink = bindings.inventory_sink
+        if startup_error is not None:
+            raise startup_error
         return kvcr
 
     monkeypatch.setattr(kvcr_manager, "KVCR", make_kvcr)
@@ -229,10 +242,59 @@ def _make_tier(
                 self_describing_kv_events=self_describing_kv_events,
             ),
         ),
-        primary_kv_view=memoryview(np.zeros((4, 16), dtype=np.int8)),
+        primary_kv_view=(
+            primary_kv_view
+            if primary_kv_view is not None
+            else memoryview(np.zeros((4, 16), dtype=np.int8))
+        ),
     )
     assert isinstance(tier, KVCRSecondaryTierManager)
     return tier
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, KVCRStartupError, KeyboardInterrupt]
+)
+@pytest.mark.parametrize("secondary_g2_slots", [0, 1])
+def test_startup_failure_cleanup(monkeypatch, error_type, secondary_g2_slots):
+    """Unsafe failures must hold a buffer export so nothing can unmap memory
+    native work may still write into. Ordinary failures release everything."""
+    retained: list[object] = []
+    monkeypatch.setattr(kvcr_manager, "_RETAINED_NATIVE_BUFFERS", retained)
+    close = Mock()
+    monkeypatch.setattr(_StubControlChannel, "close", close)
+    unsafe = error_type is not RuntimeError
+
+    mapping = mmap.mmap(-1, mmap.PAGESIZE)
+    primary_kv_view = memoryview(mapping)
+    local_mapping = mmap.mmap(-1, mmap.PAGESIZE) if secondary_g2_slots else None
+    monkeypatch.setattr(
+        kvcr_manager, "mmap", SimpleNamespace(mmap=lambda *_: local_mapping)
+    )
+
+    with pytest.raises(error_type, match="startup failed"):
+        _make_tier(
+            monkeypatch,
+            RecordingKVCR(),
+            startup_error=error_type("startup failed"),
+            primary_kv_view=primary_kv_view,
+            secondary_g2_slots=secondary_g2_slots,
+        )
+
+    assert close.call_count == (0 if unsafe else 1)
+    # Drop the test's own export, leaving only whatever the manager retained:
+    # the mapping is unmappable afterwards only if that retention covers it.
+    primary_kv_view.release()
+    mappings = [mapping] if local_mapping is None else [mapping, local_mapping]
+    if local_mapping is not None:
+        assert local_mapping.closed is not unsafe
+    for region in mappings:
+        if unsafe:
+            with pytest.raises(BufferError):
+                region.close()
+    retained.clear()
+    for region in mappings:
+        region.close()
 
 
 def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
@@ -328,6 +390,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert list(blocks) == [key]
     (descriptor,) = blocks[key]
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
+    assert type(descriptor.element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -336,14 +399,67 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert kvcr.discard_hint_calls == ["req"]
 
 
-def test_kvcr_tier_allows_request_without_router_hint(monkeypatch):
-    """Keep router hints optional for requests from non-hint-aware routers."""
+@pytest.mark.parametrize(
+    ("computed", "in_flight", "total_tokens", "expected_keys"),
+    [
+        (None, None, None, 5),
+        (32, 16, 64, 1),
+        (16, 16, 64, 0),
+        (64, 0, 64, 4),
+        (80, 0, 80, 4),
+    ],
+)
+def test_kvcr_tier_refreshes_processed_prefix(
+    monkeypatch, computed, in_flight, total_tokens, expected_keys
+):
+    """Refresh only processed keys on request completion."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
 
-    tier.on_new_request(ReqContext(req_id="req"))
+    ctx = ReqContext(req_id="req")
+    if computed is not None:
+
+        class TokenCountContext(ReqContext):
+            num_computed_tokens = computed
+            num_in_flight_tokens = in_flight
+            num_prompt_tokens = 64
+            num_tokens = total_tokens
+
+        ctx = TokenCountContext(req_id="req")
+    keys = [make_offload_key(bytes([index]), 0) for index in range(5)]
+    for position, key in enumerate(keys):
+        ctx.set_offload_key_position(key, (position + 1) * 16)
+    tier.on_new_request(ctx)
+    tier.on_request_finished(ctx)
 
     assert kvcr.submit_hint_calls == []
+    assert kvcr.align_sequence_calls == (
+        [(keys[:expected_keys], True)] if expected_keys else []
+    )
+    assert list(ctx._offload_key_positions) == keys
+
+
+def test_kvcr_tier_batches_consecutive_completions(monkeypatch):
+    """Batch completions without reordering requests that share keys."""
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr)
+    ctx = ReqContext(req_id="req")
+    head, middle, tail, future = map(OffloadKey, (b"h", b"m", b"t", b"f"))
+    for key, end_token in ((tail, 48), (head, 16), (middle, 32), (future, 64)):
+        ctx.set_offload_key_position(key, end_token)
+    other = ReqContext(req_id="other")
+    other.set_offload_key_position(head, 16)
+    tier.submit_store(_job(7, ctx, key=tail))
+    tier.submit_load(_job(8, ctx, key=middle))
+    tier.submit_store(_job(9, other, key=head))
+    tier.submit_load(_job(10, ctx, key=middle))
+
+    assert [job.job_id for job in tier.get_finished_jobs()] == [7, 8, 9, 10]
+    assert kvcr.align_sequence_calls == [
+        ([head, middle, tail], False),
+        ([head], False),
+        ([head, middle], False),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -364,13 +480,24 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     assert tier.lookup(OffloadKey(b"k0"), ReqContext(req_id="req")) is expected
 
 
-def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
-    """Hold primary-tier hits until KVCR releases the corresponding pin."""
+@pytest.mark.parametrize(
+    ("job_keys", "chunk_ids", "success"),
+    [
+        (None, [1, 3], True),
+        ((b"k2", b"k0"), [3, 1], True),
+        (None, [1], False),
+        ((b"k0", b"other"), [1, 3], False),
+    ],
+    ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
+)
+def test_kvcr_tier_serves_primary_pin_request(
+    monkeypatch, job_keys, chunk_ids, success
+):
+    """Validate pin jobs and hold accepted hits until KVCR releases the pin."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
-    chunk_ids = {keys[0]: 1, keys[2]: 3}
     lifecycle: list[str] = []
 
     class Parent:
@@ -384,8 +511,8 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
         def create_store_job(self, requested_keys, req_context):
             return TransferJob(
                 job_id=11,
-                keys=requested_keys,
-                chunk_ids=np.array([chunk_ids[key] for key in requested_keys]),
+                keys=requested_keys if job_keys is None else job_keys,
+                chunk_ids=np.array(chunk_ids, dtype=np.int32),
                 is_promotion=True,
                 req_context=req_context,
             )
@@ -401,6 +528,11 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request
+    assert lifecycle == ["new", "finished"]
+    if not success:
+        assert result is None
+        assert list(tier.get_finished_jobs()) == [JobResult(11, False)]
+        return
     assert result is not None
     pin_handle, descriptors = result
     assert descriptors[keys[1]] is None
@@ -408,7 +540,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     assert block_descriptors is not None
     (descriptor,) = block_descriptors
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=3)
-    assert lifecycle == ["new", "finished"]
+    assert type(descriptor.element_index) is int
 
     polls = 0
 
@@ -511,6 +643,7 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     assert blocks[key] == [
         MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
     ]
+    assert type(blocks[key][0].element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None
@@ -540,7 +673,16 @@ def test_kvcr_tier_requires_self_describing_inventory_events(monkeypatch):
         )
 
 
-def test_kvcr_tier_accumulates_block_results(monkeypatch):
+@pytest.mark.parametrize(
+    ("successes", "expected"),
+    [
+        ((True, False), JobResult(13, False, {OffloadKey(b"k0")})),
+        ((False, True), JobResult(13, False, {OffloadKey(b"k1")})),
+        ((True, True), JobResult(13, True)),
+    ],
+    ids=["success-then-failure", "failure-then-success", "all-success"],
+)
+def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     """Wait for every block result and preserve partial success while draining."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
@@ -557,13 +699,10 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch):
 
     op_handle, _, _ = kvcr.deliver_calls[0]
     kvcr.completed.clear()
-    kvcr.complete(op_handle, {keys[0]: True})
+    kvcr.complete(op_handle, {keys[0]: successes[0]})
     assert list(tier.get_finished_jobs()) == []
 
-    kvcr.complete(op_handle, {keys[1]: False})
+    kvcr.complete(op_handle, {keys[1]: successes[1]})
     tier.drain_jobs()
 
-    [result] = tier.get_finished_jobs()
-    assert result.job_id == 13
-    assert not result.success
-    assert result.successful_keys == {keys[0]}
+    assert list(tier.get_finished_jobs()) == [expected]

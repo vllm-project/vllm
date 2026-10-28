@@ -16,7 +16,7 @@ We currently support the following OpenAI APIs:
 - [Chat Completions batch API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions/batch`)
 - [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-- [Decisions API](decisions.md) (`/v1/decisions`)
+- [Decisions API](../../models/structured_decisions_models.md#openai-decisions-api) (`/v1/decisions`)
     - Supports text-only predicate, choice, and score questions on supported generation models.
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
@@ -78,7 +78,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
-- [Structured Decisions API](structured_decisions.md) (`/v1/systemone`)
+- [Structured Decisions API](../../models/structured_decisions_models.md#typesafe-system-one-endpoint) (`/v1/systemone`)
     - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - Answers typed questions about a state with a probability for every allowed answer.
 
@@ -116,7 +116,7 @@ LoRA dynamic loading & unloading is enabled in the API server. This should ONLY 
 
 For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
 
-- `/start_profile` - Start PyTorch profiler
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body with `profiler_kwargs` to pass keyword arguments to the underlying profiler)
 - `/stop_profile` - Stop PyTorch profiler
 
 ### SageMaker APIs
@@ -170,6 +170,14 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
 
 ## Server in development mode
 
