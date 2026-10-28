@@ -1046,14 +1046,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "kakaocorp/kanana-1.5-v-3b-instruct",
         trust_remote_code=True,
     ),
-    "KeyeForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-8B-Preview",
-        trust_remote_code=True,
-    ),
-    "KeyeVL1_5ForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-1_5-8B",
-        trust_remote_code=True,
-    ),
     "MoonshotKimiaForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Audio-7B-Instruct",
         tokenizer_mode="kimi_audio",
