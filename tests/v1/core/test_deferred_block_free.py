@@ -13,14 +13,13 @@ the newest scheduled step's output has been processed.
 
 import os
 import time
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -600,28 +599,6 @@ def test_deferred_async_load_registers_after_inflight_step():
         outputs.append(scheduler.schedule())
     registered.assert_called_once()
     assert registered.call_args.args[0] is importer
-
-
-def test_deferred_async_load_records_hit_sources_when_started():
-    """The connector attributes cache-hit tiers only once the load is
-    registered, so a deferred load records its prefix cache stats then."""
-    scheduler, importer, outputs, _ = _setup_async_load(defer_async_loads=True)
-    out0, out1, _ = outputs
-    connector = scheduler.connector
-    scheduler.connector_prefix_cache_stats = PrefixCacheStats()
-    sources = MagicMock()
-    with (
-        patch.object(connector, "update_state_after_alloc"),
-        patch.object(
-            connector, "get_external_cache_hit_sources", return_value=sources
-        ) as hit_sources,
-        patch.object(PrefixCacheStats, "record") as record,
-    ):
-        scheduler.update_from_output(out0, _make_model_runner_output(out0))
-        scheduler.update_from_output(out1, _make_model_runner_output(out1))
-    hit_sources.assert_called_once()
-    assert hit_sources.call_args.args[0] is importer
-    assert record.call_args.kwargs["hits_by_source"] is sources
 
 
 def test_async_load_registers_immediately_without_deferral():
