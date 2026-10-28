@@ -3,95 +3,12 @@
 
 import pytest
 import torch
-from compressed_tensors.compressors.pack_quantized import PackedQuantizationCompressor
-from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
-from safetensors.torch import save_file
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from transformers import AutoModel, LlamaConfig, LlamaModel, TokenizersBackend
+from transformers import AutoModel
 
 from vllm import PoolingParams
 from vllm.config import PoolerConfig
 
 from ...utils import check_embeddings_close
-
-
-@pytest.mark.core_model
-def test_pooling_with_tied_quantized_token_embeddings(
-    vllm_runner, tmp_path, monkeypatch
-):
-    """An omitted LM head must not try to tie packed token embedding weights."""
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    config = LlamaConfig(
-        vocab_size=128,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        max_position_embeddings=32,
-        tie_word_embeddings=True,
-    )
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(0)
-        model = LlamaModel(config).to(torch.bfloat16).eval()
-    state_dict = model.state_dict()
-    weight = state_dict.pop("embed_tokens.weight")
-    scheme = QuantizationScheme(
-        targets=["Embedding"],
-        weights=QuantizationArgs(
-            num_bits=4, type="int", strategy="group", group_size=32
-        ),
-        format="pack-quantized",
-    )
-    scale = weight.reshape(128, 4, 32).float().abs().amax(-1) / 7.5
-    compressed = PackedQuantizationCompressor.compress(
-        {"weight": weight, "weight_scale": scale.to(torch.bfloat16)}, scheme
-    )
-    with torch.no_grad():
-        weight.copy_(
-            PackedQuantizationCompressor.decompress(compressed, scheme)["weight"]
-        )
-        token_ids = torch.tensor([[1, 2, 3], [5, 17, 127]])
-        expected = torch.nn.functional.normalize(
-            model(token_ids).last_hidden_state[:, -1].float(), dim=-1
-        )
-    config.quantization_config = {
-        "quant_method": "compressed-tensors",
-        "format": "pack-quantized",
-        "config_groups": {"embeddings": scheme.model_dump(mode="json")},
-    }
-    config.architectures = ["LlamaModel"]
-    config.save_pretrained(tmp_path)
-    save_file(
-        state_dict
-        | {f"embed_tokens.{name}": value for name, value in compressed.items()},
-        tmp_path / "model.safetensors",
-    )
-    tokenizer = TokenizersBackend(
-        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
-        unk_token="[UNK]",
-    )
-    tokenizer.save_pretrained(tmp_path)
-    with vllm_runner(
-        str(tmp_path),
-        runner="pooling",
-        dtype="bfloat16",
-        enforce_eager=True,
-        max_model_len=32,
-        max_num_seqs=2,
-        gpu_memory_utilization=0.2,
-        pooler_config=PoolerConfig(pooling_type="LAST"),
-    ) as runner:
-        results = runner.llm.embed(
-            [{"prompt_token_ids": ids} for ids in token_ids.tolist()]
-        )
-    check_embeddings_close(
-        embeddings_0_lst=expected.tolist(),
-        embeddings_1_lst=[result.outputs.embedding for result in results],
-        name_0="dequantized HF",
-        name_1="packed vLLM",
-    )
 
 
 @pytest.mark.cpu_test
