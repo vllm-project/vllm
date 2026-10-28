@@ -228,3 +228,21 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [(None, "NixlPullConnector"), ("push", "NixlPushConnector"), ("Push", None)],
+)
+def test_nixl_connector_transfer_mode(mode, expected):
+    """Frameworks that only accept "NixlConnector" select push via extra config."""
+    ktc = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={} if mode is None else {"transfer_mode": mode},
+    )
+    if expected is None:
+        with pytest.raises(ValueError, match="transfer_mode"):
+            KVConnectorFactory.get_connector_class(ktc)
+    else:
+        assert KVConnectorFactory.get_connector_class(ktc).__name__ == expected
