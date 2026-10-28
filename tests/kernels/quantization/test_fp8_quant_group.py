@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
-    _FP8_MIN_SCALING_FACTOR,
+    FP8_MIN_SCALING_FACTOR,
     QuantFP8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -205,6 +205,6 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert ((scales_zero_ue8m0.view(torch.int32) & 0x807FFFFF) == 0).all(), (
         "Clamped scales did not have zero sign and mantissa bits."
     )
-    assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
-        "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
+    assert (scales_zero_ue8m0 >= FP8_MIN_SCALING_FACTOR).all(), (
+        "Clamped scales were not larger than or equal to FP8_MIN_SCALING_FACTOR."
     )

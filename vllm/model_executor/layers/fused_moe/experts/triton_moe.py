@@ -549,14 +549,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and a2_scale is None
             and not self.quantization_emulation
             and lora_context is None
-            and cache2_dim * 2 == N
         ):
+            assert cache2_dim * 2 == N
             # Under EP the first GEMM never writes the rows of remote routes and the
             # second never reads them, so they are skipped here too.
             qintermediate_cache2, a2q_scale = silu_mul_token_quant(
                 intermediate_cache1.view(-1, N),
                 topk_ids if skip_invalid else None,
                 expert_map if skip_invalid else None,
+                num_align_experts,
             )
         else:
             self.activation(

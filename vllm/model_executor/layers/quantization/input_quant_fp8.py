@@ -22,7 +22,7 @@ from vllm.utils.deep_gemm import (
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
-_FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
 # --8<-- [start:quant_fp8]
@@ -208,7 +208,7 @@ class QuantFP8(CustomOp):
             else:
                 x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
 
-            scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+            scale = (x_max / _FP8_MAX).clamp(min=FP8_MIN_SCALING_FACTOR)
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
@@ -244,7 +244,7 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scales_raw = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        scales_raw = (absmax / _FP8_MAX).clamp(min=FP8_MIN_SCALING_FACTOR)
         scales = (
             torch.exp2(torch.ceil(torch.log2(scales_raw)))
             if self.use_ue8m0

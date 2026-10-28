@@ -12,6 +12,9 @@ finalize never read those rows.
 
 import torch
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+    FP8_MIN_SCALING_FACTOR,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -24,6 +27,7 @@ def _silu_mul_token_quant_kernel(
     scale_ptr,
     topk_ids_ptr,
     expert_map_ptr,
+    num_experts,
     H,
     stride_x,
     stride_q,
@@ -34,7 +38,11 @@ def _silu_mul_token_quant_kernel(
 ):
     row = tl.program_id(0).to(tl.int64)
     if HAS_MASK:
+        # Same rule as `moe_align_block_size`: ids outside [0, num_experts) are
+        # dropped without reading `expert_map`.
         expert = tl.load(topk_ids_ptr + row)
+        if (expert < 0) | (expert >= num_experts):
+            return
         if tl.load(expert_map_ptr + expert) < 0:
             return
     offs = tl.arange(0, BLOCK)
@@ -58,18 +66,29 @@ def silu_mul_token_quant(
     x: torch.Tensor,
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    num_experts: int | None = None,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """SiLU-and-mul of `x` (`[rows, 2H]`, gate then up), quantized to FP8 per row.
 
     Returns the FP8 activation `[rows, H]` and float32 scales `[rows, 1]`. With
     `topk_ids` (`[rows]` once flattened) and `expert_map`, rows routed to a remote
-    expert are skipped and their outputs are left uninitialized.
+    expert, or to an id outside `[0, num_experts)`, are skipped and their outputs are
+    left untouched. `num_experts` defaults to `expert_map.numel()`. `out` optionally
+    supplies the two output tensors.
     """
     assert x.dim() == 2 and x.stride(-1) == 1 and x.size(1) % 2 == 0
     rows, H = x.size(0), x.size(1) // 2
     _, fp8_max = get_fp8_min_max()
-    q = torch.empty((rows, H), dtype=current_platform.fp8_dtype(), device=x.device)
-    scale = torch.empty((rows, 1), dtype=torch.float32, device=x.device)
+    if out is None:
+        q = torch.empty((rows, H), dtype=current_platform.fp8_dtype(), device=x.device)
+        scale = torch.empty((rows, 1), dtype=torch.float32, device=x.device)
+    else:
+        q, scale = out
+        assert q.shape == (rows, H) and q.stride(-1) == 1
+        assert q.dtype == current_platform.fp8_dtype()
+        assert scale.shape == (rows, 1) and scale.dtype == torch.float32
+        assert scale.is_contiguous()
     if rows == 0:
         return q, scale
     has_mask = False
@@ -77,17 +96,21 @@ def silu_mul_token_quant(
     if topk_ids is not None and expert_map is not None:
         has_mask = True
         ids, emap = topk_ids.reshape(-1), expert_map
+        if num_experts is None:
+            num_experts = expert_map.numel()
+        assert num_experts <= expert_map.numel()
     _silu_mul_token_quant_kernel[(rows,)](
         x,
         q,
         scale,
         ids,
         emap,
+        num_experts or 0,
         H,
         x.stride(0),
         q.stride(0),
         fp8_max,
-        1.0 / (fp8_max * 512.0),
+        FP8_MIN_SCALING_FACTOR,
         HAS_MASK=has_mask,
         BLOCK=triton.next_power_of_2(H),
         num_warps=4 if H <= 1024 else 8,
