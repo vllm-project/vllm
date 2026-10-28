@@ -25,6 +25,7 @@ Typical usage inside a transformer decoder layer::
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -36,11 +37,13 @@ from ..common.hyperconnection import (
     HyperConnectionConfig,
 )
 from .ops.hc import (
+    MAX_FUSED_UP_M,
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
+    hc_up_gate_mix,
 )
 
 
@@ -144,10 +147,17 @@ class GatedResidual(nn.Module):
             injection = None
 
         lowrank = hc_silu(lowrank, self.hc_count)
-        gate = self.input_mix_weight_up(lowrank)  # [M, D]
-        block_input = hc_gate_mix(xn, gate, self.hc_count)
+        block_input = self._up_gate_mix(xn, lowrank)
 
         return hidden_states, block_input, injection
+
+    def _up_gate_mix(self, xn: torch.Tensor, lowrank: torch.Tensor) -> torch.Tensor:
+        if 1 <= xn.shape[0] <= MAX_FUSED_UP_M and not envs.VLLM_BATCH_INVARIANT:
+            return hc_up_gate_mix(
+                xn, lowrank, self.input_mix_weight_up.weight, self.hc_count
+            )
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
+        return hc_gate_mix(xn, gate, self.hc_count)
 
     def combine_and_mix(
         self,
@@ -180,8 +190,7 @@ class GatedResidual(nn.Module):
             injection = None
 
         lowrank = hc_silu(lowrank, self.hc_count)
-        gate = self.input_mix_weight_up(lowrank)  # [M, D]
-        block_input = hc_gate_mix(xn, gate, self.hc_count)
+        block_input = self._up_gate_mix(xn, lowrank)
 
         return hidden_states, block_input, injection
 

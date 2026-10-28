@@ -185,6 +185,105 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
     return out
 
 
+# Above this the up GEMM is compute bound and the unfused GEMM + gate-mix wins.
+MAX_FUSED_UP_M = 64
+
+
+@triton.jit
+def _hc_up_gate_mix_kernel(
+    x_ptr,
+    a_ptr,
+    w_ptr,
+    y_ptr,
+    M,
+    stride_x,
+    stride_a,
+    stride_w,
+    stride_y,
+    HC_DIM: tl.constexpr,
+    HC: tl.constexpr,
+    RANK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    launch_pdl: tl.constexpr,
+) -> None:
+    offs_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    mask_n = offs_n < HC_DIM
+    mask_mn = mask_m[:, None] & mask_n[None, :]
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
+    acc = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+    for stream in tl.static_range(HC):
+        cols = stream * HC_DIM + offs_n
+        g = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        for k0 in tl.static_range(0, RANK, BLOCK_K):
+            k = k0 + offs_k
+            mask_k = k < RANK
+            a = tl.load(
+                a_ptr + offs_m[:, None] * stride_a + k[None, :],
+                mask_m[:, None] & mask_k[None, :],
+                other=0.0,
+            )
+            w = tl.load(
+                w_ptr + cols[None, :] * stride_w + k[:, None],
+                mask_k[:, None] & mask_n[None, :],
+                other=0.0,
+            )
+            g = tl.dot(a, w, g)
+        # Round the gate to the activation dtype, matching the unfused GEMM output.
+        g = g.to(y_ptr.dtype.element_ty).to(tl.float32)
+        x = tl.load(
+            x_ptr + offs_m[:, None] * stride_x + cols[None, :], mask_mn, other=0.0
+        )
+        acc += tl.sigmoid(g) * x.to(tl.float32)
+    acc /= HC
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+    tl.store(y_ptr + offs_m[:, None] * stride_y + offs_n[None, :], acc, mask_mn)
+
+
+def _hc_up_gate_mix(
+    x: torch.Tensor, lowrank: torch.Tensor, weight: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    M, DIM = x.shape
+    rank = lowrank.shape[1]
+    assert weight.shape == (DIM, rank)
+    assert lowrank.shape[0] == M
+    assert DIM % hc_count == 0
+    assert x.stride(1) == 1 and lowrank.stride(1) == 1 and weight.stride(1) == 1
+
+    HC_DIM = DIM // hc_count
+    out = x.new_empty(M, HC_DIM)
+    BLOCK_M = 16
+    BLOCK_N = 16
+    _hc_up_gate_mix_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(HC_DIM, BLOCK_N))](
+        x,
+        lowrank,
+        weight,
+        out,
+        M,
+        x.stride(0),
+        lowrank.stride(0),
+        weight.stride(0),
+        out.stride(0),
+        HC_DIM,
+        hc_count,
+        rank,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K=64,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+    )
+    return out
+
+
 @triton.jit
 def _hc_combine_kernel(
     block_ptr,
@@ -386,6 +485,13 @@ def _hc_gate_mix_fake(
     return x.new_empty((x.shape[0], x.shape[1] // hc_count))
 
 
+def _hc_up_gate_mix_fake(
+    x: torch.Tensor, lowrank: torch.Tensor, weight: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    del lowrank, weight
+    return x.new_empty((x.shape[0], x.shape[1] // hc_count))
+
+
 def _hc_combine_fake(
     residual: torch.Tensor,
     block_output: torch.Tensor,
@@ -424,6 +530,11 @@ direct_register_custom_op(
     fake_impl=_hc_gate_mix_fake,
 )
 direct_register_custom_op(
+    op_name="amd_hc_up_gate_mix",
+    op_func=_hc_up_gate_mix,
+    fake_impl=_hc_up_gate_mix_fake,
+)
+direct_register_custom_op(
     op_name="qwen4_exp_hc_combine",
     op_func=_hc_combine,
     fake_impl=_hc_combine_fake,
@@ -447,6 +558,13 @@ def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
 
 def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
     return torch.ops.vllm.qwen4_exp_hc_gate_mix(x, gate, hc_count)
+
+
+def hc_up_gate_mix(
+    x: torch.Tensor, lowrank: torch.Tensor, weight: torch.Tensor, hc_count: int
+) -> torch.Tensor:
+    """Fused HC up projection (``lowrank @ weight.T``) + sigmoid gate mix."""
+    return torch.ops.vllm.amd_hc_up_gate_mix(x, lowrank, weight, hc_count)
 
 
 def hc_combine(
@@ -479,9 +597,11 @@ def hc_combine_norm(
 
 
 __all__ = [
+    "MAX_FUSED_UP_M",
     "grouped_gemma_rmsnorm",
     "hc_combine",
     "hc_combine_norm",
     "hc_gate_mix",
     "hc_silu",
+    "hc_up_gate_mix",
 ]
