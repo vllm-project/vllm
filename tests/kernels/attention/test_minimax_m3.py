@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -39,6 +41,15 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
         "MiniMax M3 attention kernels require CUDA or ROCm.",
         allow_module_level=True,
     )
+
+
+PREFILL_KERNELS = [pytest.param(minimax_m3_sparse_attn, id="scalar")]
+if current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn as minimax_m3_sparse_attn_tiled,
+    )
+
+    PREFILL_KERNELS.append(pytest.param(minimax_m3_sparse_attn_tiled, id="query_tiled"))
 
 
 @pytest.fixture
@@ -954,6 +965,215 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     assert tri_prefill.data_ptr() == buf_htk[:, nd:, :].data_ptr()
 
 
+def _reference_aiter_sparse_table(
+    topk: torch.Tensor,
+    page16_block_table: torch.Tensor,
+    row_req_id: list[int],
+    row_pos: list[int],
+    num_kv_heads: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Page table and context the AITER top-k emits for the sparse attend.
+
+    One row per (token, kv head), head minor; index head ``h`` drives kv head
+    ``h``. Full blocks keep their top-k order and the query's own block goes
+    last, since only it is partially visible.
+    """
+    pages_per_block = BLOCK_SIZE // 16
+    num_tokens = topk.shape[1]
+    sparse_bt = torch.zeros(
+        num_tokens * num_kv_heads, TOPK * pages_per_block, dtype=torch.int32
+    )
+    sparse_ctx = torch.zeros(num_tokens * num_kv_heads, dtype=torch.int32)
+    topk_cpu = topk.cpu().tolist()
+    page16_cpu = page16_block_table.cpu().tolist()
+    for n, (req_id, pos) in enumerate(zip(row_req_id, row_pos)):
+        self_block = pos // BLOCK_SIZE
+        for kv_head in range(num_kv_heads):
+            selected = [b for b in topk_cpu[kv_head][n] if 0 <= b <= self_block]
+            full = [b for b in selected if b < self_block]
+            row = n * num_kv_heads + kv_head
+            for slot, block in enumerate(full + [b for b in selected if b not in full]):
+                base = page16_cpu[req_id][block] * pages_per_block * num_kv_heads
+                for j in range(pages_per_block):
+                    sparse_bt[row, slot * pages_per_block + j] = (
+                        base + kv_head + j * num_kv_heads
+                    )
+            if len(full) < len(selected):
+                sparse_ctx[row] = (
+                    len(full) * BLOCK_SIZE + pos + 1 - self_block * BLOCK_SIZE
+                )
+            else:
+                sparse_ctx[row] = min(len(selected) * BLOCK_SIZE, pos + 1)
+    return sparse_bt, sparse_ctx
+
+
+# ROCm counterpart of test_msa_indexer_impl_matches_triton.
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="The AITER MSA indexer is ROCm-only.",
+)
+@pytest.mark.parametrize("num_idx_heads", [1, 2])
+@pytest.mark.parametrize(("init_blocks", "local_blocks"), [(0, 0), (1, 2)])
+def test_aiter_indexer_impl_matches_reference(
+    num_idx_heads, init_blocks, local_blocks, monkeypatch
+):
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.amd.indexer_msa import (
+        MiniMaxM3IndexerMSAImpl,
+        MiniMaxM3IndexerMSAMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_rebase_block_table_to_page16,
+    )
+
+    monkeypatch.setattr(
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+    )
+    if reason := indexer_msa_mod.msa_indexer_unsupported_reason(
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=HEAD_DIM,
+        indexer_kv_dtype="fp8",
+        max_model_len=8192,
+    ):
+        pytest.skip(f"AITER MSA indexer unavailable: {reason}")
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads,
+        "sparse_block_size": BLOCK_SIZE,
+    }
+
+    # Decode-first mixed batch; two rows see fewer than TOPK blocks.
+    batch = BatchSpec(
+        seq_lens=[300, 4097, 5000, 2624, 200], query_lens=[1, 1, 1, 64, 200]
+    )
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    num_tokens = batch.compute_num_tokens()
+    common.positions = torch.cat(
+        [
+            torch.arange(s - q, s, device=device, dtype=torch.int64)
+            for s, q in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
+    index_bt = common.block_table_tensor
+    num_pages = index_bt.numel()
+    index_bt.copy_(
+        torch.randperm(num_pages, device=device, dtype=torch.int32).view_as(index_bt)
+    )
+    # A distinct attend table catches a top-k resolved through the index table.
+    attn_bt = torch.flip(index_bt, dims=(1,)) + num_pages
+    page16_bt = minimax_m3_rebase_block_table_to_page16(attn_bt)
+
+    # e4m3-exact, unique block scores make the fp8 top-k deterministic.
+    index_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, HEAD_DIM, device=device, dtype=torch.float8_e4m3fn
+    )
+    values = torch.tensor(_E4M3_EXACT_VALUES, dtype=torch.float32)
+    for r, seq_len in enumerate(batch.seq_lens):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        assert num_blocks <= len(values)
+        perm = values[torch.randperm(len(values))]
+        for b in range(num_blocks):
+            index_cache[index_bt[r, b]] = float(perm[b])
+    head_sign = torch.tensor([(-1.0) ** h for h in range(num_idx_heads)])
+    index_q = (
+        head_sign.view(1, num_idx_heads, 1)
+        .expand(num_tokens, num_idx_heads, HEAD_DIM)
+        .to(device=device, dtype=torch.float8_e4m3fn)
+    )
+
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.float8_e4m3fn,
+    )
+    rows = num_tokens * num_idx_heads
+    topk_buf = torch.full(
+        (num_idx_heads, num_tokens, TOPK), -2, dtype=torch.int32, device=device
+    )
+    sparse_bt = torch.full(
+        (rows, TOPK * PAGES_PER_SPARSE_BLOCK), -27182, dtype=torch.int32, device=device
+    )
+    sparse_ctx = torch.full((rows,), -27182, dtype=torch.int32, device=device)
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerMSAImpl(
+            num_kv_heads=num_idx_heads,
+            scale=HEAD_DIM**-0.5,
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_idx_heads,
+            index_head_dim=HEAD_DIM,
+            prefix="idx_aiter",
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            indexer_kv_dtype="fp8",
+            topk_indices_buffer=topk_buf,
+        )
+        builder = MiniMaxM3IndexerMSAMetadataBuilder(
+            spec, [impl.index_cache.prefix], vllm_config, device
+        )
+    impl.index_cache.kv_cache = index_cache
+    impl.sparse_bt_buffer = sparse_bt
+    impl.sparse_ctx_buffer = sparse_ctx
+
+    md = builder.build(0, common)
+    nd = md.num_decode_tokens
+    assert md.num_decodes == 3 and nd == 3
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        decode_topk, prefill_topk = impl(
+            index_q.view(num_tokens, -1),
+            decode_page16_block_table=page16_bt[: md.num_decodes],
+            prefill_page16_block_table=page16_bt[md.num_decodes :],
+        )
+    torch.accelerator.synchronize()
+
+    assert decode_topk is not None and prefill_topk is not None
+    assert decode_topk.data_ptr() == topk_buf[:, :nd].data_ptr()
+    assert prefill_topk.data_ptr() == topk_buf[:, nd:].data_ptr()
+
+    q_lens = torch.tensor(batch.query_lens, device=device, dtype=torch.int32)
+    seq_lens = torch.tensor(batch.seq_lens, device=device, dtype=torch.int32)
+    expected = _reference_index_topk(
+        index_q,
+        index_cache,
+        index_bt,
+        q_lens,
+        seq_lens,
+        seq_lens - q_lens,
+        TOPK,
+        init_blocks,
+        local_blocks,
+    )
+    _assert_topk_indices_equal_unordered(topk_buf, expected)
+
+    row_req_id = [r for r, q in enumerate(batch.query_lens) for _ in range(q)]
+    expected_bt, expected_ctx = _reference_aiter_sparse_table(
+        topk_buf, page16_bt, row_req_id, common.positions.tolist(), num_idx_heads
+    )
+    assert torch.equal(sparse_bt.cpu(), expected_bt)
+    assert torch.equal(sparse_ctx.cpu(), expected_ctx)
+
+
 @pytest.mark.parametrize(
     ("decode_query_len", "max_decode_query_len"),
     [
@@ -1444,19 +1664,21 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     reason="CuteDSL index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    ("dtype", "decode_query_len", "max_decode_query_len"),
+    ("dtype", "decode_query_len", "max_decode_query_len", "concurrent_writes"),
     [
-        (torch.bfloat16, 1, 1),
-        (torch.bfloat16, 3, 8),
-        (torch.float8_e4m3fn, 1, 1),
-        (torch.float8_e4m3fn, 3, 8),
-        (torch.float8_e4m3fn, 8, 8),
+        (torch.bfloat16, 1, 1, False),
+        (torch.bfloat16, 3, 8, False),
+        (torch.float8_e4m3fn, 1, 1, False),
+        (torch.float8_e4m3fn, 3, 8, False),
+        (torch.float8_e4m3fn, 8, 8, False),
+        pytest.param(torch.float8_e4m3fn, 1, 1, True, id="concurrent-writes"),
     ],
 )
 def test_decode_index_score_cutedsl_correctness(
     dtype: torch.dtype,
     decode_query_len: int,
     max_decode_query_len: int,
+    concurrent_writes: bool,
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops import (
@@ -1466,7 +1688,8 @@ def test_decode_index_score_cutedsl_correctness(
     torch.manual_seed(0)
     init_blocks, local_blocks = 0, 0
     num_idx_heads, head_dim = 4, 128
-    active_seq_lens = torch.tensor((1025, 4097), device="cuda", dtype=torch.int32)
+    lengths = (131326, 131289, 131252, 131215) if concurrent_writes else (1025, 4097)
+    active_seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     batch = active_seq_lens.numel()
     total_q = batch * decode_query_len
     max_seq_len = int(active_seq_lens.max())
@@ -1488,7 +1711,8 @@ def test_decode_index_score_cutedsl_correctness(
     )
     score = unified_score.transpose(0, 1)
 
-    minimax_m3_index_decode_score_cutedsl(
+    launch = partial(
+        minimax_m3_index_decode_score_cutedsl,
         idx_q,
         index_kv_cache,
         block_table,
@@ -1501,6 +1725,7 @@ def test_decode_index_score_cutedsl_correctness(
         max_decode_query_len=max_decode_query_len,
         score_out=score,
     )
+    launch()
     expected = _reference_decode_index_score(
         idx_q,
         index_kv_cache,
@@ -1510,6 +1735,23 @@ def test_decode_index_score_cutedsl_correctness(
         score_block_stride,
     )
     torch.testing.assert_close(score, expected)
+
+    if concurrent_writes:
+        # Concurrent stores expose shared-memory reuse before ldmatrix reads finish.
+        quiet = score.clone()
+        noise = torch.zeros(1 << 26, device="cuda")
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        try:
+            for _ in range(20):
+                with torch.cuda.stream(side):
+                    for _ in range(40):
+                        noise.mul_(1.0)
+                launch()
+                torch.testing.assert_close(score, quiet, atol=0, rtol=0)
+                side.synchronize()
+        finally:
+            side.synchronize()
 
 
 # Sparse attention kernels.
@@ -1563,6 +1805,7 @@ def _reference_sparse_attn(
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("sparse_attn", PREFILL_KERNELS)
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
     [
@@ -1571,6 +1814,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
+    sparse_attn,
     kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
@@ -1628,7 +1872,7 @@ def test_prefill_sparse_attention_correctness(
         q_start += q_len
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_cache,
         topk_idx,
@@ -1772,40 +2016,37 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
 
 
-def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
+def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     """The top-k emits the attend's page table, so it needs that attend.
 
     Selected without it, the indexer would reach its top-k with no table to
     resolve through; falling back instead surfaces the fp8 index cache as the
     configuration error it is.
     """
-    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
 
-    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
-
-    def unsupported_reason() -> str | None:
-        return indexer_aiter_mod.aiter_indexer_unsupported_reason(
-            topk_blocks=TOPK,
-            sparse_block_size=BLOCK_SIZE,
-            num_index_heads=1,
-            index_head_dim=HEAD_DIM,
-            # The implementation also accepts this legacy fp8 alias.
-            indexer_kv_dtype="fp8_e4m3",
-            max_model_len=8192,
-        )
+    monkeypatch.setattr(indexer_msa_mod.current_platform, "is_rocm", lambda: True)
+    kwargs = dict(
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=1,
+        index_head_dim=HEAD_DIM,
+        indexer_kv_dtype="fp8_e4m3",
+        max_model_len=8192,
+    )
 
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
-    reason = unsupported_reason()
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is not None and "AITER sparse PA attend" in reason
 
     # With the attend asked for, the gate moves on to the kernel-contract
     # checks rather than stopping here.
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    reason = unsupported_reason()
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
@@ -2586,6 +2827,103 @@ def test_decode_sparse_attention_correctness(
     error = (actual[:active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("capture_graph", [False, True])
+@pytest.mark.parametrize("num_reqs", [2, 17], ids=["split-k", "single-chunk"])
+@pytest.mark.parametrize(
+    "invalid_block", [-1, 1_000_000], ids=["sentinel", "out-of-range"]
+)
+def test_decode_sparse_attention_ignores_invalid_topk(
+    kv_layout: KVCacheLayout, capture_graph: bool, num_reqs: int, invalid_block: int
+):
+    """Unused top-k entries must not be dereferenced as block-table indices."""
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.full(
+        (num_reqs,), decode_query_len, device="cuda", dtype=torch.int32
+    )
+    seq_lens[1] = 4096
+    q = torch.randn(
+        seq_lens.numel() * decode_query_len,
+        NUM_Q_HEADS,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+    )
+    kv_cache = _allocate_main_kv_via_contract(1, kv_layout)
+
+    # All logical blocks alias the single valid page. With a contiguous multi-row
+    # table, row 1's raw pointer offset -1 resolves to the final element of row
+    # 0. Poison that exact location so an unsafe load deterministically forms an
+    # out-of-range KV-cache pointer.
+    clean_block_table = torch.zeros(num_reqs, 32, device="cuda", dtype=torch.int32)
+    block_table = clean_block_table.clone()
+    block_table[0, -1] = 1_000_000
+    topk_idx = torch.full(
+        (NUM_KV_HEADS, q.shape[0], TOPK),
+        -1,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    topk_idx[..., 0] = 0
+    # Request 1 has invalid entries both before and after its valid block.
+    # Two requests produce empty split-K chunks; 17 put the full top-k in one
+    # chunk, exercising neutral updates before and after a nonempty softmax.
+    request_topk = topk_idx[:, decode_query_len : 2 * decode_query_len]
+    request_topk.fill_(invalid_block)
+    request_topk[..., TOPK // 2] = 0
+
+    # A valid-only run isolates sentinel handling from BF16-vs-FP32 rounding.
+    # Include block 0 exactly once; replacing sentinels with 0 would duplicate
+    # its contribution. The general correctness test covers reference accuracy.
+    valid_topk = torch.zeros(
+        (NUM_KV_HEADS, q.shape[0], 1), device="cuda", dtype=torch.int32
+    )
+    expected = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        valid_topk,
+        clean_block_table,
+        seq_lens,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        expected,
+        decode_query_len,
+    )
+    actual = torch.empty_like(q)
+
+    def run_decode() -> None:
+        minimax_m3_sparse_attn_decode(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            NUM_KV_HEADS,
+            SM_SCALE,
+            actual,
+            decode_query_len,
+        )
+
+    if capture_graph:
+        # An unfixed kernel faults during capture and leaves the CUDA context
+        # unusable. Run negative-control reproductions in a dedicated process.
+        run_decode()
+        current_platform.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_decode()
+        for _ in range(3):
+            graph.replay()
+    else:
+        run_decode()
+    current_platform.synchronize()
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_decode_wrong_layout_breaks_parity():

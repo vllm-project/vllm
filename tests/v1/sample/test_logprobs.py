@@ -498,8 +498,12 @@ def test_prompt_logprob_token_ids_validation():
     with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
         verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
-    with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprobs or"):
         verify(prompt_logprob_start=3)
+    # It also offsets top-K prompt logprobs.
+    verify(prompt_logprobs=1, prompt_logprob_start=3)
+    with pytest.raises(VLLMValidationError, match="non-negative"):
+        verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
 def test_prompt_logprob_token_ids_require_v2_model_runner():
@@ -518,6 +522,7 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         structured_outputs_config=None,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
     params = SamplingParams(prompt_logprob_token_ids=[[1, 2]])
     with patch.object(SamplingParams, "verify"):
@@ -527,6 +532,14 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+
+        # Top-K prompt logprobs only honor prompt_logprob_start on the V2 runner.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
+        InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.use_v2_model_runner = False
+        with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
 
 
@@ -1407,10 +1420,6 @@ def test_prompt_logprobs_with_chunking_and_preemption():
 def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     """Per-row scores stay row-aligned across chunked prefill and preemption."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    # The ragged check below compares a second generate call against the first
-    # one. Default kernel selection varies between processes, which moves bf16
-    # logprob tails by up to 0.2; under this the two runs are bit-identical.
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     prompts = [
         "The following numbers of the sequence "
@@ -1473,7 +1482,10 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert float(scores.max()) <= 1e-3, "logprobs must be <= 0"
 
         # Ragged rows: each row keeps a prefix of the candidates and must
-        # reproduce that prefix of the full scores, with -inf padding.
+        # reproduce that prefix of the full scores, with -inf padding. On ROCm
+        # the second generate call picks its own kernels, which moves bf16
+        # tails by up to 0.19; a misaligned row is off by nats either way.
+        ragged_atol = 0.2 if current_platform.is_rocm() else 1e-2
         ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
         ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
         for output, ragged_output in zip(outputs, ragged_outputs):
@@ -1482,7 +1494,7 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
                 n = 1 + j % 4
                 expected[j, :n] = output.prompt_token_id_logprobs[j, :n]
             np.testing.assert_allclose(
-                ragged_output.prompt_token_id_logprobs, expected, atol=1e-2
+                ragged_output.prompt_token_id_logprobs, expected, atol=ragged_atol
             )
 
         # The row count is checked against the prompt at admission.
@@ -1532,14 +1544,15 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
-    """A prefill that starts past the first scored row returns no scores.
-
-    Such a prefill (here a prefix-cache hit the caller opted back into) never
-    computes the leading rows, so emitting the buffer would return values the
-    model never produced for them.
-    """
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score, for both fixed-ID
+    scores and top-K prompt logprobs offset by prompt_logprob_start."""
+    start = 17
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Cached and uncached prefills have different execution shapes; batch
+    # invariance makes their scores comparable bit for bit.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     text = "The capital of France is Paris. " * 20
 
@@ -1547,6 +1560,7 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         "Qwen/Qwen3-0.6B",
         max_model_len=512,
         enable_prefix_caching=True,
+        block_size=16,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
         token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
@@ -1554,18 +1568,32 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=1,
-            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 1, 1)),
-            skip_reading_prefix_cache=False,
+            prompt_logprobs=2,
+            prompt_logprob_start=start,
+            prompt_logprob_token_ids=np.tile(
+                [10, 100, 1000], (len(token_ids) - 1 - start, 1)
+            ),
+            skip_reading_prefix_cache=True,
         )
 
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+        # Top-K prompt logprobs start at the same row: position p is predicted
+        # by row p - 1, so positions up to and including start are None.
+        assert first.prompt_logprobs is not None
+        assert len(first.prompt_logprobs) == len(token_ids)
+        assert all(lp is None for lp in first.prompt_logprobs[: start + 1])
+        assert all(first.prompt_logprobs[start + 1 :])
 
-        # The re-send is served from the prefix cache, so its prefill starts
-        # past row 0 and the leading rows are never computed.
+        sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert second.prompt_token_id_logprobs is None
+        assert second.num_cached_tokens == 16
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 1 - start, 3)
+        np.testing.assert_array_equal(
+            second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
+        )
+        assert second.prompt_logprobs == first.prompt_logprobs
 
 
 @large_gpu_mark(min_gb=24)
