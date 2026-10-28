@@ -479,8 +479,7 @@ steps:
   parallelism: 6
   mirror:
     amd:
-      label: ":amd: (MI300) Quantization Kernels"
-      automatic_shard: true
+      label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
@@ -503,7 +502,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation"
+      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (L4) MoE Kernels"
   key: kernels-moe-test
