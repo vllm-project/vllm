@@ -219,6 +219,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 # path (skip_final_all_reduce); EP/all2all, SP, zero experts,
                 # and replicated shared experts all produce or add a complete
                 # output, which a downstream fused norm would all-reduce again.
+                # NOTE: moe_config is shared across layers; the condition is
+                # layer-uniform, so this reset is idempotent.
                 moe_config = self.mlp.experts.moe_config
                 moe_partial_ok = (
                     moe_config.skip_final_all_reduce

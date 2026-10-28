@@ -33,9 +33,10 @@ requires_cuda = pytest.mark.skipif(
 
 
 def _gemma_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
+    dtype = x.dtype
     x = x.float()
     var = x.pow(2).mean(dim=-1, keepdim=True)
-    return (x * torch.rsqrt(var + eps) * (w.float() + 1.0)).to(x.dtype)
+    return (x * torch.rsqrt(var + eps) * (w.float() + 1.0)).to(dtype)
 
 
 @requires_cuda
