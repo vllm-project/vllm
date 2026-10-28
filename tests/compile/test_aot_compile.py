@@ -23,6 +23,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+    _compute_code_hash_with_content,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -1067,3 +1068,28 @@ def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_
         assert traced > before
         assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
         assert counters["unique_graphs"] == traced
+
+
+def test_compute_code_hash_ignores_locale_encoding(tmp_path):
+    """AOT source verification must not depend on the locale's default encoding."""
+    source = tmp_path / "traced.py"
+    content = "# —\n"
+    source.write_text(content, encoding="utf-8")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "utf8=0",
+            "-c",
+            "import sys; from vllm.compilation.caching import _compute_code_hash; "
+            "print(_compute_code_hash({sys.argv[1]}))",
+            str(source),
+        ],
+        env={**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    expected = _compute_code_hash_with_content({str(source): content})
+    assert proc.stdout.split()[-1] == expected
