@@ -22,6 +22,8 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::routes::openai::utils::types::ReasoningEffort;
+
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -305,6 +307,8 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    pub reasoning_effort_map: HashMap<ReasoningEffort, String>,
     /// Whether requests may supply their own chat template.
     pub trust_request_chat_template: bool,
     /// Whether request-level tools are left out of the prompt when
