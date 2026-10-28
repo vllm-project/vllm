@@ -63,13 +63,15 @@ def test_rotary_embedding_registration():
     not current_platform.is_rocm(),
     reason="AITER rotary is only available on ROCm",
 )
-def test_aiter_partial_rotary_falls_back():
-    """The AITER kernel only rotates full heads; partial rotary must not use it."""
+@pytest.mark.parametrize(("head_size", "rotary_dim"), [(128, 64), (96, 96)])
+def test_aiter_unsupported_shapes_fall_back(head_size, rotary_dim):
+    """AITER's Triton RoPE needs full rotary and a power-of-2 head size (e.g.
+    Phi-3-mini uses 96); other shapes must fall back instead of failing."""
     impl = ir.ops.rotary_embedding.impls["aiter"]
     if not impl.supported:
         pytest.skip("AITER rotary is not supported on this platform")
 
-    args = _inputs(7, 128, torch.bfloat16, True, rotary_dim=64)
+    args = _inputs(7, head_size, torch.bfloat16, True, rotary_dim=rotary_dim)
     assert not impl.supports_args(*args)
 
     expected = rope_native(*clone_args(args))

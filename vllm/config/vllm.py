@@ -204,14 +204,14 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if rotary embedding custom op is active and
+    """Enable if the RoPE custom op or another RoPE fusion is requested and
     use_inductor_graph_partition is enabled.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_enabled()
-        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and cfg.compilation_config.uses_rope_kernel()
         and (
             cfg.compilation_config.use_inductor_graph_partition
             or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -249,7 +249,9 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
 
     if not rocm_aiter_ops.is_enabled():
         return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    # The RoPE custom op or another RoPE fusion opts in, as before RoPE fusions
+    # stopped forcing the custom op.
+    return cfg.compilation_config.uses_rope_kernel()
 
 
 OPTIMIZATION_LEVEL_00 = {

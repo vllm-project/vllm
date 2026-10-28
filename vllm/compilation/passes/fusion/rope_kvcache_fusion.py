@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRotaryEmbedding, rope_covers_full_head
+from .matcher_utils import MatcherRotaryEmbedding, aiter_fused_rope_supported
 from .rms_quant_fusion import (
     empty_bf16,
     empty_i64,
@@ -300,7 +300,7 @@ class RopeStaticQQuantKVCachePattern:
             self.get_inputs(),
             fwd_and_view_to_reshape,
             pm_pass,
-            extra_check=lambda match: rope_covers_full_head(match, self.head_size),
+            extra_check=lambda match: aiter_fused_rope_supported(match, self.head_size),
         )
 
 
@@ -431,7 +431,7 @@ class RopeReshapeKVCachePattern:
             self.get_inputs(),
             fwd_and_view_to_reshape,
             pm_pass,
-            extra_check=lambda match: rope_covers_full_head(match, self.head_size),
+            extra_check=lambda match: aiter_fused_rope_supported(match, self.head_size),
         )
 
 

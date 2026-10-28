@@ -151,6 +151,41 @@ def test_reject_contradictory_custom_ops(custom_ops, config_kwargs, match):
         CompilationConfig(custom_ops=custom_ops, **config_kwargs)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="RoPE+KV-cache fusions are ROCm-only"
+)
+@pytest.mark.parametrize(
+    ("custom_ops", "pass_kwargs", "expected"),
+    [
+        (["none"], {}, False),
+        (["none", "+rotary_embedding"], {}, True),
+        (["none"], {"fuse_rope_kvcache": True}, True),
+        (["none"], {"enable_qk_norm_rope_fusion": True}, True),
+    ],
+)
+def test_rope_fusion_defaults_follow_rope_opt_in(
+    custom_ops, pass_kwargs, expected, monkeypatch
+):
+    """An explicit RoPE fusion still turns on the sibling RoPE fusion defaults,
+    as it did when it forced the RoPE custom op."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config.vllm import (
+        enable_qk_norm_rope_kvcache,
+        enable_rope_kvcache_fusion,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", staticmethod(lambda: True))
+    cfg = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            custom_ops=custom_ops,
+            use_inductor_graph_partition=True,
+            pass_config=PassConfig(**pass_kwargs),
+        )
+    )
+    assert enable_qk_norm_rope_kvcache(cfg) is expected
+    assert enable_rope_kvcache_fusion(cfg) is expected
+
+
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 # NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends

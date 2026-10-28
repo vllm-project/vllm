@@ -30,6 +30,7 @@ from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
@@ -86,11 +87,11 @@ class MatcherCustomOp(ABC):
         raise NotImplementedError
 
 
-def rope_covers_full_head(match: Match, head_size: int) -> bool:
-    """Whether the matched cos/sin cache rotates whole heads. AITER's
-    fused_qk_rope_reshape_and_cache does not support partial rotary."""
+def aiter_fused_rope_supported(match: Match, head_size: int) -> bool:
+    """Whether AITER's fused_qk_rope_reshape_and_cache supports the match: it
+    needs full rotary and a power-of-2 head size."""
     cache = match.kwargs["cos_sin_cache"].meta["val"]
-    return cache.shape[-1] == head_size
+    return cache.shape[-1] == head_size and next_power_of_2(head_size) == head_size
 
 
 def rope_custom_op_is_c_kernel() -> bool:

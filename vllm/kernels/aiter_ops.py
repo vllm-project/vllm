@@ -9,6 +9,7 @@ from torch.library import Library
 from vllm import ir
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 current_platform.import_kernels()
@@ -47,7 +48,10 @@ def aiter_rotary_supported_args(
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> bool:
-    return cos_sin_cache.shape[-1] == head_size
+    # AITER's Triton RoPE needs full rotary and a power-of-2 head size.
+    return (
+        cos_sin_cache.shape[-1] == head_size and next_power_of_2(head_size) == head_size
+    )
 
 
 def flatten_to_2d_is_free(x: Tensor) -> bool:
