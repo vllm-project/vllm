@@ -19,6 +19,7 @@ from kvcr import (
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
     KVCRBindings,
+    ZmqPeerControlChannel,
 )
 from kvcr.config import (
     G3Options,
@@ -29,7 +30,6 @@ from kvcr.config import (
     LocalDramOptions,
     RemoteFWDramOptions,
 )
-from kvcr.control_channels import ZmqPeerControlChannel
 from kvcr.policy import (
     FIFOPolicy,
     G3FIFOPolicy,
