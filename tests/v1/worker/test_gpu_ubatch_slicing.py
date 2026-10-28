@@ -9,7 +9,10 @@ the same microbatches, so the main test here pins V2's slicing against V1's
 threaded execution of the microbatches.
 """
 
-import threading
+import faulthandler
+import multiprocessing
+import os
+import signal
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
@@ -676,34 +679,30 @@ def test_merge_keeps_aux_hidden_states_per_layer():
         torch.testing.assert_close(merged, expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-@pytest.mark.parametrize("failed_ubatch", [0, 1])
-def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
-    """A failing microbatch surfaces as a named error, not a downstream KeyError.
-
-    The first recorded failure is reported, not microbatch 0's later error from
-    registering a recv hook on the exited microbatch 1. A microbatch that fails
-    *while its sibling is parked at a yield* hangs the step instead -- the
-    shared handoff protocol in `ubatching.py` has no way to unwind a parked
-    microbatch, and the V1 runner has the same gap. Fixing that means changing
-    `ubatching.py`, which is out of scope for the V2 runner.
-    """
+def _run_failing_ubatch(connection, failed_ubatch, yield_before_failure, fail_in_hook):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
-    failed_threads: list[threading.Thread] = []
 
     class _FailingModel(torch.nn.Module):
         def forward(self, input_ids, positions, **kwargs):
-            if dbo_current_ubatch_id() == failed_ubatch:
-                failed_threads.append(threading.current_thread())
-                raise ValueError("boom")
-            if failed_ubatch == 0:
+            if fail_in_hook:
+                if dbo_current_ubatch_id() != failed_ubatch:
+
+                    def fail():
+                        raise ValueError("boom")
+
+                    dbo_register_recv_hook(fail)
+                dbo_yield()
                 return input_ids.float().unsqueeze(-1)
+            if yield_before_failure:
+                dbo_yield()
+            if dbo_current_ubatch_id() == failed_ubatch:
+                raise ValueError("boom")
             dbo_yield()
-            failed_threads[0].join(timeout=5.0)
-            assert not failed_threads[0].is_alive()
-            dbo_register_recv_hook(lambda: None)
+            dbo_yield()
+            return input_ids.float().unsqueeze(-1)
 
     model_inputs = _make_model_inputs(8, device)
     ubatch_state = _make_ubatch_state(
@@ -714,24 +713,54 @@ def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
         ],
     )
 
-    result: dict[str, BaseException] = {}
+    finish = runner.begin_capturable_run(_FailingModel(), model_inputs, ubatch_state)
+    connection.send("ready")
+    with pytest.raises(RuntimeError, match=f"Microbatch {failed_ubatch}") as error:
+        finish()
+    assert isinstance(error.value.__cause__, ValueError)
+    assert str(error.value.__cause__) == "boom"
 
-    def _call():
-        try:
-            runner.run(_FailingModel(), model_inputs, ubatch_state)
-        except BaseException as e:  # noqa: BLE001
-            result["error"] = e
+    trace: list[tuple[str, int]] = []
+    output = runner.run(_YieldingModel(trace), model_inputs, ubatch_state)
+    expected = model_inputs["input_ids"].float().unsqueeze(-1) * 3
+    assert torch.equal(output, expected)
+    assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    connection.send("recovered")
 
-    # Run behind a watchdog: `UBatchRunner.run` joins without a timeout, so a
-    # regression here would wedge the suite rather than fail it.
-    caller = threading.Thread(target=_call, daemon=True)
-    caller.start()
-    caller.join(timeout=60.0)
-    assert not caller.is_alive(), "UBatchRunner.run hung on a failing microbatch"
 
-    assert isinstance(result["error"], RuntimeError)
-    assert f"Microbatch {failed_ubatch}" in str(result["error"])
-    assert isinstance(result["error"].__cause__, ValueError)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+@pytest.mark.parametrize(
+    ("yield_before_failure", "fail_in_hook"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_ubatch_runner_names_the_microbatch_that_failed(
+    failed_ubatch, yield_before_failure, fail_in_hook
+):
+    """Unwind parked siblings, preserve the original failure, and allow reuse."""
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=_run_failing_ubatch,
+        args=(sender, failed_ubatch, yield_before_failure, fail_in_hook),
+    )
+    process.start()
+    sender.close()
+    try:
+        assert receiver.poll(60), "microbatch test initialization timed out"
+        assert receiver.recv() == "ready"
+        if not receiver.poll(10):
+            os.kill(process.pid, signal.SIGUSR1)
+            process.join(timeout=1)
+            pytest.fail("UBatchRunner.finish hung after a microbatch failed")
+        assert receiver.recv() == "recovered"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        receiver.close()
 
 
 # DCP x DBO: each microbatch recomputes DCP-local seq_lens from its own

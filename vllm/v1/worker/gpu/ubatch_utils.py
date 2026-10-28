@@ -521,12 +521,6 @@ class UBatchRunner:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
                 # Recorded so the join below can report which microbatch broke.
-                # Note the siblings are not told to unwind: microbatches hand
-                # control to each other, so one that dies mid-forward leaves
-                # the others parked on a handoff that never comes and the step
-                # hangs. The V1 runner behaves the same way; fixing it means
-                # changing the shared handoff protocol in ubatching.py, which
-                # is deliberately out of scope here.
                 errors[ubatch_context.id] = e
 
         # Threads own the forward context; keep it cleared and SMs reserved
@@ -559,11 +553,14 @@ class UBatchRunner:
                 self._pending_finish = None
                 stack.close()
 
-            if errors:
-                failed = next(iter(errors))
+            failure = ubatch_contexts[0].abort_state.failure
+            if failure is None and errors:
+                failure = next(iter(errors.items()))
+            if failure is not None:
+                failed, error = failure
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
-                ) from errors[failed]
+                ) from error
             return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
 
         self._pending_finish = finish
