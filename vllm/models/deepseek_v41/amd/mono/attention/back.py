@@ -512,9 +512,7 @@ def stage_split(c, unit):
                 ) // 2
                 for hlf in range_constexpr(2):
                     bo.buffer_store(
-                        fx.Vector.from_elements(
-                            words[4 * hlf : 4 * hlf + 4], fx.Int32
-                        ),
+                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
                         rsrc(c["part"]),
                         off + 4 * hlf,
                         cache_modifier=CM_DEV,
