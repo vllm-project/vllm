@@ -8,6 +8,7 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from concurrent.futures import Future
@@ -600,6 +601,79 @@ class TestPromotionLatency:
         assert stats is not None
         observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
         assert len(observations[("1:p2p", "success")]) == 1
+
+
+def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
+    """A timed-out P2P load fails at once but keeps its primary chunk out of
+    the free pool: the peer may still be writing it. The AbortAck frees it."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session import client as client_module
+    from vllm.v1.kv_offload.tiering.p2p.session.client import _PD_LOAD_TIMEOUT_S
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import AbortAckMsg
+
+    now = [1000.0]
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: now[0])
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = SimpleNamespace(poll=lambda: [])  # type: ignore[assignment]
+    region = _mock_mmap_region(4)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+    free_before = primary._get_num_free_chunks()
+
+    now[0] += _PD_LOAD_TIMEOUT_S + 1.0
+    tiering._process_finished_jobs()
+    assert 7 not in tiering._jobs
+    assert primary.lookup(key, ctx) is LookupResult.MISS
+    assert primary.num_deferred_release_chunks == 1
+    assert primary._get_num_free_chunks() == free_before
+
+    conn.enqueue(
+        {
+            TYPE_KEY: AbortAckMsg.TYPE,
+            AbortAckMsg.KV_REQUEST_ID: "req-1",
+            AbortAckMsg.ROUND_SEQ: 0,
+        }
+    )
+    tiering._process_finished_jobs()
+    assert primary.num_deferred_release_chunks == 0
+    assert primary._get_num_free_chunks() == free_before + 1
 
 
 # ---------------------------------------------------------------------------
@@ -1653,6 +1727,36 @@ class TestPollOnce:
         assert "req-33" in mgr._failed_req_ids
         assert peer_dead not in mgr._sessions
         assert peer_alive in mgr._sessions
+
+    def test_failed_load_carries_its_deferred_release(self):
+        """A session's deferred release reaches the engine's JobResult, so the
+        TieringManager holds the load's chunks until the event is set."""
+        mgr = _make_manager()
+        peer = "10.0.0.2:9000"
+        release = threading.Event()
+        mgr._sessions[peer] = _FakeSession(  # type: ignore[assignment]
+            peer_id=peer,
+            loads=[
+                LoadResult(
+                    job_id=11,
+                    kv_request_id="req-11",
+                    success=False,
+                    deferred_release=release,
+                )
+            ],
+        )
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._poll_once()
+
+        (result,) = mgr._finished_jobs
+        assert (result.job_id, result.success) == (11, False)
+        assert result.deferred_release is release
+        assert "req-11" in mgr._failed_req_ids
 
     def test_new_fetch_id_binds_and_replays_unbound_batches(self):
         """When session.poll() reports a kv_request_id whose FetchMsg
