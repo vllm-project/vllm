@@ -9,7 +9,6 @@ from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
 from vllm.exceptions import VLLMValidationError
@@ -21,18 +20,19 @@ from vllm.renderers.chat_utils import (
     ChatCompletionContentPartParam,
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
+    ImageURL,
 )
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
-from ..late_chunking import (
+from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..token_embed.late_chunking import (
     attach_late_chunking_metadata,
     build_late_chunking_metadata,
     prepare_late_chunking_input,
 )
-from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
@@ -135,6 +135,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
+
+        if any(
+            engine_input["prompts"]["type"] == "multimodal"
+            for engine_input in ctx.engine_inputs
+        ):
+            raise VLLMValidationError(
+                "Chunked embedding processing does not support multimodal inputs. "
+                "Disable enable_chunked_processing to use multimodal inputs."
+            )
 
         ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
@@ -665,6 +674,25 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
+
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
+        requests = super().get_request_factory_online(ctx)
+        if ctx.pooling_params.late_chunking_params is not None:
+            for request in requests:
+                slot = LateChunkingSlot()
+                ctx.late_chunking.append(slot)
+                request["late_chunking"] = slot
+        return requests
+
+    def post_process_online(self, ctx: PoolingServeContext):
+        if ctx.late_chunking:
+            for output, slot in zip(
+                ctx.final_res_batch, ctx.late_chunking, strict=True
+            ):
+                assert slot.metadata is not None
+                attach_late_chunking_metadata(output, slot.metadata)
 
     def get_request_factory_offline(
         self, ctx: AnyOfflineInputsContext

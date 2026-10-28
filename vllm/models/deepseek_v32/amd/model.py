@@ -7,13 +7,11 @@ from itertools import islice
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -32,6 +30,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -71,6 +71,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             topk_indices_buffer=topk_indices_buffer,
         )
 
+        self.zero_mlp_output = False
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
@@ -82,7 +83,15 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mlp.experts.moe_config.skip_final_all_reduce = True
+            moe_cfg = self.mlp.experts.moe_config
+            pc = moe_cfg.moe_parallel_config
+            # Validated on MoRI only. DeepEP, pplx and the other combines
+            # keep the previous always-skip behavior.
+            if pc.use_mori_kernels:
+                # Combine is already all-reduced; the next fused norm sums TP.
+                self.zero_mlp_output = get_tensor_model_parallel_rank() > 0
+            else:
+                moe_cfg.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -116,6 +125,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual, self.post_attention_layernorm
         )
         hidden_states = self.mlp(hidden_states)
+        if self.zero_mlp_output:
+            hidden_states = torch.zeros_like(hidden_states)
         return hidden_states, residual
 
 
@@ -161,10 +172,10 @@ class DeepseekV32Model(torch.nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -235,26 +246,31 @@ class DeepseekV32Model(torch.nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
             if _try_load_fp8_indexer_wk(
                 name,
