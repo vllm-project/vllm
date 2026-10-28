@@ -15,6 +15,8 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -825,6 +827,42 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _unified_attn_shared_memory(
+    tile_size: int,
+    head_size_padded: int,
+    block_m: int,
+    element_size: int,
+) -> int:
+    """Bytes for two copies of the Q tile and the K tile.
+
+    Pipeline depth does not change this request. fp16, ``BLOCK_M`` 16,
+    tile 32 and a 512-wide head is 98,304 bytes.
+    """
+    return 2 * element_size * head_size_padded * (block_m + tile_size)
+
+
+def _fit_tile_to_shared_memory(
+    tile_size: int,
+    head_size: int,
+    block_m: int,
+    element_size: int,
+    max_shared_mem: int,
+) -> int:
+    """Halve ``tile_size`` until the unified-attention launch fits.
+
+    fp8 dots need a tile of at least 32. A tile of 16 still fits a
+    512-wide fp16 head in 64KB of shared memory.
+    """
+    min_tile = 32 if element_size < 2 else 16
+    head_size_padded = next_power_of_2(head_size)
+    while tile_size > min_tile and (
+        _unified_attn_shared_memory(tile_size, head_size_padded, block_m, element_size)
+        > max_shared_mem
+    ):
+        tile_size //= 2
+    return tile_size
+
+
 def unified_attention(
     q,
     k,
@@ -1020,6 +1058,24 @@ def unified_attention(
     if use_td:
         TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, block_size)
         TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, block_size)
+
+    # Shared-memory size is a CUDA device attribute.
+    if current_platform.is_cuda():
+        max_shared_mem = get_max_shared_memory_bytes()
+        TILE_SIZE_PREFILL = _fit_tile_to_shared_memory(
+            TILE_SIZE_PREFILL,
+            head_size,
+            BLOCK_M,
+            q.element_size(),
+            max_shared_mem,
+        )
+        TILE_SIZE_DECODE = _fit_tile_to_shared_memory(
+            TILE_SIZE_DECODE,
+            head_size,
+            BLOCK_M,
+            q.element_size(),
+            max_shared_mem,
+        )
 
     # Tensor descriptors for Q load / output store require every element
     # of ``block_shape`` to be a power of 2.  ``num_queries_per_kv`` is

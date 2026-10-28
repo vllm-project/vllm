@@ -19,6 +19,8 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
+    _fit_tile_to_shared_memory,
+    _unified_attn_shared_memory,
     reduce_segments,
     unified_attention,
 )
@@ -92,6 +94,94 @@ def _uses_splitk(
         mm_prefix_range=mm_prefix,
     )
     return kernel.__getitem__.return_value.call_args.kwargs["IS_3D"]
+
+
+def test_head_512_fp16_tile_matches_sm75_shared_memory() -> None:
+    """Tile 32 of a 512-wide fp16 head requests 98,304 bytes; tile 16 fits in 64KB."""
+    block_m = 16  # Gemma 4 global layers: 16 query heads, 1 KV head.
+    assert _unified_attn_shared_memory(32, 512, block_m, 2) == 98304
+    assert _unified_attn_shared_memory(16, 512, block_m, 2) == 65536
+    # Equal to the limit still fits; Triton rejects only a strictly larger request.
+    assert _fit_tile_to_shared_memory(32, 512, block_m, 2, 65536) == 16
+    assert _fit_tile_to_shared_memory(32, 512, block_m, 2, 98304) == 32
+    # Sliding-window heads and large-memory GPUs keep the prefill tile.
+    assert _fit_tile_to_shared_memory(32, 256, block_m, 2, 65536) == 32
+    assert _fit_tile_to_shared_memory(32, 128, block_m, 2, 65536) == 32
+    assert _fit_tile_to_shared_memory(32, 512, block_m, 2, 227 * 1024) == 32
+    # fp8 dots stay at tile 32 even when the estimate exceeds the device.
+    assert _fit_tile_to_shared_memory(32, 512, block_m, 1, 1024) == 32
+    # Triton pads the head, so a 384-wide head costs the same as 512.
+    assert _fit_tile_to_shared_memory(32, 384, block_m, 2, 65536) == 16
+
+
+def _launched_prefill_tile(
+    monkeypatch,
+    *,
+    head_size: int,
+    max_shared_mem: int,
+    dtype: torch.dtype = torch.float16,
+) -> int:
+    """Launch the 2D kernel on CPU tensors and return the selected tile."""
+    num_query_heads = 16
+    num_kv_heads = 1
+    query_len = 4
+    query = torch.empty((query_len, num_query_heads, head_size), dtype=dtype)
+    cache = torch.empty((1, 16, num_kv_heads, head_size), dtype=dtype)
+    kernel = MagicMock()
+    monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
+    monkeypatch.setattr(attention.current_platform, "is_cuda", lambda: True)
+    # Host-side padding. Real Triton provides this; the CPU placeholder does not.
+    if not hasattr(attention.triton, "next_power_of_2"):
+        monkeypatch.setattr(
+            attention.triton, "next_power_of_2", next_power_of_2, raising=False
+        )
+    monkeypatch.setattr(
+        attention, "get_max_shared_memory_bytes", lambda gpu=0: max_shared_mem
+    )
+    unified_attention(
+        query,
+        cache,
+        cache,
+        torch.empty_like(query),
+        torch.tensor([0, query_len], dtype=torch.int32),
+        query_len,
+        torch.tensor([query_len], dtype=torch.int32),
+        query_len,
+        head_size**-0.5,
+        True,
+        (-1, -1),
+        torch.zeros((1, 1), dtype=torch.int32),
+        0.0,
+        None,
+        None,
+        None,
+    )
+    return kernel.__getitem__.return_value.call_args.kwargs["TILE_SIZE"]
+
+
+@pytest.mark.parametrize(
+    ("head_size", "max_shared_mem", "expected_tile"),
+    [
+        # Tesla T4 / SM75: 65,536 bytes. Tile 32 needs 98,304.
+        pytest.param(512, 65536, 16, id="512-t4"),
+        # Request equal to the device limit is accepted.
+        pytest.param(512, 98304, 32, id="512-exact-fit"),
+        # A100/H100-class opt-in shared memory keeps the prefill tile.
+        pytest.param(512, 227 * 1024, 32, id="512-large-smem"),
+        # Gemma 4 sliding layers stay on tile 32 even at the T4 limit.
+        pytest.param(256, 65536, 32, id="256-t4"),
+        pytest.param(128, 65536, 32, id="128-t4"),
+    ],
+)
+def test_prefill_tile_fits_shared_memory(
+    monkeypatch, head_size: int, max_shared_mem: int, expected_tile: int
+) -> None:
+    assert (
+        _launched_prefill_tile(
+            monkeypatch, head_size=head_size, max_shared_mem=max_shared_mem
+        )
+        == expected_tile
+    )
 
 
 def _spy_reduce_segments(monkeypatch):
