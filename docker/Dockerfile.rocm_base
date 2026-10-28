@@ -80,7 +80,9 @@ RUN apt-get update -y \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11==3.0.4 Cython
-RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox \
+    libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install ROCm SDK via TheRock
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
@@ -209,8 +211,10 @@ RUN cd mori \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
     && pip install "setuptools_scm>=6.2" \
-    && CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps" \
-       python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+    && BUILD_UMBP=ON CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps" \
+       python3 setup.py bdist_wheel --dist-dir=dist \
+    && grep -qx 'BUILD_UMBP:BOOL=ON' build/CMakeCache.txt \
+    && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 ###
