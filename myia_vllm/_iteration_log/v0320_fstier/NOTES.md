@@ -4094,3 +4094,21 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Coordination** : inbox trié — rapport worker po-2024 sur #4334 marqué lu avec la note que son output est « Request timed out » sous un statut SUCCÈS (le livrable cache la panne du producteur — le même piège que nbaudit ; à ne pas compter comme progression sur #4334) ; la queue-po2025 (tests ms#1551) relève de roo-extensions, marquée lue ; relais po-2023 déjà intégré au cycle précédent. Dashboard : aucune mention non traitée.
 
 **Registre** : Q41 ouverte (MAJ : 22 888 ce cycle, retour sous la ligne — la question reste posée à double sens VRAM/KV). Q43 armée (`KV_OFFLOAD_GB_FSTIER=32` dans `.env`), **toujours en attente de recreate** — jamais pendant un épisode de saturation ; recommandation maintenue de grouper Q41+Q43 dans le même geste si le user tranche Q41 pour 0.70.
+
+## Cycle 14:1xZ (28/10) — 🟢 ; la cadence des 400 window+1 double (4/2 h) ; la queue tape la 1ʳᵉ sonde pour la 2ᵉ fois
+
+**Prod** : health 200 en 6,2 ms, RC=0, StartedAt inchangé (27/10 02:15:05Z, up 36 h), OOM 0, 3/3 Up. VRAM GPU 0 **22 902** (2ᵉ cycle consécutif sous 23 000 ; 22 888 hier), GPU 1 plat 21 650. /dev/shm 25G/63G = 39 %. Watchdog : 1 WEDGE `fail 1/2` (13:08:37Z), zéro 2/2, 3 908 OK.
+
+**Les deux jambes** : préemptions **35→39 (+4, sous le seuil Δ≥5)** ; sondes **1/6 >9 s** (30,72 s), médiane **0,17 s** (les 5 autres : 0,14-0,21 s). **🟢, aucun barreau.**
+
+**La queue frappe la 1ʳᵉ sonde, 2ᵉ cycle de suite** : 23,6 s (12:1xZ) puis 30,7 s (14:1xZ), toujours la sonde n°1 de la batterie, les suivantes immédiates étant à ~0,2 s. Deux occurrences ne font pas une pente — mais si le motif tient au 16:1xZ, l'hypothèse « position en file au démarrage de la batterie » (mon premier appel arrive derrière ce que le moteur tient en vol) devient crédible et **testable** (batterie décalée de 60 s, ou sonde jalonnée avant la n°1).
+
+**400 window+1 : la cadence DOUBLE** — **4 dans la fenêtre** (corps 896-1 018 Ko, UA `Bun/1.3.14` = hub), après 2 à 12:1xZ. Cumul ~16 h : **12**. Chacune = une session hub qui franchit 262 145 tokens d'entrée et prend un 400 sec. #431 ne les absorbe pas — **à re-signaler à claudish avec la cadence montante** (leur disjoncteur vise le retry-local, pas la cause).
+
+**KV et charge** : KV **47,3 %** en fin de fenêtre (vs 91,2 % à 12:1xZ — la charge est en créneaux), file 0/0, prefix hits **72,8 %** (600,6M/825,3M). Census 2 h : 581 req, **58 % de corps 100K-1M** (338/581) — le régime long-contexte tient. Clé morte `1f7f6080cb65` : 20×401/2 h (bruit stable).
+
+**Sécurité** : aucune IP inconnue en 200 (7 j). `212.133.41.47` déjà classée famille mobile flotte au cycle précédent. Rien de nouveau.
+
+**Annexes** : nbaudit **ok** 14:07:14Z (`Image/` vague 2 servie, `consecutive_failures=0`). G: OK. Commit **80,2 %** (marge 75,9 GB). Condensation : **zéro nouvel épisode disjoncteur depuis 07:43Z** (dernier événement du log).
+
+**Registre** : Q41 ouverte — VRAM sous la ligne pour le 2ᵉ cycle consécutif (mesure en ligne au registre, high-water raffermi). Q43 armée, recreate en attente de fenêtre. Rien de nouveau à arbitrer.
