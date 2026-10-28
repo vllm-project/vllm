@@ -16,6 +16,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     has_deep_select,
@@ -27,9 +28,10 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa, mqa_logits_mx_inputs
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
+    dsa_indexer_uses_fp4,
 )
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadata,
@@ -38,12 +40,12 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 
 def _prefill_k_workspaces(
-    total_seq_lens: int, head_dim: int
+    total_seq_lens: int, head_dim: int, use_fp4_cache: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The packed MXFP4 K-gather workspace ``(values, scales)``, shared with
-    the dense indexer layers of the same model."""
+    """The K-gather workspace ``(values, scales)`` of the indexer cache
+    format, shared with the dense indexer layers of the same model."""
     values_spec, scales_spec = _gather_workspace_shapes(
-        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache=True
+        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
     )
     k_quant, k_scale = current_workspace_manager().get_simultaneous(
         values_spec, scales_spec
@@ -75,15 +77,16 @@ def _gather_prefill_chunk_k(
 class SparseMQAIndexer(nn.Module):
     """Candidate-consuming indexer on DeepGEMM's sparse MQA-logits kernels.
 
-    Only valid for indexer layers that read candidate blocks with the MXFP4
-    indexer cache on SM100. The K cache is written by the model before this
-    runs; ``forward`` takes the same arguments as `SparseAttnIndexer` so the
-    attention layer can call either.
+    Only valid for indexer layers that read candidate blocks on SM100, with
+    the FP8 or the MXFP4 indexer cache. The K cache is written by the model
+    before this runs; ``forward`` takes the same arguments as
+    `SparseAttnIndexer` so the attention layer can call either.
     """
 
     weights_dtype = torch.bfloat16
     """Per-head weights dtype the sparse kernels take. The fused Q RoPE-quant
-    kernel writes it directly so no cast runs per step."""
+    kernel writes it directly on the MXFP4 cache; on the FP8 cache it emits
+    fp32 (Q scale folded in) and ``forward`` casts."""
 
     def __init__(
         self,
@@ -116,18 +119,19 @@ class SparseMQAIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
+        self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse
         logits allocation so the memory estimate covers them."""
-        _prefill_k_workspaces(self.max_total_seq_len, self.head_dim)
+        _prefill_k_workspaces(self.max_total_seq_len, self.head_dim, self.use_fp4_cache)
         max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         torch.empty(max_logits_bytes, dtype=torch.uint8, device=device)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        q_quant: tuple[torch.Tensor, torch.Tensor],
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor | None,
         weights: torch.Tensor,
     ) -> torch.Tensor:
@@ -141,7 +145,16 @@ class SparseMQAIndexer(nn.Module):
             "SparseMQAIndexer needs DeepseekV41SparseIndexerBackend metadata"
         )
         assert k is None, "the model writes the indexer K cache"
-        q_values, q_scale = q_quant
+        if self.use_fp4_cache:
+            # MXFP4 values go to DeepGEMM as int8 (its packed-FP4 tag).
+            q_values, q_scale = q_quant
+            q_values = q_values.view(torch.int8)
+        else:
+            # FP8 Q: its scale is folded into the weights; unit UE8M0 scales.
+            assert isinstance(q_quant, torch.Tensor)
+            q_values = q_quant
+            q_scale, weights = mqa_logits_mx_inputs(q_values, None, weights)
+        k_dtype = torch.int8 if self.use_fp4_cache else q_values.dtype
         kv_cache = self.k_cache.kv_cache
         topk_tokens = self.topk_tokens
         topk_indices_buffer = self.topk_indices_buffer
@@ -153,7 +166,7 @@ class SparseMQAIndexer(nn.Module):
             sparse_chunks = metadata.sparse_prefill
             assert prefill is not None and sparse_chunks is not None
             k_quant_full, k_scale_full = _prefill_k_workspaces(
-                self.max_total_seq_len, self.head_dim
+                self.max_total_seq_len, self.head_dim, self.use_fp4_cache
             )
             for chunk, rows in zip(prefill.chunks, sparse_chunks):
                 k_quant, k_scale = _gather_prefill_chunk_k(
@@ -163,9 +176,9 @@ class SparseMQAIndexer(nn.Module):
                     continue  # buffer already holds -1
                 start, end = chunk.token_start, chunk.token_end
                 rows.kernel_metadata = sparse_mqa_logits_prefill_chunk(
-                    q_values[start:end].view(torch.int8),
+                    q_values[start:end],
                     q_scale[start:end],
-                    k_quant.view(torch.int8),
+                    k_quant.view(k_dtype),
                     k_scale.view(torch.int32).squeeze(-1),
                     weights[start:end],
                     chunk.cu_seqlen_ks,
@@ -188,9 +201,9 @@ class SparseMQAIndexer(nn.Module):
             num_rows = decode_rows.row_ke.shape[0]
             if num_rows > 0:
                 decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
-                    q_values[:num_rows].view(torch.int8).unsqueeze(1),
+                    q_values[:num_rows].unsqueeze(1),
                     q_scale[:num_rows].unsqueeze(1),
-                    kv_cache_as_quant_view(kv_cache, self.head_dim, use_fp4_cache=True),
+                    kv_cache_as_quant_view(kv_cache, self.head_dim, self.use_fp4_cache),
                     weights[:num_rows],
                     decode_rows.row_ke,
                     decode_rows.block_table,
