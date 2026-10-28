@@ -681,10 +681,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
                 _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
-                if backend_name not in (
-                    "DEEPSEEK_V32_INDEXER",
-                    "ROCM_AITER_MLA_SPARSE",
-                ):
+                if backend_name != "DEEPSEEK_V32_INDEXER":
                     from vllm.v1.attention.backends.mla.sparse_swa import (
                         _COMPUTE_PREFILL_METADATA_KERNEL,
                     )
