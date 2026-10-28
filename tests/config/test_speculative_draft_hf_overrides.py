@@ -298,16 +298,22 @@ def test_glm5_next_mtp_override_promotes_index_share():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("model_impl", "architecture"),
-    [("transformers", "TransformersMoEForMTP"), ("auto", "Glm4MoeMTPModel")],
+    ("model_type", "model_impl", "architecture"),
+    [
+        ("glm4_moe", "transformers", "TransformersMoEForMTP"),
+        ("glm4_moe", "auto", "Glm4MoeMTPModel"),
+        # Does not follow the Transformers MTP standard (no `num_mtp_layers`)
+        ("qwen3_next", "transformers", "Qwen3NextMTP"),
+    ],
 )
 def test_mtp_draft_architecture_follows_target_model_impl(
-    tmp_path, model_impl: str, architecture: str
+    tmp_path, model_type: str, model_impl: str, architecture: str
 ):
     """The MTP draft of a Transformers backend target uses the Transformers backend
-    too, while other targets keep their native MTP draft."""
-    config = AutoConfig.for_model("glm4_moe", num_nextn_predict_layers=1)
-    config.architectures = ["Glm4MoeForCausalLM"]
+    too if the model follows the Transformers MTP standard, while other targets keep
+    their native MTP draft."""
+    config = AutoConfig.for_model(model_type, num_nextn_predict_layers=1)
+    config.architectures = [config.__class__.__name__.replace("Config", "ForCausalLM")]
     config.save_pretrained(tmp_path)
     target = ModelConfig(str(tmp_path), model_impl=model_impl, skip_tokenizer_init=True)
 
@@ -319,4 +325,6 @@ def test_mtp_draft_architecture_follows_target_model_impl(
     )
 
     assert speculative_config.method == "mtp"
-    assert speculative_config.draft_model_config.architecture == architecture
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == architecture
+    assert draft.hf_config.n_predict == 1

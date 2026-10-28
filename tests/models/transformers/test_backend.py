@@ -13,9 +13,22 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PreTrainedConfig
+from safetensors.torch import load_file, save_file
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    PreTrainedConfig,
+)
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -820,12 +833,6 @@ MTP_MODELS = {
 def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch):
     """An MTP draft for a model following the Transformers MTP standard loads each
     MTP layer appended to the target's checkpoint into `MtpModel`'s layout."""
-    from safetensors.torch import load_file, save_file
-    from transformers import AutoConfig, AutoModelForCausalLM
-
-    from vllm.config import ParallelConfig, SpeculativeConfig, set_current_vllm_config
-    from vllm.model_executor.model_loader import get_model
-
     kwargs = MTP_MODELS[model_type] | MTP_MOE_KWARGS
     num_hidden_layers = kwargs.pop("num_hidden_layers")
     num_mtp_layers = 2
@@ -869,7 +876,7 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
     assert draft.architecture == "TransformersMoEForMTP"
     vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
     with set_current_vllm_config(vllm_config):
-        model = get_model(vllm_config=vllm_config, model_config=draft)
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
 
     assert len(model.model.layers) == num_mtp_layers
     for k, layer in enumerate(model.model.layers):
