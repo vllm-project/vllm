@@ -45,7 +45,9 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node()
+        allowed_memory_nodes = get_visible_memory_node(
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
@@ -78,25 +80,6 @@ class CPUWorker(Worker):
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
-        available_memory = memory_status.available_memory
-
-        if (
-            vllm_config.cache_config.kv_cache_memory_bytes is None
-            and self.requested_cpu_memory > available_memory
-        ):
-            raise ValueError(
-                f"Available memory on node {cpu_core.numa_node} "
-                f"({format_gib(available_memory)}/"
-                f"{format_gib(memory_status.total_memory)} GiB) on startup "
-                f"is less than desired CPU memory utilization "
-                f"({vllm_config.cache_config.gpu_memory_utilization}, "
-                f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "On the CPU backend, the `--gpu-memory-utilization` flag "
-                "controls the fraction of CPU memory reserved (despite its "
-                "name). To resolve: decrease `--gpu-memory-utilization` "
-                "(e.g. `--gpu-memory-utilization 0.5`) "
-                "or reduce CPU memory used by other processes."
-            )
 
         super().__init__(
             vllm_config,

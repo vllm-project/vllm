@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+import struct
 from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pybase64 as base64
 import pytest
-from PIL import Image
+from PIL import Image, features
+from PIL.BlpImagePlugin import BLPFormatError
 
 from vllm.multimodal.image import (
     ALLOWED_IMAGE_FORMATS,
@@ -319,6 +322,48 @@ def test_image_broken_png_rejected():
     with pytest.raises(ValueError, match="Failed to load image") as exc_info:
         image_io.load_bytes(data)
     assert isinstance(exc_info.value.__cause__, SyntaxError)
+
+
+@pytest.mark.parametrize(
+    ("data", "cause"),
+    [
+        # AVIF without a primary item: the AVIF decoder raises RuntimeError
+        # from Image.open().
+        pytest.param(
+            base64.b64decode(
+                "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
+                "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
+                "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
+                "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
+                "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
+                "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
+            ),
+            RuntimeError,
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
+        ),
+        # BLP2 header with compression 0, which Pillow does not know:
+        # BLPFormatError, a NotImplementedError and so a RuntimeError, from
+        # image.load().
+        (
+            b"BLP2"
+            + struct.pack("<i", 0)
+            + bytes([1, 0, 0, 0])
+            + struct.pack("<II", 1, 1)
+            + bytes(128 + 1024),
+            BLPFormatError,
+        ),
+    ],
+    ids=["avif-no-primary-item", "blp-unknown-compression"],
+)
+def test_image_decoder_error_rejected(data, cause):
+    """Decoder errors that are neither OSError nor SyntaxError surface as a
+    client-side ValueError instead of HTTP 500 or 501."""
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, cause)
 
 
 def test_image_pixel_limit_disabled(monkeypatch):
