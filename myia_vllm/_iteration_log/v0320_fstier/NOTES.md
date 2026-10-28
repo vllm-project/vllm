@@ -4186,3 +4186,30 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Annexes** : nbaudit **ok** 20:05Z (`Image/` vague 2, 5 séries). G: OK (695 Go libres). Condensation : **zéro épisode disjoncteur depuis 07:43Z** (7 cycles).
 
 **Registre** : aucune question ouverte (Q41 close 2ᵉ fois, Q43 exécutée). À relever aux prochains cycles : GPU 1 (21 786 vs plat 21 650), commit (89,2 %), reconstruction du hit-rate prefix.
+
+## Cycle 22:1xZ (28/10) — 🟠 QUALIFIÉ : plateau de saturation KV ~100 min (équilibre stable, pas de dégradation) ; hypothèse préchauffe RÉFUTÉE en régime saturé
+
+**Prod** : health 200 (3 ms), RC=0, StartedAt **stable 18:20:28Z** (zéro restart), OOM 0, 3/3 Up, `/dev/shm` 33G = 51 % (plancher tenu). VRAM GPU 0 **23 141** / GPU 1 **21 786** (inchangés vs 20:1xZ — GPU 1 ne bouge plus, le +136 reste un point isolé).
+
+**★ L'épisode de saturation du soir — timeline complète** (observé en continu grâce à une question user : « le modèle tient la charge ? ») :
+
+- **~20:45Z** : KV GPU **95,9 %**, préemptions **2→18** (Δ+16 en ~40 min), file 3. Sondes spot : **timeout 90 s / 67,7 s / 13,7 s** (décroissantes).
+- **20:55Z** : KV 89,8 %, préemptions 19.
+- **22:1xZ** : KV **91,9-94,9 %** (plateau), préemptions **19 figées** (Δ+0 en 80 min), running 4 / waiting 2, prefix hits cumulés **84,2 %** (47,4M/56,2M — reconstruction quasi terminée, la barre ~73 % est dépassée).
+- **Watchdog** : 3 908 sondes OK, que des `WEDGE fail 1/2` (20:41, 20:52, 21:31, 21:57, 22:01Z — le pic 21:57/22:01 à 4 min d'écart montre la file qui touche les sondes du watchdog aussi), **zéro 2/2, zéro restart**.
+
+**Verdict 🟠 QUALIFIÉ** — les trois conditions du critère AND sont réunies : jambe 1 (Δ préemptions +17 ≥5 sur le cycle), jambe 2 (batterie 6/6 sondes 16,5-78,6 s >9 s), persistance (~100 min ≥30 min). **MAIS la lecture fine est « équilibre stable », pas « dégradation »** : préemptions figées à 19 depuis 80 min = le moteur a trouvé son point d'admission (il régule à la marge KV), health 3 ms, décroissance des délais de sonde au fil de chaque batterie. Aucun geste auto (barreaux suspendus, escalade = user) → **Q44 au registre** : replier un siège haiku (po-2024 d'abord) ou laisser passer la nuit (décroissance nocturne = le pattern ; décision avant le pic de demain soir si récidive).
+
+**★ Reproduction n°2 de la préchauffe — l'hypothèse est RÉFUTÉE en régime saturé** : préchauffe 8,94 s (exclue) puis **sonde 1 = 78,56 s**, sondes 2-6 = 16,5/34,2/57,3/27,5/19,3 s (**6/6 lentes**). Les 2 premières reproductions (KV 42-51 %, moteur installé) tenaient : sonde 1 = 0,16/0,38 s AVEC préchauffe. **Loi à deux régimes, maintenant mesurée des deux côtés** : (a) à basse occupation, le coût du premier appel (CUDA graphs/pipelines) est réel et une préchauffe l'absorbe ; (b) en saturation, la position en file derrière les prefills long-contexte domine tout et la préchauffe est invisible. **Conséquence pratique : pas de préchauffe à armer côté moteur** — le levier en régime saturé est la capacité (KV/sièges), pas la chaleur du pipeline.
+
+**★ EN-TÊTES D'ATTRIBUTION : ARRIVÉS ET VIVANTS** (DM claudish 21:43Z → vérifié par valeur) : la requête test po-2025 reçue **20:38:29Z** `/v1/chat/completions` 200, `x_claudish_client="myia-po-2025:d-dev-claudish"` + `x_claudish_machine="myia-po-2025"` (le hub traduit /v1/messages→/v1/chat/completions — le path moteur n'est pas celui de la demande). **155 requêtes/1 h portent les deux en-têtes** ; première distribution par machine jamais mesurée (2 h, 157 attribuées) : **ai-01 75 · po-2028 72 · po-2023 66 · po-2027 31 · po-2024 7 · po-2025 1**. La mesure « 0/24 456 » du 27/10 est close. Point ouvert côté hub : workspace `:unknown` sur tout le trafic régulier (seul le test rend un workspace résolu). Réponse envoyée à claudish (msg-20261028T221530).
+
+**400 window+1 : 0/2 h** — première fenêtre propre depuis le début du comptage. Cumul inchangé ~20/24 h.
+
+**Sécurité** : zéro nouvelle IP avec 200 (7 j). Deux bruits mineurs attribués : `fp=50829b227a2a` = client Python interne à clé morte (5×401/3 j, `/v1/models` + 1 essai chat, ip locale absente de x_forwarded_for) ; `212.133.41.x` = famille mobile Free (client OpenAI/JS, 6 req/3 j les 24-25/10) — aucun des deux n'est une alerte. Poller Go `1f7f6080cb65` stable (20×401/2 h).
+
+**★ Marge commit : 90,3 % — LIGNE 90 FRANCHIE** (37,4 Go libres ; 89,2 → 90,0 → 90,3 sur la soirée). Conforme au protocole : signalé au user au rapport, **aucun travail lourd**, pas de bricolage — levier structurel (.wslconfig) hors périmètre vllm. Le tier qui remplit (282 Go lus/2 h = pages engagées) + vmmemWSL ambiant.
+
+**Annexes** : nbaudit **ok** 22:06Z — **vague 2 `Image/` ARMÉE** (`subpath:["19451:Image/"]`, 5 séries, 0 échec). G: OK (694 Go libres). Condensation propre (BaselineManager WARN 22:11:44 = course d'init RSM connue, cosmétique). **ERROR global 21:51Z (po-2025:rsm, condensation truncation) qualifié côté moteur** : 0 non-200 hors 401 dans la fenêtre moteur 21:49-21:56Z, les trois « Connection error » coïncident à la seconde avec le recreate hub drainé 21:49Z (334 s, 4 flux coupés) — artefact du fenêtrage recreate, pas le condenseur ni l'engine. [REPLY] posté sur global.
+
+**Registre** : **Q44 ouverte** (🟠 qualifié : repli siège ou laisser passer la nuit — recommandation : laisser passer la nuit, re-décision demain avant le pic du soir si récidive). Q41/Q43 closes.
