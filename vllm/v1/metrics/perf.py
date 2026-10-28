@@ -68,6 +68,11 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "moe_wna16": 0.5,
     "inc": 0.5,
     "experts_int8": 1,
+    # Added 2026: configs renamed/added after the table was last expanded.
+    "gpt_oss_mxfp4": 0.5,
+    "deepseek_v4_fp8": 1,
+    "auto_gptq": 0.5,
+    "auto_awq": 0.5,
 }
 
 
@@ -468,10 +473,13 @@ class AttentionQuantizationConfigParser(Parser):
         if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
             args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for attention metrics: {quant_method}"
-            )
-
+                # Fall back to the model-dtype size set by BaseConfigParser
+                # instead of dropping the whole component silently.
+            logger.warning_once(
+                "Unsupported quantization method for attention metrics: %s; "
+                "falling back to model dtype weight size",
+                quant_method,
+        )
         return args
 
 
@@ -1125,9 +1133,13 @@ class FfnQuantizationConfigParser(Parser):
         if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
             args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for FFN metrics: {quant_method}"
-            )
+            # Fall back to the model-dtype size set by BaseConfigParser
+            # instead of dropping the whole component silently.
+            logger.warning_once(
+                "Unsupported quantization method for FFN metrics: %s; "
+                "falling back to model dtype weight size",
+                quant_method,
+        )
 
         return args
 
