@@ -14,16 +14,23 @@ from tests.utils import (
     multi_gpu_test,
     multi_process_parallel,
 )
+from vllm.config import ParallelConfig
 from vllm.distributed import get_tp_group
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
+from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
 from vllm.platforms import current_platform
 
@@ -79,6 +86,9 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         return tail_op
 
     monkeypatch.setattr(MoERunner, "__init__", fake_runner_init)
+    monkeypatch.setattr(
+        latent_moe_runner, "get_tensor_model_parallel_world_size", lambda: 8
+    )
     monkeypatch.setattr(latent_moe_runner.torch.cuda, "Event", lambda: object())
     monkeypatch.setattr(
         latent_moe_runner,
@@ -104,6 +114,51 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     assert moe_config.use_deferred_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
+
+
+def test_column_parallel_tail_shards_over_the_tp_group(dist_init) -> None:
+    """Without expert parallelism, ``moe_config.tp_size`` also counts the DP
+    replicas (2 for TP=1 x DP=2), but only the TP group shares a hidden vector
+    and takes part in the tail's final all-reduce. Every hidden column must
+    still get the routed up-projection."""
+    moe_config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=LATENT_SIZE,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=FusedMoEParallelConfig.make(
+            tp_size_=1,
+            pcp_size_=1,
+            dp_size_=2,
+            sp_size_=1,
+            vllm_parallel_config=ParallelConfig(),
+        ),
+        in_dtype=torch.float32,
+    )
+    assert moe_config.tp_size == 2
+
+    torch.manual_seed(0)
+    up_proj = ReplicatedLinear(
+        LATENT_SIZE, HIDDEN_SIZE, bias=False, params_dtype=torch.float32
+    ).cuda()
+    up_proj.weight.data.normal_(std=LATENT_SIZE**-0.5)
+    runner = object.__new__(latent_moe_runner.LatentMoERunner)
+    object.__setattr__(runner, "moe_config", moe_config)
+    object.__setattr__(
+        runner, "routed_output_transform", KimiRoutedOutputTransform(None, up_proj)
+    )
+    latent = torch.randn(8, LATENT_SIZE, device="cuda")
+    shared = torch.randn(8, HIDDEN_SIZE, device="cuda")
+    expected = shared + F.linear(latent, up_proj.weight)
+
+    actual = runner._shard_up_proj_tail(latent, shared, None)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _make_deferred_routed_output(
