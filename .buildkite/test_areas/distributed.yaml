@@ -514,7 +514,7 @@ steps:
     - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
-    - pytest -v -s tests/v1/distributed/test_dbo.py
+    - pytest -v -s tests/v1/distributed/test_dbo.py -m 'not nixl_ep'
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
@@ -563,7 +563,7 @@ steps:
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
-      - pytest -v -s tests/v1/distributed/test_dbo.py
+      - pytest -v -s tests/v1/distributed/test_dbo.py -m 'not nixl_ep'
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py
       - pytest -v -s tests/distributed/test_rocm_aiter_custom_ar.py
@@ -571,6 +571,22 @@ steps:
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
+
+- label: ":nvidia: (H100) MRV2 NIXL decode staging"
+  key: mrv2-nixl-decode-staging
+  device: h100
+  num_devices: 2
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/
+    - vllm/config/
+    - tests/v1/distributed/test_dbo.py
+    - .buildkite/scripts/install-kv-connectors.sh
+    - requirements/kv_connectors.txt
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/v1/distributed/test_dbo.py -m nixl_ep
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
@@ -582,7 +598,7 @@ steps:
     - pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
-    - pytest -v -s tests/v1/distributed/test_dbo.py
+    - pytest -v -s tests/v1/distributed/test_dbo.py -m 'not nixl_ep'
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
   mirror:
     amd:
