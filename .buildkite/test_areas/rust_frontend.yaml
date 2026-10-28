@@ -14,6 +14,7 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/entrypoints/serve/
   - vllm/v1/sample/
+  - vllm/v1/engine/logits_processor_validation.py
   - tests/utils.py
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
@@ -57,9 +58,7 @@ steps:
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
-  # The Rust frontend cannot run the logits processor's validate_params, so an invalid argument
-  # reaches the engine instead of returning 400.
-  - pytest -v -s v1/logits_processors/test_custom_online.py -k "not test_invalid_custom_logitsproc_arg"
+  - pytest -v -s v1/logits_processors/test_custom_online.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
@@ -75,6 +74,7 @@ steps:
       - vllm/entrypoints/openai/
       - vllm/entrypoints/serve/
       - vllm/v1/sample/
+      - vllm/v1/engine/logits_processor_validation.py
       - tests/utils.py
       - tests/benchmarks/test_serve_cli.py
       - tests/entrypoints/openai/chat_completion/test_chat_completion.py
