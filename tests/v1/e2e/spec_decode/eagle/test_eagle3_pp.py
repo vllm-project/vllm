@@ -82,6 +82,10 @@ def test_eagle3_pipeline_parallel_acceptance():
         # forward, which must send this stage's aux hidden states.
         ("Qwen/Qwen3-VL-4B-Instruct", "AngelSlim/Qwen3-VL-4B-Instruct_eagle3"),
         ("openai/gpt-oss-20b", "RedHatAI/gpt-oss-20b-speculator.eagle3"),
+        (
+            "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+            "RedHatAI/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3",
+        ),
     ],
 )
 def test_eagle3_pipeline_parallel_targets(model, draft):
