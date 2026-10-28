@@ -78,10 +78,16 @@ class _Engine:
         self.pool = self.scheduler.kv_cache_manager.block_pool
         self.workers = [_make_consumer_worker() for _ in range(tp_size)]
         # Like the executors: only multi-worker outputs are aggregated.
-        self.aggregator = KVOutputAggregator(tp_size) if tp_size > 1 else None
+        self.aggregator = (
+            KVOutputAggregator.from_connector(self.scheduler.connector, tp_size)
+            if tp_size > 1
+            else None
+        )
 
     def step(self, write_done: frozenset[str] = frozenset()):
-        out = self.scheduler.schedule()
+        self.finish(self.scheduler.schedule(), write_done)
+
+    def finish(self, out, write_done: frozenset[str] = frozenset()):
         scheduled = [self.scheduler.requests[i] for i in out.num_scheduled_tokens]
         outputs = []
         for worker in self.workers:
@@ -129,7 +135,6 @@ def test_prefill_dies_request_fails_and_blocks_stay_allocated(engine):
     engine.clock.now += 2
     engine.step()
     assert request.status == RequestStatus.FINISHED_ERROR
-    # write_done never comes, so the blocks are never released.
     engine.clock.now += 10 * TIMEOUT_S
     for _ in range(3):
         engine.step()
@@ -147,7 +152,26 @@ def test_prefill_slow_request_fails_and_blocks_freed_on_late_write_done(engine):
     assert request.status == RequestStatus.FINISHED_ERROR
     assert engine.pool.get_num_free_blocks() == held
 
-    # The late write_done for a finished request reaches the worker with #59058.
     engine.step(write_done=frozenset({request.request_id}))
     assert request.request_id not in engine.scheduler.requests
     assert engine.pool.get_num_free_blocks() == free_before
+
+
+def test_timeout_reported_once_when_two_schedules_precede_the_output(engine):
+    """Batch queue / async scheduling: step N+1 is scheduled before the output
+    of step N is processed."""
+    request = engine.add_waiting_request()
+    held = engine.pool.get_num_free_blocks()
+    engine.clock.now += TIMEOUT_S + 1
+
+    first = engine.scheduler.schedule()
+    second = engine.scheduler.schedule()
+    assert first.kv_connector_metadata.write_recv_timed_out_req_ids == {
+        request.request_id
+    }
+    assert not second.kv_connector_metadata.write_recv_timed_out_req_ids
+
+    engine.finish(first)
+    engine.finish(second)
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held

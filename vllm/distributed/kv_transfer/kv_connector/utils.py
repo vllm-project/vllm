@@ -64,7 +64,9 @@ class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
-    def __init__(self, expected_finished_count: int):
+    def __init__(
+        self, expected_finished_count: int, failed_recving_before_finished: bool = False
+    ):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
@@ -72,10 +74,14 @@ class KVOutputAggregator:
         self._failed_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
+        self._failed_recving_before_finished = failed_recving_before_finished
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
-        return cls(connector.get_finished_count() or world_size)
+        return cls(
+            connector.get_finished_count() or world_size,
+            connector.reports_failed_recving_before_finished(),
+        )
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
@@ -168,13 +174,14 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
-            update_finished_set(
-                kv_output.failed_recving, self._failed_remaining_count, all_failed
-            )
+            if self._failed_recving_before_finished:
+                update_finished_set(
+                    kv_output.failed_recving, self._failed_remaining_count, all_failed
+                )
             self._failed_recving_pending |= kv_output.failed_recving
 
-        # A recv reported failed by every worker fails the request even if it
-        # has not finished; its blocks stay held until it does.
+        # Opt-in: a recv reported failed by every worker fails the request even
+        # if it has not finished; its blocks stay held until it does.
         failed_recving = self._failed_recving_pending & (finished_recving | all_failed)
         self._failed_recving_pending -= failed_recving
         for req_id in finished_recving:
