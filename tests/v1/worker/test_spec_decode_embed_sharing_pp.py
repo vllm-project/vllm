@@ -7,6 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.model_loader.mtp_validation import (
     disable_mtp_completeness_check,
 )
@@ -158,6 +159,7 @@ def m3_config():
         speculative_config=SimpleNamespace(
             method="mtp", draft_model_config=SimpleNamespace(hf_config=hf_config)
         ),
+        parallel_config=ParallelConfig(),
         quant_config=None,
         cache_config=None,
         kernel_config=SimpleNamespace(specialized_decode=None),

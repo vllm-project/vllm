@@ -1443,6 +1443,18 @@ class DeepseekV41LLMForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                getattr(layer, "ffn", None),
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 AMD fused shared experts are not supported yet; "
+                "please open an issue."
+            )
         from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
             prepare_weights,
         )
