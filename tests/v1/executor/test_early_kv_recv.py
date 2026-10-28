@@ -8,7 +8,12 @@ import pytest
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.v1.executor import early_kv_recv
-from vllm.v1.executor.early_kv_recv import EarlyKVRecvReceiver, EarlyKVRecvSender
+from vllm.v1.executor.early_kv_recv import (
+    EarlyKVOutputAggregator,
+    EarlyKVRecvReceiver,
+    EarlyKVRecvSender,
+)
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
 class _PendingConnector:
@@ -107,3 +112,43 @@ def test_poll_failure_terminates_worker_without_engine_drain(receiver, broken_ch
         if process.is_alive():
             process.kill()
             process.join()
+
+
+@pytest.mark.parametrize(
+    "ordinary_rank,failed",
+    [(None, False), (0, False), (-1, False), (0, True), (-1, True)],
+)
+def test_early_receives_share_normal_quorum(ordinary_rank, failed):
+    workers = 2
+    aggregator = EarlyKVOutputAggregator(workers)
+    early = set()
+    normal = KVConnectorOutput()
+    for rank in range(workers):
+        if ordinary_rank is not None and rank == ordinary_rank % workers:
+            output = ModelRunnerOutput(
+                [],
+                {},
+                kv_connector_output=KVConnectorOutput(
+                    finished_recving={"request"},
+                    failed_recving={"request"} if failed else set(),
+                ),
+            )
+            assert (result := aggregator.aggregate([output])) is not None
+            assert (normal := result.kv_connector_output) is not None
+        else:
+            early |= aggregator.add_finished_recving({"request"})
+        if rank < workers - 1:
+            assert not early and not normal.finished_recving
+    # If an early notification completes a failed quorum, recovery stays on
+    # the ordinary output path, even when that output has no new receives.
+    if not normal.finished_recving:
+        assert aggregator.aggregate([None]) is None
+        output = ModelRunnerOutput([], {})
+        assert (result := aggregator.aggregate([output])) is not None
+        assert (normal := result.kv_connector_output) is not None
+    assert early | (normal.finished_recving or set()) == {"request"}
+    assert normal.failed_recving == ({"request"} if failed else set())
+    assert not early if failed else not (early and normal.finished_recving)
+    assert (result := aggregator.aggregate([ModelRunnerOutput([], {})])) is not None
+    assert (empty := result.kv_connector_output) is not None
+    assert not empty.finished_recving and not empty.failed_recving

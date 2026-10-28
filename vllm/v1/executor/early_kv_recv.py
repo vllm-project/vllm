@@ -10,10 +10,53 @@ import zmq
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
+from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
+
+
+class EarlyKVOutputAggregator(KVOutputAggregator):
+    """Share the normal receive quorum only when early reporting is enabled."""
+
+    def __init__(self, expected_finished_count: int):
+        super().__init__(expected_finished_count)
+        self._early_failed_recving = set[str]()
+
+    def add_finished_recving(self, req_ids: set[str]) -> set[str]:
+        """Callers report each worker/load once; identities are not deduplicated."""
+        finished = set[str]()
+        for req_id in req_ids:
+            remaining = (
+                self._recv_remaining_count.get(req_id, self._expected_finished_count)
+                - 1
+            )
+            if remaining:
+                self._recv_remaining_count[req_id] = remaining
+            else:
+                finished.add(req_id)
+                self._recv_remaining_count.pop(req_id, None)
+        failed = finished & self._failed_recving_pending
+        self._early_failed_recving.update(failed)
+        return finished - failed
+
+    def aggregate(
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
+    ) -> ModelRunnerOutput | None:
+        output = super().aggregate(outputs, output_rank)
+        if output is not None and self._early_failed_recving:
+            # A quorum completed by an early vote still uses normal recovery.
+            kv_output = output.kv_connector_output
+            assert kv_output is not None
+            kv_output.finished_recving = (
+                kv_output.finished_recving or set()
+            ) | self._early_failed_recving
+            kv_output.failed_recving |= self._early_failed_recving
+            self._failed_recving_pending -= self._early_failed_recving
+            self._early_failed_recving.clear()
+        return output
 
 
 class EarlyKVRecvReceiver:

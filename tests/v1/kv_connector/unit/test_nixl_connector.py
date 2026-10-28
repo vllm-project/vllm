@@ -4525,15 +4525,17 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
 
 
 @pytest.mark.cpu_test
-def test_early_recv_reports_successes_only_through_poll(recv_worker):
+@pytest.mark.parametrize("collect_in_step", [False, True])
+def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_step):
     worker = recv_worker
-    worker._worker_polls_recving = True
+    worker._early_finished_recving = set()
     worker._recving_transfers["request"] = [101]
     worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
     assert worker.poll_finished_recving() == set()
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    assert worker.get_transfer_results().finished_recving == set()
+    if collect_in_step:
+        assert worker.get_transfer_results().finished_recving == set()
     assert worker.poll_finished_recving() == {"request"}
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
@@ -4545,7 +4547,7 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker):
 @pytest.mark.cpu_test
 def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker = recv_worker
-    worker._worker_polls_recving = True
+    worker._early_finished_recving = set()
     worker._recving_transfers["request"] = [101]
     worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"

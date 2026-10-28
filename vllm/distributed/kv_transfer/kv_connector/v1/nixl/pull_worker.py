@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -36,6 +37,8 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
+    _early_finished_recving: set[str] | None = None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -43,9 +46,47 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        self._worker_polls_recving = self.kv_transfer_config.enable_early_recv
+        if self.kv_transfer_config.enable_early_recv:
+            self._early_finished_recving = set()
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        results = super().get_transfer_results()
+        if self._early_finished_recving is not None:
+            # Normal collection may finish before the GPU output is ready.
+            self._early_finished_recving.update(
+                results.finished_recving - results.failed_recving
+            )
+            results.finished_recving &= results.failed_recving
+        return results
+
+    def has_pending_recving(self) -> bool:
+        return self._early_finished_recving is not None and (
+            bool(self._early_finished_recving)
+            or any(r not in self._recv_failures for r in self._recving_transfers)
+        )
+
+    def poll_finished_recving(self) -> set[str]:
+        if not self.has_pending_recving():
+            return set()
+        assert self._early_finished_recving is not None
+        finished, self._early_finished_recving = self._early_finished_recving, set()
+        # Failed handles are retried by normal collection, once per step.
+        transfers = {
+            r: handles
+            for r, handles in self._recving_transfers.items()
+            if r not in self._recv_failures
+        }
+        done, failed = self._pop_done_transfers(transfers)
+        self._recving_transfers.update(transfers)
+        for req_id in done:
+            del self._recving_transfers[req_id]
+        self._recv_failures.update(failed)
+        done -= self._recv_failures
+        if done:
+            self._finish_recved(done, set())
+        return finished | done
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.

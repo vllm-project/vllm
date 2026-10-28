@@ -20,7 +20,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 import torch
@@ -69,7 +69,11 @@ from vllm.utils.torch_utils import (
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.executor.early_kv_recv import EarlyKVRecvReceiver, EarlyKVRecvSender
+from vllm.v1.executor.early_kv_recv import (
+    EarlyKVOutputAggregator,
+    EarlyKVRecvReceiver,
+    EarlyKVRecvSender,
+)
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -78,6 +82,9 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -438,10 +445,18 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
+    def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
+        if self.early_kv_recv is None:
+            super().init_kv_output_aggregator(connector)
+        else:
+            self.kv_output_aggregator = EarlyKVOutputAggregator.from_connector(
+                connector, self.parallel_config.world_size
+            )
+
     def take_early_finished_recving(self) -> set[str] | None:
         if self.early_kv_recv is None:
             return None
-        assert self.kv_output_aggregator is not None
+        assert isinstance(self.kv_output_aggregator, EarlyKVOutputAggregator)
         finished: set[str] = set()
         for notification in self.early_kv_recv.drain():
             finished.update(

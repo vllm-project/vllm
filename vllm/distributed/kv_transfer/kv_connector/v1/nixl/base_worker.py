@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Container, Iterator
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -132,8 +132,6 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
-    # Route successes through early polling; keep failures on the normal path.
-    _worker_polls_recving: bool = False
 
     # Layer-name routing is supported only by NixlPushConnector for HMA or
     # packed KV caches under PP.
@@ -3214,17 +3212,9 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving = set[ReqId]()
-        if self._worker_polls_recving:
-            # poll_finished_recving() pops the rest; failed receives retry
-            # their retained handles here, once per step.
-            self._pop_done_transfers(self._recving_transfers, self._recv_failures)
-        else:
-            done_recving, newly_failed = self._pop_done_transfers(
-                self._recving_transfers
-            )
-            if newly_failed:
-                self._recv_failures.update(newly_failed)
+        done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
+        if newly_failed:
+            self._recv_failures.update(newly_failed)
 
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
@@ -3273,25 +3263,6 @@ class NixlBaseConnectorWorker:
             finished_recving=done_recving,
             failed_recving=failed_recv_reqs,
         )
-
-    def poll_finished_recving(self) -> set[str]:
-        """Pop and post-process successful receives; defer failures to normal output."""
-        if not self.has_pending_recving():
-            return set()
-        done_recving, newly_failed = self._pop_done_transfers(
-            self._recving_transfers,
-            self._recving_transfers.keys() - self._recv_failures,
-        )
-        if newly_failed:
-            self._recv_failures.update(newly_failed)
-        done_recving -= self._recv_failures
-        if done_recving:
-            self._finish_recved(done_recving, set())
-        return done_recving
-
-    def has_pending_recving(self) -> bool:
-        """Whether a receive that has not failed is still in flight."""
-        return any(r not in self._recv_failures for r in self._recving_transfers)
 
     def _finish_recved(
         self, done_recving: set[str], failed_recv_reqs: set[str]
@@ -3452,15 +3423,12 @@ class NixlBaseConnectorWorker:
                 )
 
     def _pop_done_transfers(
-        self,
-        transfers: dict[str, list[int]],
-        req_ids: Container[str] | None = None,
+        self, transfers: dict[str, list[int]]
     ) -> tuple[set[str], set[str]]:
         """Poll transfers, retaining handles until they can be released.
 
         Args:
             transfers: Outstanding handles by request, updated in place.
-            req_ids: Only poll these requests; all of them if None.
 
         Returns:
             Requests with no outstanding handles and requests with observed
@@ -3470,8 +3438,6 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         failed_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            if req_ids is not None and req_id not in req_ids:
-                continue
             in_progress = []
             for handle in handles:
                 try:
