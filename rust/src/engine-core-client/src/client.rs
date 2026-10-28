@@ -21,8 +21,8 @@ use crate::metrics::EngineSleepState;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
-use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode, SleepLevel};
+use crate::protocol::request::EngineCoreRequest;
+use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -378,6 +378,7 @@ impl EngineCoreClient {
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
+            config.client_index,
             config.engine_stats_enabled,
             &engines,
         ));
@@ -718,54 +719,7 @@ impl EngineCoreClient {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
-        trace!(
-            method,
-            client_index = self.config.client_index,
-            engine_count = self.engines.len(),
-            "sending utility request"
-        );
-
-        /// Removes utility waiters if a call future is cancelled before completion.
-        struct UtilityCallGuard<'a> {
-            inner: &'a ClientInner,
-            call_ids: Vec<u64>,
-        }
-
-        impl Drop for UtilityCallGuard<'_> {
-            fn drop(&mut self) {
-                self.inner.unregister_utility_calls(self.call_ids.drain(..));
-            }
-        }
-
-        let mut call_guard = UtilityCallGuard {
-            inner: self.inner.as_ref(),
-            call_ids: Vec::with_capacity(self.engines.len()),
-        };
-
-        let mut prepared_calls = Vec::with_capacity(self.engines.len());
-        for engine in &self.engines {
-            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
-            call_guard.call_ids.push(call_id);
-            let request =
-                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
-            prepared_calls.push((&engine.engine_id, call_id, rx, request));
-        }
-
-        let outcomes = join_all(prepared_calls.into_iter().map(
-            |(engine_id, call_id, rx, request)| async move {
-                self.inner
-                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
-                    .await?;
-                rx.await
-                    .map_err(|_| Error::UtilityCallClosed {
-                        method: method.to_string(),
-                        call_id,
-                    })??
-                    .into_typed_result(method)
-            },
-        ))
-        .await;
-        outcomes.into_iter().collect()
+        self.inner.call_utility(method, args).await
     }
 
     /// Call a utility method on all connected engines and return the shared

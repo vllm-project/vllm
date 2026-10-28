@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use futures::future::join_all;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
@@ -29,7 +30,7 @@ use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
-use crate::protocol::utility::UtilityOutput;
+use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
@@ -48,6 +49,9 @@ pub(crate) struct ClientInner {
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    /// Engines that utility calls go to, and this client's index on them.
+    engine_ids: Vec<EngineId>,
+    client_index: u32,
     /// Per-tensor byte threshold loaded from env variable
     /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
     msgpack_zero_copy_threshold: usize,
@@ -71,6 +75,7 @@ impl ClientInner {
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
+        client_index: u32,
         engine_stats_enabled: bool,
         engines: &[ConnectedEngine],
     ) -> Self {
@@ -88,6 +93,8 @@ impl ClientInner {
             input_send,
             handle,
             model_name,
+            engine_ids: engines.iter().map(|engine| engine.engine_id.clone()).collect(),
+            client_index,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             engine_stats_enabled,
             scheduler_stats_recorder,
@@ -251,6 +258,60 @@ impl ClientInner {
     /// the client is healthy and changes permanently to `false` on failure.
     pub fn subscribe_health(&self) -> watch::Receiver<bool> {
         self.health_tx.subscribe()
+    }
+
+    /// Call a typed utility method on every engine. See
+    /// [`crate::EngineCoreClient::call_utility`].
+    pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        A: serde::Serialize + std::fmt::Debug,
+    {
+        trace!(
+            method,
+            client_index = self.client_index,
+            engine_count = self.engine_ids.len(),
+            "sending utility request"
+        );
+
+        /// Removes utility waiters if a call future is cancelled before completion.
+        struct UtilityCallGuard<'a> {
+            inner: &'a ClientInner,
+            call_ids: Vec<u64>,
+        }
+
+        impl Drop for UtilityCallGuard<'_> {
+            fn drop(&mut self) {
+                self.inner.unregister_utility_calls(self.call_ids.drain(..));
+            }
+        }
+
+        let mut call_guard = UtilityCallGuard {
+            inner: self,
+            call_ids: Vec::with_capacity(self.engine_ids.len()),
+        };
+
+        let mut prepared_calls = Vec::with_capacity(self.engine_ids.len());
+        for engine_id in &self.engine_ids {
+            let (call_id, rx) = self.allocate_and_register_utility_call()?;
+            call_guard.call_ids.push(call_id);
+            let request = EngineCoreUtilityRequest::new(self.client_index, call_id, method, &args)?;
+            prepared_calls.push((engine_id, call_id, rx, request));
+        }
+
+        let outcomes = join_all(prepared_calls.into_iter().map(
+            |(engine_id, call_id, rx, request)| async move {
+                self.send_to_engine(engine_id, EngineCoreRequestType::Utility, &request).await?;
+                rx.await
+                    .map_err(|_| Error::UtilityCallClosed {
+                        method: method.to_string(),
+                        call_id,
+                    })??
+                    .into_typed_result(method)
+            },
+        ))
+        .await;
+        outcomes.into_iter().collect()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
@@ -562,6 +623,7 @@ mod tests {
             send,
             Handle::current(),
             "test-model".to_string(),
+            0,
             true,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
