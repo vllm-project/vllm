@@ -17,7 +17,12 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+import vllm._custom_ops as ops
+from vllm.model_executor.layers.activation import (
+    GeluAndMul,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -29,6 +34,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -56,6 +62,22 @@ def _silu_and_mul_fp8_static(
         orig_dtype=x.dtype,
         orig_shape=out_shape,
         quant_key=kFp8StaticTensorSym,
+    )
+
+
+def _gelu_and_mul_fp8_dynamic_token(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """GeluAndMul (tanh) + FP8 dynamic per-token quantization."""
+    result, scale = ops.gelu_tanh_and_mul_per_token_quant(
+        x, getattr(linear, "input_scale_ub", None)
+    )
+    return QuantizedActivation(
+        data=result,
+        scale=scale,
+        orig_dtype=x.dtype,
+        orig_shape=result.shape,
+        quant_key=kFp8DynamicTokenSym,
     )
 
 
@@ -170,6 +192,37 @@ def _relu_squared_static_fp8_quant_supported(
     )
 
 
+def _gelu_and_mul_fp8_dynamic_token_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """Return whether the GELU-tanh per-token FP8 producer can consume this input."""
+    scale_ub = getattr(linear, "input_scale_ub", None)
+    return (
+        isinstance(act_fn, GeluAndMul)
+        and act_fn.approximate == "tanh"
+        # Only replace the CUDA gelu_and_mul op, whose output the kernel
+        # reproduces exactly. Under torch.compile the native op is already
+        # fused with the quantization, with its own FP8 rounding. Compare the
+        # functions: bound methods do not compare equal while Dynamo traces.
+        and getattr(act_fn._forward_method, "__func__", None)
+        is type(act_fn).forward_cuda
+        and x.is_cuda
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and x.is_contiguous()
+        and (
+            scale_ub is None
+            or (
+                isinstance(scale_ub, torch.Tensor)
+                and scale_ub.dtype == torch.float32
+                and scale_ub.device == x.device
+                and scale_ub.numel() == 1
+            )
+        )
+    )
+
+
 # Optional per-entry predicates preserve the unconditional fallback contract
 # for producers whose supported inputs are narrower than their registry key.
 _FUSED_ACT_QUANT_SUPPORT: dict[
@@ -182,6 +235,14 @@ if current_platform.is_cuda() and current_platform.has_device_capability(90):
     _FUSED_ACT_QUANT[_RELU2_STATIC_FP8_KEY] = relu_squared_static_fp8_quant
     _FUSED_ACT_QUANT_SUPPORT[_RELU2_STATIC_FP8_KEY] = (
         _relu_squared_static_fp8_quant_supported
+    )
+
+# This path is validated on SM89 and newer CUDA devices.
+if current_platform.is_cuda() and current_platform.has_device_capability(89):
+    _GELU_DYNAMIC_TOKEN_FP8_KEY = (GeluAndMul, kFp8DynamicTokenSym)
+    _FUSED_ACT_QUANT[_GELU_DYNAMIC_TOKEN_FP8_KEY] = _gelu_and_mul_fp8_dynamic_token
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_DYNAMIC_TOKEN_FP8_KEY] = (
+        _gelu_and_mul_fp8_dynamic_token_supported
     )
 
 # Add CUDA-specific entries for dynamic block quantization

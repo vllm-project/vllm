@@ -6,6 +6,7 @@ import itertools
 
 import torch
 
+import vllm._custom_ops as ops
 import vllm.model_executor.layers.activation  # noqa F401
 from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.custom_op import op_registry
@@ -27,6 +28,7 @@ def benchmark_activation(
     provider: str,
     func_name: str,
     dtype: torch.dtype,
+    quantize_fp8: bool = False,
 ):
     device = "cuda"
     num_tokens = batch_size * seq_len
@@ -44,10 +46,19 @@ def benchmark_activation(
     else:
         layer = op_registry[func_name]()
 
-    x = torch.randn(num_tokens, dim, dtype=dtype, device=device)
+    x = torch.randn(
+        num_tokens, dim * (2 if quantize_fp8 else 1), dtype=dtype, device=device
+    )
     compiled_layer = torch.compile(layer.forward_native)
 
-    if provider == "custom":
+    if quantize_fp8:
+        if provider == "custom":
+            fn = lambda: ops.scaled_fp8_quant(
+                layer.forward_cuda(x), use_per_token_if_dynamic=True
+            )
+        else:
+            fn = lambda: ops.gelu_tanh_and_mul_per_token_quant(x)
+    elif provider == "custom":
         fn = lambda: layer(x)
     elif provider == "compiled":
         fn = lambda: compiled_layer(x)
@@ -79,28 +90,52 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype", type=str, choices=["half", "bfloat16", "float"], default="bfloat16"
     )
+    parser.add_argument(
+        "--quantize-fp8",
+        action="store_true",
+        help="Compare GELU-tanh + per-token FP8 CUDA chain with the fused kernel.",
+    )
     args = parser.parse_args()
     assert args
 
     func_name = args.func_name
     dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
+    if args.quantize_fp8:
+        if func_name != "gelu_and_mul_tanh" or dtype == torch.float32:
+            parser.error("--quantize-fp8 requires gelu_and_mul_tanh and FP16/BF16")
+        # Gemma3 1B / 4B / 12B / 27B intermediate sizes.
+        configs = list(
+            itertools.product([1, 16, 128, 512, 2048], [1], [6912, 10240, 15360, 21504])
+        )
 
     perf_report = triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["batch_size", "seq_len", "intermediate_size"],
             x_vals=configs,
             line_arg="provider",
-            line_vals=["custom", "compiled"],
-            line_names=["Custom OP", "Compiled"],
+            line_vals=["custom", "fused"]
+            if args.quantize_fp8
+            else ["custom", "compiled"],
+            line_names=["CUDA chain", "Fused"]
+            if args.quantize_fp8
+            else ["Custom OP", "Compiled"],
             styles=[("blue", "-"), ("green", "-")],
             ylabel="ms",
-            plot_name=f"{func_name}-op-performance",
+            plot_name=(
+                f"{func_name}-{'fp8-' if args.quantize_fp8 else ''}op-performance"
+            ),
             args={},
         )
     )
 
     perf_report(
         lambda batch_size, seq_len, intermediate_size, provider: benchmark_activation(
-            batch_size, seq_len, intermediate_size, provider, func_name, dtype
+            batch_size,
+            seq_len,
+            intermediate_size,
+            provider,
+            func_name,
+            dtype,
+            args.quantize_fp8,
         )
     ).run(print_data=True)

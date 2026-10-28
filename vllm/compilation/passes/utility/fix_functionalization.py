@@ -104,6 +104,17 @@ class FixFunctionalizationPass(VllmInductorPass):
             elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
                 mutated_args = {1: "result", 2: "scale", 3: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(torch.ops._C, "gelu_tanh_and_mul_per_token_quant")
+                and at_target == torch.ops._C.gelu_tanh_and_mul_per_token_quant.default
+            ):
+                mutated_args = {1: "result", 2: "scale"}
+                self.defunctionalize(
+                    graph,
+                    node,
+                    mutated_args,
+                    args=("result", "input", "scale", "scale_ub"),
+                )
             elif at_target in [
                 torch.ops._C.rms_norm.default,
                 torch.ops._C.rms_norm_static_fp8_quant.default,
