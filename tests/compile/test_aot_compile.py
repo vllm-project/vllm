@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import builtins
 import functools
 import hashlib
 import json
@@ -23,6 +24,8 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+    _compute_code_hash,
+    _compute_code_hash_with_content,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -1067,3 +1070,24 @@ def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_
         assert traced > before
         assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
         assert counters["unique_graphs"] == traced
+
+
+def test_compute_code_hash_uses_source_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """UTF-8 traced sources must not depend on the locale default."""
+    source = "# non-ASCII: ✓\n"
+    traced_file = tmp_path / "traced.py"
+    traced_file.write_text(source, encoding="utf-8")
+    real_open = builtins.open
+
+    def open_with_cp1252(file, mode="r", *args, **kwargs):
+        if "b" not in mode:
+            kwargs.setdefault("encoding", "cp1252")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", open_with_cp1252)
+
+    assert _compute_code_hash({str(traced_file)}) == _compute_code_hash_with_content(
+        {str(traced_file): source}
+    )
