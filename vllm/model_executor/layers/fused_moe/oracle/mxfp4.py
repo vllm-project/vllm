@@ -171,6 +171,8 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
     FLASHINFER_MOE_EP_DEEP_GEMM = "FLASHINFER_MOE_EP_DEEP_GEMM"
+    # AITER MegaMoEV2: routing outside, dispatch/GEMMs/combine fused over MoRI.
+    AITER_MEGA_MOE = "AITER_MEGA_MOE"
 
 
 # Backends that share the same TRTLLM weight format
@@ -345,6 +347,13 @@ def backend_to_kernel_cls(
 
         return [FlashInferMoeEpExperts]
 
+    elif backend == Mxfp4MoeBackend.AITER_MEGA_MOE:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
+            AiterMegaMoEExperts,
+        )
+
+        return [AiterMegaMoEExperts]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -387,6 +396,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
+        "aiter_mega_moe": [Mxfp4MoeBackend.AITER_MEGA_MOE],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
@@ -845,7 +855,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
-    if backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+    if (
+        backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
+        or backend == Mxfp4MoeBackend.AITER_MEGA_MOE
+    ):
         # The megakernel takes the model's dimensions and validates them itself.
         return hidden_size, intermediate_size
     if backend in B12X_BACKENDS:
@@ -1599,6 +1612,22 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    if mxfp4_backend == Mxfp4MoeBackend.AITER_MEGA_MOE:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
+            shuffle_aiter_mega_moe_weights,
+        )
+
+        return (
+            *shuffle_aiter_mega_moe_weights(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            ),
+            w13_bias,
+            w2_bias,
+        )
+
     if mxfp4_backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4:
         return (
             w13_weight.data,
@@ -2192,6 +2221,8 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+        # MegaMoEV2 takes bf16 activations and quantizes them internally.
+        Mxfp4MoeBackend.AITER_MEGA_MOE,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(

@@ -627,6 +627,9 @@ class MoERunner(MoERunnerInterface):
             )
         else:
             # Modular kernels: select experts first, then call routed_experts
+            if self._quant_method.appends_fused_shared_experts:
+                assert self.routed_scaling_factor == 1.0
+                self.router.num_fused_shared_experts = 0
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,

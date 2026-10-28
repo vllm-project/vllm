@@ -38,6 +38,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def init_mori_shmem(cpu_group) -> None:
+    assert has_mori(), (
+        "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
+        " to install MoRI kernels."
+    )  # noqa
+    import mori  # type: ignore[import-not-found]
+
+    torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+    mori.shmem.shmem_torch_process_group_init("mori")
+
+
 class PassThroughAll2AllManager(All2AllManagerBase):
     """Placeholder for ``all2all_backend="passthrough"``.
 
@@ -921,38 +932,15 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
 class MoriAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, all2all_backend: str):
-        assert has_mori(), (
-            "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
-            " to install MoRI kernels."
-        )  # noqa
         assert all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
         ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
-        import mori
 
         super().__init__(cpu_group)
         self._all2all_backend = all2all_backend
         self.handle_cache = Cache()
-
-        torch._C._distributed_c10d._register_process_group("mori", cpu_group)
-        vllm_config = get_current_vllm_config()
-        if vllm_config.kernel_config.moe_backend == "aiter_mega_moe":
-            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
-            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
-            # (> 8GB with a fused shared expert, which needs an mxfp4 target).
-            online_targets = getattr(
-                vllm_config.model_config.quantization_config, "targets", None
-            )
-            may_fuse_shared_expert = (
-                envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-                and "mxfp4" in (online_targets or {}).values()
-            )
-            heap_size = os.environ.setdefault(
-                "MORI_SHMEM_HEAP_SIZE", "16G" if may_fuse_shared_expert else "8G"
-            )
-            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
-        mori.shmem.shmem_torch_process_group_init("mori")
+        init_mori_shmem(cpu_group)
 
     def _make_all2all_kwargs(
         self,

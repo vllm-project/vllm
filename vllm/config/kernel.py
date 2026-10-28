@@ -148,6 +148,7 @@ MoEBackend = Literal[
 
 FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
 FLASHINFER_MOE_EP_DEEP_GEMM = "flashinfer_moe_ep_mega_deep_gemm"
+AITER_MEGA_MOE = "aiter_mega_moe"
 
 # Backends implemented by the shared FlashInfer MoE-EP adapter.
 FLASHINFER_MOE_EP_BACKENDS = frozenset(
@@ -156,8 +157,9 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
         FLASHINFER_MOE_EP_DEEP_GEMM,
     }
 )
-# Those backends dispatch and combine themselves, so the framework must not
+# Backends that dispatch and combine themselves, so the framework must not
 # run a separate all2all around them.
+PASSTHROUGH_MOE_BACKENDS = FLASHINFER_MOE_EP_BACKENDS | {AITER_MEGA_MOE}
 PASSTHROUGH_ALL2ALL_BACKEND: Final = "passthrough"
 
 # "Native" here meaning that the backend does not use the fused MoE path.
@@ -165,9 +167,9 @@ PASSTHROUGH_ALL2ALL_BACKEND: Final = "passthrough"
 # TODO: migrate to the fused MoE path ultimately.
 NATIVE_MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"})
 
-# Every megakernel backend. The FlashInfer variants run through the standard
+# Every megakernel backend. The non-native variants run through the standard
 # fused-MoE model path; the quantization method binds the kernel.
-MEGA_MOE_BACKENDS = NATIVE_MEGA_MOE_BACKENDS | FLASHINFER_MOE_EP_BACKENDS
+MEGA_MOE_BACKENDS = NATIVE_MEGA_MOE_BACKENDS | PASSTHROUGH_MOE_BACKENDS
 
 SparseIndexerTopkBackend = Literal[
     "auto",
@@ -195,7 +197,8 @@ def bind_passthrough_all2all_backend(
     moe_backend: str, parallel_config: "ParallelConfig"
 ) -> None:
     """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
-    expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
+    expert-parallel communication (the FlashInfer MoE-EP and AITER MegaMoE
+    megakernels).
 
     Such a deployment gets ``passthrough`` when the all2all backend is left at
     its default and rejects any other explicit choice; the value is meaningless
@@ -204,7 +207,7 @@ def bind_passthrough_all2all_backend(
     ``set_platform_defaults`` calls idempotent.
     """
     a2a = parallel_config.all2all_backend
-    if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+    if moe_backend in PASSTHROUGH_MOE_BACKENDS:
         if a2a == PASSTHROUGH_ALL2ALL_BACKEND:
             return
         if a2a != "allgather_reducescatter":
@@ -223,7 +226,7 @@ def bind_passthrough_all2all_backend(
     elif a2a == PASSTHROUGH_ALL2ALL_BACKEND:
         raise ValueError(
             f"all2all_backend={a2a!r} is only valid with a moe_backend that "
-            f"dispatches and combines itself ({sorted(FLASHINFER_MOE_EP_BACKENDS)}),"
+            f"dispatches and combines itself ({sorted(PASSTHROUGH_MOE_BACKENDS)}),"
             f" got moe_backend={moe_backend!r}."
         )
 
@@ -333,8 +336,8 @@ class KernelConfig:
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
-      kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
-      DeepSeek-V4 only)
+      kernel for MXFP4 experts (ROCm gfx950, requires DP+EP; dispatches
+      over MoRI shmem itself, so leave --all2all-backend unset)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4

@@ -112,6 +112,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return None
 
     @property
+    def appends_fused_shared_experts(self) -> bool:
+        return (
+            self.moe_kernel is not None
+            and self.moe_kernel.fused_experts.appends_fused_shared_experts
+        )
+
+    @property
     def skip_forward_padding(self) -> bool:
         """Whether to skip the padding in the forward before applying the moe method."""
         return False
