@@ -13,6 +13,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -442,13 +443,11 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     assert lengths == [num_kernel_blocks * physical_page_bytes]
 
     def split_contiguous_blocks(src_ids, dst_ids):
-        return [[block_id] for block_id in src_ids], [
-            [block_id] for block_id in dst_ids
-        ]
+        return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
 
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-        "mooncake_connector.group_concurrent_contiguous",
+        "mooncake_connector._contiguous_runs",
         side_effect=split_contiguous_blocks,
     ):
         (

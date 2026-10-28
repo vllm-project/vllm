@@ -1327,7 +1327,7 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv:
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()

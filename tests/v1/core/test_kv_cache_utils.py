@@ -13,7 +13,6 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
     new_kv_cache_spec,
     new_mamba_spec,
@@ -36,6 +35,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -139,7 +139,9 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
 def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
     """Every page needs a host block, so one max_model_len request must fit."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -182,9 +184,6 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     backing; KV cache layout resolution must skip them."""
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
-    monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
-    )
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -1379,6 +1378,31 @@ def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     )
     layout = resolve_kv_cache_layout(config, [["LBHNC"]], [new_mla_spec(), tail])
     assert layout == KVCacheLayout.LBHNC
+
+
+def test_pipeline_stages_resolve_a_layout_every_stage_supports(monkeypatch):
+    """PP stages hold different layers, so their workers can report different
+    supported layouts (e.g. only one stage has FlashInfer layers on SM100)."""
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = None
+    any_layout = [layout.name for layout in get_supported_kv_cache_layouts([])]
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"], any_layout])
+    assert layout == KVCacheLayout.LBHNC
+
+    # A stage that declares nothing must not outvote a declared preference.
+    config.cache_config.kv_cache_layout = None
+    layout = resolve_kv_cache_layout(config, [["BLHNC", "LBNHC"], any_layout])
+    assert layout == KVCacheLayout.BLHNC
+
+    config.cache_config.kv_cache_layout = None
+    with pytest.raises(ValueError, match="No KV cache layout satisfies"):
+        resolve_kv_cache_layout(config, [["LBHNC"], ["LBNHC"]])
 
 
 @pytest.mark.parametrize("use_mla", [False, True])
