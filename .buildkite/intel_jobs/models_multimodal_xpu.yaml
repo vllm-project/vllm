@@ -209,7 +209,7 @@ steps:
     'pip install av matplotlib ftfy &&
     cd tests &&
     pytest --continue-on-collection-errors -v -s models/multimodal/generation -m not core_model --ignore models/multimodal/generation/test_common.py || true &&
-    pytest --continue-on-collection-errors-v -s models/multimodal/test_mapping.py || true'
+    pytest --continue-on-collection-errors -v -s models/multimodal/test_mapping.py || true'
 - label: ':nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)'
   key: multi-modal-models-extended-ppl
   device: intel_gpu
