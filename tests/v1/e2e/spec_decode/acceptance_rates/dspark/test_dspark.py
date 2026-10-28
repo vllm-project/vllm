@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.models.utils import check_logprobs_close
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
@@ -154,3 +155,72 @@ def test_dspark_correctness_and_acceptance_rate(
         assert (
             acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
         ), f"{context}: {metrics_summary}"
+
+
+def test_lfm2_moe_dspark_matches_target_across_requests(monkeypatch, vllm_runner):
+    """Guard auxiliary capture and ShortConv state reuse with accepted drafts."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model = "LiquidAI/LFM2.5-8B-A1B"
+    runner_config = dict(
+        dtype="bfloat16",
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
+        max_num_seqs=2,
+        block_size=None,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        async_scheduling=False,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.8,
+        kv_cache_memory_bytes=512 * 1024 * 1024,
+        disable_log_stats=False,
+    )
+    prompt_batches = [
+        ["Explain why the sky is blue in two sentences."],
+        [
+            "Write a Python function that returns the Fibonacci numbers up to n.",
+            "List three advantages of using a hash table.",
+        ],
+        ["A shop sells 12 apples for 6 dollars. How much do 30 apples cost?"],
+    ]
+    with vllm_runner(model, **runner_config) as target_runner:
+        tokenizer = target_runner.llm.get_tokenizer()
+        batches = [
+            [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for prompt in prompts
+            ]
+            for prompts in prompt_batches
+        ]
+        target_outputs = [
+            target_runner.generate_greedy_logprobs(batch, 128, 5) for batch in batches
+        ]
+
+    speculative_config = dict(
+        method="dspark",
+        model="LiquidAI/LFM2.5-8B-A1B-DSpark",
+        num_speculative_tokens=9,
+        enable_adaptive_verification=False,
+    )
+    with vllm_runner(
+        model, speculative_config=speculative_config, **runner_config
+    ) as spec_runner:
+        prev_metrics = spec_runner.llm.get_metrics()
+        for batch, reference in zip(batches, target_outputs):
+            outputs = spec_runner.generate_greedy_logprobs(batch, 128, 5)
+            assert all(output[0] for output in outputs)
+            check_logprobs_close(
+                outputs_0_lst=reference,
+                outputs_1_lst=outputs,
+                name_0="target",
+                name_1="dspark",
+            )
+            metrics = spec_runner.llm.get_metrics()
+            acceptance_rate = compute_acceptance_rate(metrics, prev_metrics)
+            print(f"LFM2 MoE DSpark batch acceptance rate: {acceptance_rate:.3f}")
+            assert acceptance_rate > 0
+            prev_metrics = metrics

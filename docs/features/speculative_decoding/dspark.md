@@ -45,8 +45,48 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
+## Liquid LFM2.5-8B-A1B
+
+The LFM2 MoE target supports
+[LiquidAI/LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B) with
+[LiquidAI/LFM2.5-8B-A1B-DSpark](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B-DSpark).
+Set `num_speculative_tokens` to the drafter's trained block size of nine.
+The target captures auxiliary features for the drafter and retains ShortConv
+states during speculative verification.
+
+This model pair was validated on a single AMD gfx1151 GPU with Model Runner V2,
+BF16 weights, and eager execution:
+
+```python
+import os
+
+os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="LiquidAI/LFM2.5-8B-A1B",
+    dtype="bfloat16",
+    max_model_len=4096,
+    enforce_eager=True,
+    async_scheduling=False,
+    enable_prefix_caching=False,
+    speculative_config={
+        "method": "dspark",
+        "model": "LiquidAI/LFM2.5-8B-A1B-DSpark",
+        "num_speculative_tokens": 9,
+        "enable_adaptive_verification": False,
+    },
+)
+outputs = llm.chat(
+    [{"role": "user", "content": "Explain why the sky is blue."}],
+    SamplingParams(temperature=0, max_tokens=128),
+)
+print(outputs[0].outputs[0].text)
+```
+
 Auxiliary hidden-state capture across pipeline-parallel ranks is not supported
-for this target. CUDA graphs, async scheduling, adaptive verification, and prefix
-caching require separate validation for this model pair. Performance depends on
+for these targets. CUDA graphs, async scheduling, adaptive verification, and prefix
+caching require separate validation for these model pairs. Performance depends on
 input/output lengths and request concurrency. Low-precision verification can
 produce different greedy token selections when candidate scores are close.
