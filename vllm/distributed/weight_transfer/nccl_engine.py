@@ -223,6 +223,7 @@ class NCCLWeightTransferEngine(
         """
         from vllm.model_executor.model_loader.reload import check_plannable
 
+        self.shutdown()
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
