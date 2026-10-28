@@ -357,11 +357,6 @@ def test_sparse_autotune_respects_cache_selection(
         sparse, "_flashinfer_sparse_mla_decode_label", lambda *_: "DSv3.2"
     )
     monkeypatch.setattr(sparse, "resolve_flashinfer_autotune_v2_root", lambda: tmp_path)
-    cache_path = tmp_path / "autotune.json"
-    cache_path.write_bytes(b"cached")
-    monkeypatch.setattr(
-        sparse, "resolve_flashinfer_autotune_file", lambda _: cache_path
-    )
     monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
 
     @contextmanager
@@ -396,13 +391,11 @@ def test_sparse_autotune_respects_cache_selection(
         managed.assert_not_called()
         reload.assert_not_called()
         assert legacy.call_count == 1  # every rank tunes its sparse calls
-        world.broadcast_object.assert_called_once_with(
-            b"cached" if rank == 0 else None, src=0
-        )
-        # The leader also preloads its cache file before the scoped warmup.
-        assert tuner.load_configs.call_args_list == (2 if rank == 0 else 1) * [
-            call(str(cache_path))
-        ]
+        # Sparse MLA keeps its calibration in FlashInfer's own store, so no
+        # AutoTuner cache file is loaded or shared.
+        world.broadcast_object.assert_not_called()
+        tuner.load_configs.assert_not_called()
+        assert world.barrier.call_count == (1 if world_size > 1 else 0)
     assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 

@@ -40,11 +40,6 @@ def worker(monkeypatch, tmp_path):
         attn_groups=[[SimpleNamespace(backend=backend)]],
         _dummy_run=Mock(),
     )
-    cache_path = tmp_path / "autotune.json"
-    cache_path.write_bytes(b"cached")
-    monkeypatch.setattr(
-        warmup, "resolve_flashinfer_autotune_file", lambda _: cache_path
-    )
     monkeypatch.setattr(warmup, "resolve_flashinfer_autotune_v2_root", lambda: tmp_path)
     monkeypatch.setitem(
         sys.modules,

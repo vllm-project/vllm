@@ -10,10 +10,8 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-    resolve_flashinfer_autotune_file,
     resolve_flashinfer_autotune_v2_root,
     use_flashinfer_autotune_v2,
-    write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import autotune as flashinfer_autotune
@@ -206,7 +204,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     refine_tokens = _sparse_mla_refine_tokens(worker)
 
     try:
-        from flashinfer.autotuner import AutoTuner
+        from flashinfer.autotuner import AutoTuner  # noqa: F401
     except ImportError:
         logger.warning(
             "Skipping FlashInfer SM120 sparse MLA decode autotune because "
@@ -217,7 +215,6 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     from vllm.distributed.parallel_state import get_world_group
 
     world = get_world_group()
-    is_leader = world.rank_in_group == 0
 
     dummy_run_kwargs = dict(
         num_tokens=num_tokens,
@@ -232,27 +229,18 @@ def _run_flashinfer_sparse_mla_decode_autotune(
             worker, num_tokens, log_label, dummy_run_kwargs, refine_tokens
         )
 
-    cache_path = resolve_flashinfer_autotune_file(runner)
-
     autotune_kwargs = _sparse_mla_autotune_kwargs()
-    tuner = AutoTuner.get()
-    if is_leader:
-        logger.info(
-            "Autotuning FlashInfer SM120 sparse MLA %s decode with cache: %s",
-            log_label,
-            cache_path,
-        )
-        # Tuning is entered per sparse call, so the cache file is loaded and
-        # saved around the whole warmup instead of by each call's context.
-        if cache_path.exists():
-            tuner.load_configs(str(cache_path))
+    if world.rank_in_group == 0:
+        logger.info("Autotuning FlashInfer SM120 sparse MLA %s decode", log_label)
 
     def tune() -> contextlib.AbstractContextManager:
         return flashinfer_autotune(True, **autotune_kwargs)
 
-    # Every rank tunes its own sparse calls: FlashInfer's SM120 sparse-MLA
-    # calibration and refine_cpb measure the local device and persist under
-    # its device key, not in the cache file the leader shares below.
+    # Every rank tunes its own sparse calls. FlashInfer's SM120 sparse MLA does
+    # not select tactics through AutoTuner: tuning mode only enables its
+    # calibration and refine_cpb, which measure the local device and persist
+    # them in FlashInfer's own per-device store, so no AutoTuner cache file is
+    # loaded, saved or shared here.
     with torch.inference_mode():
         warmup_executed = True
         if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
@@ -276,34 +264,8 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     if not warmup_executed:
         return False
 
-    if is_leader and tuner._dirty:
-        tuner.save_configs(str(cache_path))
-    tune_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            tune_results = f.read()
-
-    tune_results = world.broadcast_object(tune_results, src=0)
-    if tune_results is None:
-        logger.warning(
-            "No FlashInfer SM120 sparse MLA %s decode autotune cache entries found. "
-            "Falling back to FlashInfer's default tactic heuristic.",
-            log_label,
-        )
+    if world.world_size > 1:
         world.barrier()
-        return True
-
-    write_flashinfer_autotune_cache(cache_path, tune_results)
-    world.barrier()
-
-    AutoTuner.get().load_configs(str(cache_path))
-    logger.info(
-        "FlashInfer SM120 sparse MLA %s decode autotune cache loaded on rank %d "
-        "from %s.",
-        log_label,
-        world.rank_in_group,
-        cache_path,
-    )
     return True
 
 
