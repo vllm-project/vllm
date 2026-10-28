@@ -451,12 +451,14 @@ def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_r
 
 def test_min_across_dp(monkeypatch):
     """A MIN all-reduce over the DP group; without one (no DP, or dense models'
-    independent DP engines) the value stands."""
+    independent DP engines) or with a single rank, the value stands."""
+    from types import SimpleNamespace
+
     import torch.distributed as dist
 
     from vllm.config import ParallelConfig
 
-    group = object()
+    group = SimpleNamespace(size=lambda: 2)
     seen: list[tuple[object, object]] = []
 
     def all_reduce(tensor, op, group):
@@ -465,6 +467,7 @@ def test_min_across_dp(monkeypatch):
 
     monkeypatch.setattr(dist, "all_reduce", all_reduce)
     assert ParallelConfig.min_across_dp(None, 7) == 7
+    assert ParallelConfig.min_across_dp(SimpleNamespace(size=lambda: 1), 7) == 7
     assert seen == []
     assert ParallelConfig.min_across_dp(group, 7) == 3
     assert seen == [(dist.ReduceOp.MIN, group)]
