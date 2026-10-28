@@ -117,3 +117,69 @@ def test_mxfp4_kv_selects_the_rocm_attend():
             select_main_backend_and_impl_cls(
                 topk_blocks=16, kv_cache_dtype="mxfp4", num_kv_heads=1
             )
+
+
+def test_mxfp4_decode_work_map_is_graph_stable(monkeypatch):
+    """A captured decode graph keeps the work map's address and row count it saw
+    at capture, so every step must refill one buffer and use one block bound."""
+    import sys
+    import types
+
+    from vllm.models.minimax_m3.amd import indexer_mxfp4 as mod
+    from vllm.models.minimax_m3.amd.indexer_msa import (
+        MiniMaxM3IndexerMSAMetadata,
+        MiniMaxM3IndexerMSAMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerDecodeMetadata
+
+    calls = []
+
+    def work_map(seq_lens, max_block, query_len, heads, out=None):
+        calls.append((out, max_block))
+        return out
+
+    fake = types.ModuleType("aiter.ops.flydsl")
+    fake.minimax_m3_index_score_work_map = work_map
+    fake.minimax_m3_index_score_work_map_capacity = lambda *a: 64
+    for name in ("aiter", "aiter.ops"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "aiter.ops.flydsl", fake)
+
+    def fake_build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        n = common_attn_metadata  # the max_seq_len of this step
+        t = torch.zeros(1, dtype=torch.int32)
+        decode = MiniMaxM3IndexerDecodeMetadata(
+            seq_lens=t,
+            block_table=t,
+            max_seq_len=n,
+            decode_query_len=1,
+            max_decode_query_len=1,
+        )
+        return MiniMaxM3IndexerMSAMetadata(
+            seq_lens=t,
+            max_seq_len=n,
+            slot_mapping=t,
+            num_actual_tokens=1,
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            decode=decode,
+        )
+
+    monkeypatch.setattr(MiniMaxM3IndexerMSAMetadataBuilder, "build", fake_build)
+    builder = object.__new__(mod.MiniMaxM3IndexerMxfp4MetadataBuilder)
+    builder.num_index_heads = 1
+    builder.max_model_len = 4096
+    builder._max_decode_reqs = 32
+    builder.max_decode_query_len = 1
+    builder.sparse_block_size = 128
+    builder.device = torch.device("cpu")
+    builder._work_map_buf = None
+
+    first = builder.build(0, 4096)  # the capture step: max_seq_len == max_model_len
+    second = builder.build(0, 300)  # a later step with a short real context
+    assert len(calls) == 2
+    assert calls[0][0] is calls[1][0] is builder._work_map_buf
+    assert calls[0][1] == calls[1][1] == 4096 // 128
+    assert first.decode.max_seq_len == second.decode.max_seq_len == 4096
