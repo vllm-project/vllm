@@ -53,15 +53,16 @@ def _make_inputs(nq, nkv, niq, M, nb, bs, slots):
         swizzle_mxfp8_scale,
     )
 
-    gen = torch.Generator(device="cuda").manual_seed(M)
+    # CPU RNG: the CUDA one's output depends on the GPU's SM count
+    gen = torch.Generator().manual_seed(M)
 
     def randn(*shape):
-        return torch.randn(*shape, device="cuda", generator=gen)
+        return torch.randn(*shape, generator=gen).cuda()
 
     n = (nq + 2 * nkv + niq + 1) * HEAD_DIM
     # activations with a few outlier channels, like real hidden states
     x = randn(M, HIDDEN) * 0.5
-    x[:, torch.randperm(HIDDEN, device="cuda", generator=gen)[:16]] *= 20
+    x[:, torch.randperm(HIDDEN, generator=gen)[:16].cuda()] *= 20
     x = x.bfloat16()
     w = (randn(n, HIDDEN) * 0.05).bfloat16()
     xq, xsf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
@@ -74,7 +75,7 @@ def _make_inputs(nq, nkv, niq, M, nb, bs, slots):
     )
     norm_weights = offset_std[:, :1] + offset_std[:, 1:] * randn(4, HEAD_DIM)
     norm_weights = norm_weights.bfloat16()
-    positions = torch.randint(0, MAX_POS, (M,), device="cuda", generator=gen)
+    positions = torch.randint(0, MAX_POS, (M,), generator=gen).cuda()
     inv_freq = 1.0 / (
         5e6 ** (torch.arange(0, ROTARY_DIM, 2, device="cuda").float() / ROTARY_DIM)
     )
@@ -86,11 +87,10 @@ def _make_inputs(nq, nkv, niq, M, nb, bs, slots):
     elif slots == "last_page":
         sm = ism = torch.arange(nb * bs - M, nb * bs, device="cuda")
     else:
-        sm, ism = (
-            torch.randperm(nb * bs, device="cuda", generator=gen)[:M] for _ in range(2)
-        )
-        sm[torch.rand(M, device="cuda", generator=gen) < 0.03] = -1
-        ism[torch.rand(M, device="cuda", generator=gen) < 0.03] = -1
+        sm, ism = (torch.randperm(nb * bs, generator=gen)[:M] for _ in range(2))
+        sm[torch.rand(M, generator=gen) < 0.03] = -1
+        ism[torch.rand(M, generator=gen) < 0.03] = -1
+        sm, ism = sm.cuda(), ism.cuda()
     return xq, xsf, wq, wsf, norm_weights, positions, cos_sin, sm, ism
 
 
@@ -119,33 +119,43 @@ def _check_fp8(name, got, want):
 def _check_cache(name, got, want, slots, bs):
     """NVFP4 cache [nb, (nslots,) bs, 72] vs the chain's: pages without an
     inserted token are byte-identical; in the others, E2M1 codes and E4M3
-    scale bytes are each within one code, and few differ."""
+    scale bytes are each within one code, and few differ. A scale one code
+    apart re-codes its whole group, so E2M1 mismatches only count in groups
+    with equal scales."""
     pages = torch.zeros(got.shape[0], dtype=torch.bool, device=got.device)
     pages[slots[slots >= 0] // bs] = True
     changed = (got != want).flatten(1).any(1)
     assert not (changed & ~pages).any(), f"{name}: writes to pages with no token"
-    # each (page, slot) holds bs tokens' E2M1 data (64B each), then their
-    # E4M3 group scales (8B each)
-    got = got[pages].reshape(-1, bs * 72)
-    want = want[pages].reshape(-1, bs * 72)
 
-    def nibbles(b):
-        return _ordered(torch.stack((b & 0xF, b >> 4), -1), 0x8)
+    def split(c):
+        """Each (page, slot) holds bs tokens' E2M1 data (8 groups of 8B), then
+        their E4M3 group scales (8B; V's swizzled in 4-token quads) -> codes
+        [rows, bs, 8, 16] and scales [rows, bs, 8]."""
+        c = c[pages].reshape(-1, bs * 72)
+        data = c[:, : bs * 64].reshape(-1, bs, 8, 8)
+        codes = _ordered(torch.stack((data & 0xF, data >> 4), -1), 0x8)
+        sf = c[:, bs * 64 :].reshape(-1, bs, 8).to(torch.int16)
+        if got.dim() == 4:  # K/V cache: odd slots are V
+            # byte (t // 4 * 4 + g // 2) * 8 + g % 2 * 4 + t % 4 -> [t, g]
+            k, v = sf.reshape(-1, 2, bs, 8).unbind(1)
+            v = v.reshape(-1, bs // 4, 4, 2, 4).permute(0, 1, 4, 2, 3)
+            sf = torch.stack((k, v.reshape(-1, bs, 8)), 1).reshape(-1, bs, 8)
+        return codes.flatten(-2), sf
 
-    for part, frac in (
-        (slice(0, bs * 64), NVFP4_MAX_MISMATCH_FRAC),
-        (slice(bs * 64, None), NVFP4_SF_MAX_MISMATCH_FRAC),
+    (g, g_sf), (w, w_sf) = split(got), split(want)
+    d, d_sf = (g - w).abs(), (g_sf - w_sf).abs()
+    assert (d <= 1).all() and (d_sf <= 1).all(), f"{name}: codes off by > 1 code"
+    written = (g_sf != CACHE_FILL) | (w_sf != CACHE_FILL)
+    for what, mism, frac in (
+        ("E2M1 codes", d[written & (d_sf == 0)] > 0, NVFP4_MAX_MISMATCH_FRAC),
+        ("scale bytes", d_sf[written] > 0, NVFP4_SF_MAX_MISMATCH_FRAC),
     ):
-        g, w = got[:, part], want[:, part]
-        written = (g != CACHE_FILL) | (w != CACHE_FILL)
-        if part.start == 0:  # packed E2M1 nibbles: compare per code
-            d = (nibbles(g) - nibbles(w)).abs()
-            written = written[..., None].expand_as(d)
-        else:  # scale bytes: positive E4M3
-            d = (g.to(torch.int16) - w.to(torch.int16)).abs()
-        assert (d <= 1).all(), f"{name}: codes off by > 1 code"
-        mism = (d[written] > 0).float().mean() if written.any() else 0.0
-        assert mism <= frac, f"{name}: {mism:.2%} of written codes differ"
+        if mism.numel() == 0:
+            continue
+        # 5 sigma of binomial slack: small M writes only a few groups
+        rate = mism.float().mean().item()
+        bound = frac + 5 * (frac / mism.numel()) ** 0.5
+        assert rate <= bound, f"{name}: {rate:.2%} of written {what} differ"
 
 
 @pytest.mark.parametrize(
