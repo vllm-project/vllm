@@ -31,13 +31,11 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     MoERunner,
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -54,7 +52,12 @@ from .glm4_moe import (
     Glm4MoE,
     Glm4MoeDecoderLayer,
 )
-from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
+from .utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layers,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
 
 class SharedHead(nn.Module):
@@ -217,10 +220,10 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.model.layers.values(),
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Glm4MoE,
-            "mtp_block.mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -259,8 +262,10 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        fused_shared_expert_layers = self.fused_shared_expert_layers
+        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
         num_experts = self.config.n_routed_experts
-        if self.is_fused_shared_expert_enabled and self.config.n_shared_experts:
+        if fused_shared_expert_layers and self.config.n_shared_experts:
             num_experts += self.config.n_shared_experts
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -284,8 +289,11 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                     continue
                 name = self._rewrite_spec_layer_name(spec_layer, name)
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in fused_shared_expert_layers
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
