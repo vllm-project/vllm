@@ -48,6 +48,7 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     get_draft_quant_config,
+    map_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
 )
@@ -56,31 +57,6 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
-_DRAFT_LAYER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.])layers\.(\d+)")
-
-
-def _add_global_draft_layer_exclusions(
-    quant_config: QuantizationConfig | None,
-    start_layer_id: int,
-    num_hidden_layers: int,
-) -> None:
-    """Add runtime layer aliases for checkpoint-local quant exclusions."""
-    if quant_config is None or start_layer_id == 0:
-        return
-    exclusions = getattr(quant_config, "exclude_modules", None)
-    if not isinstance(exclusions, list):
-        return
-
-    def offset_local_layer(match: re.Match[str]) -> str:
-        layer_idx = int(match.group(1))
-        if layer_idx >= num_hidden_layers:
-            return match.group(0)
-        return f"layers.{layer_idx + start_layer_id}"
-
-    for exclusion in tuple(exclusions):
-        global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
-        if global_exclusion != exclusion and global_exclusion not in exclusions:
-            exclusions.append(global_exclusion)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -412,13 +388,17 @@ class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "midlayer.": "layers.0.",
+        orig_to_new_regex={
+            # Match a complete module name, including bare names and trailing
+            # wildcards in quantization configs, but not e.g. midlayer_extra.
+            re.compile(r"(?<![A-Za-z0-9_])midlayer(?=\.|\*|$)"): "layers.0",
             # Muse-Glimmer-30B-assistant names the aux-hidden-state encoder
             # `encoder.fc` / `encoder.output_norm_enc`; this head calls them
             # `fc` / `hidden_norm`. Same tensors and shapes, different names.
-            "encoder.output_norm_enc.": "hidden_norm.",
-            "encoder.fc.": "fc.",
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.output_norm_enc(?=\.|\*|$)"): (
+                "hidden_norm"
+            ),
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.fc(?=\.|\*|$)"): "fc",
         },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -442,8 +422,12 @@ class DFlashQwen3Model(nn.Module):
         self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
-        _add_global_draft_layer_exclusions(
-            self.quant_config, start_layer_id, self.config.num_hidden_layers
+        map_draft_quant_config(
+            self.quant_config,
+            self.hf_to_vllm_mapper,
+            prefix,
+            start_layer_id,
+            self.config.num_hidden_layers,
         )
 
         drafter_config = getattr(self.config, "eagle_config", {})
@@ -859,7 +843,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 "means the draft model's target_layer_ids reference layers that "
                 "do not exist in the target model (incompatible draft/target pair)."
             )
-        result = self.model.fc(hidden_states)
+        # The target may keep its residual stream in FP32 (e.g. Muse Spark).
+        result = self.model.fc(hidden_states.to(self.model.fc.params_dtype))
         if needs_squeeze:
             result = result.squeeze(0)
         return result

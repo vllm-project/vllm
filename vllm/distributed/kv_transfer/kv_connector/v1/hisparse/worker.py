@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
     HiSparseKVConnectorStats,
@@ -23,11 +22,12 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
+    HiSparseHostPool,
     drop_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
@@ -164,6 +164,7 @@ def _create_hisparse_host_events(
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
+    backend = get_hisparse_backend()
     if shared_host_region is None:
         return torch.Event(), torch.Event()
 
@@ -171,18 +172,18 @@ def _create_hisparse_host_events(
     ipc_handles = None
     if is_host_writer:
         events = (
-            torch.cuda.Event(interprocess=True),
-            torch.cuda.Event(interprocess=True),
+            backend.create_ipc_event(),
+            backend.create_ipc_event(),
         )
-        stream = current_stream()
+        stream = torch.accelerator.current_stream()
         for event in events:
             event.record(stream)
-        ipc_handles = tuple(event.ipc_handle() for event in events)
+        ipc_handles = tuple(backend.export_event(event) for event in events)
     ipc_handles = get_tp_group().broadcast_object(ipc_handles, src=0)
     if events is None:
         events = (
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[0]),
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[1]),
+            backend.import_event(device, ipc_handles[0]),
+            backend.import_event(device, ipc_handles[1]),
         )
     return events
 
@@ -191,6 +192,7 @@ class HiSparseConnectorWorker:
     """Own HiSparse host/hot state and execute its worker-side transfers."""
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
+        self.backend = get_hisparse_backend()
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self._initialized = False
@@ -211,26 +213,20 @@ class HiSparseConnectorWorker:
         if not cache_handles:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
         hot_backings: dict[int, torch.Tensor] = {}
-        registered_host_pools: dict[int, torch.Tensor] = {}
-        shared_host_regions: dict[int, SharedOffloadRegion] = {}
+        host_pools: dict[int, HiSparseHostPool] = {}
         for cache in cache_handles:
             hot_backing = cache.runtime.hot_backing
             hot_backings[hot_backing.untyped_storage().data_ptr()] = hot_backing
-            registered_pool = cache.runtime.registered_host_pool
-            registered_host_pools[registered_pool.data_ptr()] = registered_pool
-            if (region := cache.runtime.shared_host_region) is not None:
-                shared_host_regions[id(region)] = region
+            assert cache.runtime.host_pool is not None
+            host_pools[id(cache.runtime.host_pool)] = cache.runtime.host_pool
         if len(hot_backings) != 1:
             raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
         hot_backing = next(iter(hot_backings.values()))
-        if len(shared_host_regions) > 1:
-            raise RuntimeError("HiSparse caches must share one host region.")
-        shared_host_region = next(iter(shared_host_regions.values()), None)
-        pinned_host_pools = (
-            []
-            if shared_host_region is not None
-            else list(registered_host_pools.values())
-        )
+        if len(host_pools) != 1:
+            raise RuntimeError("HiSparse caches must share one host pool.")
+        host_pool = next(iter(host_pools.values()))
+        shared_host_region = host_pool.shared_region
+        pinned_host_pools = host_pool.pinned
         is_host_writer = _is_hisparse_host_writer(shared_host_region)
 
         resident = cache_handles[0].view
@@ -280,9 +276,7 @@ class HiSparseConnectorWorker:
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
         self.is_host_writer = is_host_writer
-        self.dma_stream = (
-            torch.cuda.Stream(device=device) if self.is_host_writer else None
-        )
+        self.dma_stream = torch.Stream(device=device) if self.is_host_writer else None
         self._slot_mapping_staging = None
         if self.is_host_writer:
             max_mirror_rows = (
@@ -372,7 +366,7 @@ class HiSparseConnectorWorker:
                 "HiSparse request-state mapping exceeds max_num_seqs: "
                 f"{indices.numel()} > {self.request_state_indices.numel()}."
             )
-        if torch.cuda.is_current_stream_capturing():
+        if self.backend.is_current_stream_capturing():
             return
         # Attention indexes persistent request state by input-batch row. Refresh
         # that indirection after every batch compaction or reorder.
@@ -418,7 +412,7 @@ class HiSparseConnectorWorker:
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
-        current_stream().wait_event(previous_host_write_event)
+        torch.accelerator.current_stream().wait_event(previous_host_write_event)
         if self.shared_host_region is not None and not num_tokens:
             # Without a forward, no TP collective keeps rank 0 from recording
             # a shared event again before every rank has issued its wait.
@@ -501,9 +495,9 @@ class HiSparseConnectorWorker:
                 "HiSparse row mapping exceeds staging capacity: "
                 f"{end} > {state.slots.shape[0]}."
             )
-        main_stream = current_stream()
+        main_stream = torch.accelerator.current_stream()
         state.stream.wait_stream(main_stream)
-        with torch.cuda.stream(state.stream):
+        with state.stream:
             state.slots[start:end].copy_(
                 slots[:num_tokens],
                 non_blocking=True,
@@ -581,9 +575,9 @@ class HiSparseConnectorWorker:
         if (
             self._metrics_calls % _METRICS_INTERVAL == 0
             and not self._metrics_pending
-            and not torch.cuda.is_current_stream_capturing()
+            and not self.backend.is_current_stream_capturing()
         ):
-            compute_stream = current_stream()
+            compute_stream = torch.accelerator.current_stream()
             for runtime in self.leader_runtimes:
                 group = runtime.index_group
                 compute_stream.wait_stream(group.copy_stream)
@@ -616,12 +610,12 @@ class HiSparseConnectorWorker:
         stream = self.dma_stream
         assert stream is not None
         if ready_event is None:
-            stream.wait_stream(current_stream())
+            stream.wait_stream(torch.accelerator.current_stream())
         else:
             stream.wait_event(ready_event)
         completion_event = torch.Event()
-        with torch.cuda.stream(stream):
-            ops.swap_blocks_batch(
+        with stream:
+            self.backend.swap_blocks_batch(
                 descriptors.src[:descriptor_count],
                 descriptors.dst[:descriptor_count],
                 descriptors.sizes[:descriptor_count],
@@ -787,7 +781,9 @@ class HiSparseConnectorWorker:
                         source[host_start : host_start + self.kernel_block_size],
                         non_blocking=True,
                     )
-        self._record_transfer_completion(transfers, stream=current_stream())
+        self._record_transfer_completion(
+            transfers, stream=torch.accelerator.current_stream()
+        )
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
@@ -917,7 +913,7 @@ class HiSparseConnectorWorker:
         self._clear_forward_mirror_state()
 
     def finish_forward(self) -> None:
-        compute_stream = current_stream()
+        compute_stream = torch.accelerator.current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
         self._in_step = False

@@ -14,12 +14,14 @@ from transformers import PreTrainedConfig
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
+from vllm.model_executor.layers.pooler.seqwise.heads import EmbeddingPoolerHead
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
     LastPool,
     MeanPool,
     get_seq_pooling_method,
 )
+from vllm.model_executor.layers.pooler.seqwise.poolers import SequencePooler
 from vllm.model_executor.layers.pooler.special import BOSEOSFilter, DispatchPooler
 from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
 from vllm.model_executor.layers.pooler.tokwise.methods import (
@@ -350,6 +352,70 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
     assert pooler.get_pooling_updates("token_classify").requires_token_ids == (
         tok_pooling_type == "STEP"
     )
+
+
+@pytest.mark.parametrize("dimensions", [None, [2, 3, None]])
+def test_dispatch_single_task_preserves_dense_or_ragged_output(dimensions):
+    """Dispatch must retain the sub-pooler's dense batch when rows are uniform."""
+    pooler = DispatchPooler(
+        {"embed": SequencePooler(LastPool(), EmbeddingPoolerHead())}
+    )
+    params = [
+        PoolingParams(task="embed", dimensions=d) for d in (dimensions or [None] * 3)
+    ]
+    metadata = _make_metadata([3, 2, 3], pooling_params=params)
+    hidden = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    outputs = pooler(hidden, metadata)
+    expected = hidden[[2, 4, 7]]
+    if dimensions is None:
+        assert isinstance(outputs, torch.Tensor)
+        torch.testing.assert_close(outputs, expected)
+    else:
+        assert isinstance(outputs, list)
+        for output, row, dimension in zip(outputs, expected, dimensions, strict=True):
+            torch.testing.assert_close(output, row[:dimension])
+
+
+def test_dispatch_single_task_keeps_unfinished_token_outputs():
+    """Bypassing dispatch slicing must preserve chunked token-pooling state."""
+    pooler = DispatchPooler(
+        {"token_embed": TokenPooler(TestAllPool._make_all_pool(chunked=True))}
+    )
+    metadata = _make_metadata(
+        [4, 2, 3],
+        tasks=["token_embed"] * 3,
+        num_scheduled_tokens=[2, 2, 1],
+        seq_lens=[2, 2, 1],
+    )
+    hidden = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    outputs = pooler(hidden, metadata)
+    assert isinstance(outputs, list)
+    assert outputs[0] is None and outputs[2] is None
+    torch.testing.assert_close(outputs[1], hidden[2:4])
+    torch.testing.assert_close(
+        metadata.pooling_states[0].hidden_states_cache[0], hidden[:2]
+    )
+    torch.testing.assert_close(
+        metadata.pooling_states[2].hidden_states_cache[0], hidden[4:]
+    )
+
+
+def test_dispatch_mixed_tasks_preserves_token_offsets():
+    """Mixed tasks still use group-relative indices and retain request order."""
+    pooler = DispatchPooler(
+        {
+            "embed": SequencePooler(LastPool(), EmbeddingPoolerHead()),
+            "token_embed": TokenPooler(TestAllPool._make_all_pool()),
+        }
+    )
+    metadata = _make_metadata([2, 3, 1], tasks=["embed", "token_embed", "embed"])
+    hidden = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    outputs = pooler(hidden, metadata)
+    assert isinstance(outputs, list)
+    for output, expected in zip(
+        outputs, [hidden[1], hidden[2:5], hidden[5]], strict=True
+    ):
+        torch.testing.assert_close(output, expected)
 
 
 class TestAllPool:
