@@ -12,9 +12,10 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language
   commands:
-    # Test standard language models, excluding a subset of slow tests
+    # Test standard language models, excluding a subset of slow tests.
+    # The exclusion sits in -k so the shard planner reads -m as picking tests.
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and (not slow_test)'
+    - pytest -v -s models/language -m core_model -k 'not slow_test'
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Language Models (Standard)"
