@@ -1,0 +1,106 @@
+name: Fork remote CPU and lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/fork-remote-cpu.yml'
+      - '.pre-commit-config.yaml'
+      - 'pyproject.toml'
+      - 'vllm/**'
+      - 'tests/v1/spec_decode/remote/**'
+      - 'tests/v1/e2e/spec_decode/remote/**'
+  push:
+    branches:
+      - 'remote-speculator-*'
+      - 'feat/remote-*'
+      - 'feat/unified-speculation-runtime'
+    paths:
+      - '.github/workflows/fork-remote-cpu.yml'
+      - '.pre-commit-config.yaml'
+      - 'pyproject.toml'
+      - 'vllm/**'
+      - 'tests/v1/spec_decode/remote/**'
+      - 'tests/v1/e2e/spec_decode/remote/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-remote-cpu-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-and-lint:
+    if: github.repository == 'seo-rii/vllm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      VLLM_TARGET_DEVICE: cpu
+      CUDA_VISIBLE_DEVICES: ''
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+      - name: Install CPU test dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python \
+            pytest==8.4.2 pytest-timeout==2.4.0 msgspec==0.19.0 ruff==0.14.0 \
+            numpy==2.5.4 regex==2026.9.29
+          uv pip install --python .venv/bin/python \
+            torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu
+      - name: Lint changed Python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          .venv/bin/python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          base = os.environ['BASE_SHA']
+          if not base or set(base) == {'0'}:
+              base = subprocess.check_output(
+                  ['git', 'hash-object', '-t', 'tree', '/dev/null'], text=True
+              ).strip()
+          elif subprocess.run(
+              ['git', 'cat-file', '-e', base + '^{commit}'],
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+          ).returncode:
+              subprocess.run(
+                  ['git', 'fetch', '--no-tags', '--depth=1', 'origin', base],
+                  check=True,
+              )
+          files = [os.fsdecode(path) for path in subprocess.check_output([
+              'git', 'diff', '--name-only', '--diff-filter=ACMR', '-z',
+              base, 'HEAD', '--', '*.py',
+          ]).split(b'\0') if path]
+          if files:
+              subprocess.run([
+                  sys.executable, '-m', 'ruff', 'check',
+                  '--output-format=github', '--', *files,
+              ], check=True)
+              subprocess.run([
+                  sys.executable, '-m', 'ruff', 'format', '--check', '--', *files,
+              ], check=True)
+          else:
+              print('No changed Python files.')
+          PY
+      # These real socket/control-plane suites need no compiled vLLM kernels,
+      # downloaded model weights, or the GPU fixtures in tests/conftest.py.
+      - name: Test remote transport, protocol, server, and state
+        run: |
+          .venv/bin/python -m pytest --noconftest -p pytest_timeout -q \
+            tests/v1/spec_decode/remote/test_capabilities.py \
+            tests/v1/spec_decode/remote/test_protocol.py \
+            tests/v1/spec_decode/remote/test_server.py \
+            tests/v1/spec_decode/remote/test_state.py \
+            tests/v1/spec_decode/remote/test_transport.py
