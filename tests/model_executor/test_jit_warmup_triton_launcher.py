@@ -511,6 +511,49 @@ def test_warmup_pointer_specializes_like_the_live_tensor(
     assert is_within_2gb(stub) is (live_ptr_range is None)
 
 
+def test_warmup_pointer_range_survives_the_fake_tensor_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatcher that needs real tensors must not drop ``ptr_range_bytes``.
+
+    A dispatcher touching tensor APIs re-runs its case through fake tensors,
+    so the declared range has to round-trip the stand-in as an attribute and
+    come back out of both conversion points, key derivation and the warmup
+    launch. Dropping it there silently restores the optimistic <2 GiB
+    specialization and the kernel JITs on its first real batch.
+    """
+    kernel = _FakeTritonKernel()
+    over_2gb = 1 << 32
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(
+            first=TritonWarmupTensor(
+                torch.bfloat16, shape=(2, 3), ptr_range_bytes=over_2gb
+            ),
+            second=1,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
+        assert isinstance(first, torch.Tensor)
+        return (first.shape[0],), dict(CONST=first[0].numel())
+
+    derived: list[dict[str, Any]] = []
+
+    def derive(kernel: Any, kwargs: dict[str, Any]) -> set[TritonJitKey]:
+        derived.append(kwargs)
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
+
+    _patch_key_deriver(monkeypatch, derive)
+
+    keys = dispatch.get_warmup_keys()
+    kernel.warmup_calls.clear()
+    dispatch.compile(keys[0])
+
+    assert [kwargs["first"].ptr_range_bytes for kwargs in derived] == [over_2gb]
+    assert [call["first"].ptr_range_bytes for call in kernel.warmup_calls] == [over_2gb]
+
+
 def test_triton_key_derivation_applies_wrappers_and_runtime_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
