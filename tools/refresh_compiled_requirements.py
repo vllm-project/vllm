@@ -4,10 +4,13 @@
 
 Reads each ``pip-compile`` hook in ``.pre-commit-config.yaml`` and reruns it
 with ``--upgrade``, then once more without ``--upgrade``. The second pass
-keeps the upgraded pins and rewrites the header to the pre-commit command, so
-CI's compile hooks do not touch the files again.
+keeps the upgraded pins and hashes and rewrites the header to the pre-commit
+command, so CI's compile hooks do not touch the files again.
 Handwritten requirements, build pins, and connector pins are unchanged;
 Dependabot security updates cover those source manifests separately.
+The hooks generate SHA-256 hashes for published package archives. uv verifies
+these on download; excluded ROCm packages and separate source/build installs
+are outside these locks.
 
 ``--upgrade`` stays off the pre-commit hooks. Those run on every commit and
 must not float transitive pins.
@@ -61,6 +64,8 @@ def main() -> None:
     for name, args in hooks:
         if "--upgrade" in args:
             sys.exit(f"{name} already passes --upgrade; refusing to double it")
+        if "--generate-hashes" not in args:
+            sys.exit(f"{name} must pass --generate-hashes")
         run(["uv", "pip", "compile", *args, "--upgrade"])
         run(["uv", "pip", "compile", *args])
 

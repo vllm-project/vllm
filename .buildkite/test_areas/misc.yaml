@@ -562,6 +562,9 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/check_github_actions_pins.py
+  - tools/use_existing_torch.py
+  - tests/tools/test_dependency_pins.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -587,6 +590,7 @@ steps:
   - pytest -v -s test_pcp_dp.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_quantization_revision_pin.py
+  - pytest -v -s tools/test_dependency_pins.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_ray_env_utils.py
   - pytest -v -s test_request_input_bounds.py

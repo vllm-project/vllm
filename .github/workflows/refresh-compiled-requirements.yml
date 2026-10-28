@@ -26,6 +26,7 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: "3.12"
+          version: "0.11.1"
           enable-cache: false
       - name: Upgrade compiled requirement locks
         run: >-
@@ -58,6 +59,8 @@ jobs:
           {
             echo 'Publishing is disabled. Review the patch and open a PR manually.'
             echo 'This artifact refreshes five compiled locks within their source constraints.'
+            echo 'Package versions and SHA-256 archive hashes are pinned together.'
+            echo 'uv verifies these hashes on download; separate build/source installs and excluded ROCm packages are outside these locks.'
             echo 'Handwritten requirements, build pins, and connector pins are not upgraded here.'
             echo 'Dependabot security updates cover source manifests; incompatible or unpatched alerts still need manual fixes.'
             printf '\n[Download patch and base SHA](%s)\n' "${ARTIFACT_URL}"
@@ -152,11 +155,12 @@ jobs:
           fi
           cat > "${RUNNER_TEMP}/requirements-pr.md" <<'EOF'
           ## Summary
-          - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade.
+          - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade, pinning versions and SHA-256 archive hashes.
           - Only regular-file modifications to these five locks passed publisher validation.
 
           ## Test plan
           - [ ] Review dependency changes before merging.
+          - [ ] Review archive hash changes alongside package versions.
           - [ ] CI pre-commit pip-compile hooks leave these locks unchanged.
           EOF
           gh pr create \
