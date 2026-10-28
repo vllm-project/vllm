@@ -528,7 +528,9 @@ def test_zen_cpu_rejects_unknown_checkpoint_format():
         may_have_bias=False,
         allow_tile_padding=True,
     )
+    # Naming the format beats reporting a width of None we never read.
     assert reason is not None
+    assert "Args" in reason
 
 
 @pytest.mark.parametrize(
@@ -641,6 +643,29 @@ def test_zen_experts_support_predicates():
     )
     assert not ZentorchExpertsWNA16._supports_parallel_config(
         type("Par", (), {"use_ep": True})()
+    )
+
+
+def test_zen_experts_score_every_routing_method_they_accept():
+    """Quant methods other than compressed-tensors never call
+    process_weights_after_loading, so the constructor defaults decide how
+    apply() routes. Accepting a method without a scoring entry would silently
+    route it as softmax."""
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts import zentorch_moe
+
+    for routing_method in RoutingMethodType:
+        if routing_method == RoutingMethodType.Custom:
+            continue
+        accepted = zentorch_moe.ZentorchExpertsWNA16._supports_routing_method(
+            routing_method, None, None
+        )
+        assert accepted == (routing_method in zentorch_moe._ROUTING_SCORING)
+
+    # Laguna and MiniMax-M2 renormalize a biased sigmoid, not a softmax.
+    assert zentorch_moe._ROUTING_SCORING[RoutingMethodType.MiniMax2] == (
+        "sigmoid",
+        True,
     )
 
 

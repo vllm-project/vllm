@@ -918,8 +918,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
-    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
-    # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
+    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and on
+    # Zen CPUs zentorch DA8W4 kernels for int4, and DA8W8 for grouped int8 MoE.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.

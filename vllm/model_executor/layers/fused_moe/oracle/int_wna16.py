@@ -192,7 +192,7 @@ def _backend_incompatibility_reason(
 
     if backend == WNA16MoEBackend.ZEN_CPU:
         if not envs.VLLM_CPU_INT4_W4A8:
-            return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
+            return "VLLM_CPU_INT4_W4A8=0 disables the dynamic-activation path"
         if may_have_zp:
             return "zero points are not supported"
         if isinstance(quant_config, MoeWNA16Config):
@@ -205,6 +205,8 @@ def _backend_incompatibility_reason(
         ):
             return "group activation ordering is not supported"
         num_bits = _zen_cpu_num_bits(quant_config)
+        if num_bits is None:
+            return f"cannot read a weight width from {type(quant_config).__name__}"
         if num_bits not in _ZEN_CPU_NUM_BITS:
             return f"unsupported weight width W{num_bits}A16"
         group_size = getattr(quant_config, "group_size", None)

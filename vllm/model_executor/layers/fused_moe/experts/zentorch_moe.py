@@ -27,6 +27,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8Static,
 )
 
+# apply() routes internally, so these must be right even when a quant method
+# skips process_weights_after_loading. Inverse of get_routing_method_type();
+# Custom is absent because it carries its own callable.
+_ROUTING_SCORING: dict[RoutingMethodType, tuple[str, bool]] = {
+    RoutingMethodType.Default: ("softmax", False),
+    RoutingMethodType.Renormalize: ("softmax", True),
+    RoutingMethodType.RenormalizeNaive: ("softmax", True),
+    RoutingMethodType.MiniMax2: ("sigmoid", True),
+}
+
 
 class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
     """Group-quantized W4A16/W8A16 monolithic MoE experts. The op dynamically
@@ -43,12 +53,9 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        # Defaults hold until process_weights_after_loading sees the layer.
-        self.renormalize = moe_config.routing_method in (
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
+        self.scoring_func, self.renormalize = _ROUTING_SCORING.get(
+            moe_config.routing_method, ("softmax", False)
         )
-        self.scoring_func = "softmax"
         self.custom_routing_function: Callable | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -127,13 +134,12 @@ class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return routing_method in [
-            RoutingMethodType.Default,
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
-            RoutingMethodType.Custom,
-            RoutingMethodType.MiniMax2,
-        ]
+        # Driven off _ROUTING_SCORING so a method cannot be accepted here
+        # without apply() knowing how to score it.
+        return (
+            routing_method in _ROUTING_SCORING
+            or routing_method == RoutingMethodType.Custom
+        )
 
     @staticmethod
     def _supports_router_logits_dtype(
