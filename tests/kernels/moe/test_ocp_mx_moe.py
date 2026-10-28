@@ -1532,6 +1532,9 @@ class RocmBackendConfig(TypedDict):
     requires_gfx1250: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
+    # Mxfp4MoeBackend name, when the config key is an alias (e.g. a SiLU variant).
+    backend: NotRequired[str]
+    sign_percent: NotRequired[float]
 
 
 # TODO: Further tighten the accuracy threshold.
@@ -1709,7 +1712,7 @@ def test_rocm_mxfp4_moe_oracle(
     monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
     # Map string to enum
-    backend = Mxfp4MoeBackend[config.get("backend", backend_name)]
+    backend = Mxfp4MoeBackend[config.get("backend") or backend_name]
 
     # Get experts class from oracle
     experts_cls_list = backend_to_kernel_cls(backend)
@@ -2678,7 +2681,7 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
-# (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
+# (backend, activation, has_bias, hidden_in, inter_in, hidden_out, inter_out)
 #
 # The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
 # per-partition intermediate is aligned to 128, not 256, so a model whose native
@@ -2691,37 +2694,56 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
 ROCM_MXFP4_ROUNDUP_CASES = [
     # W4A4: 3072 / TP8 = 384 stays 384. This is the case the alignment change is
     # for; the generic 256 round-up would allocate 512.
-    ("AITER_MXFP4_MXFP4", "SILU", 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 6144, 384, 6144, 384),
     # W4A4, already 256-aligned (e.g. moe_intermediate 2048 at TP8): identity in
     # both the old and the new form, so such models are provably untouched.
-    ("AITER_MXFP4_MXFP4", "SILU", 6144, 256, 6144, 256),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 6144, 256, 6144, 256),
     # W4A4, 1024 / TP8 = 128: the most aggressive case, halved rather than trimmed.
-    ("AITER_MXFP4_MXFP4", "SILU", 4096, 128, 4096, 128),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 4096, 128, 4096, 128),
     # W4A4 ignores the activation -- the branch does not read it.
-    ("AITER_MXFP4_MXFP4", None, 6144, 384, 6144, 384),
-    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", None, None, 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", None, 6144, 384, 6144, 384),
     # W4A4 hidden_size is still rounded to 256, unlike the intermediate.
-    ("AITER_MXFP4_MXFP4", "SILU", 384, 384, 512, 384),
-    # W4A16 CK + SiTU/SILU keeps its own 128/128 carve-out.
-    ("AITER_MXFP4_BF16", "SITU", 384, 384, 384, 384),
-    ("AITER_MXFP4_BF16", "SILU", 384, 384, 384, 384),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 384, 384, 512, 384),
+    # W4A16 + SiTU/SILU keeps a 128 intermediate carve-out, but the hidden size
+    # stays 256-aligned (AITER's FlyDSL stage 1 uses tile_k=256 over it, a
+    # 128-aligned hidden size gives wrong outputs), regardless of the bias.
+    *[
+        ("AITER_MXFP4_BF16", act, has_bias, 384, 384, 512, 384)
+        for act in ("SITU", "SILU")
+        for has_bias in (None, True, False)
+    ],
     # ... but only for those activations; anything else takes the generic ROCm arm.
-    ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", None, 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", True, 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", True, 768, 384, 768, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", None, 768, 384, 768, 512),
+    # TODO: update once https://github.com/ROCm/aiter/pull/6086 is merged and
+    # AITER is bumped. Bias-free SwiGLU pads the hidden size to a multiple of 512
+    # to work around wrong outputs of AITER's separated gate/up split-K path.
+    *[
+        ("AITER_MXFP4_BF16", act, False, hidden_in, 384, hidden_out, 512)
+        for act in ("SWIGLUOAI", "SWIGLUOAI_UNINTERLEAVE")
+        for hidden_in, hidden_out in ((256, 512), (384, 512), (768, 1024), (1024, 1024))
+    ],
+    # The bias-free padding is AITER_MXFP4_BF16-specific.
+    ("AITER_MXFP4_FP8", "SWIGLUOAI", False, 768, 384, 768, 512),
     # Backends that stay on the generic ROCm 256/256 round-up.
-    ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
-    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
-    ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+    ("AITER_MXFP4_FP8", "SILU", None, 384, 384, 512, 512),
+    ("AITER_TRITON_MXFP4_BF16", "SILU", None, 384, 384, 512, 512),
+    ("TRITON", "SWIGLUOAI", None, 384, 384, 512, 512),
 ]
 
 
 @pytest.mark.parametrize(
-    "backend_name,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    "backend_name,activation_name,has_bias,hidden_in,inter_in,hidden_out,inter_out",
     ROCM_MXFP4_ROUNDUP_CASES,
 )
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
 def test_rocm_mxfp4_round_up_hidden_and_intermediate(
     backend_name: str,
     activation_name: str | None,
+    has_bias: bool | None,
     hidden_in: int,
     inter_in: int,
     hidden_out: int,
@@ -2744,11 +2766,11 @@ def test_rocm_mxfp4_round_up_hidden_and_intermediate(
     activation = MoEActivation[activation_name] if activation_name else None
 
     hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
-        backend, hidden_in, inter_in, activation
+        backend, hidden_in, inter_in, activation, has_bias
     )
 
     assert (hidden, intermediate) == (hidden_out, inter_out), (
-        f"{backend_name} / {activation_name}: "
+        f"{backend_name} / {activation_name} / has_bias={has_bias}: "
         f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
         f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
     )
