@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -10,7 +12,9 @@ use vllm_chat::{
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
+use crate::error::{
+    ApiError, bail_invalid_request, chat_submit_error, invalid_request, text_submit_error,
+};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
@@ -145,13 +149,15 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
-    let tool_context = ResolvedToolContext::new(
+    let (tools, tool_parameter_json) = convert_tools(request.tools)?;
+    let mut tool_context = ResolvedToolContext::new(
         &messages,
-        convert_tools(request.tools)?,
+        tools,
         request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+    tool_context.tool_parameter_json = tool_parameter_json;
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
@@ -415,27 +421,39 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
-    tools
+pub(crate) fn convert_tools(
+    tools: Option<Vec<Tool>>,
+) -> Result<(Vec<ChatTool>, HashMap<String, String>), ApiError> {
+    let mut tool_parameter_json = HashMap::new();
+    let tools = tools
         .unwrap_or_default()
         .into_iter()
         .map(|tool| {
             if tool.tool_type != "function" {
                 bail_invalid_request!("Only function tools are supported.");
             }
+            let parameters =
+                serde_json::from_str(tool.function.parameters.get()).map_err(|error| {
+                    invalid_request!(param = "tools", "failed to parse tool parameters: {error}")
+                })?;
+            tool_parameter_json.insert(
+                tool.function.name.clone(),
+                Box::<str>::from(tool.function.parameters).into_string(),
+            );
             Ok(ChatTool {
                 name: tool.function.name,
                 description: tool.function.description,
-                parameters: tool.function.parameters,
+                parameters,
                 strict: tool.function.strict,
                 defer_loading: tool.function.defer_loading.or(tool.defer_loading),
             })
         })
-        .collect()
+        .collect::<Result<_, ApiError>>()?;
+    Ok((tools, tool_parameter_json))
 }
 
 fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
-    let tools = convert_tools(tools)?;
+    let (tools, _) = convert_tools(tools)?;
     Ok((!tools.is_empty()).then_some(tools))
 }
 
@@ -1124,10 +1142,11 @@ mod tests {
                     function: Function {
                         name: "get_weather".to_string(),
                         description: Some("Get weather".to_string()),
-                        parameters: json!({
+                        parameters: serde_json::value::to_raw_value(&json!({
                             "type": "object",
                             "properties": {"city": {"type": "string"}},
-                        }),
+                        }))
+                        .unwrap(),
                         strict: Some(true),
                         defer_loading: None,
                     },
@@ -1138,6 +1157,7 @@ mod tests {
             ..base_request()
         };
 
+        let request = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
         let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
@@ -1487,10 +1507,11 @@ mod tests {
                 function: Function {
                     name: "get_weather".to_string(),
                     description: Some("Get weather".to_string()),
-                    parameters: json!({
+                    parameters: serde_json::value::to_raw_value(&json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    }))
+                    .unwrap(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1583,10 +1604,11 @@ mod tests {
                 function: Function {
                     name: "get_weather".to_string(),
                     description: Some("Get weather".to_string()),
-                    parameters: json!({
+                    parameters: serde_json::value::to_raw_value(&json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    }))
+                    .unwrap(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1618,10 +1640,11 @@ mod tests {
                 function: Function {
                     name: "get_weather".to_string(),
                     description: Some("Get weather".to_string()),
-                    parameters: json!({
+                    parameters: serde_json::value::to_raw_value(&json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    }))
+                    .unwrap(),
                     strict: None,
                     defer_loading: None,
                 },

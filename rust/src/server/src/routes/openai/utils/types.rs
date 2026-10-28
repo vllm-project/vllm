@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use vllm_chat::ChatTokenUsage;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -302,7 +303,7 @@ pub struct Function {
     pub name: String,
     pub description: Option<String>,
     #[serde(default)]
-    pub parameters: Value,
+    pub parameters: Box<RawValue>,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
@@ -474,6 +475,7 @@ pub enum ChatMessage {
     #[serde(rename = "developer")]
     Developer {
         content: MessageContent,
+        #[serde(default, deserialize_with = "deserialize_message_tools")]
         tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
@@ -484,6 +486,12 @@ pub enum ChatMessage {
         role: String,
         content: MessageContent,
     },
+}
+
+fn deserialize_message_tools<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<Tool>>, D::Error> {
+    serde_json::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
 }
 
 /// Role tags of the standard [`ChatMessage`] variants.

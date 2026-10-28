@@ -258,7 +258,7 @@ mod tests {
                 function: Function {
                     name: "tool".to_string(),
                     description: None,
-                    parameters: json!({}),
+                    parameters: serde_json::value::to_raw_value(&json!({})).unwrap(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -277,7 +277,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: serde_json::value::to_raw_value(&json!({})).unwrap(),
                         strict: None,
                         defer_loading: None,
                     },
@@ -301,7 +301,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: serde_json::value::to_raw_value(&json!({})).unwrap(),
                         strict: None,
                         defer_loading: None,
                     },

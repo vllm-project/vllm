@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use minijinja::Value as MiniJinjaValue;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
@@ -16,6 +17,7 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
+use self::tojson::raw_json_to_minijinja_value;
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -228,7 +230,12 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
+        let tools = (!request.tools().is_empty()).then(|| {
+            to_template_tools(
+                request.tools(),
+                Some(&request.tool_context.tool_parameter_json),
+            )
+        });
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -344,7 +351,7 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: JsonValue,
+    parameters: MiniJinjaValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -381,7 +388,7 @@ fn to_template_message<'a>(
         ChatMessage::Developer { content, tools } => TemplateMessage {
             role: "developer",
             content: to_template_content(content, content_format, multimodal)?,
-            tools: tools.as_deref().map(to_template_tools),
+            tools: tools.as_deref().map(|tools| to_template_tools(tools, None)),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -619,7 +626,10 @@ fn truncate_prompt_at_continue_final_message_tag(
     Ok(rendered)
 }
 
-fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
+fn to_template_tools(
+    tools: &[ChatTool],
+    raw_parameters: Option<&HashMap<String, String>>,
+) -> Vec<TemplateTool> {
     tools
         .iter()
         .map(|tool| TemplateTool {
@@ -627,7 +637,10 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
+                parameters: raw_parameters
+                    .and_then(|parameters| parameters.get(&tool.name))
+                    .and_then(|raw| raw_json_to_minijinja_value(raw))
+                    .unwrap_or_else(|| MiniJinjaValue::from_serialize(&tool.parameters)),
                 strict: tool.strict,
                 defer_loading: tool.defer_loading,
             },

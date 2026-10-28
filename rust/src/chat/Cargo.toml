@@ -12,6 +12,7 @@ easy-ext.workspace = true
 futures.workspace = true
 half.workspace = true
 image.workspace = true
+indexmap.workspace = true
 itertools.workspace = true
 llm-multimodal.workspace = true
 minijinja.workspace = true
@@ -21,7 +22,7 @@ openai-harmony.workspace = true
 reqwest-0-13.workspace = true
 serde.workspace = true
 serde-json-fmt.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 strum.workspace = true
 subenum.workspace = true
@@ -48,7 +49,6 @@ clap.workspace = true
 expect-test.workspace = true
 paste.workspace = true
 rmp-serde.workspace = true
-serde_json = { workspace = true, features = ["raw_value"] }
 serial_test.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
