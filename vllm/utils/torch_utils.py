@@ -946,19 +946,22 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+HAS_CUSTOM_CLASS = is_torch_equal_or_newer("2.14.0.dev")
 
 # Allow toggling LayerName usage via environment variable.
 # Defaults to True on torch >= 2.11, False otherwise.
 # Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
 _USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
 
-if HAS_OPAQUE_TYPE:
-    from torch._opaque_base import OpaqueBase
+if HAS_CUSTOM_CLASS:
+    from torch._custom_class_base import CustomClassBase
+elif HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase as CustomClassBase
 else:
-    OpaqueBase = object  # type: ignore[misc, assignment]
+    CustomClassBase = object  # type: ignore[misc, assignment]
 
 
-class LayerName(OpaqueBase):  # type: ignore[misc]
+class LayerName(CustomClassBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
     When torch >= 2.11, this is registered as a hoisted value-type opaque
@@ -980,7 +983,11 @@ class LayerName(OpaqueBase):  # type: ignore[misc]
         return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
-if HAS_OPAQUE_TYPE:
+if HAS_CUSTOM_CLASS:
+    from torch._library.opaque_object import register_custom_class
+
+    register_custom_class(LayerName, typ="constant", hoist=True)
+elif HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
     register_opaque_type(LayerName, typ="value", hoist=True)
