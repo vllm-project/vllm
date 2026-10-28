@@ -59,16 +59,16 @@ Execute the following commands to build and install vLLM from source.
     `torchcodec` also needs a shared FFmpeg (built in `Dockerfile.s390x`). Video decoding only; there is no s390x NVDEC path.
     See `docker/Dockerfile.s390x` for exact versions and build commands used in each multi-stage build.
 
-!!! note "LLVM 20 required for llvmlite"
-    `llvmlite v0.47` requires LLVM 20, but UBI 9.6 repos ship LLVM 21 which is
-    not compatible. You must build LLVM 20 from source before building `llvmlite`:
+!!! note "LLVM 22 required for llvmlite"
+    `llvmlite v0.50` requires LLVM 22, but UBI 9.6 repos ship LLVM 21 which is
+    not compatible. You must build LLVM 22 from source before building `llvmlite`:
 
     ```bash
-    curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/llvm-project-20.1.8.src.tar.xz
-    tar -xf llvm-project-20.1.8.src.tar.xz
-    cmake -G Ninja -S llvm-project-20.1.8.src/llvm -B llvm-build \
+    curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/llvm-project-22.1.8.src.tar.xz
+    tar -xf llvm-project-22.1.8.src.tar.xz
+    cmake -G Ninja -S llvm-project-22.1.8.src/llvm -B llvm-build \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/opt/llvm20 \
+        -DCMAKE_INSTALL_PREFIX=/opt/llvm22 \
         -DLLVM_TARGETS_TO_BUILD="SystemZ" \
         -DLLVM_ENABLE_RTTI=ON \
         -DLLVM_BUILD_TOOLS=OFF \
@@ -81,10 +81,10 @@ Execute the following commands to build and install vLLM from source.
     ninja -C llvm-build install
     ```
 
-    Then build `llvmlite` pointing to LLVM 20:
+    Then build `llvmlite` pointing to LLVM 22:
 
     ```bash
-    CMAKE_PREFIX_PATH=/opt/llvm20 LLVM_CONFIG=/opt/llvm20/bin/llvm-config \
+    CMAKE_PREFIX_PATH=/opt/llvm22 LLVM_CONFIG=/opt/llvm22/bin/llvm-config \
         python setup.py bdist_wheel
     ```
 
