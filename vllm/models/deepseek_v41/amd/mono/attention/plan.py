@@ -66,10 +66,8 @@ class Dims:
     @property
     def head_tiles(self) -> int:
         """16-head MFMA tiles a rank: TP8's 8 heads take one, half of it
-        padding (``heads_pad``); a rank always has at least one."""
-        tiles = cdiv(self.heads, HEAD_TILE)
-        assert tiles >= 1, self.heads
-        return tiles
+        padding (``heads_pad``)."""
+        return cdiv(self.heads, HEAD_TILE)
 
     @property
     def heads_pad(self) -> int:

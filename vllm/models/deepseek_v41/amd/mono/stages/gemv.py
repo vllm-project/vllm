@@ -96,8 +96,10 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
     shuffle lays a row group out in 32-column blocks of 16 rows, a chunk two of
     them (lanes 0-31, 32-63); ``k`` % 64 = 32 (a last quarter step): the lanes
     of a block past the row read its last block. ``row_major`` (vLLM's dense
-    layout, k % 64 == 0): the same registers from a row-major [N, K] weight --
-    lane l row 16 rg + l % 16, K bytes 128 st + 16 (l // 16) .. and + 64."""
+    layout, k % 32 == 0): the same registers from a row-major [N, K] weight --
+    lane l row 16 rg + l % 16, K bytes 128 st + 16 (l // 16) .. and + 64; with
+    k % 64 == 32 (TP8's shared expert, K = 288) the last step's upper lanes are
+    clamped into the row, as in the shuffled layout."""
     lane = c["lane"]
     j = lane // 16
     kg = k // 32

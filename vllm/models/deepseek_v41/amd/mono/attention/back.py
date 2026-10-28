@@ -488,28 +488,9 @@ def stage_split(c, unit):
                 )
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
-            if const_expr(d.heads < d.heads_pad):
-                # TP8: 8 heads a rank in one 16-wide head tile; the padded
-                # columns (hh >= heads) are not stored
-                off = (
-                    ((t * nchunk + ch) * d.heads + fx.min(hh, d.heads - 1)) * HEAD_DIM
-                    + dbase
-                    + 16 * g
-                ) // 2
-                if hh < d.heads:
-                    for hlf in range_constexpr(2):
-                        bo.buffer_store(
-                            fx.Vector.from_elements(
-                                words[4 * hlf : 4 * hlf + 4], fx.Int32
-                            ),
-                            rsrc(c["part"]),
-                            off + 4 * hlf,
-                            cache_modifier=CM_DEV,
-                        )
-            else:
-                off = (
-                    ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g
-                ) // 2
+            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
+
+            def store_part(off=off, words=words):
                 for hlf in range_constexpr(2):
                     bo.buffer_store(
                         fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
@@ -517,6 +498,13 @@ def stage_split(c, unit):
                         off + 4 * hlf,
                         cache_modifier=CM_DEV,
                     )
+
+            if const_expr(d.heads < d.heads_pad):
+                # TP8: the padded columns of the head tile are not stored
+                if hh < d.heads:
+                    store_part()
+            else:
+                store_part()
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
