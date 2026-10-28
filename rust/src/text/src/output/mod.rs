@@ -19,6 +19,7 @@ use std::sync::Arc;
 use futures::{StreamExt as _, pin_mut};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_llm::WeightVersionSpan;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -43,7 +44,7 @@ pub struct CollectedTextOutput {
     /// Per-request speculative-decoding statistics emitted by the engine.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     /// Weight-version spans over generated token positions.
-    pub weight_versions: Option<Vec<vllm_llm::WeightVersionSpan>>,
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
