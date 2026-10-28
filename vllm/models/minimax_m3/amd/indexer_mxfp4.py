@@ -9,7 +9,7 @@ forced blocks, so ``_pin_forced_blocks`` writes AITER's sentinels between the
 two.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
 import torch
@@ -180,6 +180,15 @@ class MiniMaxM3IndexerMxfp4Metadata(MiniMaxM3IndexerMSAMetadata):
 
 
 class MiniMaxM3IndexerMxfp4MetadataBuilder(MiniMaxM3IndexerMSAMetadataBuilder):
+    """The decode scorer's work map lives in one persistent buffer.
+
+    A captured decode graph bakes in the work map's address and its row count
+    (the scorer's grid). Both therefore have to survive every replay: the map is
+    refilled in place each step, and is always built for the model-length block
+    bound, which is also the bound the graph is captured with (the model runner
+    captures with ``max_seq_len == max_model_len``).
+    """
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -189,6 +198,27 @@ class MiniMaxM3IndexerMxfp4MetadataBuilder(MiniMaxM3IndexerMSAMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_index_heads = 1
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self._max_decode_reqs = vllm_config.scheduler_config.max_num_seqs
+        self._work_map_buf: torch.Tensor | None = None
+
+    def _work_map_buffer(self) -> torch.Tensor:
+        if self._work_map_buf is None:
+            from aiter.ops.flydsl import minimax_m3_index_score_work_map_capacity
+
+            max_block = cdiv(self.max_model_len, self.sparse_block_size)
+            # The exact grid is not monotonic in the batch or the query length,
+            # so size for the capacity of every decode query length.
+            rows = max(
+                minimax_m3_index_score_work_map_capacity(
+                    self._max_decode_reqs, max_block, query_len, self.num_index_heads
+                )
+                for query_len in range(1, self.max_decode_query_len + 1)
+            )
+            self._work_map_buf = torch.empty(
+                (rows, 2), dtype=torch.int32, device=self.device
+            )
+        return self._work_map_buf
 
     def build(
         self,
@@ -202,11 +232,16 @@ class MiniMaxM3IndexerMxfp4MetadataBuilder(MiniMaxM3IndexerMSAMetadataBuilder):
         if d is not None:
             from aiter.ops.flydsl import minimax_m3_index_score_work_map
 
+            # The scorer's block bound is part of its grid: a replayed graph
+            # keeps the one it was captured with, so every step uses it.
+            d = replace(d, max_seq_len=self.max_model_len)
+            metadata.decode = d
             work_map = minimax_m3_index_score_work_map(
                 d.seq_lens,
                 cdiv(d.max_seq_len, self.sparse_block_size),
                 d.decode_query_len,
                 self.num_index_heads,
+                out=self._work_map_buffer(),
             )
         return MiniMaxM3IndexerMxfp4Metadata(
             **{f.name: getattr(metadata, f.name) for f in fields(metadata)},
