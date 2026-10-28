@@ -147,8 +147,8 @@ def test_config_refusals_report_every_reason():
     config.cache_config.block_size = 64
     config.aux_output_config.enable_return_routed_experts = True
     config.model_config.hf_text_config.sparse_attention_config["sparse_attention_freq"][
-        2
-    ] = 1
+        10
+    ] = 0
     with pytest.raises(ValueError) as error:
         specialized_decode_config(config)
     for reason in (
@@ -161,6 +161,17 @@ def test_config_refusals_report_every_reason():
         assert reason in str(error.value)
     with pytest.raises(ValueError, match="sparse attention on layers 3"):
         specialized_decode_config(_vllm_config(layers=3))
+
+
+def test_minimax_m31_layout_is_accepted():
+    # MiniMax-M3.1: NVFP4 KV and indexer cache, sparse attention on every layer
+    config = _vllm_config()
+    config.cache_config.cache_dtype = "nvfp4"
+    config.attention_config.resolve_indexer_kv_dtype = lambda _default: "nvfp4"
+    config.model_config.hf_text_config.sparse_attention_config[
+        "sparse_attention_freq"
+    ] = [1] * 60
+    assert specialized_decode_config(config).last_layer == 59
 
 
 @pytest.mark.parametrize("method", ["eagle3", "ngram", "mtp", "draft_model"])

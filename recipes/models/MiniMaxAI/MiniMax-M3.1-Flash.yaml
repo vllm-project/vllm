@@ -124,8 +124,9 @@ features:
           blackwell: unsupported
   mono_decode:
     label: "Mono decode"
-    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: decode steps of up to 16 tokens run fused kernels; larger steps and steps with prefill run on the normal path. Mono fuses each whole layer and keeps DSpark, but needs FP8 KV and indexer K caches. Monokernel fuses everything after attention and keeps the NVFP4 caches, but refuses DSpark: turn Speculative decoding off with it."
     strategies: [single_node_tp]
+    default_mode: mono
     modes:
       # The kernels read the experts as AITER MXFP4 tables, which only the
       # Quark export loads as; they need the AITER sparse PA path, i.e. FP8 KV
@@ -133,6 +134,8 @@ features:
       # graphs.
       mono:
         variants: [mxfp4]
+        label: "Mono"
+        description: "Each layer as one fused kernel, for decode steps of up to 16 tokens (4 requests with DSpark 3). FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
         args:
           - "--kv-cache-dtype"
           - "fp8"
@@ -146,6 +149,29 @@ features:
           VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
           VLLM_ROCM_MINIMAX_M3_MONO: "1"
         # Measured on MI355X only.
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+          mi350x: unsupported
+      # The fused launch reads the shared expert as a 129th AITER MXFP4 expert,
+      # so the shared expert is re-quantized from MXFP8 to MXFP4 at load and
+      # fused. The fused QKV must have 2560 rows, so indexer_decode_cp is off.
+      # The NVFP4 KV cache comes from the amd baseline.
+      monokernel:
+        variants: [mxfp4]
+        label: "Monokernel"
+        description: "Everything after attention (all-reduces, norm, router, shared and routed experts) as one persistent kernel, for decode steps of up to 16 tokens, on the V2 model runner. Keeps the NVFP4 KV and indexer K caches. Re-quantizes the shared expert to MXFP4. No DSpark: turn Speculative decoding off."
+        args:
+          - "--monokernel"
+          - "--attention-config"
+          - '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": false}'
+          - "--quantization-config.targets"
+          - '{"*shared_experts*": "mxfp4"}'
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
         hardware:
           hopper: unsupported
           blackwell: unsupported

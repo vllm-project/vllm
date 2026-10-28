@@ -65,6 +65,27 @@ def _tensor(
     return value.detach()
 
 
+def _bf16_projection(linear, shape: tuple[int, int]) -> torch.Tensor:
+    """The projection weight as BF16. An MXFP8 checkpoint (MiniMax-M3.1) gets
+    a dequantized copy; E4M3 times a power of two is exact in BF16, and the
+    stock path keeps serving the MXFP8 weight."""
+    weight = linear.weight
+    scale = getattr(linear, "weight_scale", None)
+    if (
+        weight.dtype == torch.float8_e4m3fn
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.uint8
+        and tuple(weight.shape) == shape
+        and tuple(scale.shape) == (shape[0], shape[1] // 32)
+    ):
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+
+        return dequant_mxfp8_to_bf16(weight, scale).contiguous()
+    return weight
+
+
 def _bf16_vector(
     value: torch.Tensor, size: int, name: str, require_cuda: bool
 ) -> torch.Tensor:
@@ -213,7 +234,7 @@ class MonoLayerWeights:
                 require_cuda,
             ),
             qkv=_tensor(
-                attn.qkv_proj.weight,
+                _bf16_projection(attn.qkv_proj, (QKV_ROWS, HIDDEN)),
                 shape=(QKV_ROWS, HIDDEN),
                 dtype=torch.bfloat16,
                 name=f"layer {layer_id} QKV/index projection",
@@ -238,7 +259,7 @@ class MonoLayerWeights:
                 require_cuda,
             ),
             output=_tensor(
-                attn.o_proj.weight,
+                _bf16_projection(attn.o_proj, (HIDDEN, O_K)),
                 shape=(HIDDEN, O_K),
                 dtype=torch.bfloat16,
                 name=f"layer {layer_id} output projection",
