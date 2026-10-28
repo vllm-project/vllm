@@ -245,6 +245,8 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "mxfp4" stores MiniMax M3 K/V as MXFP4 (e2m1 data with one e8m0 scale per
+    32 values) on ROCm gfx950; use it with `indexer_kv_dtype="mxfp4"`.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
