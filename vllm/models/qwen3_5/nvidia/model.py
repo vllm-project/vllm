@@ -109,9 +109,10 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 
 logger = init_logger(__name__)
 
@@ -176,7 +177,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             get_tensor_model_parallel_world_size() > 1
             and parallel_config.pipeline_parallel_size == 1
             and not self.use_attn_reduce_scatter_for_moe
-            and current_platform.is_cuda()
             and flashinfer_trtllm_fused_allreduce_norm is not None
         )
         # Whether this layer's MLP/MoE leaves an un-reduced partial, i.e.
@@ -194,6 +194,9 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 gqa_interleaved_layout=False,
                 reduce_results=reduce_results,
             )
+            # Recover the inductor gated-norm fusion with a Triton kernel that
+            # also reads z strided from the packed qkvz projection.
+            self.linear_attn._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
                 config,
@@ -206,7 +209,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             )
             # Qwen3.5 dropped torch.compile for breakable CUDA graphs; recover
             # the sigmoid-gate-mul fusion with the Triton kernel.
-            self.self_attn.use_fused_output_gate = current_platform.is_cuda()
+            self.self_attn.use_fused_output_gate = True
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
 

@@ -37,9 +37,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import HAS_TRITON
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
 from .ops.fused_pre_fc_norms import fused_pre_fc_norms
@@ -118,7 +116,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.pre_fc_norm_embedding = Qwen3_5RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.use_fused_pre_fc_norms = HAS_TRITON and current_platform.is_cuda()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -138,18 +135,13 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
-            if self.use_fused_pre_fc_norms:
-                hidden_states = fused_pre_fc_norms(
-                    inputs_embeds,
-                    hidden_states,
-                    self.pre_fc_norm_embedding.weight,
-                    self.pre_fc_norm_hidden.weight,
-                    self.pre_fc_norm_embedding.variance_epsilon,
-                )
-            else:
-                inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-                hidden_states = self.pre_fc_norm_hidden(hidden_states)
-                hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            hidden_states = fused_pre_fc_norms(
+                inputs_embeds,
+                hidden_states,
+                self.pre_fc_norm_embedding.weight,
+                self.pre_fc_norm_hidden.weight,
+                self.pre_fc_norm_embedding.variance_epsilon,
+            )
             hidden_states = self.fc(hidden_states)
             residual = None
         else:
