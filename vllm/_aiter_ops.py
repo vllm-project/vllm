@@ -238,6 +238,15 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     return False
 
 
+def is_aiter_found_and_supported_on_rdna() -> bool:
+    """RDNA (gfx11 + gfx12) analog of `is_aiter_found_and_supported()`."""
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_rdna
+
+        return on_rdna()
+    return False
+
+
 def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
@@ -2327,20 +2336,20 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_aiter_enabled(cls) -> bool:
-        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
-        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
-        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
-        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        """AITER on RDNA: library present, arch is RDNA, and the user enabled
+        aiter. Only aiter's Triton kernels exist on RDNA (no CK build), so this
+        deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella and
+        gates only the Triton paths RDNA uses. The RDNA analog of
         `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4() and cls._AITER_ENABLED
+        return on_rdna() and cls._AITER_ENABLED
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -2877,8 +2886,8 @@ class rocm_aiter_ops:
         )
 
     @classmethod
-    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
-        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+    def are_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
@@ -3061,16 +3070,16 @@ class rocm_aiter_ops:
         global _OPS_REGISTERED
 
         if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()
         ):
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11, on_gfx950
+            from vllm.platforms.rocm import on_gfx950
 
-            # This op has self-contained Triton/C++ implementations on gfx11
-            # and gfx950.  Only its optional top-k fast path comes from aiter.
-            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx950.
+            # Only its optional top-k fast path comes from aiter.
+            if on_gfx950() and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
@@ -3793,7 +3802,7 @@ class rocm_aiter_ops:
     def triton_sparse_mla_fwd(
         q: torch.Tensor,
         kv_buffer: torch.Tensor,
-        o: torch.Tensor,
+        o: torch.Tensor | None,
         sm_scale: float,
         kv_indptr: torch.Tensor,
         kv_indices: torch.Tensor,
@@ -3806,6 +3815,9 @@ class rocm_aiter_ops:
         extra_kv_indptr: torch.Tensor | None = None,
         extra_kv_indices: torch.Tensor | None = None,
         has_invalid: bool = True,
+        inv_rope_positions: torch.Tensor | None = None,
+        inv_rope_cos_sin_cache: torch.Tensor | None = None,
+        out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -3816,10 +3828,13 @@ class rocm_aiter_ops:
         paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
         must come with its q_scale and runs both dots in fp8. The extra segment
         is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
-        compressed tokens here.
+        compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
+        make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
+        replaces o with MXFP8 rows.
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
+        assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
         sparse_mla_fwd(
             q,
@@ -3838,6 +3853,9 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+            inv_rope_positions=inv_rope_positions,
+            inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
+            out_mxfp8=out_mxfp8,
         )
 
     @staticmethod
