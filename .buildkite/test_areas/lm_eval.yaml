@@ -153,6 +153,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) LM Eval Small Models"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       num_devices: 1
@@ -546,6 +547,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 DP"
   key: lm-eval-deepseek-r1-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -555,6 +557,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -634,6 +637,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 DP"
   key: lm-eval-deepseek-v32-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -643,6 +647,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -1153,6 +1158,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   optional: true
@@ -1166,6 +1172,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) GPQA Eval (GPT-OSS)"
+      automatic_shard: true
       dind: false
       device: mi300_2
       num_devices: 2
