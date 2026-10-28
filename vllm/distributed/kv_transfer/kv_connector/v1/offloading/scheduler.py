@@ -54,6 +54,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
     TierFilter,
     TierMatcher,
     make_offload_key,
@@ -89,6 +90,8 @@ class TransferJobStatus:
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
     fenced_block_ids: list[int] | None = None
+    # The trigger of the store. None for a load job.
+    trigger: StoreTrigger | None = None
 
 
 def _parse_tier_filter(raw: Any) -> TierFilter:
@@ -1187,7 +1190,9 @@ class OffloadingConnectorScheduler:
                 key = self._make_boundary_key(
                     req, group_idx, boundary, req_status.req_context
                 )
-                store_output = self.manager.prepare_store([key], req_status.req_context)
+                store_output = self.manager.prepare_store(
+                    [key], req_status.req_context, StoreTrigger.ON_COMPUTE
+                )
                 if store_output is None:
                     self._connector_stats.increase_counter(
                         _ConnectorMetricName.ALLOCATION_FAILURE
@@ -1204,6 +1209,7 @@ class OffloadingConnectorScheduler:
                     pending_count=self.config.num_workers,
                     keys={key},
                     is_store=True,
+                    trigger=StoreTrigger.ON_COMPUTE,
                     fenced_block_ids=[block_id],
                 )
                 group_sizes = [0] * num_groups
@@ -1316,7 +1322,9 @@ class OffloadingConnectorScheduler:
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
-            store_output = self.manager.prepare_store(keys, req_status.req_context)
+            store_output = self.manager.prepare_store(
+                keys, req_status.req_context, StoreTrigger.ON_COMPUTE
+            )
             if store_output is None:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
@@ -1351,6 +1359,7 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
                 keys=set(store_output.keys_to_store),
                 is_store=True,
+                trigger=StoreTrigger.ON_COMPUTE,
                 fenced_block_ids=source_blocks,
             )
             store_jobs[job_id] = TransferJob(
@@ -1592,7 +1601,7 @@ class OffloadingConnectorScheduler:
                 continue
 
             store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
+                new_offload_keys, req_status.req_context, StoreTrigger.ON_COMPUTE
             )
             if store_output is None:
                 self._connector_stats.increase_counter(
@@ -1681,6 +1690,7 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
                 is_store=True,
+                trigger=StoreTrigger.ON_COMPUTE,
                 deferred_fence_block_ids=deferred_fence_block_ids,
                 fenced_block_ids=fenced_block_ids or None,
             )
@@ -1894,7 +1904,10 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                assert job_status.trigger is not None
+                self.manager.complete_store(
+                    job_status.keys, req_status.req_context, job_status.trigger
+                )
             else:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:

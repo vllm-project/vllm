@@ -42,6 +42,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -604,7 +605,8 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
 
     primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
     ctx = ReqContext(req_id="promotion")
-    primary.prepare_store([key], ctx)
+    primary.prepare_store([key], ctx, StoreTrigger.ON_COMPUTE)
+
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -627,7 +629,7 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.token_ids == req.all_token_ids
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
-    primary.complete_store([key], ctx, success=success)
+    primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     if success:
         assert primary.lookup(key, ctx) is LookupResult.HIT
@@ -652,13 +654,13 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
     ready_key, failed_key = [make_offload_key(_hash(i), 0) for i in (1, 2)]
     primary = CPUOffloadingManager(num_chunks=2, enable_events=True)
     ctx = ReqContext(req_id="shared-prefix")
-    primary.prepare_store([ready_key], ctx)
+    primary.prepare_store([ready_key], ctx, StoreTrigger.ON_COMPUTE)
     tracker.record_store(ready_req, group, 0, ready_key)
-    primary.complete_store([ready_key], ctx)
+    primary.complete_store([ready_key], ctx, StoreTrigger.ON_COMPUTE)
     [stored] = tracker.take_events(primary.take_events())
     assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
 
-    primary.prepare_store([failed_key], ctx)
+    primary.prepare_store([failed_key], ctx, StoreTrigger.ON_COMPUTE)
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -666,7 +668,7 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
         )
         is None
     )
-    primary.complete_store([failed_key], ctx, success=False)
+    primary.complete_store([failed_key], ctx, StoreTrigger.ON_COMPUTE, success=False)
     assert list(tracker.take_events(primary.take_events())) == []
     assert primary.lookup(ready_key, ctx) is LookupResult.HIT
     assert ready_key in tracker._pending_event_metadata
@@ -683,7 +685,8 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     ctx = ReqContext(req_id="retry")
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     for attempt in range(2):
-        primary.prepare_store([key], ctx)
+        primary.prepare_store([key], ctx, StoreTrigger.ON_COMPUTE)
+
         assert (
             OffloadingConnectorScheduler._maximal_prefix_lookup(
                 scheduler, [key], ctx, req, group, 0
@@ -691,7 +694,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
             is None
         )
         if attempt == 0:
-            primary.complete_store([key], ctx, success=False)
+            primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=False)
     # Drain the old failure only after the retry captured its metadata.
     old_cleanup = list(tracker.take_events(primary.take_events()))
     [inventory] = tracker.take_events(
@@ -701,7 +704,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     assert inventory.token_ids == req.all_token_ids
     assert old_cleanup == []
     assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
-    primary.complete_store([key], ctx, success=success)
+    primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     assert len(events) == int(success)
     assert key in tracker._pending_event_metadata

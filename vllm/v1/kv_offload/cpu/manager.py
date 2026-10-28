@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StoreTrigger,
     get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
@@ -262,6 +263,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         keys = list(keys)
         if self.counts is not None:
@@ -376,6 +378,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []

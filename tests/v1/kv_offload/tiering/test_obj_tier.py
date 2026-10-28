@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -564,9 +565,9 @@ class TestMockObjTierFailures:
         )
 
         keys = [key(1)]
-        primary_result = primary_tier.prepare_store(keys, _CTX)
+        primary_result = primary_tier.prepare_store(keys, _CTX, StoreTrigger.ON_COMPUTE)
         assert primary_result is not None
-        primary_tier.complete_store(keys, _CTX, success=True)
+        primary_tier.complete_store(keys, _CTX, StoreTrigger.ON_COMPUTE, success=True)
         job = manager.create_store_job(keys, _CTX)
         obj_tier.submit_store(job)
 

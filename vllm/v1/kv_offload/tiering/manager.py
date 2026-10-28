@@ -44,6 +44,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -550,6 +551,7 @@ class TieringOffloadingManager(OffloadingManager):
             self.primary_tier.complete_write(
                 successful_keys,
                 transfer_job.req_context,
+                StoreTrigger.ON_COMPUTE,
                 True,
             )
         if not failed_keys:
@@ -567,6 +569,7 @@ class TieringOffloadingManager(OffloadingManager):
             self.primary_tier.complete_write(
                 failed_keys,
                 transfer_job.req_context,
+                StoreTrigger.ON_COMPUTE,
                 False,
             )
 
@@ -801,7 +804,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
         # preventing duplicate promotion attempts.
-        primary_write_result = self.primary_tier.prepare_write([key], req_context)
+        primary_write_result = self.primary_tier.prepare_write(
+            [key], req_context, StoreTrigger.ON_COMPUTE
+        )
 
         if primary_write_result is None:
             # Primary tier is full; caller should treat the chunk as unavailable
@@ -904,7 +909,10 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare chunks to be stored from GPU to primary tier.
 
@@ -918,6 +926,7 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             keys: Chunks to prepare for storing.
             req_context: Per-request context.
+            trigger: Why the connector asks for the store.
 
         Returns:
             PrepareStoreOutput describing where to store chunks and what was
@@ -945,7 +954,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Cascading of these newly-stored chunks to ALL secondary tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
-        primary_result = self.primary_tier.prepare_store(keys, req_context)
+        primary_result = self.primary_tier.prepare_store(keys, req_context, trigger)
 
         if primary_result is None:
             return None
@@ -1030,6 +1039,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
         """Mark chunks as done storing from GPU to primary tier.
@@ -1046,12 +1056,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         Args:
             keys: Chunks that finished storing.
-            success: Whether the GPU→primary transfer succeeded.
             req_context: Per-request context forwarded to primary.prepare_read().
+            trigger: The trigger given to the matching prepare_store().
+            success: Whether the GPU→primary transfer succeeded.
 
         """
         # Step 1: Complete store in primary tier (makes chunks loadable)
-        self.primary_tier.complete_store(keys, req_context, success)
+        self.primary_tier.complete_store(keys, req_context, trigger, success)
 
         if success:
             # Step 2: Cascade to ALL secondary tiers
