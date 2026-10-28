@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -2995,8 +2996,11 @@ def _producer_with_cpu_hit(
     )
     seed_ctx = ReqContext(req_id="seed")
     with tiering.lock:
-        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
-        tiering.primary_tier.complete_store([key], seed_ctx)
+        assert (
+            tiering.primary_tier.prepare_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.primary_tier.complete_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
     return consumer, tiering
 
 
