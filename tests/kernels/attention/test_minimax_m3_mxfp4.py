@@ -162,7 +162,7 @@ def test_write_matches_bf16_cache(num_tokens, skip_index):
     pages = kv.view(num_pages, 2, -1)
     rocm_aiter_ops.fused_qknorm_idxrqknorm_mxfp4(
         qkv.clone(), w, w, cos_sin, pos, NQ, 1, ROT, 1e-6, slots,
-        pages[:, :1], pages[:, 1:], q8,
+        pages[:, :1], pages[:, 1:], q_out=q8,
         index_q_norm_weight=w, index_k_norm_weight=w, num_index_heads=1,
         index_cache=None if skip_index else index_pages,
         index_q_out=None if skip_index else iq,

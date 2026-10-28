@@ -2594,7 +2594,7 @@ class rocm_aiter_ops:
         slot_mapping: torch.Tensor,
         kv_cache_k: torch.Tensor,
         kv_cache_v: torch.Tensor,
-        q_fp8_out: torch.Tensor,
+        q_out: torch.Tensor,
         index_q_norm_weight: torch.Tensor | None = None,
         index_k_norm_weight: torch.Tensor | None = None,
         num_index_heads: int = 0,
@@ -2608,8 +2608,9 @@ class rocm_aiter_ops:
         ``kv_cache_k`` / ``kv_cache_v`` are uint8 ``[pages, kv_heads, 8704]``
         views of 128-token pages (``[128 x 64 B e2m1][128 x 4 B e8m0]``); the
         index cache is a uint8 ``[pages, 8704]`` in the same format. The
-        post-RoPE main q comes back as e4m3 in ``q_fp8_out`` and no bf16 copy is
-        written. Needs an aiter with ``kv_cache_dtype="mxfp4"`` support.
+        post-RoPE main q comes back as e4m3 in ``q_out`` (``float8_e4m3fn``,
+        saturating cast, no scale) and no bf16 copy is written. Needs an aiter
+        with ``kv_cache_dtype="mxfp4"`` support.
         """
         from aiter import fused_qknorm_idxrqknorm
 
@@ -2631,14 +2632,13 @@ class rocm_aiter_ops:
             kv_cache_v=kv_cache_v,
             index_cache=index_cache,
             block_size=128,
-            q_out=None,
+            q_out=q_out,
             index_q_out=index_q_out,
             index_slot_mapping=index_slot_mapping,
             kv_cache_dtype="mxfp4",
             index_cache_dtype="auto" if skip_index_branch else "mxfp4",
             asm_layout=False,
             skip_index_branch=skip_index_branch,
-            q_fp8_out=q_fp8_out,
         )
 
     @classmethod

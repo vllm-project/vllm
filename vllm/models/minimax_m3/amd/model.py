@@ -1168,7 +1168,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             pages[:, : self.num_kv_heads],
             pages[:, self.num_kv_heads :],
-            q,
+            q_out=q,
             index_q_norm_weight=self.index_q_norm.weight,
             index_k_norm_weight=self.index_k_norm.weight,
             num_index_heads=self.num_idx_heads,
