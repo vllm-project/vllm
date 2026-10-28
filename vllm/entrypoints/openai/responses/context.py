@@ -137,10 +137,18 @@ class TurnUsageTracker:
         self.current_turn_metrics.input_tokens = input_tokens
         last = self._last_finished_turn
         if last is not None:
-            tool_tokens = max(
-                0,
-                input_tokens - last.input_tokens - last.output_tokens,
-            )
+            tool_tokens = input_tokens - last.input_tokens - last.output_tokens
+            if tool_tokens < 0:
+                logger.error(
+                    "Negative tool output tokens calculated: %d "
+                    "(current_input=%d, previous_input=%d, "
+                    "previous_output=%d). Setting to 0.",
+                    tool_tokens,
+                    input_tokens,
+                    last.input_tokens,
+                    last.output_tokens,
+                )
+                tool_tokens = 0
             self.current_turn_metrics.tool_output_tokens = tool_tokens
         self.current_turn_metrics.cached_input_tokens = output.num_cached_tokens or 0
         return True
@@ -283,7 +291,7 @@ class SimpleContext(ConversationContext):
         num_output_tokens = len(delta_output.token_ids or [])
         self.num_output_tokens += num_output_tokens
         self.turn_usage.add_output_tokens(num_output_tokens)
-        if delta_output.finish_reason is not None:
+        if output.finished:
             self.turn_usage.end_turn()
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -434,7 +442,7 @@ class ParsableContext(ConversationContext):
         num_output_tokens = len(completion.token_ids or [])
         self.num_output_tokens += num_output_tokens
         self.turn_usage.add_output_tokens(num_output_tokens)
-        if completion.finish_reason is not None:
+        if output.finished:
             self.turn_usage.end_turn()
         self.finish_reason = completion.finish_reason
         if output.kv_transfer_params is not None:
