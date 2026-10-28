@@ -27,6 +27,9 @@ prevent late replies from reactivating retired state. Replies for another sessio
 request, or batch are discarded before their ordering counters or draft tokens are
 used.
 
+Socket cleanup errors encountered while handling a transport failure do not
+replace that failure or interrupt the configured fallback.
+
 Feature schema and frame byte budgets are checked before tensor serialization.
 Connections, partial frames, pending bytes and adapter waiters have server-side
 bounds. A shutdown grace timeout does not authorize freeing GPU storage whose
