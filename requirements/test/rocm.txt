@@ -654,8 +654,6 @@ numpy==2.2.6
     #   tritonclient
     #   vocos
     #   xgrammar
-nvidia-cuda-cccl==13.3.4.3.1
-    # via nvidia-nvshmem-cu13
 open-clip-torch==2.32.0
     # via -r requirements/test/rocm.in
 openai==2.31.0
