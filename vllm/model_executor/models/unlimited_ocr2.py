@@ -114,12 +114,6 @@ class UnlimitedOCR2Attention(nn.Module):
         assert isinstance(all_metadata, dict)
         metadata = all_metadata[self.attn.layer_name]
         assert isinstance(metadata, TritonAttentionMetadata)
-        if (
-            context.additional_kwargs.get("is_dummy_run", False)
-            and metadata.max_query_len > 1
-        ):
-            result.zero_()
-            return
         assert roles is not None
         assert isinstance(context.slot_mapping, dict)
         slots = context.slot_mapping[self.attn.layer_name]
@@ -148,11 +142,17 @@ class UnlimitedOCR2Attention(nn.Module):
             )
         else:
             starts = metadata.query_start_loc.tolist()
-            lengths = metadata.seq_lens.tolist()
+            first_slots = slots[
+                metadata.query_start_loc[:-1].clamp_max(slots.shape[0] - 1)
+            ]
+            lengths, first_slots_cpu = torch.stack(
+                (metadata.seq_lens, first_slots)
+            ).tolist()
             result.zero_()
             for request, length in enumerate(lengths):
                 start, end = starts[request : request + 2]
-                if start == end:
+                # Padding and capture rows have no assigned KV slots.
+                if start == end or first_slots_cpu[request] < 0:
                     continue
                 if end - start == 1:
                     result[start:end] = paged_dash_decode(
