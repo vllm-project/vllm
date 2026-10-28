@@ -157,7 +157,8 @@ def test_config_refusal_accepts_the_supported_deployment(fse, aux):
     ],
 )
 def test_config_refusal_names_the_unmet_condition(cfg, model, why):
-    assert why in _config_refusal(cfg, model)
+    reason = _config_refusal(cfg, model)
+    assert reason is not None and why in reason
 
 
 def _fwd(n: int, q: int = 1, reqs: int | None = None, prefills: int = 0):
@@ -181,18 +182,24 @@ def test_step_refusal_accepts_a_pure_decode():
     assert _step_refusal(_fwd(6, q=3), "attn", 6, pos) is None
 
 
+def _step_reason(fwd, n: int, positions: torch.Tensor) -> str:
+    reason = _step_refusal(fwd, "attn", n, positions)
+    assert reason is not None
+    return reason
+
+
 def test_step_refusal_rejects_what_the_kernels_cannot_serve():
     pos = torch.zeros(4, dtype=torch.int64)
-    assert "tokens" in _step_refusal(_fwd(MAX_TOKENS + 1), "attn", MAX_TOKENS + 1, pos)
-    assert "prefill" in _step_refusal(_fwd(4, prefills=1), "attn", 4, pos)
-    assert "per request" in _step_refusal(_fwd(4, q=3, reqs=2), "attn", 4, pos)
-    assert "shorter" in _step_refusal(_fwd(4, reqs=2), "attn", 4, pos)
-    assert "positions" in _step_refusal(_fwd(4), "attn", 4, pos.to(torch.int32))
+    assert "tokens" in _step_reason(_fwd(MAX_TOKENS + 1), MAX_TOKENS + 1, pos)
+    assert "prefill" in _step_reason(_fwd(4, prefills=1), 4, pos)
+    assert "per request" in _step_reason(_fwd(4, q=3, reqs=2), 4, pos)
+    assert "shorter" in _step_reason(_fwd(4, reqs=2), 4, pos)
+    assert "positions" in _step_reason(_fwd(4), 4, pos.to(torch.int32))
     fwd = _fwd(4)
     fwd.attn_metadata["attn"].decode.block_table = fwd.attn_metadata[
         "attn"
     ].decode.block_table.t()
-    assert "contiguous" in _step_refusal(fwd, "attn", 4, pos)
+    assert "contiguous" in _step_reason(fwd, 4, pos)
 
 
 # ---- MonoDecode host contract: enable, runner life cycle, slot check, routing ----

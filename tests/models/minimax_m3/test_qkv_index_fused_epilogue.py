@@ -227,7 +227,8 @@ def test_qkv_index_fused_epilogue(case):
         q8 = torch.empty_like(q8_ref) if q_mode != "bf16" else None
         iq = torch.empty_like(iq_ref)
         minimax_m3_qkv_index_fused_epilogue(
-            xq, xsf, wq, wsf, positions, cos_sin, *norm_weights, EPS,
+            xq, xsf, wq, wsf, positions, cos_sin, norm_weights[0],
+            norm_weights[1], norm_weights[2], norm_weights[3], EPS,
             slot_mapping=sm, index_slot_mapping=ism, kv_cache=kv, index_cache=ic,
             q_out=q, index_q_out=iq, q_fp8_out=q8, q_fp8_scale=Q_FP8_SCALE,
             k_scale=kv_scales[0], v_scale=kv_scales[1], cta_group=cta_group,
