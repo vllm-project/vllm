@@ -84,155 +84,83 @@ def _legacy_config(m: int, n: int) -> dict:
     )
 
 
-def _shape_config(m: int, n: int, k: int, num_processors: int) -> dict:
-    if (((m + 63) // 64) * ((n + 63) // 64)) / num_processors <= 7.5:
-        if m * n <= 131072:
+def _shape_config(
+    m: int, n: int, k: int, num_processors: int, cache_size_bytes: int
+) -> dict:
+    output_elements = m * n
+    tile_waves = ((m + 63) // 64) * ((n + 63) // 64) / num_processors
+    if tile_waves <= 7.5:
+        if output_elements <= 131072:
             if n / k <= 0.0625:
                 if m <= 16:
-                    if n <= 256:
-                        if (
-                            m <= 32
-                            and k >= 4096
-                            and ((m + 15) // 16) * ((n + 31) // 32) < 4 * num_processors
-                        ):
-                            return _CHOICES[10]
-                        return _CHOICES[13]
-                    else:
-                        if (
-                            m <= 32
-                            and k >= 4096
-                            and ((m + 15) // 16) * ((n + 31) // 32) < 4 * num_processors
-                        ):
-                            return _CHOICES[9]
-                        return _CHOICES[13]
-                else:
-                    if m <= 64:
-                        return _CHOICES[24]
-                    else:
-                        return _CHOICES[13]
-            else:
-                if n <= 1024:
-                    if m * n <= 8192:
-                        return _CHOICES[27]
-                    else:
-                        if m * n <= 32768:
-                            return _CHOICES[24]
-                        else:
-                            return _CHOICES[11]
-                else:
-                    if m * n <= 4096:
-                        if k <= 3840:
-                            return _CHOICES[26]
-                        else:
-                            return _CHOICES[25]
-                    else:
-                        if m <= 32:
-                            return _CHOICES[14]
-                        else:
-                            return _CHOICES[19]
-        else:
-            if m * n <= 327680:
-                if n / k <= 1.3333333333333333:
-                    if n / k <= 0.0625:
-                        return _CHOICES[15]
-                    else:
-                        if n <= 3840:
-                            return _CHOICES[12]
-                        else:
-                            return _CHOICES[12]
-                else:
+                    tiles = ((m + 15) // 16) * ((n + 31) // 32)
+                    if k >= 4096 and tiles < 4 * num_processors:
+                        return _CHOICES[10 if n <= 256 else 9]
                     return _CHOICES[13]
-            else:
-                if n <= 4096:
-                    if m * n <= 786432:
-                        if m <= 128:
-                            return _CHOICES[16]
-                        else:
-                            return _CHOICES[17]
-                    else:
-                        if k <= 4096:
-                            return _CHOICES[6]
-                        else:
-                            return _CHOICES[1]
-                else:
-                    if m * n <= 655360:
-                        return _CHOICES[22]
-                    else:
-                        return _CHOICES[18]
-    else:
-        if m <= 64:
-            if n <= 30720:
-                if m * n <= 262144:
-                    if n <= 16384:
-                        return _CHOICES[28]
-                    else:
-                        return _CHOICES[23]
-                else:
-                    if m <= 48:
-                        return _CHOICES[29]
-                    else:
-                        return _legacy_config(m, n)
-            else:
-                if m <= 16:
-                    return _CHOICES[20]
-                else:
-                    if m <= 32:
-                        return _CHOICES[31]
-                    else:
-                        return _CHOICES[30]
-        else:
-            if n <= 24576:
-                if n * k <= 15728640:
-                    if n / k <= 32.0:
-                        if n <= 512:
-                            return _CHOICES[16]
-                        else:
-                            return _legacy_config(m, n)
-                    else:
-                        if m <= 128:
-                            return _CHOICES[32]
-                        else:
-                            return _CHOICES[33]
-                else:
-                    if m * n <= 33554432:
-                        if m * n <= 8388608:
-                            return _CHOICES[1]
-                        else:
-                            return _CHOICES[6]
-                    else:
-                        if m <= 4096:
-                            return _CHOICES[3]
-                        else:
-                            return _CHOICES[2]
-            else:
-                if m <= 128:
-                    return _CHOICES[8]
-                else:
-                    if n <= 30720:
-                        if m <= 1024:
-                            return _CHOICES[5]
-                        else:
-                            return _CHOICES[0]
-                    else:
-                        if m <= 1024:
-                            return _CHOICES[7]
-                        else:
-                            return _CHOICES[4]
+                return _CHOICES[24 if m <= 64 else 13]
+            if n <= 1024:
+                if output_elements <= 8192:
+                    return _CHOICES[27]
+                return _CHOICES[24 if output_elements <= 32768 else 11]
+            if output_elements <= 4096:
+                return _CHOICES[26 if k <= 3840 else 25]
+            return _CHOICES[14 if m <= 32 else 19]
+        if output_elements <= 327680:
+            if n / k > 1.3333333333333333:
+                return _CHOICES[13]
+            return _CHOICES[15 if n / k <= 0.0625 else 12]
+        if n <= 4096:
+            if output_elements <= 786432:
+                return _CHOICES[16 if m <= 128 else 17]
+            return _CHOICES[6 if k <= 4096 else 1]
+        return _CHOICES[22 if output_elements <= 655360 else 18]
+
+    if m <= 64:
+        if n <= 30720:
+            if output_elements <= 262144:
+                return _CHOICES[28 if n <= 16384 else 23]
+            return _CHOICES[29] if m <= 48 else _legacy_config(m, n)
+        if m <= 16:
+            return _CHOICES[20]
+        return _CHOICES[31 if m <= 32 else 30]
+    if n <= 24576:
+        if cache_size_bytes > 0 and n * k * 64 <= cache_size_bytes * 15:
+            if n / k <= 32.0:
+                return _CHOICES[16] if n <= 512 else _legacy_config(m, n)
+            return _CHOICES[32 if m <= 128 else 33]
+        if output_elements <= 8388608:
+            return _CHOICES[1]
+        if output_elements <= 33554432:
+            return _CHOICES[6]
+        return _CHOICES[3 if m <= 4096 else 2]
+    if m <= 128:
+        return _CHOICES[8]
+    if n <= 30720:
+        return _CHOICES[5 if m <= 1024 else 0]
+    return _CHOICES[7 if m <= 1024 else 4]
 
 
 @lru_cache(maxsize=2048)
-def get_heuristic_config(m: int, n: int, k: int, num_processors: int = 32) -> dict:
-    """Select by shape and processor count; 32 retains the reference policy."""
+def get_heuristic_config(
+    m: int,
+    n: int,
+    k: int,
+    num_processors: int = 32,
+    cache_size_bytes: int = 64 * 1024**2,
+) -> dict:
+    """Select by shape, processor count and last-level data-cache capacity."""
     if num_processors <= 0:
         raise ValueError("num_processors must be positive")
-    choice = _shape_config(m, n, k, num_processors)
+    if cache_size_bytes < 0:
+        raise ValueError("cache_size_bytes must be nonnegative")
+    choice = _shape_config(m, n, k, num_processors, cache_size_bytes)
     if m >= 128 and n >= 24576 and k <= 1024:
         if k <= 512:
             return _CHOICES[33] if 192 < m <= 1024 else _CHOICES[22]
         return _CHOICES[34]
-    if n >= 16384 and n * k >= 64 * 1024**2:
+    if cache_size_bytes > 0 and n >= 16384 and n * k >= cache_size_bytes:
         if n <= 24576 and 64 < m <= 128:
-            return _CHOICES[39 if n * k <= 72 * 1024**2 else 40]
+            return _CHOICES[39 if n * k * 8 <= cache_size_bytes * 9 else 40]
         if 128 < m <= 512:
             if n < 20480 or (n <= 24576 and 256 < m <= 384):
                 return _CHOICES[36]
@@ -245,7 +173,13 @@ def get_heuristic_config(m: int, n: int, k: int, num_processors: int = 32) -> di
             and choice.get("variant") != "persistent"
         ):
             return _CHOICES[35]
-    if 8 < m <= 64 and k >= 8192 and n <= k // 2 and n * k >= 60 * 1024**2:
+    if (
+        cache_size_bytes > 0
+        and 8 < m <= 64
+        and k >= 8192
+        and n <= k // 2
+        and n * k * 16 >= cache_size_bytes * 15
+    ):
         return _CHOICES[24 if m <= 16 else 37 if m <= 32 else 38]
     if choice.get("variant") == "persistent":
         return dict(choice, programs=2 * num_processors)

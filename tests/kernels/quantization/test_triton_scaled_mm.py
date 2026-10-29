@@ -180,8 +180,16 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
 @pytest.mark.parametrize("tuned", [False, True])
 @pytest.mark.parametrize("rdna", [False, True])
 @pytest.mark.parametrize("num_processors", [16, 32])
+@pytest.mark.parametrize("cache_size_bytes", [32 * 1024**2, 64 * 1024**2])
 def test_triton_fp8_per_token_backend_preserves_linear_shape(
-    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned, rdna, num_processors
+    per_token_fp8_configs,
+    monkeypatch,
+    out_dtype,
+    use_bias,
+    tuned,
+    rdna,
+    num_processors,
+    cache_size_bytes,
 ):
     """Select the backend and validate quantization, weight layout and 3D output."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
@@ -199,6 +207,10 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
         monkeypatch.setattr("vllm.platforms.rocm.on_rdna", lambda: rdna)
         monkeypatch.setattr(
             "vllm.utils.platform_utils.num_compute_units", lambda *_args: num_processors
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic.get_device_cache_size",
+            lambda *_args: cache_size_bytes,
         )
 
     if tuned:
@@ -224,6 +236,7 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
     assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
     assert kernel.use_heuristic == (current_platform.is_rocm() and rdna)
     assert kernel.num_processors == (num_processors if kernel.use_heuristic else 0)
+    assert kernel.cache_size_bytes == (cache_size_bytes if kernel.use_heuristic else 0)
     if not tuned:
 
         def unexpected_lookup(*_args):
@@ -489,8 +502,9 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
 )
 @pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048), (2048, 4096), (4096, 4096)])
 @pytest.mark.parametrize("num_processors", [16, 32])
+@pytest.mark.parametrize("cache_size_bytes", [32 * 1024**2, 64 * 1024**2])
 def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
-    n, k, num_processors, monkeypatch
+    n, k, num_processors, cache_size_bytes, monkeypatch
 ):
     """Startup compilation must cover odd and aligned serving token counts."""
     from vllm.model_executor.layers.quantization.utils import (
@@ -504,6 +518,7 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
         out_dtype=torch.bfloat16,
         max_tokens=257,
         num_processors=num_processors,
+        cache_size_bytes=cache_size_bytes,
     )
     misses = []
     monkeypatch.setattr(
@@ -527,7 +542,7 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
             sb,
             torch.bfloat16,
             None,
-            heuristic.get_heuristic_config(m, n, k, num_processors),
+            heuristic.get_heuristic_config(m, n, k, num_processors, cache_size_bytes),
         )
         torch.testing.assert_close(
             out,

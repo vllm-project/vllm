@@ -45,24 +45,27 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         from vllm.utils.platform_utils import get_device_name_as_file_name
 
         n, k = c.weight_shape
-        self.has_tuned_configs = bool(
-            get_w8a8_per_token_fp8_configs(
-                n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
-            )
+        configs = get_w8a8_per_token_fp8_configs(
+            n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
         )
+        self.has_tuned_configs = bool(configs)
         self.use_heuristic = False
         if current_platform.is_rocm() and current_platform.supports_fp8():
             from vllm.platforms.rocm import on_rdna
 
             self.use_heuristic = on_rdna()
         self.num_processors = 0
+        self.cache_size_bytes = 0
         if self.use_heuristic:
+            from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
+                get_device_cache_size,
+            )
             from vllm.utils.platform_utils import num_compute_units
 
-            self.num_processors = num_compute_units(
-                torch.accelerator.current_device_index()
-            )
-        if self.use_heuristic and not self.has_tuned_configs:
+            device = torch.accelerator.current_device_index()
+            self.num_processors = num_compute_units(device)
+            self.cache_size_bytes = get_device_cache_size(device)
+        if self.use_heuristic:
             from vllm.config import get_current_vllm_config
             from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
                 fp8_per_token_warmup,
@@ -74,6 +77,8 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
                 out_dtype=c.out_dtype,
                 max_tokens=get_current_vllm_config().scheduler_config.max_num_batched_tokens,
                 num_processors=self.num_processors,
+                cache_size_bytes=self.cache_size_bytes,
+                tuned_m_range=(min(configs), max(configs)) if configs else None,
             )
 
     @classmethod
@@ -120,6 +125,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
                 self.has_tuned_configs,
                 True,
                 self.num_processors,
+                self.cache_size_bytes,
             ).view(*output_shape)
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
             A,
@@ -131,6 +137,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
             self.has_tuned_configs,
             self.use_heuristic,
             self.num_processors,
+            self.cache_size_bytes,
         ).view(*output_shape)
 
 
@@ -300,6 +307,7 @@ def _w8a8_triton_per_token_scaled_mm_func(
     has_tuned_configs: bool,
     use_heuristic: bool = False,
     num_processors: int = 0,
+    cache_size_bytes: int = -1,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         get_w8a8_per_token_fp8_config,
@@ -323,8 +331,14 @@ def _w8a8_triton_per_token_scaled_mm_func(
                     from vllm.utils.platform_utils import num_compute_units
 
                     num_processors = num_compute_units(qx.get_device())
+                if cache_size_bytes < 0:
+                    cache_size_bytes = heuristic.get_device_cache_size(qx.get_device())
                 choice = heuristic.get_heuristic_config(
-                    qx.size(0), weight.size(1), qx.size(1), num_processors
+                    qx.size(0),
+                    weight.size(1),
+                    qx.size(1),
+                    num_processors,
+                    cache_size_bytes,
                 )
             else:
                 choice = {
@@ -386,6 +400,7 @@ def _w8a8_triton_per_token_scaled_mm_fake(
     has_tuned_configs: bool,
     use_heuristic: bool = False,
     num_processors: int = 0,
+    cache_size_bytes: int = -1,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device

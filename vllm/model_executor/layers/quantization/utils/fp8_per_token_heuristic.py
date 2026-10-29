@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-token FP8 launch heuristics and specialized contiguous kernels."""
 
+from functools import cache
 from typing import Any
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     triton_scaled_mm as shared_mm,
 )
@@ -16,8 +18,55 @@ from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.triton_utils import tl, triton
 
 knobs = triton.knobs
+logger = init_logger(__name__)
 _LAUNCH_CACHE: dict[tuple, Any] = {}
 get_heuristic_config = heuristic_rules.get_heuristic_config
+
+
+@cache
+def get_device_cache_size(device: int) -> int:
+    """Return the GPU's last-level data cache in bytes, falling back to L2."""
+    from vllm.platforms import current_platform
+    from vllm.utils.platform_utils import cuda_get_device_properties
+
+    try:
+        from amdsmi import amdsmi_get_gpu_cache_info, amdsmi_get_processor_handles
+
+        from vllm.platforms.rocm import with_amdsmi_context
+
+        @with_amdsmi_context
+        def query():
+            physical = current_platform.visible_device_id_to_physical_device_id(device)
+            handle = amdsmi_get_processor_handles()[physical]
+            entries = [
+                entry
+                for entry in amdsmi_get_gpu_cache_info(handle)["cache"]
+                if "DATA_CACHE" in entry["cache_properties"]
+                and "CPU_CACHE" not in entry["cache_properties"]
+                and 2 <= entry["cache_level"] < 2**32 - 1
+                and 0 < entry["cache_size"] < 2**32 - 1
+                and 0 < entry["num_cache_instance"] < 2**32 - 1
+            ]
+            level = max((entry["cache_level"] for entry in entries), default=0)
+            # AMD SMI reports KiB per cache instance.
+            return sum(
+                entry["cache_size"] * entry["num_cache_instance"] * 1024
+                for entry in entries
+                if entry["cache_level"] == level
+            )
+
+        size = query()
+        if size > 0:
+            return size
+    except Exception as error:
+        logger.debug("GPU last-level cache query failed; using L2: %s", error)
+    try:
+        (l2_size,) = cuda_get_device_properties(
+            device, ("L2_cache_size",), init_cuda=True
+        )
+        return max(0, int(l2_size))
+    except (AttributeError, RuntimeError):
+        return 0
 
 
 def can_use_fp8_per_token_heuristic(a, b, sa, sb, out_dtype, bias) -> bool:
@@ -415,7 +464,17 @@ def launch_fp8_per_token(
 
 
 class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
-    def get_warmup_keys(self, *, n, k, out_dtype, max_tokens, num_processors=0):
+    def get_warmup_keys(
+        self,
+        *,
+        n,
+        k,
+        out_dtype,
+        max_tokens,
+        num_processors=0,
+        cache_size_bytes=-1,
+        tuned_m_range=None,
+    ):
         from vllm.model_executor.warmup.jit_warmup_triton_helper import (
             triton_scalar_specialization_rep,
         )
@@ -424,9 +483,15 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             from vllm.utils.platform_utils import num_compute_units
 
             num_processors = num_compute_units(torch.accelerator.current_device_index())
+        if cache_size_bytes < 0:
+            cache_size_bytes = get_device_cache_size(
+                torch.accelerator.current_device_index()
+            )
         choices: dict[tuple, int] = {}
         for m in range(1, max_tokens + 1):
-            config = get_heuristic_config(m, n, k, num_processors)
+            if tuned_m_range is not None and tuned_m_range[0] <= m <= tuned_m_range[1]:
+                continue
+            config = get_heuristic_config(m, n, k, num_processors, cache_size_bytes)
             bm, bn, bk = (
                 config[key] for key in ("block_size_m", "block_size_n", "block_size_k")
             )
@@ -440,7 +505,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             )
             choices.setdefault(key, m)
         return [
-            (m, n, k, out_dtype, bias, num_processors)
+            (m, n, k, out_dtype, bias, num_processors, cache_size_bytes)
             for m in choices.values()
             for bias in (False, True)
         ]
@@ -450,7 +515,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             TritonWarmupTensor,
         )
 
-        m, n, k, out_dtype, bias, num_processors = compile_key
+        m, n, k, out_dtype, bias, num_processors, cache_size_bytes = compile_key
         a = TritonWarmupTensor(torch.float8_e4m3fn, shape=(m, k))
         b = TritonWarmupTensor(torch.float8_e4m3fn, shape=(k, n), strides=(1, k))
         scale = TritonWarmupTensor(torch.float32)
@@ -461,7 +526,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             scale,
             out_dtype,
             TritonWarmupTensor(out_dtype) if bias else None,
-            get_heuristic_config(m, n, k, num_processors),
+            get_heuristic_config(m, n, k, num_processors, cache_size_bytes),
             _warmup=True,
         )
 
