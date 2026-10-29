@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -23,8 +22,13 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    get_elastic_ep_rank_retired,
+    set_elastic_ep_rank_retired,
+    set_scaling_elastic_ep,
+)
 from vllm.exceptions import (
+    GenerationError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     ProfilerAlreadyActiveError,
@@ -44,17 +48,21 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
+from vllm.tracing import init_tracer, log_tracing_disabled_warning
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    StreamingInputOutputCollector,
+)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
@@ -349,7 +357,7 @@ class AsyncLLM(EngineClient):
                 else self.get_num_unfinished_requests()
             )
             if current_requests + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -357,20 +365,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -402,6 +417,10 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
         if self.errored:
             raise EngineDeadError()
+
+        if trace_headers and self.observability_config.otlp_traces_endpoint is None:
+            log_tracing_disabled_warning()
+            trace_headers = None
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -581,6 +600,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
+        self._validate_resumable_request()
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
@@ -610,7 +630,9 @@ class AsyncLLM(EngineClient):
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
-        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+        queue = StreamingInputOutputCollector(
+            sampling_params.output_kind, internal_req_id
+        )
 
         async def handle_inputs():
             cancelled = False
@@ -618,6 +640,13 @@ class AsyncLLM(EngineClient):
             any_added = False
             try:
                 async for input_chunk in input_stream:
+                    # Stop once the session has finished (aborted or errored).
+                    # There is no await between this check and the ADD send,
+                    # so any chunk already sent precedes the engine abort.
+                    if any_added and not self.output_processor.has_request(
+                        internal_req_id
+                    ):
+                        break
                     sp = input_chunk.sampling_params
                     if sp:
                         self._validate_streaming_input_sampling_params(sp)
@@ -653,8 +682,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     if any_added:
                         # Send empty final request to indicate that inputs have
-                        # finished. Don't send if cancelled (session was aborted).
-                        await self._add_request(final_req, None, None, 0, queue)
+                        # finished. Don't send if cancelled or if the session
+                        # already finished (aborted or errored).
+                        if self.output_processor.has_request(internal_req_id):
+                            await self._add_request(final_req, None, None, 0, queue)
                     elif not errored:
                         queue.put(STREAM_FINISHED)
 
@@ -663,6 +694,13 @@ class AsyncLLM(EngineClient):
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
+
+    def _validate_resumable_request(self) -> None:
+        if self.vllm_config.is_mm_encoder_only or self.model_config.is_diffusion:
+            raise VLLMValidationError(
+                "Resumable requests are not supported for encoder-only or "
+                "diffusion models."
+            )
 
     @staticmethod
     def _validate_streaming_input_sampling_params(
@@ -780,7 +818,10 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError) as e:
+        except (VLLMClientError, GracefulHTTPError, GenerationError) as e:
+            if q is not None:
+                # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -850,22 +891,25 @@ class AsyncLLM(EngineClient):
                     for start in range(0, num_outputs, chunk_size):
                         end = start + chunk_size
                         outputs_slice = engine_core_outputs[start:end]
+                        if mm_processor_cache is not None:
+                            missing_hashes = [
+                                mm_hash
+                                for eco in outputs_slice
+                                for mm_hash in eco.mm_cache_miss_hashes or ()
+                            ]
+                            # Mark before publishing errors so even queued
+                            # renders invalidate before their next cache lookup.
+                            renderer.queue_mm_cache_invalidations(missing_hashes)
+
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
-
-                        # 2b) Recover from P0/P1 cache drift: the engine flags hashes
-                        # it couldn't find (mm_cache_miss_hashes); drop them from the
-                        # P0 shadow so the client's retry resends the data and
-                        # repopulates P1. Hot-path no-op (field is None otherwise).
-                        if mm_processor_cache is not None:
-                            for eco in outputs_slice:
-                                if eco.mm_cache_miss_hashes:
-                                    for mm_hash in eco.mm_cache_miss_hashes:
-                                        mm_processor_cache.invalidate(mm_hash)
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
@@ -890,6 +934,12 @@ class AsyncLLM(EngineClient):
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
+                if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
+                    logger.info(
+                        "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
+                    )
+                    output_processor.propagate_error(e)
+                    return
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
@@ -940,14 +990,14 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. New generation/encoding requests will not be scheduled
-        until resume is called.
+        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
+        with ``RetryableRequestError`` from when the pause starts until
+        :meth:`resume_generation`; ``keep`` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
@@ -956,23 +1006,15 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
-        if wait_for_inflight_requests:
-            warnings.warn(
-                "The `wait_for_inflight_requests` parameter in "
-                "`AsyncLLM.pause_generation()` is deprecated. "
-                "Please use `mode` argument instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        await self.engine_core.pause_generation_async(
+            mode=mode, clear_cache=clear_cache
+        )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -1054,7 +1096,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError):
+        except (VLLMClientError, GracefulHTTPError, GenerationError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
@@ -1086,6 +1128,8 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        if get_elastic_ep_rank_retired():
+            return
         if self.errored:
             raise self.dead_error
 
@@ -1095,6 +1139,7 @@ class AsyncLLM(EngineClient):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         async with self._profile_lock:
             if self._profile_session_guard_enabled and self._profile_session_active:
@@ -1112,6 +1157,7 @@ class AsyncLLM(EngineClient):
                     profile_prefix,
                     delay_iterations,
                     max_iterations,
+                    profiler_kwargs=profiler_kwargs,
                 )
             except Exception:
                 self._profile_session_active = False
@@ -1172,11 +1218,18 @@ class AsyncLLM(EngineClient):
 
         return fully_awake
 
-    async def checkpoint_prepare(self) -> None:
-        await self.collective_rpc("checkpoint_prepare")
+    async def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        refusal = await self.engine_core.checkpoint_prepare_async(mode)
+        if refusal is None:
+            # Preparing resets the engine's multimodal cache.
+            await self.renderer.clear_mm_cache_async()
+        return refusal
 
     async def checkpoint_restore(self) -> None:
-        await self.collective_rpc("checkpoint_restore")
+        await self.engine_core.checkpoint_restore_async()
+
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return await self.engine_core.checkpoint_state_async()
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
@@ -1235,8 +1288,13 @@ class AsyncLLM(EngineClient):
                 "waiting for requests to drain before scaling"
             )
             await self.wait_for_requests_to_drain(drain_timeout)
-        except BaseException:
-            set_scaling_elastic_ep(False)
+        except BaseException as e:
+            if self.vllm_config.parallel_config.data_parallel_external_lb:
+                await self.engine_core.abort_external_elastic_ep(
+                    str(e) or type(e).__name__
+                )
+            else:
+                set_scaling_elastic_ep(False)
             raise
 
     async def scale_elastic_ep(
@@ -1249,7 +1307,8 @@ class AsyncLLM(EngineClient):
     async def _scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int
     ) -> None:
-        old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        parallel_config = self.vllm_config.parallel_config
+        old_data_parallel_size = parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
                 "Data parallel size is already %s, skipping scale",
@@ -1280,9 +1339,36 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+        rank_will_retire = (
+            parallel_config.data_parallel_external_lb
+            and new_data_parallel_size < old_data_parallel_size
+            and parallel_config.data_parallel_rank >= new_data_parallel_size
+        )
+        if rank_will_retire:
+            set_elastic_ep_rank_retired(True)
+
+        commit_succeeded = False
+        try:
+            await self.engine_core.commit_elastic_ep()
+            parallel_config.data_parallel_size = new_data_parallel_size
+            commit_succeeded = True
+            if rank_will_retire:
+                logger.info(
+                    "[Elastic EP] Data-parallel rank %s is retired and awaiting "
+                    "external process shutdown",
+                    parallel_config.data_parallel_rank,
+                )
+        finally:
+            if rank_will_retire and not commit_succeeded:
+                set_elastic_ep_rank_retired(False)
+            # A failed commit may leave engines partially reconfigured or paused.
+            if commit_succeeded:
+                set_scaling_elastic_ep(False)
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        return await self.engine_core.get_external_elastic_ep_status()
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
@@ -1307,6 +1393,10 @@ class AsyncLLM(EngineClient):
         return self.engine_core.resources.engine_dead or not self.is_running
 
     @property
+    def should_keep_api_server_alive(self) -> bool:
+        return get_elastic_ep_rank_retired()
+
+    @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
 
@@ -1322,6 +1412,10 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        await self.collective_rpc("shutdown_weight_transfer_engine")
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""

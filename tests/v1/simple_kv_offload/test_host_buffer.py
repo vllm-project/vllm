@@ -29,7 +29,7 @@ def hugepage_with_free(n: int) -> int:
     raise AssertionError("unreachable")
 
 
-def mapping_info(addr: int) -> tuple[set[str], str]:
+def mapping_info(addr: int) -> tuple[set[str], str | None]:
     """(smaps VmFlags, numa_maps policy) of the mapping starting at ``addr``."""
     flags: set[str] = set()
     with open("/proc/self/smaps") as f:
@@ -41,8 +41,13 @@ def mapping_info(addr: int) -> tuple[set[str], str]:
             elif inside and line.startswith("VmFlags:"):
                 flags = set(line.split()[1:])
                 break
-    with open("/proc/self/numa_maps") as f:
-        policy = next(ln.split()[1] for ln in f if int(ln.split()[0], 16) == addr)
+    try:
+        with open("/proc/self/numa_maps") as f:
+            policy = next(
+                (ln.split()[1] for ln in f if int(ln.split()[0], 16) == addr), None
+            )
+    except (FileNotFoundError, PermissionError):
+        policy = None
     return flags, policy
 
 
@@ -66,15 +71,29 @@ def test_parse_hugepage_size_rejects_unknown():
 
 
 @pytest.mark.parametrize("hugepages", [False, True])
-def test_buffer_rounds_up_populates_and_skips_fork(hugepages: bool):
+@pytest.mark.parametrize("thp_enabled", [False, True])
+def test_buffer_rounds_up_populates_and_skips_fork(
+    monkeypatch, hugepages: bool, thp_enabled: bool
+):
+    monkeypatch.setenv("THP_MEM_ALLOC_ENABLE", "1" if thp_enabled else "0")
     page = hugepage_with_free(2) if hugepages else mmap.PAGESIZE
-    buf = HostBuffer(page + 1, page if hugepages else None, numa_node=0)
+    buf = HostBuffer(page + 1, page if hugepages else None)
     assert buf.nbytes == 2 * page
     assert buf.tensor.data_ptr() % page == 0
     assert int(buf.tensor[::4096].abs().sum()) == 0  # kernel-zeroed
-    flags, policy = mapping_info(buf.tensor.data_ptr())
+    flags, _ = mapping_info(buf.tensor.data_ptr())
     assert "dc" in flags  # MADV_DONTFORK sets VM_DONTCOPY
     assert ("ht" in flags) == hugepages
+    assert ("hg" in flags) == (thp_enabled and not hugepages)
+
+
+def test_buffer_prefers_numa_node():
+    buf = HostBuffer(mmap.PAGESIZE, numa_node=0)
+    if buf.numa_node is None:
+        pytest.skip("NUMA placement is unsupported or blocked")
+    _, policy = mapping_info(buf.tensor.data_ptr())
+    if policy is None:
+        pytest.skip("NUMA policy is not visible in /proc/self/numa_maps")
     assert policy == "prefer:0"
 
 

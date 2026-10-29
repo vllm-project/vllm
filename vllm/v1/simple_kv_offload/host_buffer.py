@@ -22,6 +22,7 @@ HUGEPAGE_SIZES = {"2MB": 2 << 20, "1GB": 1 << 30}
 
 _MAP_HUGETLB = 0x40000
 _MAP_HUGE_SHIFT = 26
+_MADV_HUGEPAGE = getattr(mmap, "MADV_HUGEPAGE", 14)
 _MADV_DONTFORK = getattr(mmap, "MADV_DONTFORK", 10)
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 _MPOL_PREFERRED = 1
@@ -71,9 +72,15 @@ class HostBuffer:
         # Children never need the buffer, so fork() neither copies nor
         # copy-on-write shares the pinned pages.
         self._mmap.madvise(_MADV_DONTFORK)
+        if not hugepage_size and os.environ.get("THP_MEM_ALLOC_ENABLE") == "1":
+            try:
+                self._mmap.madvise(_MADV_HUGEPAGE)
+            except OSError as e:
+                logger.warning("MADV_HUGEPAGE failed: %s", e)
         self.tensor = torch.frombuffer(memoryview(self._mmap), dtype=torch.int8)
-        if numa_node is not None:
-            self._prefer_node(numa_node)
+        self.numa_node: int | None = None
+        if numa_node is not None and self._prefer_node(numa_node):
+            self.numa_node = numa_node
         try:
             # Fault every page now: a cgroup or pool shortfall becomes an
             # error here instead of SIGBUS or an OOM kill while serving.
@@ -87,10 +94,10 @@ class HostBuffer:
                 f"{e}. The container's memory or hugetlb limit is too small."
             ) from e
 
-    def _prefer_node(self, node: int) -> None:
+    def _prefer_node(self, node: int) -> bool:
         nr = _SYS_MBIND.get(platform.machine())
         if nr is None:
-            return
+            return False
         mask = (ctypes.c_ulong * (node // 64 + 1))()
         mask[node // 64] = 1 << (node % 64)
         libc = ctypes.CDLL(None, use_errno=True)
@@ -107,3 +114,5 @@ class HostBuffer:
         if ret != 0:
             err = ctypes.get_errno()
             logger.warning("mbind to NUMA node %d failed: %s", node, os.strerror(err))
+            return False
+        return True

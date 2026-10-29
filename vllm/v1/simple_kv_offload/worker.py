@@ -19,6 +19,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -39,11 +40,13 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
         cpu_hugepage_size: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self._num_cpu_blocks_override = num_cpu_blocks
         self.disk_path = disk_path
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
@@ -165,7 +168,10 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        self.num_cpu_blocks = self._resolve_num_cpu_blocks(
+            self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
+            total_bytes_per_block,
+        )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
@@ -179,20 +185,29 @@ class SimpleCPUOffloadWorker:
         else:
             self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
 
+    def _resolve_num_cpu_blocks(self, capacity_bytes: int, bytes_per_block: int) -> int:
+        local_capacity = capacity_bytes // bytes_per_block
+        requested = self._num_cpu_blocks_override
+        if requested is None:
+            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
+        if type(requested) is not int or not 0 < requested <= local_capacity:
+            raise ValueError(
+                f"num_cpu_blocks={requested!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
+        return requested
+
     def _init_disk_mode(
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
-        self.num_cpu_blocks = num_disk_slots
-
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
-            num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -204,7 +219,7 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
             rank_path,
-            num_disk_slots,
+            self.num_cpu_blocks,
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
@@ -248,12 +263,7 @@ class SimpleCPUOffloadWorker:
         device: torch.device,
         pin_memory: bool,
     ) -> dict[str, torch.Tensor]:
-        """Carve every per-layer CPU cache out of one host mapping, pinned once.
-
-        The mapping is sized from the user's per-rank capacity, so a rank uses
-        ceil(capacity / page size) pages. On CUDA a single registration of
-        >= 512 GiB fails (vllm-project/vllm#51081).
-        """
+        """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
         layer_bytes = [
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
@@ -289,7 +299,7 @@ class SimpleCPUOffloadWorker:
             buf.nbytes / (1024**3),
             buf.page_size >> 10,
             device,
-            numa_node,
+            buf.numa_node,
             populated - start,
             pinned - populated,
         )

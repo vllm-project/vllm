@@ -73,7 +73,7 @@ def test_python_error():
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-def test_basic_cumem():
+def test_basic_cumem(monkeypatch):
     # some tensors from default memory pool
     shape = (1024, 1024)
     x = torch.empty(shape, device=DEVICE_TYPE)
@@ -97,7 +97,17 @@ def test_basic_cumem():
     # Track the allocator's own mapped bytes, not device-wide free memory.
     mapped_bytes = mapped_usage(allocator)
     assert mapped_bytes >= y.nbytes + z.nbytes
+
+    empty_cache_calls = []
+    original_empty_cache = torch.accelerator.empty_cache
+
+    def record_empty_cache():
+        empty_cache_calls.append(True)
+        return original_empty_cache()
+
+    monkeypatch.setattr(torch.accelerator, "empty_cache", record_empty_cache)
     allocator.sleep()
+    assert len(empty_cache_calls) == 1
     assert mapped_usage(allocator) == 0
     allocator.wake_up()
     assert mapped_usage(allocator) == mapped_bytes
@@ -105,6 +115,26 @@ def test_basic_cumem():
     # they can be used together
     output = x + y + z
     assert torch.allclose(output, torch.ones_like(output) * 3)
+
+    # Freeing a cuMem allocation synchronizes its device through the accelerator.
+    sync_devices = []
+    original_synchronize = torch.accelerator.synchronize
+
+    def record_synchronize(device=None):
+        sync_devices.append(device)
+        return original_synchronize(device)
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_synchronize)
+    with allocator.use_memory_pool("free-test"):
+        temp = torch.empty(4 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    device_index = torch.accelerator.current_device_index()
+    del temp
+    gc.collect()
+    # Re-entering the tag trims the freed block and runs the free callback.
+    with allocator.use_memory_pool("free-test"):
+        pass
+    assert device_index is not None
+    assert device_index in sync_devices
 
 
 @pytest.mark.parametrize("full_sleep", [0, 1, 2], ids=["kv-only", "sleep-1", "sleep-2"])
@@ -359,7 +389,7 @@ def test_runtime_state_survives_sleep(level):
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
-    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):
@@ -374,8 +404,9 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
     torch.accelerator.synchronize()
 
     assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
-    assert torch.all(fake_weight == 0xA5)
-    assert torch.all(ordinary_tensor == 0xA5)
+    expected = 0 if current_platform.is_rocm() else 0xA5
+    assert torch.all(fake_weight == expected)
+    assert torch.all(ordinary_tensor == expected)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -427,7 +458,9 @@ def test_cumem_with_cudagraph():
 
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_cudagraph_pool_sleep(level):
     """Routing, and the graph pool backed up at both sleep levels and restored
     in place by any wake."""

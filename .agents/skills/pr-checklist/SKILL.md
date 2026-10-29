@@ -104,6 +104,8 @@ When adding or modifying tests, consider both the coverage and the effectiveness
 
 Assess whether the included test cases are meaningful, concise, and maintainable. Testing should not be exhaustive: local validation is typically sufficient to ensure a baseline correctness of the change. Contributed tests should focus exclusively on areas that are deemed prone to errors, regressions, or complex interactions within the codebase. Recommend deletion of redundant, trivial, or otherwise unnecessary tests: this is one of the most common complaints raised during code reviews.
 
+Check added and changed tests against [`tests/AGENTS.md`](../../../tests/AGENTS.md). For reproducible bugs, the PR must show the new test failing without the fix and passing with it.
+
 Verify that testing actually exercises the new path, rather than passing through an unchanged path or fallback. Ensure added speculative decoding correctness tests assert nonzero acceptance rate, selection tests identify the desired backend, etc.
 
 Aim to write tests that are meaningful, targeted, and maintainable. Avoid redundant or trivial tests that do not contribute to the overall reliability of the test suite. Avoid using mock objects, especially when highly coupled with internal logic.
@@ -135,7 +137,7 @@ For bug fixes, there is no need to include details of the original bug and expla
 
 #### 3.2: Documentation and Examples
 
-Ensure that any new features, changes, or public APIs are properly documented. This includes updating relevant documentation files under `docs/` and providing usage examples where applicable. Refer to `supported_models.md` for new models and `examples/` for usage examples.
+User-visible changes need docs in the same PR, placed and checked per [Documenting User-Visible Changes](../../../docs/contributing/README.md#documenting-user-visible-changes); missing or unfindable docs are blocking. Add usage examples under `examples/` where applicable.
 
 #### 3.3: Helper Functions
 
@@ -180,6 +182,8 @@ Summarize model evaluations and benchmarks in compact tables with the configurat
 #### 4.3: Root-Cause Analysis
 
 When fixing bugs or issues, provide a clear root-cause analysis. Explain what caused the problem, how it was identified, and why the chosen solution effectively addresses it. A patch which resolves the issue without a proper root-cause analysis may lead to recurring problems and increased maintenance overhead.
+
+For fixes that involve disaggregated prefill/decode (PD) logic, such as the NIXL connector (`vllm/distributed/kv_transfer/kv_connector/v1/nixl/`), make a best effort to include a minimal example of the flow being changed and/or the initial flow that caused the failure. A short numbered sequence (or diagram) of a request's path across the P and D instances, e.g. scheduler admission, prefill execution, KV transfer registration and write, decode-side read, token generation, lets reviewers trace the root cause and the fix without reconstructing the distributed flow from the diff. Keep the example minimal: only the steps and components involved in the change. See the [disaggregated prefill](../../../docs/features/disagg_prefill.md), [NIXL KV push](../../../docs/design/nixl_kv_push_connector.md), and [NIXL KV cache lease](../../../docs/design/nixl_kv_cache_lease.md) docs for the flows involved.
 
 #### 4.4: Implementation Details
 

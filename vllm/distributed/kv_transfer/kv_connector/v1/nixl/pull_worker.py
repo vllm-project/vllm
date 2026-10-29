@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -43,6 +43,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Registration generation of each remote engine's loaded agent.
+        self._remote_registration_generations: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -141,6 +143,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
+        generation = meta.remote.registration_generation
+        if self._remote_registration_generations.get(engine_id, 0) < generation:
+            # The remote registered its KV cache again, eg after a sleep.
+            if engine_id in self._remote_agents:
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
+            self._remote_registration_generations[engine_id] = generation
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
@@ -593,7 +601,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),

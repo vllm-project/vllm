@@ -3,6 +3,7 @@
 """Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
 
 import ctypes
+import time
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -20,6 +21,8 @@ logger = init_logger(__name__)
 CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
 
+_HOST_REGISTER_CHUNK_BYTES = 1 << 30
+
 
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Pin a CPU tensor via cudaHostRegister.
@@ -28,9 +31,22 @@ def pin_tensor(tensor: torch.Tensor) -> None:
     every ``pin_memory=True`` allocation up to the next power of 2
     (e.g. 100 GB becomes 128 GB).
     """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
+    cudart = torch.cuda.cudart()
+    base = tensor.data_ptr()
+    registered = []
+    try:
+        for offset in range(0, tensor.nbytes, _HOST_REGISTER_CHUNK_BYTES):
+            if offset:
+                time.sleep(0)  # Let other threads issue CUDA calls between chunks.
+            size = min(_HOST_REGISTER_CHUNK_BYTES, tensor.nbytes - offset)
+            err = cudart.cudaHostRegister(base + offset, size, 0)
+            if err.value != 0:
+                raise RuntimeError(f"cudaHostRegister failed at offset {offset}: {err}")
+            registered.append(base + offset)
+    except Exception:
+        for ptr in reversed(registered):
+            cudart.cudaHostUnregister(ptr)
+        raise
 
 
 class _CUmemLocation(ctypes.Structure):

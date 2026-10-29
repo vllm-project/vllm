@@ -6,14 +6,12 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -29,10 +27,10 @@ from vllm.model_executor.models.qwen3_next import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
 from .utils import (
     AutoWeightsLoader,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -95,10 +93,10 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             for idx in range(self.num_mtp_layers)
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen3NextSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -164,7 +162,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -227,15 +225,18 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        shared_weight_names = ["embed_tokens", "lm_head"]
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return not name.startswith("mtp.") and not any(
+            key in name for key in ["embed_tokens", "lm_head"]
+        )
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
+                if self.is_unused_checkpoint_weight(name):
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif not any(key in name for key in shared_weight_names):
-                    continue
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
