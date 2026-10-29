@@ -501,3 +501,39 @@ class TestAsyncLookupManager:
         assert mgr._lookup_state[key].result is True
         mgr.cleanup("req_a")
         mgr.cleanup("req_b")
+
+    def test_store_drops_orphaned_in_flight_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A store must not retain an in-flight state after its request ended."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+
+        def blocking_lookup(keys, req_context):
+            results = list(batch_lookup(keys, req_context))
+            probe_started.set()
+            if not release_probe.wait(timeout=5):
+                raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key, _ctx("req_a")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+            mgr.cleanup("req_a")
+            assert key in mgr._lookup_state
+            assert not mgr._lookup_state[key].request_ids
+
+            mgr._existing.add(key)
+            mgr.mark_present([key])
+            assert key not in mgr._lookup_state
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        assert key not in mgr._lookup_state

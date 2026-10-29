@@ -286,7 +286,7 @@ class FileSystemTierManager(SecondaryTierManager):
             transfer_bytes = block_count * self._block_size if block_count else None
             keys = self._store_job_keys.pop(job_id, None)
             if keys and success:
-                # Successful store: drop the cached absent verdict so it re-probes.
+                # Successful store makes previously absent keys known-present.
                 self._lookup_manager.mark_present(keys)
                 if self.events is not None:
                     self.events.append(
