@@ -17,6 +17,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
+    override_config,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -31,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -253,6 +257,57 @@ def test_w8a8_block_fp8_fused_moe(
 
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("M", [24, 1024])
+@pytest.mark.parametrize("modular", [False, True])
+@torch.inference_mode()
+def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
+    if "H200" not in torch.cuda.get_device_name():
+        pytest.skip("This block FP8 TMA test targets H200")
+
+    E, N, K, topk = 256, 256, 128, 8
+    torch.manual_seed(123)
+    a = torch.randn((M, K), dtype=torch.bfloat16) / 10
+    score = torch.randn((M, E), dtype=torch.bfloat16)
+    w1, w2, quant_config = make_test_quant_config(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=[128, 128]
+    )
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    config_args = (w1.shape, w2.shape, topk, "fp8_w8a8", M)
+    config = try_get_optimal_moe_config(*config_args, block_shape=[128, 128])
+    assert w2.is_contiguous()
+
+    if modular:
+        moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+
+        def run():
+            return moe.apply(
+                a,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation=MoEActivation.SILU,
+                apply_router_weight_on_input=False,
+                expert_map=None,
+                global_num_experts=E,
+            )
+
+    else:
+
+        def run():
+            return fused_experts(
+                a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+            )
+
+    with set_current_vllm_config(vllm_config):
+        with override_config({**config, "USE_TMA": False}):
+            pointer_output = run()
+        tma_output = run()
+
+    torch.testing.assert_close(tma_output, pointer_output, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])

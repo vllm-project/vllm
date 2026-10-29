@@ -33,6 +33,27 @@ pub(crate) fn validate_generation_prompt_truncation(
     Ok(())
 }
 
+/// Reject an output budget larger than the whole context window, like
+/// Python's `TokenizeParams` check for chat and completions. A budget that
+/// fits the window is still clamped to the room the prompt leaves when the
+/// request is lowered; `/inference/v1/generate` only clamps, as in Python.
+pub(crate) fn validate_max_output_tokens(
+    param: &'static str,
+    max_tokens: Option<u32>,
+    max_model_len: u32,
+) -> Result<(), ApiError> {
+    if let Some(max_tokens) = max_tokens
+        && max_tokens > max_model_len
+    {
+        bail_invalid_request!(
+            param = param,
+            "{param}={max_tokens} cannot be greater than max_model_len={max_model_len}. \
+             Please request fewer output tokens."
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_generation_prompt_truncation(
     limit: Option<i64>,
     side: Option<TruncationSide>,
