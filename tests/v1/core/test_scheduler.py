@@ -2924,7 +2924,7 @@ def test_spec_decode_stats_keep_batch_after_all_padding_draft():
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
     # Async scheduling schedules placeholder draft slots for both requests.
     output = scheduler.schedule()
-    output.num_invalid_spec_tokens = {req_ids[1]: 2}
+    output.num_async_padding_slots = {req_ids[1]: 2}
     engine_outputs = scheduler.update_from_output(output, _mk_output([[1, 9], [5]]))
 
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats

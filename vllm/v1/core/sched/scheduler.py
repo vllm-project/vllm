@@ -2342,8 +2342,8 @@ class Scheduler(SchedulerInterface):
                 # scheduling records the drafter's proposal before trimming,
                 # async scheduling only sees the scheduled slots.
                 num_verified = num_draft_tokens
-                if scheduler_output.num_invalid_spec_tokens:
-                    num_verified -= scheduler_output.num_invalid_spec_tokens.get(
+                if scheduler_output.num_async_padding_slots:
+                    num_verified -= scheduler_output.num_async_padding_slots.get(
                         req_id, 0
                     )
                 num_proposed = max(num_verified, request.num_proposed_spec_tokens)
@@ -2866,7 +2866,7 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_invalid_spec_tokens: dict[str, int] = {}
+        num_async_padding_slots: dict[str, int] = {}
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
@@ -2888,14 +2888,14 @@ class Scheduler(SchedulerInterface):
             del spec_token_ids[orig_num_spec_tokens:]
             # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
-            num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
-            if num_invalid_tokens:
-                spec_token_ids.extend([-1] * num_invalid_tokens)
-                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+            num_padding_slots = orig_num_spec_tokens - len(spec_token_ids)
+            if num_padding_slots:
+                spec_token_ids.extend([-1] * num_padding_slots)
+                num_async_padding_slots[req_id] = num_padding_slots
 
             sched_spec_tokens[req_id] = spec_token_ids
 
-        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
+        scheduler_output.num_async_padding_slots = num_async_padding_slots
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
