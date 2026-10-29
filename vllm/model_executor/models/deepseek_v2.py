@@ -1247,8 +1247,6 @@ class DeepseekV2MLAAttention(nn.Module):
 
 
 class DeepseekV2DecoderLayer(nn.Module):
-    mha_attn_cls: type[nn.Module] = DeepseekAttention
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1287,7 +1285,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         attn_cls: typing.Any
         if use_mha:
-            attn_cls = self.mha_attn_cls
+            attn_cls = DeepseekAttention
         elif model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
@@ -1428,7 +1426,6 @@ class DeepseekV2DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
-    decoder_layer_cls = DeepseekV2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1470,7 +1467,7 @@ class DeepseekV2Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: self.decoder_layer_cls(
+            lambda prefix: DeepseekV2DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -1651,16 +1648,6 @@ class DeepseekV2Model(nn.Module):
         }
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
-                continue
-
-            if (
-                getattr(self.config, "unlimited_ocr2", False)
-                and ".dash_router." in name
-            ):
-                # These replicated projections are not the main QKV shards.
-                param = params_dict[name]
-                default_weight_loader(param, loaded_weight)
-                loaded_params.add(name)
                 continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)

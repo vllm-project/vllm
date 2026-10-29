@@ -63,17 +63,28 @@ processing cache consistent (verified by ``test_processing_correctness``).
 """
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import torch
+from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
 from vllm.model_executor.layers.dash_attention import DASHAttention
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2ForCausalLM,
+    DeepseekV2MLP,
     DeepseekV2Model,
+    DeepseekV2MoE,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
@@ -88,6 +99,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import MultiModalProcessingResult
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -103,6 +115,7 @@ from .deepseek_ocr import (
     DeepseekOCRProcessingInfo,
     NGramPerReqLogitsProcessor,
 )
+from .utils import make_empty_intermediate_tensors_factory, make_layers
 
 __all__ = [
     "NGramPerReqLogitsProcessor",
@@ -290,11 +303,105 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
 
 
 class UnlimitedOCR2DecoderLayer(DeepseekV2DecoderLayer):
-    mha_attn_cls = DASHAttention
+    def __init__(self, vllm_config: VllmConfig, prefix: str):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_config
+        parallel_config = vllm_config.parallel_config
+        quant_config = vllm_config.quant_config
+        self.hidden_size = config.hidden_size
+        self.layer_idx = int(prefix.split(".")[-1])
+        self.use_mha = True
+        is_moe_layer = (
+            config.n_routed_experts is not None
+            and self.layer_idx >= config.first_k_dense_replace
+            and self.layer_idx % getattr(config, "moe_layer_freq", 1) == 0
+        )
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
+        )
+        self.self_attn = DASHAttention(
+            vllm_config=vllm_config,
+            config=config,
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+            reduce_results=not self.use_sequence_parallel_moe,
+        )
+        if is_moe_layer:
+            self.mlp = DeepseekV2MoE(
+                config=config,
+                parallel_config=parallel_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+            )
+        else:
+            self.mlp = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
 
+@support_torch_compile
 class UnlimitedOCR2Model(DeepseekV2Model):
-    decoder_layer_cls = UnlimitedOCR2DecoderLayer
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Build only DASH layers; the inherited forward and MoE loader are reused.
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        self.device = current_platform.device_type
+        self.hidden_size = config.hidden_size
+        self.vocab_size = config.vocab_size
+        self.is_v32 = False
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            self.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_tokens",
+        )
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: UnlimitedOCR2DecoderLayer(vllm_config, prefix),
+            prefix=f"{prefix}.layers",
+        )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers, DeepseekV2MoE, "mlp"
+        )
+        self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.hidden_size
+        )
+        self.aux_hidden_state_layers = tuple[int, ...]()
+        self.use_mha = True
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        params = dict(self.named_parameters())
+        loaded = set()
+
+        def backbone_weights():
+            for name, weight in weights:
+                if ".dash_router." in name:
+                    # Router projections are replicated, not main QKV shards.
+                    default_weight_loader(params[name], weight)
+                    loaded.add(name)
+                else:
+                    yield name, weight
+
+        loaded.update(super().load_weights(backbone_weights()))
+        return loaded
 
 
 class UnlimitedOCR2TextForCausalLM(DeepseekV2ForCausalLM):
