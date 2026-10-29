@@ -12,11 +12,11 @@ import torch
 def _compute_slot_mapping_kernel_impl(
     num_tokens: int,
     max_num_tokens: int,
-    query_start_loc_ptr: torch.Tensor,  # [num_reqs + 1], int32
-    positions_ptr: torch.Tensor,  # [num_tokens], int64
-    block_table_ptr: torch.Tensor,  # [max_num_reqs, max_num_blocks_per_req], int32
+    query_start_loc: torch.Tensor,  # [num_reqs + 1], int32
+    positions: torch.Tensor,  # [num_tokens], int64
+    block_table: torch.Tensor,  # [max_num_reqs, max_num_blocks_per_req], int32
     block_table_stride: int,  # max_num_blocks_per_req
-    slot_mapping_ptr: torch.Tensor,  # [max_num_tokens], int64
+    slot_mapping: torch.Tensor,  # [max_num_tokens], int64
     KV_CACHE_BLOCK_SIZE: int,
     TOTAL_CP_WORLD_SIZE: int = 1,
     TOTAL_CP_RANK: int = 0,
@@ -26,10 +26,10 @@ def _compute_slot_mapping_kernel_impl(
 ) -> None:
     assert TOTAL_CP_WORLD_SIZE == 1, "Context Parallelism is not supported on CPU."
     torch.ops._C.compute_slot_mapping_kernel_impl(
-        query_start_loc_ptr,
-        positions_ptr,
-        block_table_ptr,
-        slot_mapping_ptr,
+        query_start_loc,
+        positions,
+        block_table,
+        slot_mapping,
         KV_CACHE_BLOCK_SIZE,
     )
 

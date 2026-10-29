@@ -24,6 +24,7 @@ from vllm.v1.worker.block_table import ComputeSlotMappingKernel  # noqa: E402
         ([0, 3], [0, 1, 2], [[5, 9]], [80, 81, 82]),
         ([0, 2, 5], [15, 16, 1, 15, 16], [[5, 9], [3, 7]], [95, 144, 49, 63, 112]),
     ],
+    ids=["single_request", "multiple_requests_cross_block_boundary"],
 )
 def test_cpu_slot_mapping_launch_preserves_request_and_block_boundaries(
     query_start_loc, positions, blocks, expected
