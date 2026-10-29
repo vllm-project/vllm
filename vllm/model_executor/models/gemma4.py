@@ -21,6 +21,7 @@
 from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -1421,6 +1422,8 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
+    is_3d_moe_weight: ClassVar[bool] = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # Multimodal weights are handled by the multimodal wrapper.
