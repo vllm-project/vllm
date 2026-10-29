@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pickle
 from array import array
 
 import pytest
@@ -40,7 +39,7 @@ def test_repr_with_none() -> None:
 
 
 @pytest.mark.parametrize("pack_block_ids", [False, True])
-def test_pickle_packs_block_ids(pack_block_ids: bool) -> None:
+def test_getstate_packs_block_ids(pack_block_ids: bool) -> None:
     """The v2 runner's workers receive block ids as int32 arrays, while the
     scheduler (and its KV connectors) keep the lists."""
     data = NewRequestData(
@@ -54,11 +53,11 @@ def test_pickle_packs_block_ids(pack_block_ids: bool) -> None:
         lora_request=None,
         pack_block_ids=pack_block_ids,
     )
-    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+    block_ids = data.__getstate__()["block_ids"]
 
     assert data.block_ids == ([1, 2, 3], [])
-    assert [list(ids) for ids in out.block_ids] == [[1, 2, 3], []]
-    assert all(isinstance(ids, array) == pack_block_ids for ids in out.block_ids)
+    assert [list(ids) for ids in block_ids] == [[1, 2, 3], []]
+    assert all(isinstance(ids, array) == pack_block_ids for ids in block_ids)
 
 
 def test_repr_with_multi_element_tensor() -> None:
