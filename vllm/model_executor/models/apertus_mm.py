@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from math import isqrt
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.nn.functional as F
@@ -16,12 +16,16 @@ from transformers import (
     AutoConfig,
     AutoModel,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 from transformers.models.wavtokenizer import WavTokenizerFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import (
+    AudioDummyOptions,
+    BaseDummyOptions,
+    ImageDummyOptions,
+)
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -41,6 +45,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -107,7 +112,7 @@ def _pad_logits_to_input_vocab(
 
 
 def _init_component_model(
-    component_config: PretrainedConfig,
+    component_config: PreTrainedConfig,
     model_cls: type[torch.nn.Module] | None = None,
 ) -> torch.nn.Module:
     config_dict = component_config.to_dict()
@@ -217,12 +222,12 @@ class Apertus1p5DummyInputsBuilder(BaseDummyInputsBuilder[Apertus1p5ProcessingIn
                 width=max_image_side,
                 height=max_image_side,
                 num_images=mm_counts.get("image", 0),
-                overrides=image_overrides,
+                overrides=cast(ImageDummyOptions | None, image_overrides),
             ),
             "audio": self._get_dummy_audios(
                 length=feature_extractor.sampling_rate * _MAX_AUDIO_SECONDS,
                 num_audios=mm_counts.get("audio", 0),
-                overrides=audio_overrides,
+                overrides=cast(AudioDummyOptions | None, audio_overrides),
             ),
         }
 
@@ -234,10 +239,8 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
         self,
         info: Apertus1p5ProcessingInfo,
         dummy_inputs: BaseDummyInputsBuilder,
-        *,
-        cache: object | None = None,
     ) -> None:
-        super().__init__(info, dummy_inputs, cache=cache)
+        super().__init__(info, dummy_inputs)
         config = info.get_hf_config()
         self.image_token_id = getattr(config, "image_token_id", _DEFAULT_IMAGE_TOKEN_ID)
         self.audio_token_id = getattr(config, "audio_token_id", _DEFAULT_AUDIO_TOKEN_ID)
@@ -325,42 +328,34 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
             ),
         ]
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        return self._apply_hf_processor_tokens_only(prompt)
+
     def _call_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data.get("images", []) and not mm_data.get("audios", []):
-            # Apertus HF rejects raw MM markers without their media. The cache's
-            # text-only pass needs those raw markers so BaseMultiModalProcessor
-            # can apply the cached PromptReplacement entries itself.
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=tok_kwargs.get("add_special_tokens", True),
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        item_processor_data = dict(mm_data)
-        audios = item_processor_data.pop("audios", [])
-        if audios:
-            # MultiModalDataItems uses the plural modality key; HF uses audio.
-            item_processor_data["audio"] = audios
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=item_processor_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs={**tok_kwargs, "padding": True},
+        processor_kwargs = dict(hf_kwargs, padding=True)
+        if hf_data.get("audio"):
+            feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+            processor_kwargs["sampling_rate"] = feature_extractor.sampling_rate
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        processor_kwargs = self.info.ctx.get_merged_mm_kwargs(processor_kwargs)
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            hf_processor,
+            processor_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
+
+        # The generic context downcasts media to the language model dtype.
+        # Both discrete codec towers require unrounded FP32 inputs.
+        processed_outputs = hf_processor(**hf_data, **allowed_kwargs)
 
         if "pixel_values" in processed_outputs:
             pixel_values = processed_outputs["pixel_values"]
@@ -466,7 +461,6 @@ class Apertus1p5ForConditionalGeneration(
 
         # A single primary source now yields the vision/audio tensors too (routed by
         # hf_to_vllm_mapper)
-        self.secondary_weights = []
         if get_pp_group().is_first_rank:
             with set_default_torch_dtype(torch.float32):
                 with self._mark_tower_model(vllm_config, "image"):
@@ -516,8 +510,7 @@ class Apertus1p5ForConditionalGeneration(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _get_module_device_dtype(
