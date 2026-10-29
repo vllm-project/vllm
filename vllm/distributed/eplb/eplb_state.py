@@ -222,6 +222,11 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    num_committed_layers: int = 0
+    """
+    Number of layers committed by move_to_workspace in the current async EPLB
+    rearrangement.
+    """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
     Per-ubatch scalar int32 tensors holding the number of real (non-padding)
@@ -258,6 +263,7 @@ class EplbState:
         """
         Steps after last rearrangement.
         Will trigger a rearrangement if it exceeds the threshold.
+        In async mode, it is reset again when the last layer is committed.
 
         NOTE: Keep in mind that all EP ranks need to have the same
         `expert_rearrangement_step` value to ensure synchronization.
@@ -631,17 +637,30 @@ class EplbState:
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
                 if ep_group.rank() == 0:
+                    if self._async_rearrangement_in_progress():
+                        rearrangement_status = (
+                            "async rearrangement in progress: "
+                            f"{eplb_model_state.num_committed_layers}/"
+                            f"{eplb_model_state.model.num_moe_layers} "
+                            "layers committed"
+                        )
+                    else:
+                        steps_left = (
+                            self.expert_rearrangement_step_interval
+                            - self.expert_rearrangement_step
+                        )
+                        rearrangement_status = (
+                            f"steps until the next rearrangement: {steps_left}"
+                        )
                     logger.info(
                         "EPLB step: %d for model %s: avg_tokens=%.2f, "
-                        "max_tokens=%d, balancedness=%.4f, "
-                        "steps until the next rearrangement: %d",
+                        "max_tokens=%d, balancedness=%.4f, %s",
                         self.expert_rearrangement_step,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
                         balancedness,
-                        self.expert_rearrangement_step_interval
-                        - self.expert_rearrangement_step,
+                        rearrangement_status,
                     )
 
         # Update the expert load sliding window
@@ -678,12 +697,28 @@ class EplbState:
                         model_state=eplb_model_state,
                         ep_rank=ep_group.rank(),
                     )
+                    if not self._async_rearrangement_in_progress():
+                        # Count the interval from when the new placement is fully
+                        # in place, so the next load window is recorded under it.
+                        self.expert_rearrangement_step = 0
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
-            if self.is_async and any(
-                eplb_model_state.rebalanced
-                for eplb_model_state in self.model_states.values()
-            ):
+            if self._async_rearrangement_in_progress():
+                if (
+                    ep_group.rank() == 0
+                    and self.expert_rearrangement_step
+                    % self.expert_rearrangement_step_interval
+                    == 0
+                ):
+                    logger.warning(
+                        "Async EPLB rearrangement still in progress after %d steps: %s",
+                        self.expert_rearrangement_step,
+                        ", ".join(
+                            f"{ms.model_name} {ms.num_committed_layers}/"
+                            f"{ms.model.num_moe_layers} layers committed"
+                            for ms in self.model_states.values()
+                        ),
+                    )
                 # Still performing asynchronous rearrangement; update
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
@@ -693,6 +728,11 @@ class EplbState:
             self.rearrange()
 
         self._update_layer_should_record(log_stats=log_stats)
+
+    def _async_rearrangement_in_progress(self) -> bool:
+        return self.is_async and any(
+            model_state.rebalanced for model_state in self.model_states.values()
+        )
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -971,6 +1011,7 @@ class EplbState:
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
                 )
+                eplb_model_state.num_committed_layers = 0
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
@@ -1442,6 +1483,7 @@ def _move_to_workspace(
         new_physical_to_logical_map=result.new_physical_to_logical_map,
         layer=result.layer_idx,
     )
+    model_state.num_committed_layers = result.layer_idx + 1
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
