@@ -664,6 +664,13 @@ provide the platform-specific paths. Model-level `torch.compile` is disabled;
 supported decode batches use XPU graph capture and replay. ROCm and other
 platforms retain the legacy compile model.
 
+For Qwen3.5 MoE decode with 1–8 tokens, FP16/BF16 activations and per-tensor
+FP8-e4m3 weights, the XPU model directly uses the routed/shared expert fused
+provider when available in `vllm-xpu-kernels`. It reuses the existing router,
+per-layer weights and scratch space, and reduces the combined TP partial
+output once. Other batches, quantization formats, and unsupported parallel
+configurations use the existing MoE path without requiring a compile pass.
+
 <sup>Q</sup> `Qwen*-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen*`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
 !!! note

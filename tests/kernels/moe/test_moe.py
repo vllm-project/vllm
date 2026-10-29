@@ -69,6 +69,142 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.fixture
+def xpu_qwen3_5_moe(tmp_path, request):
+    """Construct and quantize the model's real MoE block and shared linears."""
+    from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
+
+    from vllm.config import ModelConfig
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    dtype, quantized = request.param
+    text_config = Qwen3_5MoeTextConfig(
+        hidden_size=128,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=8,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=32,
+        vocab_size=128,
+        layer_types=["full_attention"],
+    )
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype=dtype,
+            max_model_len=128,
+        ),
+        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True)
+        if quantized
+        else None,
+    )
+    try:
+        with set_current_vllm_config(config), set_default_torch_dtype(dtype):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                backend=current_platform.dist_backend,
+                distributed_init_method=f"file://{tmp_path / 'distributed'}",
+            )
+            initialize_model_parallel(1, 1)
+            init_workspace_manager(torch.device(DEVICE_TYPE))
+            with torch.device(DEVICE_TYPE):
+                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
+                torch.manual_seed(7)
+                with torch.no_grad():
+                    for name, param in block.named_parameters():
+                        if "scale" in name:
+                            param.fill_(0.0625)
+                        else:
+                            values = torch.randn(param.shape, dtype=torch.float32)
+                            if param.dtype != torch.float8_e4m3fn:
+                                values *= 0.0625
+                            param.copy_(values.to(param.dtype))
+                for layer in block.modules():
+                    method = getattr(layer, "quant_method", None)
+                    if method is not None:
+                        method.process_weights_after_loading(layer)
+            yield block, config, quantized
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize(
+    "xpu_qwen3_5_moe",
+    [(torch.float16, True), (torch.bfloat16, True), (torch.float16, False)],
+    indirect=True,
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 9])
+def test_xpu_qwen3_5_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
+    """Fuse B1-8 and preserve existing model semantics for unsupported calls."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    block, config, quantized = xpu_qwen3_5_moe
+    torch.manual_seed(17)
+    x = torch.randn(
+        num_tokens, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE
+    )
+    with set_forward_context(None, config), torch.inference_mode():
+        expected = Qwen3NextSparseMoeBlock.forward(block, x)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            actual = block(x)
+    native_calls = sum(
+        event.count
+        for event in p.key_averages()
+        if event.key == "_xpu_C::moe_shared_fused_decode_interface"
+    )
+    fused_available = hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
+    should_fuse = quantized and num_tokens <= 8 and fused_available
+    assert native_calls == int(should_fuse)
+    if should_fuse:
+        # The fused and base kernels round projections/activations differently.
+        # Use the native kernel suite's FP16/BF16 tolerance.
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    else:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_shared_expert_preserves_sequence_parallel_input(xpu_qwen3_5_moe):
+    """Already partitioned calls retain the parent block's forward contract."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    block, config, _ = xpu_qwen3_5_moe
+    x = torch.ones(2, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE)
+    with set_forward_context(None, config), torch.inference_mode():
+        expected = Qwen3NextSparseMoeBlock.forward(block, x, True)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            actual = block(x, already_sequence_parallel=True)
+    assert not any(
+        event.key == "_xpu_C::moe_shared_fused_decode_interface"
+        for event in p.key_averages()
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
     captured: dict[str, torch.Tensor] = {}
 
