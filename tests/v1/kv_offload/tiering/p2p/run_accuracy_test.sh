@@ -11,6 +11,8 @@
 #   1. p2p_transfer_check.py - asserts the decoders actually pulled KV over
 #      the p2p tier (gsm8k alone passes even if the decoder recomputes), and
 #   2. the connector-agnostic test_accuracy.py (gsm8k via lm_eval).
+# Cleanup only stops processes and removes /dev/shm files this run created,
+# and the run fails if another job holds one of its fixed ports.
 #
 # Knobs (env vars unless flagged otherwise):
 #   MODEL_NAMES                 space-separated model list (default: Llama-3.2-1B-Instruct)
@@ -196,33 +198,49 @@ wait_for_proxy() {
     done" && return 0 || return 1
 }
 
+# Start a command in its own session and record the session id, so cleanup
+# only touches processes this run started. A session (unlike a process group)
+# also holds the DP API servers, which call setpgrp() and can outlive the
+# parent while keeping the HTTP port via SO_REUSEPORT. Background jobs of a
+# non-interactive shell are not group leaders, so setsid does not fork and $!
+# is the session id.
+start_in_session() {
+  setsid bash -c "$1" &
+  SESSION_IDS+=("$!")
+}
+
 cleanup_instances() {
-  echo "Cleaning up any running vLLM / proxy instances..."
-  pkill -f "p2p_connector_proxy.py" || true
-  pkill -TERM -f "vllm serve" || true
-  sleep 3
-  pkill -9 -f "vllm serve" || true
-  # DP engines/API servers (VLLM::EngineCore_DP*, VLLM::APIServer) can outlive
-  # the parent and keep the HTTP port via SO_REUSEPORT. "[:]" keeps pkill from
-  # matching its own command line.
-  pkill -9 -f "VLLM[:]:" || true
-  sleep 2
-  # A crash before the workers' mapping barrier leaves the CPU tier's shm
-  # file behind; only remove it once no vLLM process can still own it.
-  if ! pgrep -f "VLLM[:]:" > /dev/null; then
-    rm -f /dev/shm/vllm_offload_*.mmap
+  echo "Cleaning up this run's vLLM / proxy instances..."
+  if (( ${#SESSION_IDS[@]} > 0 )); then
+    local sids
+    sids=$(IFS=,; echo "${SESSION_IDS[*]}")
+    pkill -TERM -s "$sids" || true
+    timeout 30 bash -c "while pgrep -s '$sids' > /dev/null; do sleep 1; done" \
+      || pkill -KILL -s "$sids" || true
+    timeout 30 bash -c "while pgrep -s '$sids' > /dev/null; do sleep 1; done" || true
+    SESSION_IDS=()
   fi
+  # A crash before the workers' mapping barrier leaves the CPU tier's shm
+  # file behind. Every instance's engine_id starts with RUN_ID, so this only
+  # matches files from this run, whose owners are gone by now.
+  rm -f /dev/shm/vllm_offload_"${RUN_ID}"_*
   local port
   for port in $(seq "$PREFILL_HTTP_BASE" $((PREFILL_HTTP_BASE + NUM_PREFILL_INSTANCES - 1))) \
       $(seq "$DECODE_HTTP_BASE" $((DECODE_HTTP_BASE + NUM_DECODE_INSTANCES - 1))) \
       "$PROXY_PORT"; do
-    timeout 60 bash -c "while (echo > /dev/tcp/127.0.0.1/${port}) 2>/dev/null; do sleep 1; done" \
-      || echo "Warning: port ${port} still in use after cleanup"
+    if ! timeout 60 bash -c "while (echo > /dev/tcp/127.0.0.1/${port}) 2>/dev/null; do sleep 1; done"; then
+      # Another job owns it; starting on top of it would mix servers.
+      echo "Error: port ${port} is in use by a process this run did not start"
+      return 1
+    fi
   done
 }
 
-# Kill background jobs and any engine processes they left behind.
-trap 'kill $(jobs -pr) 2>/dev/null || true; cleanup_instances' SIGINT SIGTERM EXIT
+# Sessions started by this run (see start_in_session) and the prefix of every
+# instance's engine_id.
+SESSION_IDS=()
+RUN_ID="p2p_e2e_$$"
+trap 'cleanup_instances || true' SIGINT SIGTERM EXIT
 
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
@@ -247,13 +265,15 @@ gpu_list() {
 
 # Build the OffloadingConnector kv-transfer-config for a given PD port.
 build_kv_config() {
-  local pd_port=$1
+  local pd_port=$1 name=$2
   local canonical=""
   if [[ "$CANONICAL_LAYOUT" == "1" ]]; then
     canonical=',"canonical_layout":true'
   fi
-  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s%s,"secondary_tiers":[{"type":"p2p","host":"%s","port":%s}]}}' \
-    "${CPU_BYTES}" "${canonical}" "${P2P_HOST}" "${pd_port}"
+  # engine_id names the CPU tier's /dev/shm file; the RUN_ID prefix lets
+  # cleanup remove only this run's leftovers.
+  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","engine_id":"%s","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s%s,"secondary_tiers":[{"type":"p2p","host":"%s","port":%s}]}}' \
+    "${RUN_ID}_${name}" "${CPU_BYTES}" "${canonical}" "${P2P_HOST}" "${pd_port}"
 }
 
 # Append the knobs shared by prefillers and decoders to BASE_CMD.
@@ -324,7 +344,7 @@ run_tests_for_model() {
     local pd_port=$((PREFILL_PD_BASE + i * PD_PORT_STRIDE))
     local internal_port=$((PREFILLER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
     local kv_cfg
-    kv_cfg=$(build_kv_config "${pd_port}")
+    kv_cfg=$(build_kv_config "${pd_port}" "prefill${i}")
 
     echo "Prefiller $i: gpu=[${cuda_devs}] http=${http_port} pd=${pd_port}"
 
@@ -356,7 +376,7 @@ run_tests_for_model() {
     fi
     append_common_args
 
-    eval "${BASE_CMD} &"
+    start_in_session "${BASE_CMD}"
 
     PREFILL_HOSTS+=("${P2P_HOST}")
     PREFILL_PORTS+=("${http_port}")
@@ -373,7 +393,7 @@ run_tests_for_model() {
     local pd_port=$((DECODE_PD_BASE + i * PD_PORT_STRIDE))
     local internal_port=$((DECODER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
     local kv_cfg
-    kv_cfg=$(build_kv_config "${pd_port}")
+    kv_cfg=$(build_kv_config "${pd_port}" "decode${i}")
 
     echo "Decoder   $i: gpu=[${cuda_devs}] http=${http_port} pd=${pd_port}"
 
@@ -406,7 +426,7 @@ run_tests_for_model() {
     fi
     append_common_args
 
-    eval "${BASE_CMD} &"
+    start_in_session "${BASE_CMD}"
 
     DECODE_HOSTS+=("${P2P_HOST}")
     DECODE_PORTS+=("${http_port}")
@@ -447,7 +467,7 @@ run_tests_for_model() {
   fi
 
   echo "Starting proxy: ${PROXY_CMD}"
-  eval "${PROXY_CMD} &"
+  start_in_session "${PROXY_CMD}"
   wait_for_proxy
 
   # ---- Assert KV moved over the p2p tier ----
