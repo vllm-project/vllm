@@ -398,8 +398,10 @@ impl EngineCoreClient {
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
-                let (handle, runner) =
-                    CoordinatorHandle::new_inproc(coordinator_transport.input_socket);
+                let (handle, runner) = CoordinatorHandle::new_inproc(
+                    coordinator_transport.input_socket,
+                    coordinator_transport.frontend_publish_socket,
+                );
                 let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
                 let coordinator_output_task =
                     AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(

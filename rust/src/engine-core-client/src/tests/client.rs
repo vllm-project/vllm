@@ -272,6 +272,17 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
 }
 
+/// Receive one coordinator state publish and return its msgpack bytes as hex.
+async fn recv_coordinator_publish(sub: &mut SubSocket) -> String {
+    let frames = timeout(Duration::from_secs(2), sub.recv())
+        .await
+        .expect("coordinator state publish should arrive")
+        .unwrap()
+        .into_vec();
+    assert_eq!(frames.len(), 1);
+    hex::encode(&frames[0])
+}
+
 async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
     send_outputs(
         push,
@@ -610,7 +621,7 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     assert_eq!(init.parallel_config, inits[1].parallel_config);
     assert!(init.addresses.coordinator_input.is_some());
     assert!(init.addresses.coordinator_output.is_some());
-    assert!(init.addresses.frontend_stats_publish_address.is_none());
+    assert!(init.addresses.frontend_stats_publish_address.is_some());
 
     // Coordinated DP sends one DP rendezvous to every engine: the handshake
     // host plus five distinct ports.
@@ -919,6 +930,101 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let _ = shutdown1_tx.send(());
     engine0_task.await.unwrap();
     engine1_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_publishes_wave_state_to_frontend_subscribers() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (init_tx, init_rx) = oneshot::channel();
+    let (subscribed_tx, subscribed_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_task = tokio::spawn(async move {
+        let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
+        let mut coordinator =
+            engine.coordinator.take().expect("coordinator sockets should be present");
+
+        // Finish wave 0 and start wave 1 before any frontend subscribes. The
+        // `START_DP_WAVE` broadcast shows the coordinator processed both.
+        send_start_wave(&mut coordinator.output_push, 0, 0).await;
+        assert_eq!(
+            recv_start_dp_wave(&mut coordinator.input_sub).await,
+            (0, Some(0))
+        );
+        send_outputs(
+            &mut coordinator.output_push,
+            DpControlOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                control: DpControlMessage::WaveComplete(0),
+            }
+            .into(),
+        )
+        .await;
+        send_start_wave(&mut coordinator.output_push, 0, 1).await;
+        assert_eq!(
+            recv_start_dp_wave(&mut coordinator.input_sub).await,
+            (1, Some(0))
+        );
+        let _ = init_tx.send(engine.init.clone());
+
+        subscribed_rx.await.unwrap();
+        send_outputs(
+            &mut coordinator.output_push,
+            DpControlOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                control: DpControlMessage::WaveComplete(1),
+            }
+            .into(),
+        )
+        .await;
+
+        let _ = shutdown_rx.await;
+    });
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
+        &ipc,
+    )
+    .await;
+
+    let init = init_rx.await.unwrap();
+    let publish_address = init
+        .addresses
+        .frontend_stats_publish_address
+        .expect("frontend publish address should be present");
+    let mut frontend = SubSocket::new();
+    frontend.connect(&publish_address).await.unwrap();
+    frontend.subscribe("").await.unwrap();
+
+    // The wave-only publish `(None, wave, engines_running)` as a msgpack
+    // array. A frontend subscribing mid-wave first receives the current state.
+    assert_eq!(recv_coordinator_publish(&mut frontend).await, "93c001c3");
+
+    // A wave transition still pending when the frontend subscribed may publish
+    // the same state again; the next distinct state is the one that follows.
+    subscribed_tx.send(()).unwrap();
+    let next_state = loop {
+        let state = recv_coordinator_publish(&mut frontend).await;
+        if state != "93c001c3" {
+            break state;
+        }
+    };
+    assert_eq!(next_state, "93c002c2");
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
     client.shutdown().await.unwrap();
 }
 

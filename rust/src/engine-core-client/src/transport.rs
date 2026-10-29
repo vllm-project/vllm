@@ -495,7 +495,7 @@ async fn send_init_message(
             outputs: vec![output_address.to_string()],
             coordinator_input: coordinator.map(|c| c.input_address.clone()),
             coordinator_output: coordinator.map(|c| c.output_address.clone()),
-            frontend_stats_publish_address: None,
+            frontend_stats_publish_address: coordinator.map(|c| c.frontend_publish_address.clone()),
         },
         parallel_config: parallel_config.clone(),
     };
