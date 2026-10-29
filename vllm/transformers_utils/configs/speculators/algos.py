@@ -176,6 +176,7 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     supported_architectures = {
         "Qwen3DSparkModel",
         "Qwen3OmniDSparkModel",
+        "GlmDSparkMLAForCausalLM",
     }
     selected_architectures = [
         architecture

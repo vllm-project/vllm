@@ -680,6 +680,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.deepseek_v41",
         "DSparkDeepseekV4ForCausalLM",
     ),
+    "GlmDSparkMLAForCausalLM": ("glm_dspark_mla", "GlmDSparkMLAForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     # Serving under method="dflash" means EAGLEConfig rewrites the draft
