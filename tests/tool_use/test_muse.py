@@ -692,6 +692,7 @@ def test_string_schema_forms_keep_raw_text(parameters, value):
         ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "1.10", "1.10"),
         ({"type": ["number", "string"]}, "25", 25),
         ({"enum": [1, "a"]}, "1", 1),
+        ({"type": ["number", "string"], "enum": [1, "x"]}, "1", 1),
         # no string admitted, or no type information: decode as before
         ({"anyOf": [{"type": "number"}, {"type": "null"}]}, "1.10", 1.1),
         ({"description": "untyped"}, "25", 25),

@@ -595,7 +595,16 @@ fn schema_types(
     if let Some(Value::Array(subschemas)) = schema.get("allOf") {
         constraints.extend(subschemas.iter().map(|subschema| schema_types(subschema, root, refs)));
     }
-    constraints.into_iter().flatten().reduce(|allowed, types| &allowed & &types)
+    // Intersect, treating "integer" as a subset of "number".
+    constraints.into_iter().flatten().reduce(|allowed, types| {
+        let mut both = &allowed & &types;
+        if (allowed.contains("number") && types.contains("integer"))
+            || (allowed.contains("integer") && types.contains("number"))
+        {
+            both.insert("integer".to_string());
+        }
+        both
+    })
 }
 
 /// Decode a parameter value, keeping the raw text where a string is meant.
@@ -1372,6 +1381,11 @@ mod tests {
             ),
             (json!({"type": ["number", "string"]}), "25", json!(25)),
             (json!({"enum": [1, "a"]}), "1", json!(1)),
+            (
+                json!({"type": ["number", "string"], "enum": [1, "x"]}),
+                "1",
+                json!(1),
+            ),
             // no string admitted, or no type information: decode as before
             (
                 json!({"anyOf": [{"type": "number"}, {"type": "null"}]}),

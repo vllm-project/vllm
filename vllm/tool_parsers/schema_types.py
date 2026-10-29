@@ -27,6 +27,14 @@ def _json_type(value: Any) -> str:
     return "string"
 
 
+def _intersect(a: set[str], b: set[str]) -> set[str]:
+    """Intersect two type sets, treating ``integer`` as a subset of ``number``."""
+    both = a & b
+    if ("number" in a and "integer" in b) or ("integer" in a and "number" in b):
+        both.add("integer")
+    return both
+
+
 def _resolve_ref(root: dict, ref: str) -> Any:
     """Resolve a local JSON pointer such as ``#/$defs/Name`` against *root*."""
     if not ref.startswith("#/"):
@@ -85,7 +93,7 @@ def _schema_types(
     allowed: set[str] | None = None
     for c in constraints:
         if c is not None:
-            allowed = c if allowed is None else allowed & c
+            allowed = c if allowed is None else _intersect(allowed, c)
     return allowed
 
 
