@@ -946,6 +946,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+        if self.decoder_replay_layers is not None and self._mtp_hidden_buffer is None:
+            # Collapse + norm only the replay rows; the rest of the output is 0.
+            self.decoder_replay_layers.finalize = self._collapse_and_norm
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1147,18 +1150,27 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        # Collapse the hc copies with the pre-mix from the last layer's FFN
-        # mixes — the mix the reference applies via
-        # ``last_layer.hc_pre(h, pre_mix)`` (v4.1 has no learned hc_head).
+        # The replay layers' finalize already collapsed and normed their rows.
         assert pre_mix is not None
-        hidden_states = hc_collapse_triton(hidden_states, pre_mix)
-        hidden_states = self.norm(hidden_states)
+        if (
+            self.decoder_replay_layers is None
+            or self.decoder_replay_layers.finalize is None
+        ):
+            hidden_states, pre_mix = self._collapse_and_norm(hidden_states, pre_mix)
         if self.use_sequence_parallel and self._mtp_hidden_buffer is None:
             # Without MTP, gather only the collapsed and normalized hidden states.
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _collapse_and_norm(
+        self, hidden_states: torch.Tensor, pre_mix: torch.Tensor, *aux: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        """Collapse the hc copies with the last FFN's pre-mix, as the reference's
+        ``last_layer.hc_pre(h, pre_mix)``, then apply the final norm."""
+        hidden_states = self.norm(hc_collapse_triton(hidden_states, pre_mix))
+        return hidden_states, pre_mix, *aux
 
     def _mega_gate_metadata(
         self, input_ids: torch.Tensor | None
