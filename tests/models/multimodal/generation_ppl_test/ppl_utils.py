@@ -34,7 +34,7 @@ def vqa_ppl_test(
         mm_processor_kwargs = {}
 
     processor = AutoProcessor.from_pretrained(model_info.name)
-    image_token_id = processor.image_token_id
+    image_token_id = model_info.image_token_id or processor.image_token_id
 
     images = []
     prompts = []
@@ -101,6 +101,7 @@ def vqa_ppl_test(
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_id, token_log_prob = next(iter(token_data.items()))
+
                 if token_id == image_token_id:
                     continue
                 token_log_probs.append(token_log_prob.logprob)

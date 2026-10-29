@@ -53,6 +53,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from ..layers.fusion.mm_input_norm import build_mm_input_norm
 
 logger = init_logger(__name__)
 
@@ -523,6 +524,7 @@ class Gemma3ForConditionalGeneration(
     )
 
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -554,6 +556,7 @@ class Gemma3ForConditionalGeneration(
                 config.vision_config,
                 quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
+                input_norm=build_mm_input_norm(self.model_config),
             )
             self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
