@@ -44,9 +44,9 @@ def test_serialize_messages() -> None:
 
 
 @pytest.mark.parametrize("namespaced", [False, True])
-def test_custom_tool_grammar_format_rejected(namespaced) -> None:
+def test_custom_tool_grammar_format_rejected(namespaced: bool) -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
-    tool = {"type": "custom", "name": "emit", "format": grammar}
+    tool: dict[str, object] = {"type": "custom", "name": "emit", "format": grammar}
     if namespaced:
         tool = {
             "type": "namespace",
