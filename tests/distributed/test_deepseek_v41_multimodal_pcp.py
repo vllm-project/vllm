@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real-weight image PCP regression, selected by the four-GPU PCP nightly."""
 
-import re
-
 import pytest
+import regex as re
 
 from vllm import SamplingParams
 from vllm.multimodal.utils import encode_image_url
