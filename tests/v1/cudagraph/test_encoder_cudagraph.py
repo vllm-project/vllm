@@ -1245,7 +1245,9 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
                 dest[rank] = emb.clone() if clone else emb
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm graph"
+)
 class TestDeepseekVL2CudaGraph:
     """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
 

@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8

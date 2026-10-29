@@ -83,6 +83,15 @@ try:
 except ImportError:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
+if current_platform.is_rocm():
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if is_aiter_found_and_supported():
+        BACKENDS_TO_TEST += [
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        ]
+
 
 def _convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
@@ -1850,6 +1859,10 @@ if current_platform.is_rocm():
         AttentionBackendEnum.TRITON_ATTN,
         "FLEX_ATTENTION_SLOW",
     ]
+    if is_aiter_found_and_supported():
+        SLIDING_WINDOW_BACKENDS_TO_TEST.append(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+        )
 else:
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
         AttentionBackendEnum.FLASH_ATTN,

@@ -123,6 +123,7 @@ steps:
       - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
+      - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
       - tests/models/test_muse_spark_logits_local.py
@@ -147,6 +148,7 @@ steps:
         models/test_deepseek_v4_vl_stream_weights.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
@@ -198,6 +200,7 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s models/inkling/rocm
+      - pytest -v -s models/inkling/test_mm_towers.py models/inkling/test_moe_weight_layout.py models/inkling/test_qkvr_prep.py
 
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"
@@ -348,6 +351,7 @@ steps:
         models/qwen4_exp/test_qsa_prepare_amd.py
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
+      - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
