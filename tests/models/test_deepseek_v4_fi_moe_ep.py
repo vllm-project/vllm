@@ -19,6 +19,8 @@ from vllm.config.kernel import (
     validate_flashinfer_moe_ep_model,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import config as fused_moe_config
 from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -29,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     nvfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts import (
+    flashinfer_moe_ep as fi_ep_experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
@@ -58,6 +63,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kNvfp4Dynamic,
@@ -376,3 +382,70 @@ def test_megakernel_moe_backend_binds_the_all2all_backend():
     untouched = SimpleNamespace(all2all_backend="deepep_low_latency")
     bind_passthrough_all2all_backend("flashinfer_trtllm", untouched)
     assert untouched.all2all_backend == "deepep_low_latency"
+
+
+def test_mxfp4_cutedsl_moe_block_startup_registers_megakernel_scales(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    """Model MoE startup re-registers scales after CuTeDSL conversion.
+
+    CuTeDSL dequantizes MXFP4 weights before creating the megakernel, so its
+    source scale parameters are None when ``process_weights_after_loading``
+    binds the megakernel's resident weights to the model layer.
+    """
+    default_vllm_config.kernel_config.moe_backend = FLASHINFER_MOE_EP_CUTEDSL
+    default_vllm_config.parallel_config.enable_expert_parallel = True
+    bind_passthrough_all2all_backend(
+        FLASHINFER_MOE_EP_CUTEDSL, default_vllm_config.parallel_config
+    )
+    monkeypatch.setattr(fused_moe_config, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        FlashInferMoeEpExperts,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+
+    kernel_weights = tuple(torch.empty(1, dtype=torch.uint8) for _ in range(4))
+
+    class FakeFlashInferMoeEp:
+        def __init__(self, moe_config, weights, *args, **kwargs):
+            assert weights.w13_scale is None and weights.w2_scale is None
+
+        def warmup(self):
+            pass
+
+        def kernel_weights(self):
+            return kernel_weights
+
+    monkeypatch.setattr(fi_ep_experts, "FlashInferMoeEp", FakeFlashInferMoeEp)
+
+    with torch.device("cpu"):
+        runner = FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=32,
+            intermediate_size=32,
+            params_dtype=torch.bfloat16,
+            quant_config=Mxfp4Config(),
+            tp_size=2,
+            dp_size=1,
+            pcp_size=1,
+            prefix="model.layers.0.mlp.experts",
+        )
+        layer = runner.routed_experts
+        layer.w13_weight.fill_(0x77)
+        layer.w2_weight.fill_(0x77)
+        layer.w13_weight_scale.fill_(127)
+        layer.w2_weight_scale.fill_(127)
+
+        layer.quant_method.process_weights_after_loading(layer)
+
+    assert all(
+        isinstance(getattr(layer, name), torch.nn.Parameter)
+        for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    )
+    for name, tensor in zip(
+        ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
+        kernel_weights,
+    ):
+        assert getattr(layer, name).data_ptr() == tensor.data_ptr()
