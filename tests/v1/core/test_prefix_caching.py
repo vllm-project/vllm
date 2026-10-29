@@ -5137,16 +5137,17 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     assert num_computed_tokens == 8 * block_size
 
 
-def _eagle_swa_scheduler_kv_cache_config(packed: bool, block_size: int):
+def _sliding_window_scheduler_kv_cache_config(packed: bool, block_size: int, drop: bool):
     """Full attention plus a four-block sliding window on a KV transfer instance."""
     config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     config.cache_config.kv_cache_layout = "BLHNC" if packed else "LBNHC"
     config.kv_transfer_config = KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
-    config.speculative_config = fake_speculative_config(
-        method="eagle",
-        use_eagle_block_drop=lambda: True,
-        use_multi_module_mtp=lambda: False,
-    )
+    if drop:
+        config.speculative_config = fake_speculative_config(
+            method="eagle",
+            use_eagle_block_drop=lambda: True,
+            use_multi_module_mtp=lambda: False,
+        )
     layers = {
         "full": full_layer(
             AttentionSpec(
@@ -5169,36 +5170,48 @@ def _eagle_swa_scheduler_kv_cache_config(packed: bool, block_size: int):
         num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups
     )
 
+@pytest.mark.parametrize("drop", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_prompt_tokens", [165, 175])
-def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens):
+def test_sliding_window_resend_hits_after_connector_import(packed, drop):
     """A prompt longer than the window, imported through a KV connector, must
-    serve a resend from the prefix cache: the EAGLE sliding-window lookup needs
-    one block below the window, which only the retained tail keeps allocated.
-    175 tokens end one short of a block boundary, where the window's own
-    retention lands exactly on a block edge.
+    serve a resend from the prefix cache like a prompt computed locally. The
+    sliding-window lookup scans whole blocks below the window (one more with
+    the EAGLE drop), which only the retained tail keeps allocated. Checked for
+    every prompt length up to eight blocks past the window, which covers each
+    residue; prompts ending on a block boundary or one short of it are where
+    the window's own retention falls a block short.
     """
     block_size = 16
-    kv_cache_config = _eagle_swa_scheduler_kv_cache_config(packed, block_size)
-    manager = make_kv_cache_manager(
-        kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
-        hash_block_size=block_size,
-        use_eagle=True,
-        retention_interval=0,
+    window = 4 * block_size
+    kv_cache_config = _sliding_window_scheduler_kv_cache_config(
+        packed, block_size, drop
     )
 
-    token_ids = list(range(num_prompt_tokens))
-    req0 = make_request("0", token_ids, block_size, sha256)
-    assert allocate_external_prefix(manager, req0, num_prompt_tokens) is not None
-    # The scheduler caches the loaded blocks once the transfer lands.
-    manager.cache_blocks(req0, num_prompt_tokens)
-    manager.free(req0)
+    for num_prompt_tokens in range(window + 1, window + 8 * block_size + 1):
+        manager = make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=drop,
+            retention_interval=0,
+        )
+        token_ids = list(range(num_prompt_tokens))
+        req0 = make_request("0", token_ids, block_size, sha256)
+        assert allocate_external_prefix(manager, req0, num_prompt_tokens) is not None
+        # The scheduler caches the loaded blocks once the transfer lands.
+        manager.cache_blocks(req0, num_prompt_tokens)
+        manager.free(req0)
 
-    req1 = make_request("1", token_ids, block_size, sha256)
-    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == (num_prompt_tokens // block_size - 1) * block_size
+        req1 = make_request("1", token_ids, block_size, sha256)
+        _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+        # The last token is recomputed; the drop gives up one more block.
+        expected = (
+            (num_prompt_tokens // block_size - 1) * block_size
+            if drop
+            else (num_prompt_tokens - 1) // block_size * block_size
+        )
+        assert num_computed_tokens == expected, num_prompt_tokens
 
 
 def _nixl_transfer(kv_cache_config, block_size):
@@ -5309,11 +5322,14 @@ def _moriio_transfer(kv_cache_config, block_size):
 @pytest.mark.parametrize(
     "make_transfer", [_nixl_transfer, _mooncake_transfer, _moriio_transfer]
 )
+@pytest.mark.parametrize("drop", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-def test_eagle_swa_connector_import_writes_every_allocated_block(make_transfer, packed):
+def test_sliding_window_connector_import_writes_every_allocated_block(
+    make_transfer, packed, drop
+):
     """Every block a KV connector import allocates on the decoder must receive
-    the prefill's KV for the same token positions. The EAGLE sliding-window
-    group retains whole blocks below the window, and ``cache_blocks`` hashes
+    the prefill's KV for the same token positions. The sliding-window group
+    retains whole blocks below the window, and ``cache_blocks`` hashes
     them after the load: a retained block the connector does not write would
     serve a resend a prefix-cache hit on unwritten KV. Checked for every prompt
     length up to eight blocks past the window, which covers each residue both
@@ -5321,7 +5337,9 @@ def test_eagle_swa_connector_import_writes_every_allocated_block(make_transfer, 
     """
     block_size = 16
     window = 4 * block_size
-    kv_cache_config = _eagle_swa_scheduler_kv_cache_config(packed, block_size)
+    kv_cache_config = _sliding_window_scheduler_kv_cache_config(
+        packed, block_size, drop
+    )
     transfer = make_transfer(kv_cache_config, block_size)
 
     def new_manager():
@@ -5330,7 +5348,7 @@ def test_eagle_swa_connector_import_writes_every_allocated_block(make_transfer, 
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
-            use_eagle=True,
+            use_eagle=drop,
         )
 
     for num_prompt_tokens in range(window + 1, window + 8 * block_size + 1):

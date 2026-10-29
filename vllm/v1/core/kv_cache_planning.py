@@ -25,6 +25,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     MambaManager,
     SlidingWindowManager,
@@ -1583,16 +1584,30 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
-def _retain_eagle_hit_blocks_below_window(
+def _retain_hit_blocks_below_window(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
 ) -> None:
-    """Retain the full sliding-window hit span for KV transfer with EAGLE."""
+    """Retain the whole blocks a sliding-window hit scans after a KV import.
+
+    An import allocates and hashes the window for the next token. A prefix hit
+    instead scans whole blocks, including one extra block when EAGLE drops its
+    last match. Without the drop, the lookup excludes the last prompt token,
+    so it can end one block earlier and needs one more retained token.
+
+    Args:
+        vllm_config: Config supplying KV transfer and speculative decoding.
+        kv_cache_groups: Groups whose allocation policy is updated in place.
+
+    """
     transfer_config = vllm_config.kv_transfer_config
     if transfer_config is None or not transfer_config.is_kv_transfer_instance:
         return
     spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle_block_drop():
-        return
+    use_drop = (
+        spec_config is not None
+        and spec_config.use_eagle_block_drop()
+        and not vllm_config.num_hash_lookahead_tokens
+    )
     annotated = any(group.is_eagle_group for group in kv_cache_groups)
     for group in kv_cache_groups:
         config = group.manager_config
@@ -1600,14 +1615,18 @@ def _retain_eagle_hit_blocks_below_window(
         if (
             not isinstance(params, SlidingWindowManager.Params)
             or not group.prefix_cacheable
-            or (annotated and not group.is_eagle_group)
         ):
             continue
+        if isinstance(params, DFlashSlidingWindowManager.Params):
+            # This manager looks up the tail relative to the request end, just
+            # as it allocates it, so it does not need a wider hit span.
+            continue
+        drops = use_drop and (group.is_eagle_group or not annotated)
         window = params.sliding_window - 1
-        hit_blocks = cdiv(window, group.block_size) + 1
+        hit_blocks = cdiv(window, group.block_size) + int(drops)
+        retained = hit_blocks * group.block_size - window + int(not drops)
         group.manager_config = config.replace_params(
-            extra_retained_tokens=params.extra_retained_tokens
-            + hit_blocks * group.block_size - window
+            extra_retained_tokens=params.extra_retained_tokens + retained
         )
 
 
@@ -1659,7 +1678,7 @@ def get_global_kv_cache_groups(
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
-    _retain_eagle_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
+    _retain_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
     return global_kv_cache_groups
 
 
