@@ -423,6 +423,15 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Whether the loaded backend accepts image inputs.
+    pub fn supports_image_input(&self) -> bool {
+        self.processor
+            .backend
+            .multimodal_model_info()
+            .and_then(|info| info.placeholder_token(llm_multimodal::Modality::Image))
+            .is_some()
+    }
+
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
     /// capabilities, modality limits, and the final prompt positions.

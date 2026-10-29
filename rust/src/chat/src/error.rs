@@ -40,8 +40,14 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error("invalid decoded image: {message}")]
+    InvalidDecodedImage { message: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
+    /// Media that another process holds could not be read, for example over
+    /// NIXL. A retry, or the same media sent inline, may succeed.
+    #[error("media unavailable: {0}")]
+    MediaUnavailable(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,
@@ -126,6 +132,7 @@ impl Error {
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::InvalidDecodedImage { .. }
             | Self::MmLimitExceeded { .. } => true,
 
             _ => false,

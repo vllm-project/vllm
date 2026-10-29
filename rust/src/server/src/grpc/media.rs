@@ -16,6 +16,7 @@ use vllm_engine_core_client::protocol::multimodal::{
 };
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
+use super::nixl::{self, NixlImage};
 use super::pb;
 
 /// Maximum total serialized kwargs size accepted in one gRPC request.
@@ -26,12 +27,16 @@ const MAX_MSGPACK_DEPTH: usize = 32;
 ///
 /// Require a single input kind and bound the total kwargs size before decoding.
 /// Shared media preparation validates features, model support, item limits, and prompt bounds.
-pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, Status> {
+/// `nixl_ref` images become deferred loads that chat starts after its own checks.
+pub(super) fn from_proto(
+    media: Vec<pb::MediaItem>,
+    nixl_enabled: bool,
+) -> Result<MultimodalInput, Status> {
     if !media
         .iter()
         .any(|item| matches!(item.source, Some(pb::media_item::Source::Features(_))))
     {
-        return raw_parts_from_proto(media).map(MultimodalInput::Raw);
+        return raw_parts_from_proto(media, nixl_enabled).map(MultimodalInput::Raw);
     }
     let mut encoded_bytes = 0usize;
     for item in &media {
@@ -117,8 +122,12 @@ fn mixed_media_error() -> Status {
     Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
 }
 
-fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaPart>, Status> {
+fn raw_parts_from_proto(
+    media: Vec<pb::MediaItem>,
+    nixl_enabled: bool,
+) -> Result<Vec<MediaPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
+    let mut nixl_bytes = 0usize;
     for (index, item) in media.into_iter().enumerate() {
         let modality = item.modality();
         if modality == pb::Modality::Unspecified {
@@ -138,10 +147,22 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaPart>, Sta
             pb::media_item::Source::DataUri(uri) => {
                 validate_media_uri(index, "data_uri", uri, &["data"])?;
             }
-            pb::media_item::Source::RawBytes(_) => {}
+            pb::media_item::Source::RawBytes(_) | pb::media_item::Source::NixlRef(_) => {}
             pb::media_item::Source::Features(_) => return Err(mixed_media_error()),
         }
         let part = match (modality, source) {
+            (pb::Modality::Image, pb::media_item::Source::NixlRef(reference)) => {
+                let support = nixl::support(index, nixl_enabled)?;
+                let image = NixlImage::from_proto(index, reference, uuid)?;
+                nixl_bytes = nixl_bytes.saturating_add(image.len);
+                parts.push(MediaPart::DecodedImage(support.defer(image)));
+                continue;
+            }
+            (_, pb::media_item::Source::NixlRef(_)) => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].nixl_ref is only valid for images"
+                )));
+            }
             (
                 pb::Modality::Image,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
@@ -190,6 +211,12 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaPart>, Sta
             (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
         };
         parts.push(MediaPart::Content(part));
+    }
+    if nixl_bytes > nixl::MAX_NIXL_MEDIA_BYTES {
+        return Err(Status::resource_exhausted(format!(
+            "nixl_ref images exceed {} bytes of pixels",
+            nixl::MAX_NIXL_MEDIA_BYTES
+        )));
     }
     Ok(parts)
 }
@@ -250,9 +277,14 @@ mod tests {
             source: Some(pb::media_item::Source::RawBytes(vec![1])),
             ..Default::default()
         };
-        for media in [vec![raw.clone(), preprocessed()], vec![preprocessed(), raw]] {
+        for media in [
+            vec![raw.clone(), preprocessed()],
+            vec![preprocessed(), raw],
+            vec![nixl_ref_item(), preprocessed()],
+            vec![preprocessed(), nixl_ref_item()],
+        ] {
             assert_eq!(
-                from_proto(media).unwrap_err().code(),
+                from_proto(media, true).unwrap_err().code(),
                 tonic::Code::InvalidArgument
             );
         }
@@ -273,7 +305,7 @@ mod tests {
         };
         feature.is_embed = vec![true, false];
         for media in [missing_modality, missing_kwargs, invalid_mask] {
-            let error = from_proto(vec![media]).unwrap_err();
+            let error = from_proto(vec![media], true).unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().starts_with("media[0]:"));
         }
@@ -286,7 +318,7 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item]).unwrap_err();
+        let error = from_proto(vec![item.clone(), item], true).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 
@@ -343,5 +375,75 @@ mod tests {
             }),
         };
         assert_eq!(kwargs["pixel_values"], expected);
+    }
+
+    fn nixl_ref_item() -> pb::MediaItem {
+        pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::NixlRef(pb::NixlRef {
+                agent_metadata: super::super::nixl::tests::metadata(
+                    "peer",
+                    &[(0x7f00_0000_1000, 64 * 32 * 3)],
+                ),
+                addr: 0x7f00_0000_1000,
+                height: 32,
+                width: 64,
+                channels: 3,
+            })),
+            uuid: "image-0".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nixl_ref_survives_the_wire() {
+        use prost::Message as _;
+
+        let item = nixl_ref_item();
+        let decoded = pb::MediaItem::decode(item.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, item);
+    }
+
+    #[test]
+    fn nixl_ref_is_only_valid_for_images() {
+        for modality in [pb::Modality::Video, pb::Modality::Audio] {
+            let mut item = nixl_ref_item();
+            item.modality = modality as i32;
+            let error = from_proto(vec![item], true).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                error.message(),
+                "media[0].nixl_ref is only valid for images"
+            );
+        }
+    }
+
+    #[test]
+    fn nixl_ref_needs_the_runtime_flag() {
+        let error = from_proto(vec![nixl_ref_item()], false).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.message(),
+            "media[0].nixl_ref is not supported: the server was started without \
+             --enable-grpc-nixl-media"
+        );
+    }
+
+    #[cfg(not(feature = "nixl-media"))]
+    #[test]
+    fn nixl_ref_needs_the_nixl_media_feature() {
+        let url = pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Url(
+                "https://example.com/a.png".to_owned(),
+            )),
+            ..Default::default()
+        };
+        let error = from_proto(vec![url, nixl_ref_item()], true).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.message(),
+            "media[1].nixl_ref is not supported: this server was built without the `nixl-media` feature"
+        );
     }
 }

@@ -299,6 +299,10 @@ class FrontendArgs(BaseFrontendArgs):
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
     `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
     with the Python gRPC server's `--grpc` flag."""
+    enable_grpc_nixl_media: bool = False
+    """Read `MediaItem.nixl_ref` images over NIXL on the Rust frontend's gRPC
+    port. Requires `--grpc-port`, a `vllm-rs` build with the `nixl-media` cargo
+    feature, and trusted gRPC peers; see docs/usage/security.md."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -480,6 +484,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
 def validate_grpc_port_arg(args: argparse.Namespace) -> None:
     """Validate the Rust frontend's optional gRPC listener."""
     if getattr(args, "grpc_port", None) is None:
+        if getattr(args, "enable_grpc_nixl_media", False):
+            raise ValueError("--enable-grpc-nixl-media requires --grpc-port")
         return
 
     if args.grpc:

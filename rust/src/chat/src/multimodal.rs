@@ -38,6 +38,7 @@ use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
+mod decoded;
 mod expand;
 mod image;
 mod input;
@@ -48,6 +49,7 @@ mod tensor;
 mod timing;
 mod video;
 
+pub use self::decoded::{DecodedImage, DeferredImage};
 use self::expand::expand_prompt_token_ids;
 pub use self::input::{MediaPart, MultimodalInput};
 use self::timing::MM_STAGE_TARGET;
@@ -791,6 +793,7 @@ impl MultimodalModelInfo {
     fn validate_mm_limits(&self, media_parts: &[MediaPart]) -> Result<()> {
         self.validate_modality_limits(media_parts.iter().filter_map(|part| match part {
             MediaPart::Content(part) => media_part_limit_modality(part),
+            MediaPart::DecodedImage(_) => Some(MmModality::Image),
         }))
     }
 
@@ -887,6 +890,14 @@ impl MultimodalModelInfo {
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
+        // Decoded images load before preprocessing, so refuse them before any load starts.
+        if self.image.is_none()
+            && media_parts.iter().any(|part| matches!(part, MediaPart::DecodedImage(_)))
+        {
+            return Err(Error::UnsupportedModality {
+                modality: Modality::Image.to_string(),
+            });
+        }
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
@@ -969,6 +980,9 @@ impl MultimodalModelInfo {
 
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
+    ///
+    /// Decoded images skip the connector and keep their request-order slot
+    /// among the fetched images.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -982,17 +996,41 @@ impl MultimodalModelInfo {
                 .with_video_frame_sampling(sampling)
                 .with_default_video_sample_fps(default_fps);
         }
+        // Request-order images: `true` for a decoded image, `false` for a tracked one.
+        let mut image_order = Vec::new();
+        let mut decoded_loads = Vec::new();
         for part in media_parts {
             match part {
                 MediaPart::Content(part) => {
+                    if matches!(
+                        part,
+                        MediaContentPart::ImageUrl { .. } | MediaContentPart::ImageData { .. }
+                    ) {
+                        image_order.push(false);
+                    }
                     tracker.push_part(part)?;
+                }
+                MediaPart::DecodedImage(image) => {
+                    image_order.push(true);
+                    decoded_loads.push(image.load());
                 }
             }
         }
 
-        let mut tracker_output = tracker.finalize().await?;
+        // Decoded images load while the tracker fetches. Every load ends
+        // before an error returns, because the owner of the pixels may free
+        // them as soon as the request fails.
+        let (tracker_output, decoded) =
+            futures::future::join(tracker.finalize(), futures::future::join_all(decoded_loads))
+                .await;
+        let mut tracker_output = tracker_output?;
+        let mut decoded = decoded.into_iter().collect::<Result<Vec<_>>>()?.into_iter();
+        let image_slots = image_order
+            .into_iter()
+            .map(|is_decoded| is_decoded.then(|| decoded.next()).flatten())
+            .collect();
 
-        let images = tracker_output
+        let mut images = tracker_output
             .data
             .remove(&Modality::Image)
             .unwrap_or_default()
@@ -1004,7 +1042,8 @@ impl MultimodalModelInfo {
                 )),
             })
             .collect::<Result<Vec<_>>>()?;
-        let image_uuids = tracker_output.uuids.remove(&Modality::Image).unwrap_or_default();
+        let mut image_uuids = tracker_output.uuids.remove(&Modality::Image).unwrap_or_default();
+        merge_image_slots(image_slots, &mut images, &mut image_uuids)?;
 
         let videos = tracker_output
             .data
@@ -1043,6 +1082,35 @@ impl MultimodalModelInfo {
             audio_uuids,
         })
     }
+}
+
+/// Put decoded images into their request-order slots among the fetched
+/// `images`, so that images stay aligned with the prompt's image placeholders.
+fn merge_image_slots(
+    image_slots: Vec<Option<DecodedImage>>,
+    images: &mut Vec<Arc<ImageFrame>>,
+    uuids: &mut Vec<Option<String>>,
+) -> Result<()> {
+    let fetched_slots = image_slots.iter().filter(|slot| slot.is_none()).count();
+    if fetched_slots == image_slots.len() {
+        return Ok(());
+    }
+    if images.len() != fetched_slots || uuids.len() != fetched_slots {
+        bail_multimodal!(
+            "tracker returned {} images for {fetched_slots} fetched image parts",
+            images.len()
+        );
+    }
+    let mut fetched = izip!(std::mem::take(images), std::mem::take(uuids));
+    for slot in image_slots {
+        let (frame, uuid) = match slot {
+            Some(image) => image.into_parts(),
+            None => fetched.next().expect("one fetched image per empty slot"),
+        };
+        images.push(frame);
+        uuids.push(uuid);
+    }
+    Ok(())
 }
 
 /// Adapter from the frontend tokenizer trait to `llm-multimodal`.
@@ -1907,6 +1975,203 @@ mod tests {
         )]));
 
         assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
+    }
+
+    fn decoded_part(pixel: u8, uuid: Option<&str>) -> MediaPart {
+        let image = DecodedImage::new(vec![pixel; 3], 1, 1, 3, uuid.map(str::to_owned)).unwrap();
+        MediaPart::DecodedImage(DeferredImage::new(std::future::ready(Ok(image))))
+    }
+
+    #[test]
+    fn validate_mm_limits_counts_decoded_images_against_the_image_limit() {
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
+        assert!(info.validate_mm_limits(&[decoded_part(0, None)]).is_ok());
+
+        let error =
+            info.validate_mm_limits(&[decoded_part(0, None), image_url_part()]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+    }
+
+    /// A decoded image may come from another process, so its load must not
+    /// start for a request that fails validation.
+    #[tokio::test]
+    async fn decoded_images_do_not_load_when_the_request_exceeds_a_limit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
+        let started = Arc::new(AtomicBool::new(false));
+        let deferred = |started: Arc<AtomicBool>| {
+            MediaPart::DecodedImage(DeferredImage::new(async move {
+                started.store(true, Ordering::SeqCst);
+                DecodedImage::new(vec![0; 3], 1, 1, 3, None)
+            }))
+        };
+        let parts = vec![
+            deferred(Arc::clone(&started)),
+            deferred(Arc::clone(&started)),
+        ];
+
+        let error = info
+            .prepare_multimodal(
+                parts,
+                &mut vec![QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID],
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::MmLimitExceeded { .. }), "{error:?}");
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
+    /// The memory of a decoded image stays with its owner until the request
+    /// fails, so a failure must wait for the loads that already started.
+    #[tokio::test]
+    async fn a_failed_request_returns_after_its_decoded_image_loads_end() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let slow = |ended: Arc<AtomicBool>| {
+            MediaPart::DecodedImage(DeferredImage::new(async move {
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+                ended.store(true, Ordering::SeqCst);
+                DecodedImage::new(vec![0; 3], 1, 1, 3, None)
+            }))
+        };
+        let failing = MediaPart::DecodedImage(DeferredImage::new(async {
+            Err(Error::Multimodal("the read failed".to_owned()))
+        }));
+        let broken_png = MediaContentPart::ImageData {
+            data: b"not an image".to_vec(),
+            mime_type: Some("image/png".to_owned()),
+            uuid: None,
+            detail: None,
+        }
+        .into();
+
+        for other in [failing, broken_png] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let parts = vec![slow(Arc::clone(&ended)), other];
+            let error = qwen3_vl_info()
+                .prepare_multimodal(
+                    parts,
+                    &mut vec![QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID],
+                    ModelDtype::Float32,
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(ended.load(Ordering::SeqCst), "returned {error:?} first");
+        }
+    }
+
+    #[test]
+    fn merge_image_slots_keeps_request_order_and_checks_counts() {
+        let fetched = |hash: &str| {
+            Arc::new(ImageFrame::new(
+                ::image::DynamicImage::new_rgb8(1, 1),
+                bytes::Bytes::new(),
+                llm_multimodal::ImageDetail::default(),
+                llm_multimodal::ImageSource::InlineBytes,
+                hash.to_owned(),
+            ))
+        };
+        let decoded =
+            |uuid: &str| DecodedImage::new(vec![1; 3], 1, 1, 3, Some(uuid.to_owned())).unwrap();
+
+        let slots = vec![Some(decoded("d0")), None, Some(decoded("d2")), None];
+        let mut images = vec![fetched("url-1"), fetched("url-3")];
+        let mut uuids = vec![Some("u1".to_owned()), None];
+        merge_image_slots(slots, &mut images, &mut uuids).unwrap();
+        let decoded_hash = decoded("x").hash().to_owned();
+        let hashes: Vec<_> = images.iter().map(|frame| frame.hash.as_str()).collect();
+        assert_eq!(
+            hashes,
+            [decoded_hash.as_str(), "url-1", &decoded_hash, "url-3"]
+        );
+        assert_eq!(
+            uuids,
+            [
+                Some("d0".to_owned()),
+                Some("u1".to_owned()),
+                Some("d2".to_owned()),
+                None
+            ]
+        );
+
+        let slots = || vec![Some(decoded("d0")), None];
+        let mut too_few = (vec![], vec![]);
+        assert!(merge_image_slots(slots(), &mut too_few.0, &mut too_few.1).is_err());
+        let mut too_many = (vec![fetched("a"), fetched("b")], vec![None, None]);
+        assert!(merge_image_slots(slots(), &mut too_many.0, &mut too_many.1).is_err());
+    }
+
+    /// A decoded image must go through the same preprocessing as the encoded
+    /// image it came from, and keep its prompt position among fetched images.
+    #[tokio::test]
+    async fn decoded_images_match_encoded_images_and_keep_their_order() {
+        use ::image::ImageEncoder as _;
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let (width, height) = (64, 32);
+        let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+        let mut png = Vec::new();
+        ::image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, width, height, ::image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let decoded = |uuid: &str| {
+            DecodedImage::new(pixels.clone(), width, height, 3, Some(uuid.to_owned())).unwrap()
+        };
+        let ready =
+            |image| MediaPart::DecodedImage(DeferredImage::new(std::future::ready(Ok(image))));
+        let parts = vec![
+            ready(decoded("first")),
+            MediaContentPart::ImageData {
+                data: png.clone(),
+                mime_type: Some("image/png".to_owned()),
+                uuid: Some("second".to_owned()),
+                detail: None,
+            }
+            .into(),
+            ready(decoded("third")),
+        ];
+        let mut tokens = vec![
+            11,
+            QWEN3_IMAGE_PAD_ID,
+            12,
+            QWEN3_IMAGE_PAD_ID,
+            13,
+            QWEN3_IMAGE_PAD_ID,
+        ];
+
+        let features = qwen3_vl_info()
+            .prepare_multimodal(parts, &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+
+        let identifiers: Vec<_> = features.iter().map(|f| f.identifier.as_str()).collect();
+        assert_eq!(identifiers, ["first", "second", "third"]);
+        assert_eq!(features[0].mm_hash.as_deref(), Some(decoded("x").hash()));
+        assert_eq!(
+            features[1].mm_hash.as_deref(),
+            Some(llm_multimodal::hasher::hash_image(&png).as_str())
+        );
+        let pixel_values =
+            |index: usize| match features[index].data.as_ref().unwrap()["pixel_values"]
+                .data
+                .as_ref()
+            {
+                Some(MmKwargValue::Tensor(tensor)) => tensor.clone(),
+                other => panic!("unexpected pixel values {other:?}"),
+            };
+        assert_eq!(pixel_values(0), pixel_values(1));
+        assert_eq!(pixel_values(2), pixel_values(1));
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {

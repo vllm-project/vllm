@@ -2227,6 +2227,7 @@ async fn control_reports_server_and_model_info() {
     assert!(model.supports_text_input);
     assert!(model.supports_token_ids_input);
     assert!(!model.supports_multimodal);
+    assert!(!model.supports_nixl_ref);
     assert!(model.reasoning_parser.is_empty());
     assert!(model.tool_call_parser.is_empty());
 
