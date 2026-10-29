@@ -100,6 +100,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
   key: rust-frontend-serve-admin-coverage
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -149,6 +150,7 @@ steps:
   - pytest -v -s entrypoints/rl/state_transitions/test_weight_checker.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Serve/Admin Coverage"
       dind: false
       device: mi355_dpx
