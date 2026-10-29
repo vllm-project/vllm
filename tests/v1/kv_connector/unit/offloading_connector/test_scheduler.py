@@ -569,8 +569,13 @@ def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     assert not _make_dcp_shaped_hybrid_scheduler(
         decode_context_parallel_size=3
     ).config.supports_partial_tail
-    # EAGLE proof handling from core remains enabled.
-    assert _make_dcp_shaped_hybrid_scheduler(eagle=True).config.supports_partial_tail
+    # EAGLE proof positions are only supported without DCP.
+    assert not _make_dcp_shaped_hybrid_scheduler(
+        eagle=True
+    ).config.supports_partial_tail
+    assert _make_dcp_shaped_hybrid_scheduler(
+        eagle=True, decode_context_parallel_size=1
+    ).config.supports_partial_tail
     # a hash unit that does not divide every block is rejected upstream
     with pytest.raises(ValueError, match="prefix_match_unit"):
         _make_dcp_shaped_hybrid_scheduler(prefix_match_unit=6)

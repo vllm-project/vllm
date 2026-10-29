@@ -278,6 +278,7 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         # Store sub-block tails only when core can reuse them. Recurrent blocks
         # stay unsharded under DCP and must divide the full-attention chunk.
+        # EAGLE proof positions are not validated under DCP yet.
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         cache_hit_alignment = kv_cache_config.cache_hit_alignment_tokens
         supports_partial_tail = (
@@ -296,6 +297,10 @@ class SchedulerOffloadConfig(NamedTuple):
                 for config in kv_group_configs
             )
             and spec.tokens_per_hash % dcp_world_size == 0
+            and (
+                dcp_world_size == 1
+                or not any(config.is_eagle_group for config in kv_group_configs)
+            )
         )
 
         if retention_interval is not None:
@@ -665,6 +670,7 @@ class OffloadingConnectorScheduler:
         self._max_eagle_proof_margin = max(
             self._eagle_proof_margins.values(), default=0
         )
+        self._cache_hit_alignment_tokens = alignment
         self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         self._drop_eagle_checkpoint_block = (
             vllm_config.speculative_config is not None
@@ -1755,9 +1761,10 @@ class OffloadingConnectorScheduler:
                 # EAGLE tail in the GPU prefix cache; skip the store.
                 continue
             req = req_status.req
+            assert self._cache_hit_alignment_tokens is not None
             boundary = get_mamba_prefill_checkpoint_position(
                 req.num_prompt_tokens,
-                self.config.tokens_per_hash,
+                self._cache_hit_alignment_tokens,
                 drop_eagle_block=self._drop_eagle_checkpoint_block,
                 num_hash_lookahead_tokens=self._num_hash_lookahead_tokens,
             )
