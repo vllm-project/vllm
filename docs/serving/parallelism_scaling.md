@@ -71,7 +71,7 @@ Ray also offers high-level APIs for large-scale [offline batch inference](https:
 Ray is an optional dependency. Install it explicitly before using Ray-based execution, for example:
 
 ```bash
-pip install "ray[cgraph]"
+pip install ray
 ```
 
 For details, see the [Ray documentation](https://docs.ray.io/en/latest/index.html).
@@ -157,6 +157,8 @@ vllm serve /path/to/the/model/in/the/container \
   --nnodes 2 --node-rank 1 \
   --master-addr <HEAD_NODE_IP> --headless
 ```
+
+When fault tolerance is disabled, a detected remote-worker disconnect fails pending requests and terminates the distributed executor. A coordinator disconnect also terminates headless workers, including workers blocked in a collective. Restart the deployment after such a failure; workers are not automatically recovered. This handling applies after worker communication is established and does not detect a hung worker whose connection remains open.
 
 ## Optimizing network communication for tensor parallelism
 

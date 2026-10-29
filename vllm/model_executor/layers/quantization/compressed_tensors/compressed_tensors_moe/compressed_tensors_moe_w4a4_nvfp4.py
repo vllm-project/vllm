@@ -26,11 +26,18 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 
 # NVFP4 backends that have been verified to support EPLB for this quantization recipe.
 _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
@@ -185,21 +192,27 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize serialized NVFP4 expert weights for requantization."""
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w13_weight_global_scale,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_weight_global_scale,
+            layer.params_dtype,
+            group_size=self.group_size,
+            invert_global_scales=True,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
-        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
-        # requires this naming convention. However, the name change breaks
-        # reloading because the state dict no longer matches disk. Once we
-        # remove MKM, we should revert this change to ensure compatibility.
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        # MKM requires wN_weight; the loaded wN_weight_packed params stay registered.
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(

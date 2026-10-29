@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import zmq
 
+from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
@@ -206,6 +207,7 @@ def _worker_handle(proc, death_writer):
 
 def _make_executor(workers, response_mqs, failed):
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     executor.is_failed = False
     executor.failure_callback = failed.set
     executor.workers = workers

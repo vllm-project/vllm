@@ -15,8 +15,9 @@ import functools
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import Glm5NextConfig, PreTrainedConfig
+from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
@@ -38,13 +39,16 @@ def test_dict_overrides_are_not_forwarded_to_draft():
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "max_position_embeddings", None) != 1234
 
 
 @pytest.mark.cpu_test
 def test_none_overrides_fall_back_to_arch_mapping():
     composed = SpeculativeConfig.compose_draft_hf_overrides(None)
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
 
 
 def _make_speculative_config(
@@ -57,6 +61,7 @@ def _make_speculative_config(
     draft.registry.inspect_model_cls.return_value = (None, architecture)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
     target.hf_config.model_type = hf_kwargs["model_type"]
+    target.using_transformers_backend.return_value = False
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft):
         return SpeculativeConfig(
@@ -245,6 +250,7 @@ def _make_mtp_speculative_config(
         quantization=None,
         hf_overrides={},
     )
+    target_model_config.using_transformers_backend.return_value = False
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
         return SpeculativeConfig(
@@ -288,3 +294,37 @@ def test_glm5_next_mtp_override_promotes_index_share():
     assert draft_config.architectures == ["Glm5NextMTPModel"]
     assert draft_config.n_predict == 1
     assert draft_config.index_share_for_mtp_iteration is True
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("model_type", "model_impl", "architecture"),
+    [
+        ("glm4_moe", "transformers", "TransformersMoEForMTP"),
+        ("glm4_moe", "auto", "Glm4MoeMTPModel"),
+        # Does not follow the Transformers MTP standard (no `num_mtp_layers`)
+        ("qwen3_next", "transformers", "Qwen3NextMTP"),
+    ],
+)
+def test_mtp_draft_architecture_follows_target_model_impl(
+    tmp_path, model_type: str, model_impl: str, architecture: str
+):
+    """The MTP draft of a Transformers backend target uses the Transformers backend
+    too if the model follows the Transformers MTP standard, while other targets keep
+    their native MTP draft."""
+    config = AutoConfig.for_model(model_type, num_nextn_predict_layers=1)
+    config.architectures = [config.__class__.__name__.replace("Config", "ForCausalLM")]
+    config.save_pretrained(tmp_path)
+    target = ModelConfig(str(tmp_path), model_impl=model_impl, skip_tokenizer_init=True)
+
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert speculative_config.method == "mtp"
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == architecture
+    assert draft.hf_config.n_predict == 1
