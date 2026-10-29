@@ -1573,6 +1573,8 @@ class ModelConfig:
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
 
+        self.verify_eplb_config(parallel_config)
+
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
             self.architectures, self
@@ -1628,6 +1630,82 @@ class ModelConfig:
                 "data_parallel_size > 1 or tensor_parallel_size > 1 "
                 "or pipeline_parallel_size > 1."
             )
+
+    def verify_eplb_config(
+        self,
+        parallel_config: ParallelConfig,
+        *,
+        num_experts: int | None = None,
+        config_name: str = "eplb_config.num_redundant_experts",
+        disable_config_name: str | None = None,
+    ) -> None:
+        """Validate that this model's experts can be evenly distributed by EPLB."""
+        if not parallel_config.enable_eplb:
+            return
+
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            get_expert_substitution_spec,
+        )
+
+        if get_expert_substitution_spec(self) is not None:
+            return
+
+        ep_size = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.prefill_context_parallel_size
+            * parallel_config.data_parallel_size
+        )
+        if ep_size <= 1:
+            return
+
+        redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        expert_counts = self.get_eplb_expert_counts(num_experts)
+        if not expert_counts:
+            return
+
+        invalid_counts = {
+            count
+            for count in expert_counts
+            if (count + redundant_experts) % ep_size != 0
+        }
+        if not invalid_counts:
+            return
+
+        lowest_valid_counts = {(-count) % ep_size for count in expert_counts}
+        if len(lowest_valid_counts) == 1:
+            lowest_valid = next(iter(lowest_valid_counts))
+            remediation = f"Set {config_name} to {lowest_valid}."
+        else:
+            remediation = (
+                f"No single {config_name} value makes all routed expert counts "
+                f"({', '.join(str(count) for count in sorted(expert_counts))}) "
+                "divisible by the EP size."
+            )
+        if disable_config_name is not None:
+            remediation += f" To disable EPLB, set {disable_config_name} to false."
+
+        raise ValueError(
+            "EPLB requires each model's routed experts plus redundant experts "
+            "to be evenly distributed across EP ranks. "
+            f"Model {self.model!r} has routed expert counts "
+            f"{', '.join(str(count) for count in sorted(invalid_counts))}, "
+            f"EP size {ep_size}, and {config_name}={redundant_experts}. "
+            f"{remediation}"
+        )
+
+    def get_eplb_expert_counts(self, num_experts: int | None = None) -> set[int]:
+        if num_experts is not None:
+            return {num_experts} if num_experts > 0 else set()
+
+        arch_config = self.model_arch_config
+        expert_counts = {arch_config.num_experts}
+        if arch_config.per_layer_overrides is not None:
+            expert_counts.update(
+                layer.get("num_experts", arch_config.num_experts)
+                for layer in arch_config.per_layer_overrides
+            )
+        expert_counts.discard(0)
+        return expert_counts
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""

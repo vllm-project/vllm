@@ -33,10 +33,12 @@ class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
     kv_cache_dtype: str | None = None
+    draft_num_redundant_experts: int | None = None
     draft_model_config: object = None
     draft_load_config: object = None
 
     apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
+    apply_draft_eplb_overrides = SpeculativeConfig.apply_draft_eplb_overrides
 
 
 @dataclass

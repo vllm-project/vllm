@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -47,18 +48,13 @@ class _FakeParallelConfig:
             raise ValueError("elastic EP requires EPLB")
 
 
-@pytest.mark.parametrize(
-    ("model_type", "enable_eplb", "num_redundant_experts", "shares_eplb_config"),
-    [
-        ("deepseek_v4", True, 32, True),
-        ("deepseek_v41", False, 0, False),
-    ],
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="DSV4/DSV41 EPLB is disabled on ROCm",
 )
-def test_dspark_parallel_config_eplb_by_model_type(
+def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(
     model_type: str,
-    enable_eplb: bool,
-    num_redundant_experts: int,
-    shares_eplb_config: bool,
 ):
     target_config = _FakeParallelConfig()
     draft_model_config = _FakeModelConfig(
@@ -80,13 +76,29 @@ def test_dspark_parallel_config_eplb_by_model_type(
     assert draft_config is not target_config
     assert draft_config.pipeline_parallel_size == 1
     assert draft_config.tensor_parallel_size == 4
-    assert draft_config.enable_eplb is enable_eplb
-    assert draft_config.eplb_config.num_redundant_experts == num_redundant_experts
+    assert draft_config.enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == 32
     assert not draft_config.enable_elastic_ep
-    if shares_eplb_config:
-        assert draft_config.eplb_config is target_config.eplb_config
-    else:
-        assert draft_config.eplb_config is not target_config.eplb_config
+    assert draft_config.eplb_config is target_config.eplb_config
+
+
+def test_dspark_parallel_config_can_disable_draft_eplb():
+    target_config = _FakeParallelConfig()
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v41")
+    )
+
+    draft_config = _get_dspark_parallel_config(
+        target_config,
+        tensor_parallel_size=4,
+        draft_model_config=draft_model_config,
+        draft_enable_eplb=False,
+    )
+
+    assert not draft_config.enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == 0
+    assert target_config.enable_eplb
+    assert target_config.eplb_config.num_redundant_experts == 32
 
 
 @pytest.mark.parametrize("pcp_size", [1, 4])

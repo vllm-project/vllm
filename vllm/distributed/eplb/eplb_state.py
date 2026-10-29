@@ -317,48 +317,6 @@ class EplbState:
         ]
         return global_physical_to_logical_map
 
-    def validate_ep_configuration(self, new_model: MixtureOfExperts):
-        """Validate that the expert parallel configuration of
-        the new model is the same as the existing models.
-        """
-        if len(self.model_states) > 0:
-            model = next(iter(self.model_states.values())).model
-            self.assert_confs_equal(model, new_model)
-
-    @staticmethod
-    def assert_confs_equal(
-        model: MixtureOfExperts, new_model: MixtureOfExperts
-    ) -> None:
-        """Raise if the models have different expert parallel configurations."""
-        if (
-            model.num_routed_experts != new_model.num_routed_experts
-            or model.num_redundant_experts != new_model.num_redundant_experts
-            or model.num_physical_experts != new_model.num_physical_experts
-            or model.num_logical_experts != new_model.num_logical_experts
-            or model.num_expert_groups != new_model.num_expert_groups
-        ):
-            raise RuntimeError(
-                "Model: {} "
-                "with config {} "
-                "{} {} {} {} "
-                "mismatch with new model {} "
-                "with config {} "
-                "{} {} {} {}".format(
-                    type(model),
-                    model.num_routed_experts,
-                    model.num_redundant_experts,
-                    model.num_physical_experts,
-                    model.num_logical_experts,
-                    model.num_expert_groups,
-                    type(new_model),
-                    new_model.num_routed_experts,
-                    new_model.num_redundant_experts,
-                    new_model.num_physical_experts,
-                    new_model.num_logical_experts,
-                    new_model.num_expert_groups,
-                )
-            )
-
     def add_model(
         self,
         model: MixtureOfExperts,
@@ -366,7 +324,6 @@ class EplbState:
         model_name: str | None = None,
     ):
         """Build the initial EPLB state."""
-        self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
@@ -826,11 +783,6 @@ class EplbState:
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
 
         # TODO(bowen): Treat differently for prefill and decode nodes
-        eplb_model_state = next(iter(self.model_states.values()))
-        model = eplb_model_state.model
-        num_replicas = model.num_physical_experts
-        num_groups = model.num_expert_groups
-
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
             # NOTE(yongji): scale down, we need to rebalance the experts on
             # remaining GPUs, transfer the experts while we haven't shutdown
@@ -840,9 +792,6 @@ class EplbState:
             tcp_store_group = coordinator.tcp_store_group
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
@@ -859,6 +808,12 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
+            model = eplb_model_state.model
+            num_replicas = model.num_physical_experts
+            num_groups = model.num_expert_groups
+            if rank_mapping is not None and len(rank_mapping) == ep_group.size():
+                num_replicas = num_replicas // ep_group.size() * num_gpus
+
             if not is_profile:
                 eplb_model_state.last_expert_load = global_expert_load_window
             if not self.is_async or is_profile:
@@ -1056,24 +1011,14 @@ class EplbState:
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
-        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
-        assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
-            "All tensors must have the same shape[1]."
-        )
-        # Concatenate, all_reduce, then unpack to original shapes.
-        # We assume all tensors are 2D and shape[1] (num_physical_experts)
-        # is the same across all models.
-        shapes = [t.shape for t in tensor_list]
-        concat_tensor = torch.cat(tensor_list, dim=0)
 
-        all_reduce(concat_tensor, group=ep_group)
-
-        all_reduce_list = []
-        offset = 0
-        for shape in shapes:
-            all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
-            offset += shape[0]
-        return all_reduce_list
+        flat = torch.cat([tensor.flatten() for tensor in tensor_list])
+        all_reduce(flat, group=ep_group)
+        sizes = [tensor.numel() for tensor in tensor_list]
+        return [
+            chunk.view_as(tensor)
+            for chunk, tensor in zip(flat.split(sizes), tensor_list)
+        ]
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
         """Sync the expert load pass across all ranks for log stats.

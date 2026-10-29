@@ -1266,9 +1266,7 @@ class SpecDecodeBaseProposer:
         return model.__class__.__name__
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Return a VllmConfig with kernel-level overrides for the proposer.
-        Subclasses may override to apply additional config changes.
-        """
+        """Return a VllmConfig with draft-specific proposer overrides."""
         spec_cfg = self.speculative_config
         base = self.vllm_config
 
@@ -1309,7 +1307,9 @@ class SpecDecodeBaseProposer:
         """
         from vllm.compilation.backends import set_model_tag
 
-        draft_vllm_config = self._create_draft_vllm_config()
+        draft_vllm_config = self.speculative_config.apply_draft_eplb_overrides(
+            self._create_draft_vllm_config()
+        )
         with set_model_tag("eagle_head"):
             model = get_model(
                 vllm_config=draft_vllm_config,

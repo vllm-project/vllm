@@ -409,8 +409,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
         # Draft MoE layers use the dspark_* expert counts, not the
-        # backbone's (see DeepseekV4MoE and the reference
-        # ModelArgs.get_moe_config).
+        # backbone's (see the reference ModelArgs.get_moe_config).
         n_draft_experts = (
             getattr(self.config, "dspark_n_routed_experts", 0)
             or self.config.n_routed_experts

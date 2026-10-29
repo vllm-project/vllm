@@ -38,6 +38,8 @@ def draft_model_supports_eplb(
         return False
     if speculative_config is None or speculative_config.draft_model_config is None:
         return False
+    if not getattr(speculative_config, "draft_enable_eplb", True):
+        return False
     if getattr(speculative_config, "method", None) == "dspark":
         return dspark_draft_supports_eplb(speculative_config.draft_model_config)
     return True
