@@ -1014,7 +1014,7 @@ def unified_attention(
         use_td
         and _is_pow2_nq
         and _is_pow2_hs
-        and (not current_platform.is_cuda() or max_seqlen_q > 1)
+        and (not current_platform.is_cuda() or max_seqlen_q > MAX_3D_QUERY_LEN)
     )
 
     # ``_load_q_td`` / ``_store_output_td`` flatten ``(num_queries_per_kv,
