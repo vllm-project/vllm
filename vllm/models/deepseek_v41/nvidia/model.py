@@ -42,9 +42,16 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _unpack
+from vllm.model_executor.layers.fusion.quant_activation import (
+    get_input_quant_key,
+    request_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8DynamicPacked,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -109,6 +116,7 @@ from ..common.engram import (
     gather_engram_hashes,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from .ops.mega_mhc import MegaMhcFp8Out, is_mega_mhc_supported
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     init_mhc_all_reduce,
@@ -362,6 +370,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # forward keeps the separate reduce-scatter below.
                 self.attn.bind_gemm_rs()
         self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
+        if (
+            not self.use_sequence_parallel
+            and self.engram is None
+            and extract_layer_index(prefix) > 0
+            and is_mega_mhc_supported(self.hidden_size, config.hc_mult)
+        ):
+            # Mega mHC hands fused_wqa_wkv its input as MXFP8 in DeepGEMM's
+            # layout. Sequence parallel all-gathers that input in BF16, and
+            # the first and Engram layers collapse it through mhc_pre instead.
+            request_input_quant_key(self.attn.fused_wqa_wkv, kMxfp8DynamicPacked)
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -507,6 +525,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        attn_fp8_out: MegaMhcFp8Out | None = None
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
@@ -598,9 +617,24 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=self.attn_norm.variance_epsilon,
             )
         else:
+            if get_input_quant_key(
+                self.attn.fused_wqa_wkv
+            ) == kMxfp8DynamicPacked and isinstance(x, torch.Tensor):
+                # fused_wqa_wkv takes the input as MXFP8 when Mega mHC runs.
+                attn_fp8_out = MegaMhcFp8Out.for_gemm(
+                    x.shape[0], self.hidden_size, x.device
+                )
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+            (
+                residual,
+                post_mix,
+                res_mix,
+                x,
+                attn_pre,
+                aux,
+                attn_fp8_out,
+            ) = mhc_shifted_post_pre(
                 x,
                 residual,
                 post_mix,
@@ -619,6 +653,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 capture_aux=capture_previous_aux,
                 stream=mhc_stream,
                 reduce_results=self.fuse_mhc_all_reduce,
+                fp8_out=attn_fp8_out,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -626,7 +661,14 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
 
-        x = self.attn(positions, x, None)
+        x = self.attn(
+            positions,
+            x,
+            None,
+            quantized_hidden_states=None
+            if attn_fp8_out is None
+            else attn_fp8_out.as_gemm_input(),
+        )
         # With GEMM-RS bound, the attention output is already this rank's
         # sequence-parallel shard (see DeepseekV4Attention._wo_b_proj).
         if self.use_sequence_parallel and self.attn.gemm_rs is None:
@@ -634,7 +676,9 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
-        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+        # MegaMoE takes its MXFP8 input straight from Mega mHC.
+        moe_inputs = self.ffn.mega_moe_inputs(x.shape[0])
+        residual, post_mix, res_mix, x, ffn_pre, _, ffn_fp8_out = mhc_shifted_post_pre(
             x,
             residual,
             post_mix,
@@ -652,12 +696,20 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
+            fp8_out=None
+            if moe_inputs is None
+            else MegaMhcFp8Out.for_mega_moe(moe_inputs),
         )
         if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
             # The next layer's first boundary finalizes it with the all-reduce.
             x = self.ffn.forward_unfinalized(x, input_ids)
         else:
-            x = self.ffn(x, input_ids, mega_gate_metadata)
+            x = self.ffn(
+                x,
+                input_ids,
+                mega_gate_metadata,
+                hidden_states_staged=ffn_fp8_out is not None,
+            )
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
@@ -676,7 +728,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
-        *_, x, _, _ = mhc_shifted_post_pre(
+        *_, x, _, _, _ = mhc_shifted_post_pre(
             x,
             residual,
             post_mix,

@@ -251,6 +251,13 @@ kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale, symmetric=Tru
 kMxfp8DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
 kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=True)
 
+# MXFP8 activations in DeepGEMM's A-operand layout: UE8M0 scales packed four per
+# int32, MN-major with a TMA-aligned token stride (fp8_gemm_nt / fp8_einsum).
+kMxfp8DynamicPackedScale = ScaleDesc(torch.int32, False, GroupShape(1, 32))
+kMxfp8DynamicPacked = QuantKey(
+    FP8_DTYPE, scale=kMxfp8DynamicPackedScale, symmetric=True
+)
+
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 

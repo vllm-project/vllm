@@ -148,7 +148,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
 
     routed = {}
 
-    def check_routing(x, weights, ids, shared_experts):
+    def check_routing(x, weights, ids, shared_experts, **kwargs):
         routed["ids"], routed["weights"] = ids, weights
         return x + shared_experts(x)
 
@@ -276,7 +276,7 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(
         dim=-1, keepdim=True
     )
 
-    def check_routing(x, weights, ids, shared_experts):
+    def check_routing(x, weights, ids, shared_experts, **kwargs):
         torch.testing.assert_close(ids, expected_ids)
         torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
         return x + shared_experts(x)

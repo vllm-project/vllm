@@ -468,10 +468,16 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
 ):
     """BMM metadata set after construction selects grouped weight processing."""
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
-        DeepGemmMxfp8BmmLinearKernel,
+        DeepGemmMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
     )
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization import get_quantization_config
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8DynamicPacked,
+    )
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         fused_inv_rope_fp8_quant,
     )
@@ -538,7 +544,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     assert isinstance(linear.quant_method, ModelOptLinearMethod)
     linear.quant_method.process_weights_after_loading(linear)
     linear.quant_method.process_weights_after_loading(linear)
-    assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8BmmLinearKernel)
+    assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8LinearKernel)
     assert linear.weight.shape == (2, 128, 512)
     torch.testing.assert_close(
         linear.weight.view(torch.uint8).flatten(),
@@ -567,7 +573,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
             ),
             dim=1,
         )
-        inputs = fused_inv_rope_fp8_quant(
+        q, q_scale = fused_inv_rope_fp8_quant(
             x.permute(1, 0, 2),
             torch.arange(num_tokens, device="cuda"),
             cache,
@@ -577,6 +583,9 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
             rope_dim=64,
             quant_group_size=32,
             tma_aligned_scales=current_platform.has_device_capability(100),
+        )
+        inputs = QuantizedActivation(
+            q, q_scale, torch.bfloat16, q.shape, kMxfp8DynamicPacked
         )
     with torch.no_grad():
         output = linear(inputs)
@@ -602,6 +611,113 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     compiled = torch.compile(linear, backend="eager", fullgraph=True)
     with torch.no_grad():
         torch.testing.assert_close(compiled(inputs), output, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
+@pytest.mark.parametrize("num_tokens", [1, 7, 64, 300])
+@pytest.mark.parametrize("n_k", [(1536, 4096), (4096, 2048)])
+def test_deep_gemm_mxfp8_linear_matches_flashinfer(num_tokens, n_k):
+    """The DeepGEMM MXFP8 GEMM agrees with FlashInfer's on BF16 input, and
+    input its producer already packed for DeepGEMM skips the quantization."""
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8_packed_for_deepgemm,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8DynamicPacked,
+    )
+
+    for kernel_cls in (DeepGemmMxfp8LinearKernel, FlashInferCutedslMxfp8LinearKernel):
+        supported, reason = kernel_cls.is_supported()
+        if not supported:
+            pytest.skip(reason)
+    torch.manual_seed(0)
+    n, k = n_k
+    weight, weight_scale = mxfp8_e4m3_quantize(
+        torch.randn(n, k, device="cuda", dtype=torch.bfloat16)
+    )
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16)
+
+    def build(kernel_cls):
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(
+            weight_scale.clone(), requires_grad=False
+        )
+        kernel = kernel_cls(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+        kernel.process_weights_after_loading(layer)
+        return layer, kernel
+
+    reference_layer, reference_kernel = build(FlashInferCutedslMxfp8LinearKernel)
+    layer, kernel = build(DeepGemmMxfp8LinearKernel)
+    output = kernel.apply_weights(layer, x)
+    torch.testing.assert_close(
+        output, reference_kernel.apply_weights(reference_layer, x), rtol=2e-2, atol=2e-1
+    )
+
+    q, q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+        x, group_size=32, use_ue8m0=True
+    )
+    quantized = QuantizedActivation(q, q_scale, x.dtype, x.shape, kMxfp8DynamicPacked)
+    torch.testing.assert_close(
+        kernel.apply_weights(layer, quantized), output, rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
+def test_requested_input_quant_key_selects_consuming_kernel(
+    dist_init, default_vllm_config
+):
+    """A layer whose producer emits DeepGEMM's packed MXFP8 gets the kernel that
+    consumes it after loading, and then advertises that input."""
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        get_input_quant_key,
+        request_input_quant_key,
+    )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization import get_quantization_config
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8DynamicPacked,
+    )
+
+    if not DeepGemmMxfp8LinearKernel.is_supported()[0]:
+        pytest.skip("DeepGEMM MXFP8 requires Blackwell")
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    quant_config = get_quantization_config("mxfp8").from_config(
+        {"quant_method": "mxfp8"}
+    )
+    with torch.device("cuda"):
+        linear = ColumnParallelLinear(
+            512, 256, bias=False, quant_config=quant_config, return_bias=False
+        )
+    assert get_input_quant_key(linear) != kMxfp8DynamicPacked
+    request_input_quant_key(linear, kMxfp8DynamicPacked)
+    linear.weight.data.copy_(
+        torch.randn(256, 512, device="cuda").to(torch.float8_e4m3fn)
+    )
+    linear.weight_scale.data.view(torch.uint8).fill_(127)
+    assert isinstance(linear.quant_method, ModelOptLinearMethod)
+    linear.quant_method.process_weights_after_loading(linear)
+
+    assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8LinearKernel)
+    assert get_input_quant_key(linear) == kMxfp8DynamicPacked
 
 
 def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):

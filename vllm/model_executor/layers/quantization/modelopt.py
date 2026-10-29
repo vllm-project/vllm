@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     expose_input_quant_key,
+    get_requested_input_quant_key,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -2654,11 +2655,17 @@ class ModelOptLinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
-        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+        requested_key = get_requested_input_quant_key(layer)
+        if self.spec.weight == kMxfp8Static and (
+            getattr(layer, "is_bmm", False) or requested_key is not None
+        ):
+            # The model set these after create_weights picked a kernel.
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
-                bmm_batch_size=layer.bmm_batch_size,
+                bmm_batch_size=getattr(layer, "bmm_batch_size", None),
+                input_quant_key=requested_key,
             )
+            expose_input_quant_key(layer, self.kernel)
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
                 raise RuntimeError(
