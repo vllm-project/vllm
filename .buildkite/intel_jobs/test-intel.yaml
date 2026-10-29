@@ -1,0 +1,16 @@
+group: Intel
+steps:
+  - label: ":docker: Build XPU image"
+    soft_fail: true
+    depends_on: []
+    key: image-build-xpu
+    commands:
+      - bash -lc '.buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-test-repo" "$BUILDKITE_COMMIT"'
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
