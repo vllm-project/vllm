@@ -14,6 +14,7 @@ use crate::lora::{LoadLoraError, LoraPathAccessError, UnloadLoraError};
 use crate::routes::openai::utils::types::Normalizable;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
+use vllm_llm::Error as EngineError;
 
 #[derive(Debug, Deserialize, Validate)]
 pub(crate) struct LoadLoraAdapterRequest {
@@ -56,6 +57,10 @@ fn load_lora_api_error(error: LoadLoraError) -> ApiError {
         LoadLoraError::BaseModelName { .. } => {
             ApiError::invalid_request(message, Some("lora_name"))
         }
+        LoadLoraError::Engine {
+            source: EngineError::UnsupportedOperation { .. },
+            ..
+        } => ApiError::not_implemented(message),
         LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => {
             ApiError::server_error(message)
         }
@@ -70,6 +75,10 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
+        UnloadLoraError::Engine {
+            source: EngineError::UnsupportedOperation { .. },
+            ..
+        } => ApiError::not_implemented(message),
         UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
             ApiError::server_error(message)
         }

@@ -45,7 +45,7 @@ pub async fn collective_rpc(
     })?;
 
     let results = state
-        .engine_core_client()
+        .engine_client()
         .collective_rpc(&method, body.timeout, body.args, body.kwargs)
         .await
         .map_err(|error| utility_call_error("collective_rpc", error))?;

@@ -68,7 +68,7 @@ pub async fn sleep(
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
-        .engine_core_client()
+        .engine_client()
         .sleep(level, mode)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
@@ -85,7 +85,7 @@ pub async fn release_kv_cache_memory(
 ) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
     let _recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
-        .engine_core_client()
+        .engine_client()
         .release_kv_cache_memory()
         .await
         .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
@@ -110,7 +110,7 @@ pub async fn wake_up(
 
     let _recorder = METRICS.api_server.record_sleep_mode_operation("wake");
     let fully_awake = state
-        .engine_core_client()
+        .engine_client()
         .wake_up(tags.clone())
         .await
         .map_err(|error| utility_call_error("wake_up", error))?;
@@ -126,7 +126,7 @@ pub async fn is_sleeping(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<IsSleepingResponse>, ApiError> {
     let is_sleeping = state
-        .engine_core_client()
+        .engine_client()
         .is_sleeping()
         .await
         .map_err(|error| utility_call_error("is_sleeping", error))?;

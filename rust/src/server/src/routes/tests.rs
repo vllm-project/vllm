@@ -17,6 +17,7 @@ use std::{fmt, fs};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use rmpv::Value;
 use serde_json::json;
 use serial_test::serial;
@@ -28,7 +29,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -47,10 +48,10 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::Llm;
+use vllm_llm::{GenerateRequest, Llm, Result as LlmResult};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
+use vllm_text::{EngineClient, Prompt, TextBackend, TextLlm, TextRequestProcessor, TokenStream};
 use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -1221,6 +1222,90 @@ where
         )),
         engine_task,
     )
+}
+
+struct GenerationOnlyClient;
+
+impl EngineClient for GenerationOnlyClient {
+    fn generate<'a>(&'a self, _request: GenerateRequest) -> BoxFuture<'a, LlmResult<TokenStream>> {
+        Box::pin(async { unreachable!("this test does not submit generation") })
+    }
+
+    fn abort<'a>(&'a self, _request_ids: &'a [String]) -> BoxFuture<'a, LlmResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn shutdown(self: Box<Self>) -> BoxFuture<'static, LlmResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn max_model_len(&self) -> u32 {
+        128
+    }
+    fn model_dtype(&self) -> Option<ModelDtype> {
+        None
+    }
+    fn is_healthy(&self) -> bool {
+        true
+    }
+    fn supports_lora(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn generation_only_client_returns_unsupported_for_engine_operations() {
+    use crate::grpc::pb::control_server::Control as _;
+    use crate::grpc::{ControlServiceImpl, pb};
+
+    let backend = Arc::new(FakeChatBackend::new());
+    let chat = ChatLlm::new(TextLlm::new(GenerationOnlyClient, backend.clone()), backend);
+    let state = Arc::new(AppState::new(vec!["test-model".into()], chat));
+    let mut app = build_router_with_dev_mode_and_lora(state.clone(), true, true);
+
+    for path in ["/health", "/v1/models"] {
+        let response = app
+            .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    for (method, path, operation) in [
+        ("GET", "/kv_event_sources", "ready_responses"),
+        ("POST", "/reset_prefix_cache", "reset_prefix_cache"),
+    ] {
+        let response = app
+            .call(Request::builder().method(method).uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "NotImplementedError");
+        assert!(body["error"]["message"].as_str().unwrap().contains(operation));
+    }
+
+    let (status, _) = post_json(
+        &mut app,
+        "/v1/load_lora_adapter",
+        json!({
+            "lora_name": "adapter", "lora_path": "remote/adapter"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+
+    let service = ControlServiceImpl::new(state);
+    let error = service
+        .get_server_info(tonic::Request::new(pb::GetServerInfoRequest {}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    let error = service
+        .pause_generation(tonic::Request::new(pb::PauseGenerationRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 /// Engine script that answers one `add_lora` utility call with `loaded` and
@@ -4192,7 +4277,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     .await;
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state.engine_core_client().is_healthy() {
+        while state.engine_client().is_healthy() {
             tokio::task::yield_now().await;
         }
     })
@@ -4203,7 +4288,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.is_empty(), "expected empty body, got {:?}", body);
     assert!(matches!(
-        state.engine_core_client().health_error().as_deref(),
+        state.engine_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
     ));
 

@@ -19,6 +19,8 @@ pub enum ApiError {
         message: String,
         param: Option<&'static str>,
     },
+    /// The backend does not implement the requested operation.
+    NotImplemented { message: String },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
     /// The request body could not be parsed as valid JSON.
@@ -37,6 +39,7 @@ impl ApiError {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
@@ -53,6 +56,7 @@ impl ApiError {
                 message.clone(),
                 param.map(str::to_string),
             ),
+            Self::NotImplemented { message } => ("NotImplementedError", message.clone(), None),
             Self::ModelNotFound { model } => (
                 "NotFoundError",
                 format!("The model `{model}` does not exist."),

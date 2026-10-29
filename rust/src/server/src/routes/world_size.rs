@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::utils::utility_call_error;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorldSizeParams {
@@ -42,12 +43,15 @@ pub async fn get_world_size(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WorldSizeParams>,
 ) -> Result<Json<WorldSizeResponse>, ApiError> {
-    let client = state.engine_core_client();
+    let client = state.engine_client();
 
-    let ws = client.world_size();
+    let ws = client.world_size().map_err(|error| utility_call_error("world_size", error))?;
 
     let world_size = if params.include_dp {
-        let dp = client.data_parallel_size() as u64;
+        let dp = client
+            .data_parallel_size()
+            .map_err(|error| utility_call_error("data_parallel_size", error))?
+            as u64;
         ws * dp
     } else {
         ws

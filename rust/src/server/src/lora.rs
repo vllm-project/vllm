@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_text::EngineClient;
 
 use crate::config::LoraModulePath;
 
@@ -149,7 +149,7 @@ pub(crate) enum LoadLoraError {
     Engine {
         lora_name: String,
         #[source]
-        source: vllm_engine_core_client::Error,
+        source: vllm_llm::Error,
     },
     #[error("one or more engine ranks rejected LoRA adapter `{lora_name}`")]
     NotLoaded { lora_name: String },
@@ -173,7 +173,7 @@ pub(crate) enum UnloadLoraError {
     Engine {
         lora_name: String,
         #[source]
-        source: vllm_engine_core_client::Error,
+        source: vllm_llm::Error,
     },
     #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
     NotRemoved { lora_name: String, lora_int_id: u64 },
@@ -215,7 +215,7 @@ impl LoraManager {
     /// Load one dynamic LoRA adapter and register it as a public model name.
     pub async fn load_lora(
         &self,
-        engine_core_client: &EngineCoreClient,
+        engine_client: &dyn EngineClient,
         base_model_names: &[String],
         mut module: LoraModulePath,
         load_inplace: bool,
@@ -226,7 +226,7 @@ impl LoraManager {
         {
             module.path = canonical_path;
         }
-        self.register(engine_core_client, base_model_names, module, load_inplace).await
+        self.register(engine_client, base_model_names, module, load_inplace).await
     }
 
     /// Load an operator-configured adapter (`--lora-modules`). Unlike the
@@ -234,16 +234,16 @@ impl LoraManager {
     /// check applies.
     pub async fn load_static_lora(
         &self,
-        engine_core_client: &EngineCoreClient,
+        engine_client: &dyn EngineClient,
         base_model_names: &[String],
         module: &LoraModulePath,
     ) -> Result<LoadedLora, LoadLoraError> {
-        self.register(engine_core_client, base_model_names, module.clone(), false).await
+        self.register(engine_client, base_model_names, module.clone(), false).await
     }
 
     async fn register(
         &self,
-        engine_core_client: &EngineCoreClient,
+        engine_client: &dyn EngineClient,
         base_model_names: &[String],
         module: LoraModulePath,
         load_inplace: bool,
@@ -285,7 +285,7 @@ impl LoraManager {
             load_inplace,
             ..adapter.to_request()
         };
-        let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
+        let loaded = engine_client.add_lora(&lora_request).await.map_err(|source| {
             LoadLoraError::Engine {
                 lora_name: lora_name.clone(),
                 source,
@@ -302,7 +302,7 @@ impl LoraManager {
     /// registry.
     pub async fn unload_lora(
         &self,
-        engine_core_client: &EngineCoreClient,
+        engine_client: &dyn EngineClient,
         lora_name: &str,
         requested_lora_int_id: Option<u64>,
     ) -> Result<LoadedLora, UnloadLoraError> {
@@ -323,13 +323,12 @@ impl LoraManager {
             });
         }
 
-        let removed =
-            engine_core_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
-                UnloadLoraError::Engine {
-                    lora_name: adapter.lora_name.clone(),
-                    source,
-                }
-            })?;
+        let removed = engine_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
+            UnloadLoraError::Engine {
+                lora_name: adapter.lora_name.clone(),
+                source,
+            }
+        })?;
         if !removed {
             return Err(UnloadLoraError::NotRemoved {
                 lora_name: adapter.lora_name,

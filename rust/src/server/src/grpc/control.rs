@@ -8,9 +8,10 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
+use vllm_llm::Error as EngineError;
+use vllm_text::EngineClient;
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
@@ -42,59 +43,84 @@ impl ControlServiceImpl {
         self
     }
 
-    fn ready(&self) -> &EngineCoreReadyResponse {
-        self.state.engine_core_client().ready_response()
+    fn ready(&self) -> Result<&EngineCoreReadyResponse, Status> {
+        self.state
+            .engine_client()
+            .ready_response()
+            .map_err(|error| utility_status("ready_response", error))
     }
 
-    fn client(&self) -> &EngineCoreClient {
-        self.state.engine_core_client()
+    fn client(&self) -> &dyn EngineClient {
+        self.state.engine_client()
     }
 
-    fn parallelism_info(&self) -> pb::ParallelismInfo {
-        let ready = self.ready();
-        pb::ParallelismInfo {
+    fn parallelism_info(&self) -> Result<pb::ParallelismInfo, Status> {
+        let ready = self.ready()?;
+        Ok(pb::ParallelismInfo {
             tensor_parallel_size: ready.tensor_parallel_size,
             pipeline_parallel_size: ready.pipeline_parallel_size,
-            data_parallel_size: self.client().data_parallel_size().min(u32::MAX as usize) as u32,
+            data_parallel_size: self
+                .client()
+                .data_parallel_size()
+                .map_err(|error| utility_status("data_parallel_size", error))?
+                .min(u32::MAX as usize) as u32,
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
             world_size: ready.world_size,
-            data_parallel_size_local: self.client().engine_count() as u32,
-        }
+            data_parallel_size_local: self
+                .client()
+                .engine_count()
+                .map_err(|error| utility_status("engine_count", error))?
+                as u32,
+        })
     }
 
-    fn weight_transfer_backend(&self) -> Option<&str> {
-        let responses = self.client().ready_responses();
-        let backend = responses.first()?.weight_transfer_backend.as_deref()?;
-        responses
+    fn weight_transfer_backend(&self) -> Result<Option<&str>, Status> {
+        let responses = self
+            .client()
+            .ready_responses()
+            .map_err(|error| utility_status("ready_responses", error))?;
+        let Some(backend) =
+            responses.first().and_then(|ready| ready.weight_transfer_backend.as_deref())
+        else {
+            return Ok(None);
+        };
+        Ok(responses
             .iter()
             .all(|ready| ready.weight_transfer_backend.as_deref() == Some(backend))
-            .then_some(backend)
+            .then_some(backend))
     }
 
-    fn sleep_mode_enabled(&self) -> bool {
-        self.client().ready_responses().iter().all(|ready| ready.enable_sleep_mode)
-    }
-
-    fn draft_weight_updates_enabled(&self) -> bool {
-        self.client()
+    fn sleep_mode_enabled(&self) -> Result<bool, Status> {
+        Ok(self
+            .client()
             .ready_responses()
+            .map_err(|error| utility_status("ready_responses", error))?
             .iter()
-            .all(|ready| ready.supports_draft_weight_updates)
+            .all(|ready| ready.enable_sleep_mode))
     }
 
-    fn rl_capabilities(&self) -> pb::RlCapabilities {
-        let backend = self.weight_transfer_backend();
-        pb::RlCapabilities {
+    fn draft_weight_updates_enabled(&self) -> Result<bool, Status> {
+        Ok(self
+            .client()
+            .ready_responses()
+            .map_err(|error| utility_status("ready_responses", error))?
+            .iter()
+            .all(|ready| ready.supports_draft_weight_updates))
+    }
+
+    fn rl_capabilities(&self) -> Result<pb::RlCapabilities, Status> {
+        let backend = self.weight_transfer_backend()?;
+        Ok(pb::RlCapabilities {
             weight_transfer_enabled: backend.is_some(),
             weight_transfer_backend: backend.unwrap_or_default().to_string(),
-            sleep_mode_enabled: self.sleep_mode_enabled(),
-            draft_weight_updates_enabled: self.draft_weight_updates_enabled(),
-        }
+            sleep_mode_enabled: self.sleep_mode_enabled()?,
+            draft_weight_updates_enabled: self.draft_weight_updates_enabled()?,
+        })
     }
 
     fn require_weight_transfer(&self) -> Result<(), Status> {
-        self.weight_transfer_backend().map(|_| ()).ok_or_else(|| {
+        self.weight_transfer_backend()?.map(|_| ()).ok_or_else(|| {
             Status::failed_precondition(
                 "weight transfer is not configured; start vLLM with --weight-transfer-config",
             )
@@ -102,7 +128,7 @@ impl ControlServiceImpl {
     }
 
     fn require_sleep_mode(&self) -> Result<(), Status> {
-        self.sleep_mode_enabled().then_some(()).ok_or_else(|| {
+        self.sleep_mode_enabled()?.then_some(()).ok_or_else(|| {
             Status::failed_precondition(
                 "sleep mode is not configured; start vLLM with --enable-sleep-mode",
             )
@@ -112,8 +138,14 @@ impl ControlServiceImpl {
 
 const GRPC_API_VERSION: &str = "vllm";
 
-fn utility_status(method: &'static str, error: vllm_engine_core_client::Error) -> Status {
-    Status::internal(format!("{method} failed: {}", error.to_report_string()))
+fn utility_status(method: &'static str, error: EngineError) -> Status {
+    match error {
+        EngineError::UnsupportedOperation { .. } => Status::unimplemented(error.to_report_string()),
+        EngineError::EngineCoreClient(source) => {
+            Status::internal(format!("{method} failed: {}", source.to_report_string()))
+        }
+        error => Status::internal(format!("{method} failed: {}", error.to_report_string())),
+    }
 }
 
 fn pause_mode(mode: i32) -> Result<EnginePauseMode, Status> {
@@ -166,6 +198,10 @@ fn load_lora_status(error: LoadLoraError) -> Status {
         LoadLoraError::AlreadyLoaded { .. } | LoadLoraError::BaseModelName { .. } => {
             Code::AlreadyExists
         }
+        LoadLoraError::Engine {
+            source: EngineError::UnsupportedOperation { .. },
+            ..
+        } => Code::Unimplemented,
         LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => Code::Internal,
     };
     Status::new(code, error.to_report_string())
@@ -175,6 +211,10 @@ fn unload_lora_status(error: UnloadLoraError) -> Status {
     let code = match &error {
         UnloadLoraError::Disabled(_) => Code::FailedPrecondition,
         UnloadLoraError::NotFound { .. } => Code::NotFound,
+        UnloadLoraError::Engine {
+            source: EngineError::UnsupportedOperation { .. },
+            ..
+        } => Code::Unimplemented,
         UnloadLoraError::IntIdMismatch { .. }
         | UnloadLoraError::Engine { .. }
         | UnloadLoraError::NotRemoved { .. } => Code::Internal,
@@ -204,21 +244,28 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        let ready = self.ready();
+        let ready = self.ready()?;
         Ok(Response::new(pb::ServerInfo {
             engine_version: ready.vllm_version.clone(),
             api_version: GRPC_API_VERSION.to_string(),
             instance_id: ready.instance_id.clone(),
-            parallelism: Some(self.parallelism_info()),
-            max_model_len: self.state.engine_core_client().max_model_len(),
+            parallelism: Some(self.parallelism_info()?),
+            max_model_len: self.state.engine_client().max_model_len(),
             kv_block_size: ready.block_size.min(u64::from(u32::MAX)) as u32,
-            total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
+            total_kv_blocks: self
+                .state
+                .engine_client()
+                .total_num_gpu_blocks()
+                .map_err(|error| utility_status("total_num_gpu_blocks", error))?,
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
-            rl_capabilities: Some(self.rl_capabilities()),
+            rl_capabilities: Some(self.rl_capabilities()?),
             proto_version: pb::VERSION.to_string(),
-            effective_attention_block_size: self.client().effective_attention_block_size(),
+            effective_attention_block_size: self
+                .client()
+                .effective_attention_block_size()
+                .map_err(|error| utility_status("effective_attention_block_size", error))?,
         }))
     }
 
@@ -234,7 +281,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             // GenerateRequest accepts both prompt representations.
             supports_text_input: true,
             supports_token_ids_input: true,
-            supports_lora: self.ready().supports_lora,
+            supports_lora: self.client().supports_lora(),
             supports_multimodal: self.state.chat.supports_multimodal(),
             reasoning_parser: self
                 .state
@@ -260,7 +307,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             return Ok(Response::new(pb::AbortResponse {}));
         }
         self.state
-            .chat
+            .engine_client()
             .abort(&request_ids)
             .await
             .map_err(|error| Status::internal(error.to_report_string()))?;
@@ -326,8 +373,13 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        let client = self.state.engine_core_client();
-        let sources = client.ready_responses().into_iter().filter_map(kv_event_source).collect();
+        let client = self.state.engine_client();
+        let sources = client
+            .ready_responses()
+            .map_err(|error| utility_status("ready_responses", error))?
+            .into_iter()
+            .filter_map(kv_event_source)
+            .collect();
         Ok(Response::new(pb::GetKvEventSourcesResponse { sources }))
     }
 
@@ -445,7 +497,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         _request: Request<pb::StartDraftWeightUpdateRequest>,
     ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
         self.require_weight_transfer()?;
-        if !self.draft_weight_updates_enabled() {
+        if !self.draft_weight_updates_enabled()? {
             return Err(Status::failed_precondition(
                 "draft weight updates require a configured speculative draft model",
             ));

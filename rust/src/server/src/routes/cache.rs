@@ -32,7 +32,7 @@ pub async fn reset_prefix_cache(
     Query(params): Query<ResetPrefixCacheParams>,
 ) -> Result<Json<ResetPrefixCacheResponse>, ApiError> {
     let success = state
-        .engine_core_client()
+        .engine_client()
         .reset_prefix_cache(params.reset_running_requests, params.reset_external)
         .await
         .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
@@ -43,7 +43,7 @@ pub async fn reset_prefix_cache(
 /// Reset the multi-modal cache.
 pub async fn reset_mm_cache(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
     state
-        .engine_core_client()
+        .engine_client()
         .reset_mm_cache()
         .await
         .map_err(|error| utility_call_error("reset_mm_cache", error))?;
@@ -56,7 +56,7 @@ pub async fn reset_encoder_cache(
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
     state
-        .engine_core_client()
+        .engine_client()
         .reset_encoder_cache()
         .await
         .map_err(|error| utility_call_error("reset_encoder_cache", error))?;

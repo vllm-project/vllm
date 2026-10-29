@@ -53,8 +53,16 @@ where
 }
 
 /// Construct an API error for a failed utility call to the engine core.
-pub fn utility_call_error(method: &str, error: impl AsReport) -> ApiError {
-    ApiError::server_error(format!("failed to call {method}: {}", error.as_report()))
+pub fn utility_call_error(method: &str, error: vllm_llm::Error) -> ApiError {
+    match error {
+        vllm_llm::Error::UnsupportedOperation { .. } => {
+            ApiError::not_implemented(error.to_report_string())
+        }
+        vllm_llm::Error::EngineCoreClient(source) => {
+            ApiError::server_error(format!("failed to call {method}: {}", source.as_report()))
+        }
+        error => ApiError::server_error(format!("failed to call {method}: {}", error.as_report())),
+    }
 }
 
 /// Merge `kv_transfer_params` into the `vllm_xargs` map, mirroring the Python

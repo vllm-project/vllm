@@ -7,12 +7,12 @@ use std::sync::Arc;
 use futures::{StreamExt as _, future::BoxFuture, stream::BoxStream};
 use serde_json::Value as JsonValue;
 use tokio::sync::watch;
+use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_engine_core_client::protocol::OpaqueValue;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode;
-use vllm_engine_core_client::{EngineCoreClient, Error as EngineCoreError};
 use vllm_llm::{Error, GenerateOutput, GenerateRequest, Llm, Result};
 
 pub type TokenStream = BoxStream<'static, Result<GenerateOutput>>;
@@ -29,11 +29,6 @@ pub trait EngineClient: Send + Sync {
     fn model_dtype(&self) -> Option<ModelDtype>;
     fn is_healthy(&self) -> bool;
     fn supports_lora(&self) -> bool;
-
-    /// Access native administration for routes that require the ZMQ client.
-    fn as_engine_core_client(&self) -> Option<&EngineCoreClient> {
-        None
-    }
 
     fn health_error(&self) -> Option<Arc<EngineCoreError>> {
         None
@@ -217,10 +212,6 @@ impl EngineClient for Llm {
 
     fn supports_lora(&self) -> bool {
         self.engine_core_client().ready_response().supports_lora
-    }
-
-    fn as_engine_core_client(&self) -> Option<&EngineCoreClient> {
-        Some(self.engine_core_client())
     }
 
     fn health_error(&self) -> Option<Arc<EngineCoreError>> {
