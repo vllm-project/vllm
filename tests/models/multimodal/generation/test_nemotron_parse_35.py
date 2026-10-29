@@ -35,7 +35,7 @@ def generate_hf_logprobs_from_logits(
     outputs = []
     for model_inputs in inputs:
         generated = hf_model.model.generate(
-            **hf_model.wrap_device(dict(model_inputs)),
+            **hf_model.wrap_device(model_inputs),
             do_sample=False,
             max_new_tokens=max_tokens,
             output_logits=True,

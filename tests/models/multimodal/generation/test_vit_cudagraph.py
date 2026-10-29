@@ -577,7 +577,7 @@ def _check_eonly_encoder_outputs(worker, batches):
         for batch in batches:
             kwargs = {key: value.to(runner.device) for key, value in batch.items()}
             actual = manager.execute(kwargs)
-            expected = getattr(runner.model, "embed_multimodal")(**kwargs)  # noqa: B009
+            expected = runner.model.embed_multimodal(**kwargs)
             assert len(actual) == len(expected)
             for output, reference in zip(actual, expected):
                 assert torch.isfinite(output).all()

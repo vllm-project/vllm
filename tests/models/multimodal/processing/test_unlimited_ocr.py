@@ -31,11 +31,11 @@ def test_profiling_tokens_cover_all_crop_grids():
     budget = dummy_inputs["mm_placeholders"]["image"][0].get_num_embeds()
 
     for width_tiles, height_tiles in calculate_aspect_ratios(
-        max_num=getattr(hf_processor, "max_crops")  # noqa: B009
+        max_num=hf_processor.max_crops
     ):
         num_tokens = mm_processor.info.get_num_image_tokens(
-            image_width=width_tiles * getattr(hf_processor, "image_size"),  # noqa: B009
-            image_height=height_tiles * getattr(hf_processor, "image_size"),  # noqa: B009
+            image_width=width_tiles * hf_processor.image_size,
+            image_height=height_tiles * hf_processor.image_size,
         )
         assert num_tokens <= budget, (width_tiles, height_tiles, num_tokens, budget)
 

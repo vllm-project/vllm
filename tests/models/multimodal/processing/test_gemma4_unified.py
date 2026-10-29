@@ -407,7 +407,7 @@ def test_process_image_input_batching_and_chunking():
     """
     from unittest.mock import patch
 
-    model = _MockUnifiedModel()  # type: ignore[abstract]
+    model = _MockUnifiedModel()
 
     # 1. 3D stacked image tensor
     pv = torch.randn(2, 5, 48)
@@ -446,7 +446,7 @@ def test_process_image_input_batching_and_chunking():
 
 def test_process_video_input_batching():
     """Verify _process_video_input with frame counts and lists of tensors."""
-    model = _MockUnifiedModel()  # type: ignore[abstract]
+    model = _MockUnifiedModel()
 
     # 2 videos: 3 frames and 2 frames, each frame has 4 patches
     pv_vid = torch.randn(5, 4, 48)
@@ -487,7 +487,7 @@ def test_process_video_input_batching():
 def test_cuda_execution_with_gpu_sync_allowed():
     """Verify vision processing on CUDA under gpu_sync_allowed."""
     device = "cuda:0"
-    model = _MockUnifiedModel(device=device, dtype=torch.bfloat16)  # type: ignore[abstract]
+    model = _MockUnifiedModel(device=device, dtype=torch.bfloat16)
 
     pv = torch.randn(2, 5, 48, device=device, dtype=torch.bfloat16)
     pp = torch.randint(0, 100, (2, 5, 2), device=device)

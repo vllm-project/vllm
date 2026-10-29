@@ -281,7 +281,7 @@ def test_video_cache_is_independent_of_image_kwargs(
 
     def process(mm_kwargs, cache):
         return processor(
-            getattr(hf_processor, "image_token") + getattr(hf_processor, "video_token"),  # noqa: B009
+            hf_processor.image_token + hf_processor.video_token,
             mm_items,
             mm_uuid_items={"video": [video_uuid]},
             hf_processor_mm_kwargs=mm_kwargs,

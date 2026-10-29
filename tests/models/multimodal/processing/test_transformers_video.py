@@ -96,7 +96,7 @@ def test_video_multimodal_processor(model_id):
     assert result["prompt_token_ids"] == hf_inputs["input_ids"][0].tolist()
 
     (placeholder,) = result["mm_placeholders"]["video"]
-    (num_video_tokens,) = getattr(hf_processor, "_get_num_multimodal_tokens")(  # noqa: B009
+    (num_video_tokens,) = hf_processor._get_num_multimodal_tokens(
         video_sizes=[frames.shape[:3]]
     )["num_video_tokens"]
     assert placeholder.get_num_embeds() == num_video_tokens
@@ -288,7 +288,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
     assert placeholder.get_num_embeds() == max_tokens
     # Shrinking the dummy frames must never cost tokens
     num_frames = info.get_num_frames_with_most_features(seq_len, {"video": 1})
-    (huge_frame_tokens,) = getattr(  # noqa: B009
-        info.get_hf_processor(), "_get_num_multimodal_tokens"
-    )(video_sizes=[[num_frames, 10_000, 10_000]])["num_video_tokens"]
+    (huge_frame_tokens,) = info.get_hf_processor()._get_num_multimodal_tokens(
+        video_sizes=[[num_frames, 10_000, 10_000]]
+    )["num_video_tokens"]
     assert max_tokens >= huge_frame_tokens

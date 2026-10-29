@@ -72,9 +72,7 @@ def test_processor_override(
         processor=hf_processor,
         mm_kwargs=hf_processor_mm_kwargs,
     )
-    assert num_patches == expected_toks_per_img // getattr(  # noqa: B009
-        hf_processor, "image_seq_len"
-    )
+    assert num_patches == expected_toks_per_img // hf_processor.image_seq_len
 
     hf_processed_inputs = hf_processor(
         text=prompt,

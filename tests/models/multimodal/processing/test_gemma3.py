@@ -176,7 +176,7 @@ def test_get_image_size_with_most_features(
     )
 
     prompt = "<start_of_image>"
-    image_seq_length = getattr(hf_processor, "image_seq_length")  # noqa: B009
+    image_seq_length = hf_processor.image_seq_length
 
     for asset in image_assets:
         mm_data = {"image": [asset.pil_image]}

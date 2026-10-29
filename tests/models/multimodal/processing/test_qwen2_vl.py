@@ -341,9 +341,7 @@ def test_processor_override(
 
     # Ensure we have the right number of placeholders per num_crops size
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    image_token_id = tokenizer.convert_tokens_to_ids(
-        getattr(hf_processor, "image_token")  # noqa: B009
-    )
+    image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     pixel_values = processed_inputs["mm_kwargs"].get_data()["pixel_values"]
     assert isinstance(pixel_values, torch.Tensor)

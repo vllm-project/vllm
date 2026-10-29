@@ -99,7 +99,7 @@ def test_batch_padding_removed_from_image_items():
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model="BAAI/Emu3-Chat-hf", model_impl="transformers")
     )
-    image_token = getattr(mm_processor.info.get_hf_processor(), "image_token")  # noqa: B009
+    image_token = mm_processor.info.get_hf_processor().image_token
 
     images = [
         ImageAsset("cherry_blossom").pil_image,
@@ -131,7 +131,7 @@ def _process_one_gemma3_image():
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model="google/gemma-3-4b-it", model_impl="transformers")
     )
-    boi_token = getattr(mm_processor.info.get_hf_processor(), "boi_token")  # noqa: B009
+    boi_token = mm_processor.info.get_hf_processor().boi_token
     return mm_processor(
         prompt=f"{boi_token} What is this?",
         mm_items=mm_processor.info.parse_mm_data(

@@ -192,7 +192,7 @@ def test_models_image_special_tokens_processing(
         return_tensors="pt",
     )
 
-    image_token_id = getattr(hf_processor, "get_special_image_token_id")()  # noqa: B009
+    image_token_id = hf_processor.get_special_image_token_id()
     hf_prompt_token_ids = [
         image_token_id if token_id < 0 else token_id
         for token_id in hf_inputs["input_ids"][0].tolist()

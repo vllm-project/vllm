@@ -333,13 +333,13 @@ def test_moss_audio_validates_tp_config():
     vllm_config.model_config.hf_config.adapter_hidden_size = 7
 
     with pytest.raises(ValueError, match="adapter_hidden_size"):
-        MossAudioModel(vllm_config=vllm_config)  # type: ignore[abstract]
+        MossAudioModel(vllm_config=vllm_config)
 
     vllm_config = _vllm_config(tensor_parallel_size=2)
     vllm_config.model_config.hf_config.audio_config.d_model = 6
     vllm_config.model_config.hf_config.audio_config.encoder_attention_heads = 3
     with pytest.raises(ValueError, match="encoder_attention_heads"):
-        MossAudioModel(vllm_config=vllm_config)  # type: ignore[abstract]
+        MossAudioModel(vllm_config=vllm_config)
 
 
 def test_moss_audio_rejects_audio_data_list_seqlen_count_mismatch():
@@ -566,7 +566,7 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
             }
         )
     )
-    language_model = object.__new__(MossQwen3ForCausalLM)  # type: ignore[type-abstract]
+    language_model = object.__new__(MossQwen3ForCausalLM)
     torch.nn.Module.__init__(language_model)
     language_model.model = inner_model
     language_model.config = SimpleNamespace(hidden_size=4)
@@ -644,7 +644,7 @@ def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):
     assert all(hasattr(attention, name) for name in ("q_proj", "k_proj", "v_proj"))
     assert hasattr(attention, "out_proj")
     assert not hasattr(attention, "qkv")
-    assert getattr(attention, "k_proj").bias is None  # noqa: B009
+    assert attention.k_proj.bias is None
 
     weight_names = [
         "layers.0.self_attn.q_proj.weight",

@@ -58,9 +58,7 @@ def test_processor_with_audio_sample_rate(
 
     # Verify audio tokens are generated
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    audio_token_id = tokenizer.convert_tokens_to_ids(
-        getattr(hf_processor, "audio_token")  # noqa: B009
-    )
+    audio_token_id = tokenizer.convert_tokens_to_ids(hf_processor.audio_token)
     aud_tok_count = processed_inputs["prompt_token_ids"].count(audio_token_id)
 
     assert aud_tok_count >= 1, (
@@ -100,9 +98,7 @@ def test_longer_audio_generates_more_tokens(model_id: str) -> None:
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
         hf_proc = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-        audio_token_id = tokenizer.convert_tokens_to_ids(
-            getattr(hf_proc, "audio_token")  # noqa: B009
-        )
+        audio_token_id = tokenizer.convert_tokens_to_ids(hf_proc.audio_token)
         return processed["prompt_token_ids"].count(audio_token_id)
 
     short_tokens = get_token_count(1.0)

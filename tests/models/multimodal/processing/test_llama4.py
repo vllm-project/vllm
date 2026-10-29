@@ -63,9 +63,7 @@ def test_processor_override(
     prompt_token_ids = processed_inputs["prompt_token_ids"]
     assert prompt_token_ids.count(config.boi_token_index) == num_imgs
     assert prompt_token_ids.count(config.eoi_token_index) == num_imgs
-    assert (
-        prompt_token_ids.count(vocab[getattr(hf_processor, "image_token")]) == num_imgs  # noqa: B009
-    )
+    assert prompt_token_ids.count(vocab[hf_processor.image_token]) == num_imgs
     aspect_ratios = mm_data["aspect_ratios"]
     assert isinstance(aspect_ratios, torch.Tensor)
     num_x_separators = num_y_separators = 0
@@ -73,12 +71,9 @@ def test_processor_override(
         if tiles_x * tiles_y > 1:
             num_x_separators += (tiles_x - 1) * tiles_y
             num_y_separators += tiles_y
+    assert prompt_token_ids.count(vocab[hf_processor.tile_token]) == num_x_separators
     assert (
-        prompt_token_ids.count(vocab[getattr(hf_processor, "tile_token")])  # noqa: B009
-        == num_x_separators
-    )
-    assert (
-        prompt_token_ids.count(vocab[getattr(hf_processor, "tile_global_token")])  # noqa: B009
+        prompt_token_ids.count(vocab[hf_processor.tile_global_token])
         == num_y_separators
     )
 

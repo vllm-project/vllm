@@ -123,7 +123,7 @@ def test_audio_multiple_inputs(separator):
         ModelConfig(model=model_id, model_impl="transformers")
     )
 
-    audio_token = getattr(mm_processor.info.get_hf_processor(), "audio_token")  # noqa: B009
+    audio_token = mm_processor.info.get_hf_processor().audio_token
     # One token per audio; the processor expands each to its placeholder run.
     prompt = (
         "<|start_of_role|>user<|end_of_role|>"

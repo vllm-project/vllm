@@ -836,7 +836,7 @@ def _internvl_generate(
     if not isinstance(self.language_model, GenerationMixin):
         pytest.skip("HF impl is not compatible with current transformers")
 
-    outputs = getattr(self.language_model, "generate")(  # noqa: B009
+    outputs = self.language_model.generate(
         **forward_kwargs,
         **generate_kwargs,
     )

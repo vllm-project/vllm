@@ -356,13 +356,11 @@ def _test_processing_correctness(
 
     def _to_dummy_options(modality: str, count: int) -> BaseDummyOptions:
         if modality == "video":
-            return VideoDummyOptions(
-                count=count, num_frames=None, width=None, height=None
-            )
+            return VideoDummyOptions(count=count)
         if modality == "image":
-            return ImageDummyOptions(count=count, width=None, height=None)
+            return ImageDummyOptions(count=count)
         if modality == "audio":
-            return AudioDummyOptions(count=count, length=None)
+            return AudioDummyOptions(count=count)
         return BaseDummyOptions(count=count)
 
     # Assign normalized DummyOptions to the model config
