@@ -3,8 +3,8 @@
 A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
 with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
 default, `auto`, keeps the stock decode). With it off, the model runs exactly as
-without this package. The executor runs the target model; the DSpark draft
-model keeps its stock paths.
+without this package. One executor runs the target model and another the
+DSpark draft model, on the target's kernels and streams.
 
 ## Scope
 
@@ -63,12 +63,21 @@ Engram hashing as usual, then hands the decoder layers to the step. Only FULL
 CUDA graph captures of pure decode steps of up to 384 rows get one; every other
 forward runs the stock layers, which the executor does not modify.
 
+The DSpark draft model registers when it is built, and the model state builds
+its executor (`runtime/draft.py`) right after the target's, on the same fused
+kernel, mailbox and mHC side stream; the draft model's forward asks it for a
+step the same way. The model state also offers Model Runner V2 the DSpark
+post-forward CUDA graphs (`vllm/v1/worker/gpu/post_forward_cudagraph.py`).
+No capture size is required: a draft step without a FULL graph of at most 8
+rows takes no low-batch GEMM, and the model state logs once when the capture
+sizes leave no one-request draft graph.
+
 | Package | Contents |
 | --- | --- |
-| `runtime/` | The executor and its per-step gates, the model state, warm-up, attention-metadata CUDA graphs |
+| `runtime/` | The target's and the draft's executors and their per-step gates, the model state, warm-up, attention-metadata CUDA graphs |
 | `boundary/` | The mHC between sublayers on the fused all-reduce + mHC kernel, and the publishing `wo_b` GEMM |
 | `attention/` | The attention step: low-batch MXFP8 and BF16 projections, the row-sharded indexer, candidate overlap, shared sparse-index tables and the sparse-MLA decode |
-| `moe/` | The MoE step with a deferred finalize, and the low-batch routed-expert GEMMs |
+| `moe/` | The MoE step with a deferred or in-layer finalize, and the low-batch routed-expert GEMMs |
 | `engram/` | The Engram WKV ahead of the decoder layers |
 | `logits/` | The low-batch LM head and the logits gather |
 
@@ -79,8 +88,12 @@ forward runs the stock layers, which the executor does not modify.
 | Fused Lamport all-reduce + mHC at every sublayer boundary; the next mHC coefficients on the side stream up to 48 rows, inline beyond | all executor steps (up to 384 rows) |
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
+| DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
+| DSpark Markov sampling in one kernel per draft position after the bias GEMM (`vllm/v1/worker/gpu/spec_decode/dspark/fused_sample.py`) | probabilistic drafting without draft top-k, watermarking or adaptive verification |
+| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sharded_markov.py` beside it) | batches of up to 8 request rows |
+| Sampling, the request-state update and the draft input preparation in a post-forward CUDA graph, the draft context projection beside them on a side stream | uniform decode steps without logprobs, grammar or logits processing |
 | Aux hidden-state means on the mHC side stream | up to 48 rows |
-| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-8 rows |
+| Routed experts on CuTe DSL routing, `tcgen05` GEMM and finalize kernels (`moe/routed_expert_gemm.py`) | 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |
 | Compressor, indexer-weight and indexer `wk` projections on a low-batch BF16 GEMM; the index key store reads `wk`'s FP32 output | 1-8 rows |
 | `wo_b` stores its output into the fused kernel's mailbox, which then only collects | 1-8 rows |
@@ -101,5 +114,7 @@ The executor issues cross-rank collectives, so a rank that diverged would hang
 rather than fall back. Every per-step gate reads only host state that all TP
 ranks share (row and request counts, graph mode, the attention metadata's host
 fields); nothing is read back from the GPU. The LM head and logits gather run
-outside the CUDA graph (Model Runner V2 computes logits eagerly), gated by row
-count and by the custom all-gather.
+outside the target's CUDA graph (Model Runner V2 computes logits eagerly),
+gated by row count and by the custom all-gather. On uniform decode steps with
+DSpark, they, the sampling and the draft input preparation are captured in a
+post-forward CUDA graph of their own.

@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 specialized decode on NVIDIA GPUs: a decode executor over the
-stock backbone, enabled by
+stock backbone, and one over the DSpark draft model's, enabled by
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
-The executor runs FULL-graph decode steps; every other step runs the stock
-forward. It issues cross-rank collectives, so the deployment check below is
+The executors run FULL-graph decode steps; every other step runs the stock
+forward. They issue cross-rank collectives, so the deployment check below is
 collective over the TP group and every per-step decision reads host state that
 all TP ranks share.
 """
 
 import importlib.metadata
+import weakref
 from dataclasses import dataclass
 from functools import cache
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -25,6 +27,9 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ..ops.mhc import supports_mhc_all_reduce, supports_mhc_overlap
+
+if TYPE_CHECKING:
+    from ..dspark import DSparkDeepseekV4ForCausalLM
 
 logger = init_logger(__name__)
 
@@ -128,18 +133,24 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     return [need for need, ok in requirements.items() if not ok]
 
 
+def decode_backend(vllm_config: VllmConfig) -> str:
+    """``additional_config["decode_backend"]``: ``auto`` (the default, the stock
+    decode) or ``latency_specialized``."""
+    extra = vllm_config.additional_config
+    backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
+    if backend not in ("auto", "latency_specialized"):
+        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    return backend
+
+
 def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """The specialized decode settings, or None for the stock decode.
 
     Collective over the TP group when requested: every rank raises if any rank
     cannot run the specialized decode.
     """
-    extra = vllm_config.additional_config
-    backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend == "auto":
+    if decode_backend(vllm_config) == "auto":
         return None
-    if backend != "latency_specialized":
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
     # The NVLink multicast check is rank-local (the custom all-reduce catches a
@@ -158,3 +169,22 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
         autotune=kernel.enable_flashinfer_autotune is not False,
         jit_warmup=bool(kernel.enable_jit_warmup),
     )
+
+
+# The DSpark draft models built with decode_backend=latency_specialized and not yet
+# given an executor. The target's model state builds theirs once both models
+# are loaded, in registration order, which every TP rank shares.
+_drafts: list["weakref.ref[DSparkDeepseekV4ForCausalLM]"] = []
+
+
+def register_draft(draft: "DSparkDeepseekV4ForCausalLM") -> None:
+    """Have the target model's state build ``draft`` a decode executor."""
+    _drafts.append(weakref.ref(draft))
+
+
+def take_drafts() -> list["DSparkDeepseekV4ForCausalLM"]:
+    """The live drafts registered since the last call, in registration
+    order."""
+    drafts = [draft for ref in _drafts if (draft := ref()) is not None]
+    _drafts.clear()
+    return drafts

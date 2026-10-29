@@ -81,6 +81,7 @@ per tactic, before CUDA graph capture (:meth:`PublishingMxfp8Linear.precompile`)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Optional
 
 import cutlass
@@ -469,10 +470,15 @@ class PublishingMxfp8Linear:
         )
 
     def __call__(
-        self, linear: torch.nn.Module, x: torch.Tensor | QuantizedActivation
+        self,
+        linear: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
+        fallback: Callable[[torch.Tensor | QuantizedActivation], torch.Tensor]
+        | None = None,
     ) -> torch.Tensor:
         """``linear(x)``, published into ``all_reduce``'s mailbox when ``x`` is
-        an MXFP8 activation of the low-latency backend's layout."""
+        an MXFP8 activation of the low-latency backend's layout; otherwise
+        ``fallback(x)``, by default ``linear(x)``."""
         qa = (
             as_quantized_activation(x, linear.quant_method.kernel.input_quant_key())
             if isinstance(x, QuantizedActivation)
@@ -485,7 +491,7 @@ class PublishingMxfp8Linear:
             or not qa.data.is_contiguous()
             or not self.supports(linear, qa.data.shape[0])
         ):
-            return linear(x)
+            return linear(x) if fallback is None else fallback(x)
         a, a_scale = qa.data, qa.scale
         weight, weight_scale = linear.weight, linear.weight_scale
         k, n = weight.shape

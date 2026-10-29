@@ -29,9 +29,18 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.fused_sample import (
+    DSparkFusedMarkovSampler,
+)
+from vllm.v1.worker.gpu.spec_decode.dspark.sharded_markov import (
+    DSparkShardedMarkovSampler,
+    make_sharded_sampler,
+)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -80,6 +89,15 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
         self.use_confidence_head: bool = False
+        # Set in load_draft_model when the fused loop draws what the eager one
+        # does.
+        self._fused_sampler: DSparkFusedMarkovSampler | None = None
+        # Set in load_draft_model when the model shares its Markov head for the
+        # vocabulary-sharded chain.
+        self._sharded_sampler: DSparkShardedMarkovSampler | None = None
+        # Whether the sharded chain takes the draft LM head's local vocabulary
+        # shard, without the all-gather.
+        self._draft_local_logits = False
 
     def load_draft_model(
         self,
@@ -111,6 +129,52 @@ class DSparkSpeculator(DFlashSpeculator):
             # The acceptance estimator is not needed when a trained confidence head
             # is available.
             self.use_acceptance_estimator = False
+
+        get_embed_weight = getattr(model, "markov_embed_weight", None)
+        draft_vocab_size = (
+            getattr(self.draft_model_config.hf_config, "draft_vocab_size", None)
+            or self.vocab_size
+        )
+        if (
+            get_embed_weight is not None
+            and current_platform.is_cuda()
+            and self.draft_logits is not None
+            and self.draft_logits.shape[-1] == draft_vocab_size
+            and self._draft_topk is None
+            and self.draft_watermarker is None
+            and not self.enable_adaptive_verification
+            and (embed_weight := get_embed_weight()) is not None
+        ):
+            self._fused_sampler = DSparkFusedMarkovSampler(
+                self.max_num_reqs,
+                draft_vocab_size,
+                embed_weight,
+                self.use_fp64_gumbel,
+            )
+
+        # A model shares its Markov head only in configurations where every
+        # rank can run the cross-rank chain, so all ranks get here or none.
+        get_head_weight = getattr(model, "markov_bias_weight", None)
+        if (
+            self._fused_sampler is not None
+            and not self.use_fp64_gumbel
+            and get_head_weight is not None
+            and (head_weight := get_head_weight()) is not None
+        ):
+            assert self.draft_logits is not None
+            tp_group = get_tp_group()
+            self._sharded_sampler = make_sharded_sampler(
+                self._fused_sampler.embed_weight,
+                head_weight,
+                draft_vocab_size,
+                self.num_speculative_steps,
+                self.draft_logits.dtype,
+                tp_group.cpu_group if tp_group.world_size > 1 else None,
+                self.max_num_reqs,
+            )
+        get_shard = getattr(model, "draft_logits_shard", None)
+        if self._sharded_sampler is not None and get_shard is not None:
+            self._draft_local_logits = self._sharded_sampler.accepts_shard(get_shard())
         return model
 
     def _sample_logits(
@@ -154,6 +218,9 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        if self._fused_sampler is not None:
+            self._sample_sequential_fused(num_reqs, head_hidden)
+            return
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
             return
@@ -206,6 +273,65 @@ class DSparkSpeculator(DFlashSpeculator):
             )
             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
                 num_reqs, n_spec
+            )
+
+    def _sample_sequential_fused(
+        self, num_reqs: int, head_hidden: torch.Tensor
+    ) -> None:
+        """The probabilistic loop of ``_sample_sequential`` with one fused
+        sampling kernel per position after the unchanged bias GEMM."""
+        sampler = self._fused_sampler
+        assert sampler is not None and self.draft_logits is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        idx_mapping = self.sample_idx_mapping[:num_sample]
+        sample_pos = self.sample_pos[:num_sample]
+        # num_reqs is the (padded) batch every tensor-parallel rank runs, so
+        # the ranks agree on taking the cross-rank sharded chain.
+        sharded = self._sharded_sampler
+        if sharded is not None and not sharded.supports_batch(num_reqs):
+            sharded = None
+        if sharded is not None:
+            # The noise does not depend on the chain: draw it beside the LM head.
+            sharded.fork_noise(idx_mapping, sample_pos, self.seeds)
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        if sharded is not None and self._draft_local_logits:
+            # The sharded chain reads only this rank's vocabulary columns.
+            base_logits = self.model.compute_draft_logits_local(sample_hidden)
+        else:
+            base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits.view(num_reqs, n_spec, base_logits.shape[-1])
+        if sharded is not None:
+            sharded.join_noise()
+            if sharded.supports(num_reqs, base_logits):
+                sharded.sample(
+                    base_logits,
+                    self.input_buffers.input_ids,
+                    self.num_query_per_req,
+                    idx_mapping,
+                    self.temperature,
+                    self.draft_logits,
+                    self.draft_tokens,
+                )
+                return
+            if base_logits.shape[-1] != sampler.vocab_size:
+                # A local shard in a dtype the chain lacks: gather it.
+                base_logits = self.model.compute_draft_logits(sample_hidden)
+                base_logits = base_logits.view(num_reqs, n_spec, -1)
+        markov_embed = sampler.embed_anchor(
+            self.input_buffers.input_ids, self.num_query_per_req, num_reqs
+        )
+        for i in range(n_spec):
+            sampler.sample_step(
+                base_logits,
+                self.model.markov_bias(markov_embed),
+                i,
+                idx_mapping,
+                sample_pos,
+                self.temperature,
+                self.seeds,
+                self.draft_logits,
+                self.draft_tokens,
             )
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
