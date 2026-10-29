@@ -48,7 +48,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
         # Only the Xe3P grouped GEMM consumes quantized activations natively.
-        self._expects_unquantized_inputs = not torch.ops._xpu_C.is_xe3p_arch()
+        self._expects_unquantized_inputs = is_xe2_or_xe3
 
     @property
     def expects_unquantized_inputs(self) -> bool:
