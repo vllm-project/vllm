@@ -627,13 +627,18 @@ def _reference_decode_index_score(
 
 # 3600: 29 blocks over 12 splits of 3, so the last busy split has 2 blocks.
 @pytest.mark.parametrize("prefix_len", [1024, 3600])
-@pytest.mark.parametrize("force_split_k", [False, True])
-def test_prefill_index_topk_correctness(monkeypatch, prefix_len, force_split_k):
-    if force_split_k:
-        # Take the SM12.0-only split-K launch on any CUDA GPU.
-        monkeypatch.setattr(
-            current_platform, "is_device_capability", lambda cap, *_: cap == (12, 0)
-        )
+@pytest.mark.parametrize("device_capability", [80, 90, 120])
+def test_prefill_index_topk_correctness(monkeypatch, prefix_len, device_capability):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda cap, *_: device_capability == cap[0] * 10 + cap[1],
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda cap, *_: device_capability // 10 == cap // 10,
+    )
     topk = 6
     init_blocks = 0
     local_blocks = 1
