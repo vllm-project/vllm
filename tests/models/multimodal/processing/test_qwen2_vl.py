@@ -426,6 +426,56 @@ def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
         assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
 
 
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
+@pytest.mark.parametrize(("fps", "num_frames"), [(7.0, 16), (25.0, 52)])
+def test_qwen2_5_vl_video_temporal_mrope_positions(
+    model_id: str, dtype: str, fps: float, num_frames: int
+) -> None:
+    """Temporal M-RoPE ids must equal HF's float32 formula applied to the
+    processor's float32 `second_per_grid_ts`, whatever the model dtype."""
+    from vllm.model_executor.models.qwen2_5_vl import (
+        Qwen2_5_VLForConditionalGeneration,
+    )
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
+
+    ctx = build_model_context(
+        model_id, dtype=dtype, limit_mm_per_prompt={"image": 0, "video": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    temporal_patch_size = (
+        processor.info.get_hf_processor().video_processor.temporal_patch_size
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=num_frames, fps=fps)
+    processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
+    item = processed["mm_kwargs"]["video"][0]
+    spg = item.get_data()["second_per_grid_ts"]
+    assert spg.dtype == torch.float32
+    assert spg.item() == torch.tensor(temporal_patch_size / fps).item()
+
+    model = object.__new__(Qwen2_5_VLForConditionalGeneration)
+    model.config = ctx.model_config.hf_config
+    placeholder = processed["mm_placeholders"]["video"][0]
+    feature = MultiModalFeatureSpec(
+        data=item, modality="video", identifier="video-0", mm_position=placeholder
+    )
+    positions, _ = model.get_mrope_input_positions(
+        processed["prompt_token_ids"], [feature]
+    )
+
+    vision_config = model.config.vision_config
+    grid_t, grid_h, grid_w = item.get_data()["video_grid_thw"].tolist()
+    num_tokens = grid_t * grid_h * grid_w // vision_config.spatial_merge_size**2
+    video_t = positions[0, placeholder.offset : placeholder.offset + num_tokens]
+    video_t = video_t.reshape(grid_t, -1)[:, 0] - video_t[0]
+    # transformers' Qwen2.5-VL get_rope_index: float32 product, then truncate.
+    time_interval = vision_config.tokens_per_second * spg.reshape(())
+    expected = (torch.arange(grid_t) * time_interval).long()
+    assert torch.equal(video_t, expected)
+
+
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize(
     "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
