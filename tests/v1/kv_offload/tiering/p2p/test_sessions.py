@@ -3017,6 +3017,51 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize("terminal_type", [TransferDoneMsg, AbortAckMsg])
+    @pytest.mark.parametrize("monitor_disconnect", [False, True])
+    def test_buffered_terminal_settles_load_after_disconnect(
+        self, terminal_type, monitor_disconnect
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        session.request_blocks(8, "req-8", [OffloadKey(b"other")], [1])
+        failure = None
+        if terminal_type is AbortAckMsg:
+            session.finish_request("req-7")
+            (failure,) = session.poll().loads
+            assert not failure.success
+            assert not _released(failure)
+        if monitor_disconnect:
+            conn.mark_dead()
+        else:
+            conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        terminal = {
+            TYPE_KEY: terminal_type.TYPE,
+            TransferDoneMsg.KV_REQUEST_ID: "req-7",
+            TransferDoneMsg.ROUND_SEQ: 0,
+        }
+        if terminal_type is TransferDoneMsg:
+            terminal[TransferDoneMsg.SUCCESS] = True
+        conn.enqueue(terminal)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "new-work",
+                FetchMsg.KEYS: [b"new"],
+                FetchMsg.BLOCK_INDEXES: [2],
+                FetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        result = session.poll()
+        if failure is None:
+            assert result.loads == [LoadResult(7, "req-7", success=True)]
+        else:
+            assert result.loads == []
+            assert _released(failure)
+        assert not result.new_fetch_ids
+        assert session.close().failed_jobs == [8]
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -3214,13 +3259,18 @@ class TestDispatchErrorHandling:
         assert not session.alive
         assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
 
-    def test_transfer_done_missing_field_disconnects(self):
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_transfer_done_missing_field_disconnects(self, already_dead):
         """Same contract for a malformed TransferDoneMsg from the peer."""
         session, conn, _ = _make_session()
         _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if already_dead:
+            conn.mark_dead()
         conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
-        session.poll()
+        assert session.poll().loads == []
         assert not session.alive
+        assert session.close().failed_jobs == [7]
 
     def test_internal_error_does_not_disconnect_once(self, monkeypatch):
         """A non-ValueError raised by a handler is treated as an internal
@@ -3761,3 +3811,177 @@ class TestPeerFaultEscalation:
         transport._peer_faults["peer:8000"] = "late"
         session.poll()
         assert session.death_reason == "peer disconnected"
+
+
+def _p2p_inference_kwargs(port):
+    from vllm.config import KVTransferConfig
+
+    return dict(
+        model="HuggingFaceTB/SmolLM2-135M",
+        skip_tokenizer_init=True,
+        dtype="float16",
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.30,
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_load_failure_policy="recompute",
+            kv_connector_extra_config={
+                "spec_name": "TieringOffloadingSpec",
+                "cpu_bytes_to_use": 16 * 1024 * 1024,
+                "secondary_tiers": [{"type": "p2p", "host": "127.0.0.1", "port": port}],
+            },
+        ),
+    )
+
+
+def _serve_p2p_inference_source(port, ready, stop):
+    import msgspec.msgpack
+    import zmq
+
+    from vllm import LLM, SamplingParams, TokensPrompt
+
+    source_id = f"127.0.0.1:{port}".encode()
+    send = zmq.Socket.send
+    injected = False
+
+    def send_disconnect_first(sock, data, *args, **kwargs):
+        nonlocal injected
+        if (
+            sock.getsockopt(zmq.TYPE) == zmq.DEALER
+            and sock.getsockopt(zmq.IDENTITY) == source_id
+        ):
+            msg = msgspec.msgpack.decode(data)
+            if (
+                msg.get("type") == "transfer_done"
+                and msg.get("success")
+                and not injected
+            ):
+                send(
+                    sock,
+                    msgspec.msgpack.encode({"type": "disconnect"}),
+                    *args,
+                    **kwargs,
+                )
+                send(sock, data, *args, **kwargs)
+                injected = True
+                return
+        return send(sock, data, *args, **kwargs)
+
+    with patch.object(zmq.Socket, "send", send_disconnect_first):
+        llm = LLM(**_p2p_inference_kwargs(port))
+        try:
+            prompt = TokensPrompt(prompt_token_ids=[3 + i % 100 for i in range(192)])
+            params = SamplingParams(
+                temperature=0,
+                max_tokens=4,
+                ignore_eos=True,
+                extra_args={
+                    "kv_transfer_params": {
+                        "remote_decoder": {
+                            "kv_request_id": "buffered",
+                        }
+                    }
+                },
+            )
+            reference = llm.generate([prompt], params, use_tqdm=False)[0]
+            ready.put(reference.outputs[0].token_ids)
+            deadline = time.monotonic() + 180
+            while not stop.is_set():
+                assert time.monotonic() < deadline, "consumer did not finish"
+                llm.generate(
+                    [TokensPrompt(prompt_token_ids=[0])],
+                    SamplingParams(temperature=0, max_tokens=1),
+                    use_tqdm=False,
+                )
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+
+
+def test_inference_uses_completion_buffered_after_disconnect(vllm_runner, monkeypatch):
+    """A completed NIXL transfer must not become a failed promotion on disconnect."""
+    import multiprocessing
+    import socket
+    import threading
+
+    import msgspec.msgpack
+    import zmq
+
+    from vllm import SamplingParams, TokensPrompt
+    from vllm.v1.metrics.reader import Counter
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    ports = []
+    for _ in range(2):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+    source_id = f"127.0.0.1:{ports[0]}".encode()
+    target_endpoint = f"tcp://127.0.0.1:{ports[1]}".encode()
+    buffered = threading.Event()
+    recv = zmq.Socket.recv_multipart
+
+    def receive_both_before_dispatch(sock, *args, **kwargs):
+        frames = recv(sock, *args, **kwargs)
+        if (
+            sock.getsockopt(zmq.TYPE) == zmq.ROUTER
+            and sock.getsockopt(zmq.LAST_ENDPOINT) == target_endpoint
+            and frames[0] == source_id
+            and msgspec.msgpack.decode(frames[-1]).get("type") == "disconnect"
+        ):
+            assert sock.poll(5000, zmq.POLLIN), "completion did not follow disconnect"
+            buffered.set()
+        return frames
+
+    monkeypatch.setattr(zmq.Socket, "recv_multipart", receive_both_before_dispatch)
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Queue()
+    stop = ctx.Event()
+    producer = ctx.Process(
+        target=_serve_p2p_inference_source, args=(ports[0], ready, stop)
+    )
+    producer.start()
+    try:
+        kwargs = _p2p_inference_kwargs(ports[1])
+        model = kwargs.pop("model")
+        with vllm_runner(model, **kwargs) as runner:
+            reference = ready.get(timeout=180)
+            prompt = TokensPrompt(prompt_token_ids=[3 + i % 100 for i in range(192)])
+            params = SamplingParams(
+                temperature=0,
+                max_tokens=4,
+                ignore_eos=True,
+                extra_args={
+                    "kv_transfer_params": {
+                        "remote_prefiller": {
+                            "remote_host": "127.0.0.1",
+                            "remote_port": ports[0],
+                            "kv_request_id": "buffered",
+                        }
+                    }
+                },
+            )
+            result = runner.llm.generate([prompt], params, use_tqdm=False)[0]
+            assert buffered.is_set()
+            assert result.outputs[0].token_ids == reference
+            failures = [
+                metric.value
+                for metric in runner.llm.get_metrics()
+                if isinstance(metric, Counter)
+                and "promotion_job_failures" in metric.name
+            ]
+            assert sum(failures) == 0, failures
+    finally:
+        stop.set()
+        producer.join(timeout=30)
+        if producer.is_alive():
+            producer.terminate()
+            producer.join(timeout=10)
+        ready.close()
+        assert producer.exitcode == 0

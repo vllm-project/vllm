@@ -537,12 +537,14 @@ class P2PSession:
         self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
-        # Drop messages buffered before disconnect: a poll batch can
-        # contain msg-after-DisconnectMsg, and dispatching them would
-        # mutate state on a dead session.
-        if self._conn is not None and not self._conn.alive:
-            return
         msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else None
+        # Buffered terminals can still settle loads after disconnect.
+        if (
+            self._conn is not None
+            and not self._conn.alive
+            and msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+        ):
+            return
         if msg_type == ConnectMsg.TYPE:
             self._on_connect(msg)
         elif msg_type == ConnectAckMsg.TYPE:
