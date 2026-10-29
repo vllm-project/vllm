@@ -5,9 +5,9 @@
 Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
 :data:`GLM52_PROJECTIONS` was measured on B300 (SM103),
 :data:`GLM52_PROJECTIONS_SM107` on VRNVL72 (SM107) and
-:data:`GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM107 table also covers
-the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
-projections, which run as BF16 GEMMs at decode batch sizes.
+:data:`GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM103 and SM107 tables
+also cover the TP4 projections (q_b, o_proj, shared expert) and the replicated
+indexer projections, which run as BF16 GEMMs at decode batch sizes.
 """
 
 from __future__ import annotations
@@ -83,12 +83,83 @@ GLM52_EH_PROJECTION = GLM52ProjectionSpec(
     ),
 )
 
+# SM103 TP4 projections, shared experts and indexer: measured on B300 at M=1-4,
+# each M listed only where it beat cuBLAS by >= 5 % (cold and hot L2). Times are
+# table backend / cuBLAS, cold L2. Shared expert down projections stay on cuBLAS.
+
+# q_b_proj at TP4 and the indexer wq_b (replicated): 5.86 / 8.83 us at M=1.
+_SM103_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=4096,
+    k=2048,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=4, static_k=2048)),
+        (2, SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=2048)),
+        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
+    ),
+)
+
+# o_proj at TP4: 11.04 / 13.63 us at M=1.
+_SM103_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=4096,
+    cute_configs=((1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),),
+)
+
+# o_proj at TP8: 7.23 / 8.10 us at M=1.
+_SM103_O_PROJ_TP8_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=2048,
+    cute_configs=((1, SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=2048)),),
+)
+
+# indexer wk + weights_proj, replicated: 2.72 / 6.02 us at M=1.
+_SM103_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
+    n=160,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 1, k_unroll=4, static_k=6144)),
+        (2, SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 1, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2, vector_width=4, static_k=6144)),
+    ),
+)
+
+# shared expert gate_up at TP8: 3.84 / 7.71 us at M=1.
+_SM103_SHARED_GATE_UP_TP8_PROJECTION = GLM52ProjectionSpec(
+    n=512,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 1, static_k=6144)),
+        (2, SkinnyGemmConfig(2, 256, 1, k_unroll=4, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2, vector_width=4, static_k=6144)),
+    ),
+)
+
+# shared expert gate_up at TP4: 5.02 / 8.54 us at M=1.
+_SM103_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=1024,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=6144)),
+        (2, SkinnyGemmConfig(2, 256, 1, k_unroll=4, vector_width=2, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
+    ),
+)
+
 GLM52_PROJECTIONS = {
     (spec.n, spec.k): spec
     for spec in (
         GLM52_QKV_A_PROJECTION,
         GLM52_Q_B_PROJECTION,
         GLM52_EH_PROJECTION,
+        _SM103_Q_B_TP4_PROJECTION,
+        _SM103_O_PROJ_TP4_PROJECTION,
+        _SM103_O_PROJ_TP8_PROJECTION,
+        _SM103_WK_WEIGHTS_PROJECTION,
+        _SM103_SHARED_GATE_UP_TP8_PROJECTION,
+        _SM103_SHARED_GATE_UP_TP4_PROJECTION,
     )
 }
 

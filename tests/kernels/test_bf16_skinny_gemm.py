@@ -566,7 +566,7 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
     root.wrong_shape.fused_qkv_a_proj = FakeLinearBase(
         qkv_a.n + 1, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
-    # o_proj at TP4 is only in the SM107 table.
+    # o_proj at TP4 is in the SM103 and SM107 tables.
     root.attn.o_proj = FakeLinearBase(6144, 4096, glm52_gemm.UnquantizedLinearMethod())
     monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
     monkeypatch.setattr(
