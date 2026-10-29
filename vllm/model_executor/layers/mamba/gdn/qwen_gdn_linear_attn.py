@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -55,6 +56,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.utils import default_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -632,13 +634,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
-        # Opt-in overlap of in_proj_ba with in_proj_qkvz (see _in_proj_qkvz_ba),
-        # for callers that run outside torch.compile. Off with micro-batching
-        # (threads would share the events) and LoRA (not validated).
+        # Opt-in overlap of in_proj_ba with in_proj_qkvz (see forward_cuda), for
+        # callers outside torch.compile: compiled callers would need the custom-op
+        # wrapper (#36795, reverted in #38152 for cold-compile time) or Dynamo's
+        # stream tracing, neither validated here. Only for a plain cuBLAS ba GEMM:
+        # FlashInfer GEMMs (FP8 bmm_fp8, BF16 mm_bf16) share one process-wide
+        # workspace with the qkvz GEMM. Off with micro-batching (threads would
+        # share the events) and LoRA.
         self._ba_stream = None
+        ba_method = self.in_proj_ba.quant_method
         if (
             overlap_ba_proj
             and current_platform.is_cuda()
+            and isinstance(ba_method, UnquantizedLinearMethod)
+            and ba_method._gemm_impl is default_unquantized_gemm
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.lora_config is None
         ):
@@ -1154,31 +1163,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             return self.forward_cuda(hidden_states)
 
-    def _in_proj_qkvz_ba(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """in_proj_qkvz and in_proj_ba, with the tiny ba GEMM hidden on the aux
-        stream. Only during CUDA graph capture (eagerly the stream switch costs
-        more host time than it saves) and up to _BA_PROJ_OVERLAP_MAX_TOKENS.
-        ba is enqueued before qkvz (execute_in_parallel's aux-first order):
-        enqueuing qkvz first regressed block-FP8 qkvz from ~100 tokens.
-        """
-        if self._ba_stream is None:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-            return mixed_qkvz, ba
-        start, done = self._ba_events
-        mixed_qkvz, (ba,) = execute_in_parallel(
-            lambda: self.in_proj_qkvz(hidden_states)[0],
-            [lambda: self.in_proj_ba(hidden_states)[0]],
-            start,
-            [done],
-            [self._ba_stream],
-            enable=hidden_states.shape[0] <= _BA_PROJ_OVERLAP_MAX_TOKENS
-            and torch.cuda.is_current_stream_capturing(),
-        )
-        return mixed_qkvz, ba
-
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
@@ -1192,7 +1176,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, ba = self._in_proj_qkvz_ba(hidden_states)
+        if self._ba_stream is None:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+        else:
+            # Hide the tiny ba GEMM on the aux stream. Only under CUDA graph
+            # capture: eagerly the stream switch costs more host time than it
+            # saves. ba is enqueued first (aux-first order); qkvz-first
+            # regressed block-FP8 qkvz from ~100 tokens.
+            start, done = self._ba_events
+            mixed_qkvz, (ba,) = execute_in_parallel(
+                lambda: self.in_proj_qkvz(hidden_states)[0],
+                [lambda: self.in_proj_ba(hidden_states)[0]],
+                start,
+                [done],
+                [self._ba_stream],
+                enable=num_tokens <= _BA_PROJ_OVERLAP_MAX_TOKENS
+                and torch.cuda.is_current_stream_capturing(),
+            )
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
