@@ -356,6 +356,8 @@ def test_snapshot_create_strips_the_portable_option(monkeypatch):
         "Qwen/Qwen3-0.6B",
         "--revision",
         _MODEL_REVISION,
+        "--snapshot-dir",
+        "/tmp/snapshot",
         "--portable",
         "--dtype",
         "float16",
@@ -553,12 +555,10 @@ def _oracle(
 
 
 def _manifest(**changes: object) -> SnapshotManifest:
-    if changes.get("portable"):
-        changes.setdefault("work_dir", "/tmp/vllm-snapshot-work-fixture")
-        changes.setdefault("cleanup_work_dir", False)
-    else:
-        changes.setdefault("work_dir", "/tmp/vllm-snapshot-artifact-fixture")
-        changes.setdefault("cleanup_work_dir", False)
+    # The default work_dir never reaches the filesystem: callers that run a
+    # real restore pass their own path.
+    changes.setdefault("work_dir", "/tmp/vllm-snapshot-fixture")
+    changes.setdefault("cleanup_work_dir", False)
     manifest = SnapshotManifest(
         schema_version=1,
         boundary="post-engine-init-reloadable-state-released",
@@ -586,6 +586,7 @@ def _manifest(**changes: object) -> SnapshotManifest:
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
         oracle_sampled_token_logprob=-0.125,
+        portable=bool(changes.get("portable", False)),
         work_dir=changes["work_dir"],
         cleanup_work_dir=changes["cleanup_work_dir"],
     )
@@ -959,10 +960,12 @@ def test_snapshot_create_cleans_up_when_the_work_dir_is_refused(tmp_path: Path):
     tools.launch_child.assert_not_called()
 
 
-def _restore_fixture(tmp_path: Path) -> argparse.Namespace:
+def _restore_fixture(tmp_path: Path, **manifest_changes: object) -> argparse.Namespace:
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
-    write_manifest_atomic(artifact, _manifest(work_dir=str(artifact)))
+    write_manifest_atomic(
+        artifact, _manifest(work_dir=str(artifact), **manifest_changes)
+    )
     return argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
 
 
@@ -991,8 +994,7 @@ def test_snapshot_restore_requires_portable_to_match(
     manifest_portable: bool,
     requested_portable: bool | None,
 ):
-    args = _restore_fixture(tmp_path)
-    write_manifest_atomic(tmp_path / "snapshot", _manifest(portable=manifest_portable))
+    args = _restore_fixture(tmp_path, portable=manifest_portable)
     if requested_portable is not None:
         args.portable = requested_portable
 
@@ -1003,8 +1005,7 @@ def test_snapshot_restore_requires_portable_to_match(
 
 
 def test_snapshot_restore_accepts_matching_portable(tmp_path: Path):
-    args = _restore_fixture(tmp_path)
-    write_manifest_atomic(tmp_path / "snapshot", _manifest(portable=True))
+    args = _restore_fixture(tmp_path, portable=True)
     args.portable = True
 
     tools = _fake_snapshot_tools()
@@ -1585,7 +1586,7 @@ def test_snapshot_restore_rejects_saved_remap_without_prefix(
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
 
     with pytest.raises(SnapshotRestoreError, match="invalid saved link remap"):
-        tools.restore(artifact, _manifest())
+        tools.restore(artifact, _manifest(work_dir=str(artifact)))
 
     assert not tuple(tools.shm_dir.iterdir())
 
@@ -1677,14 +1678,14 @@ def test_snapshot_rejects_open_infiniband_device_before_criu(
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
     monkeypatch.setattr(
-        tools,
-        "_descriptor_targets",
+        snapshot_runtime,
+        "fd_targets",
         lambda pid: ("/dev/infiniband/uverbs7",) if pid == 101 else (),
     )
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
 
     with pytest.raises(SnapshotCreateError) as failure:
-        tools.inventory(100, tmp_path)
+        tools.inventory(100, tmp_path, tmp_path / "work")
 
     message = str(failure.value)
     assert "pid 101" in message
@@ -1912,6 +1913,11 @@ def test_snapshot_inventory_marks_a_cache_file_it_cannot_read(
         "fd_targets",
         lambda _pid: (str(kernel), str(lock)),
     )
+    monkeypatch.setattr(
+        snapshot_runtime,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(lock)),
+    )
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -1953,6 +1959,11 @@ def test_snapshot_inventory_matches_resolved_cache_roots_not_siblings(
         "fd_targets",
         lambda _pid: (str(kernel), str(stale)),
     )
+    monkeypatch.setattr(
+        snapshot_runtime,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(stale)),
+    )
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -1990,6 +2001,9 @@ def test_snapshot_inventory_records_a_generated_file_the_tree_only_mapped(
     # A kernel reached only through its pages holds no descriptor. CRIU still
     # reopens its path, so without this the artifact stayed pointed at a file
     # the host could replace with no early error.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "child.log").write_bytes(b"x" * 5)
     inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
     assert inventory.generated_files == (
         GeneratedFile(
@@ -2019,15 +2033,19 @@ def test_snapshot_collect_refuses_an_oversized_file(
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
 
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    (work_dir / "child.log").write_bytes(b"")
+
     # The limit is enforced while the inventory is assembled, so a cache
     # holding a file past it fails create before CRIU runs at all.
-    with pytest.raises(SnapshotAttachmentError, match="byte limit"):
+    with pytest.raises(SnapshotAttachmentError, match="exceeds the 8 byte limit"):
         collect_generated_files(
             (100,),
             artifact,
-            tmp_path / "work",
-            tuple(),
-            (16, 1 << 30),
+            work_dir,
+            (f"{cache_root}{os.sep}",),
+            (8, 1 << 30),
         )
 
 
@@ -2053,12 +2071,16 @@ def test_snapshot_collect_refuses_a_total_size_past_the_limit(
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
 
-    with pytest.raises(SnapshotAttachmentError, match="byte limit"):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    (work_dir / "child.log").write_bytes(b"")
+
+    with pytest.raises(SnapshotAttachmentError, match="exceed the 20 byte limit"):
         collect_generated_files(
             (100,),
             artifact,
-            tmp_path / "work",
-            tuple(),
+            work_dir,
+            (f"{cache_root}{os.sep}",),
             (1 << 30, 20),
         )
 
@@ -2202,7 +2224,6 @@ def test_snapshot_dump_stages_attachments_after_the_image_is_written(
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
     child_log = artifact / "child.log"
-    child_log.parent.mkdir(mode=0o700)
     child_log.write_bytes(b"")
     staged_before_dump: list[bool] = []
 
@@ -2221,7 +2242,7 @@ def test_snapshot_dump_stages_attachments_after_the_image_is_written(
         (100,),
         "GPU-abc",
         generated_files=(
-            GeneratedFile(str(child_log)),
+            GeneratedFile(str(child_log), required=True),
             GeneratedFile(str(kernel)),
             GeneratedFile(str(lock)),
         ),
@@ -2265,10 +2286,18 @@ def test_snapshot_inventory_carries_unreferenced_cache_files_as_warm_state(
         "fd_targets",
         lambda _pid: (str(kernel), str(lock)),
     )
+    monkeypatch.setattr(
+        snapshot_runtime,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(lock)),
+    )
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
 
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "child.log").write_bytes(b"x" * 5)
     inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
 
     # A file the image does not reference still travels as warm state, marked
@@ -2606,12 +2635,12 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
         tools.restore(artifact, manifest)
     assert str(lock) in str(gone.value)
 
-    # A refused restore leaves the image alone and marks it unreleased, so CRIU
-    # never sees a half-checked artifact.
+    # A restore refused before CRIU ran leaves no trace: the artifact is
+    # untouched and no abort marker was ever written.
     assert {
         path.name: path.read_bytes() for path in artifact.iterdir() if path.is_file()
     } == before
-    assert json.loads((artifact / "release.json").read_text()) == {"release": False}
+    assert not (artifact / "release.json").exists()
 
 
 def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
@@ -2630,6 +2659,7 @@ def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
     monkeypatch.setattr(snapshot_attachments, "sha256_file", _unreadable)
+    monkeypatch.setattr(snapshot_runtime, "sha256_file", _unreadable)
 
     # A recorded digest that cannot be read again is a failed check, not a file
     # to wave through on existence.
