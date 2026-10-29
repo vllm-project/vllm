@@ -74,6 +74,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -1159,24 +1160,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """in_proj_qkvz and in_proj_ba, with the tiny ba GEMM hidden on the aux
         stream. Only during CUDA graph capture (eagerly the stream switch costs
         more host time than it saves) and up to _BA_PROJ_OVERLAP_MAX_TOKENS.
-        ba is enqueued first: enqueuing qkvz first regressed block-FP8 qkvz.
+        ba is enqueued before qkvz (execute_in_parallel's aux-first order):
+        enqueuing qkvz first regressed block-FP8 qkvz from ~100 tokens.
         """
-        if (
-            self._ba_stream is None
-            or hidden_states.shape[0] > _BA_PROJ_OVERLAP_MAX_TOKENS
-            or not torch.cuda.is_current_stream_capturing()
-        ):
+        if self._ba_stream is None:
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
             return mixed_qkvz, ba
         start, done = self._ba_events
-        start.record()
-        with torch.cuda.stream(self._ba_stream):
-            start.wait()
-            ba, _ = self.in_proj_ba(hidden_states)
-            done.record()
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        done.wait()
+        mixed_qkvz, (ba,) = execute_in_parallel(
+            lambda: self.in_proj_qkvz(hidden_states)[0],
+            [lambda: self.in_proj_ba(hidden_states)[0]],
+            start,
+            [done],
+            [self._ba_stream],
+            enable=hidden_states.shape[0] <= _BA_PROJ_OVERLAP_MAX_TOKENS
+            and torch.cuda.is_current_stream_capturing(),
+        )
         return mixed_qkvz, ba
 
     def forward_cuda(
