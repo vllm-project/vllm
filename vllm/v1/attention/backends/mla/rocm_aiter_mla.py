@@ -45,7 +45,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
-    context_row_indices,
     expand_context,
     gather_compressed_context,
 )
@@ -1882,10 +1881,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             and self.dcp_world_size > 1
             and self._supports_fused_dcp_prefill
         ):
-            attn_metadata.dcp_context_row_indices = [
-                context_row_indices(chunk, prefill.block_table.device)
-                for chunk in prefill.chunked_context.chunks
-            ]
+            # The chunk metadata carries the row indices under DCP; the fused
+            # gather takes them as int32.
+            row_indices = []
+            for chunk in prefill.chunked_context.chunks:
+                assert chunk.context_row_indices is not None
+                row_indices.append(chunk.context_row_indices.to(torch.int32))
+            attn_metadata.dcp_context_row_indices = row_indices
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
