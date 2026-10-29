@@ -1760,6 +1760,28 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Python renders an empty user turn, so the render route must accept empty
+/// message content instead of rejecting it.
+#[tokio::test]
+async fn render_chat_accepts_empty_message_content() {
+    let mut app = test_render_app();
+
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["token_ids"].as_array().expect("token_ids").is_empty());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
@@ -9002,23 +9024,26 @@ async fn tokenize_chat_empty_messages_returns_400() {
     assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
+/// Python renders an empty user turn, so empty content is accepted here too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn tokenize_chat_empty_message_content_returns_400() {
+async fn tokenize_chat_accepts_empty_message_content() {
     let mut app = test_app().await;
 
-    let (status, json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": ""}],
-        }),
-    )
-    .await;
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -830,33 +830,16 @@ pub struct ListModelsResponse {
 // Shared validation helpers
 // ============================================================================
 
-/// Validates a messages array is non-empty and has valid user-message content.
+/// Validates a messages array is non-empty.
 ///
 /// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
-/// so validation behaviour stays in lockstep.
+/// so validation behaviour stays in lockstep. Message content may be empty,
+/// like in the Python frontend, which renders it as an empty turn.
 pub(crate) fn validate_messages(
     messages: &[ChatMessage],
 ) -> Result<(), validator::ValidationError> {
     if messages.is_empty() {
         return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-
-    for msg in messages {
-        if let ChatMessage::User { content, .. } = msg {
-            match content {
-                MessageContent::Text(text) if text.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content cannot be empty",
-                    ));
-                }
-                MessageContent::Parts(parts) if parts.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content parts cannot be empty",
-                    ));
-                }
-                _ => {}
-            }
-        }
     }
     Ok(())
 }
