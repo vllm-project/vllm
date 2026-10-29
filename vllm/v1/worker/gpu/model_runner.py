@@ -2281,17 +2281,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
-            num_drafted_tokens_per_req=(
-                self.req_states.num_drafted_tokens[input_batch.idx_mapping_np]
-                if input_batch.num_draft_tokens_per_req is not None
-                else None
-            ),
-            num_verified_tokens_per_req=(
-                input_batch.cu_num_logits.diff()
-                - self.model_state.num_new_sampled_tokens_per_step
-                if input_batch.num_draft_tokens_per_req is not None
-                else None
-            ),
+            num_draft_tokens_per_req=self._get_num_draft_tokens_per_req(input_batch),
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
@@ -2380,9 +2370,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
             )
-            self.req_states.num_drafted_tokens[input_batch.idx_mapping_np] = (
-                num_spec_tokens
-            )
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
@@ -2393,6 +2380,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
+
+    def _get_num_draft_tokens_per_req(
+        self, input_batch: InputBatch
+    ) -> torch.Tensor | None:
+        """[2, num_reqs]: drafted and verified draft tokens per request.
+
+        Must run before the drafter overwrites the draft tokens being verified.
+        """
+        if input_batch.num_draft_tokens_per_req is None:
+            return None
+        draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+        # -1 marks a draft slot without a draft token.
+        num_drafted = (draft_tokens != -1).sum(dim=-1)
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        num_in_forward = input_batch.cu_num_logits.diff() - num_bonus_tokens
+        num_verified = torch.minimum(num_in_forward, num_drafted)
+        return torch.stack([num_drafted, num_verified])
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()

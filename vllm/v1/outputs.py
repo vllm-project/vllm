@@ -305,10 +305,13 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Draft tokens per request that came out of the drafter, and those of them
-    # in the target forward pass, in req_ids order. None if the model runner
-    # does not report them, then the scheduler counts the scheduled drafts.
+    # Draft tokens per request that came out of the drafter, in req_ids order.
+    # None if the model runner does not report them, then the scheduler
+    # counts the scheduled draft tokens.
     num_drafted_tokens_per_req: list[int] | None = None
+
+    # Drafted tokens per request that went into the target forward pass, in
+    # req_ids order. Set together with num_drafted_tokens_per_req.
     num_verified_tokens_per_req: list[int] | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
