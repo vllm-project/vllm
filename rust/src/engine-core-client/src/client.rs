@@ -17,11 +17,12 @@ use tracing::{debug, info, trace};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
+use crate::metrics::EngineSleepState;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode};
+use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -953,25 +954,32 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
+    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
         self.call_utility::<(), _>("sleep", (level, mode)).await?;
+        self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
     pub async fn release_kv_cache_memory(&self) -> Result<()> {
         self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+        self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
 
     /// Wake the engine from sleep, optionally limiting the wake-up to specific
     /// tags, and return whether every engine is fully awake.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
-        Ok(self
+        let fully_awake = self
             .call_utility::<bool, _>("wake_up", (tags,))
             .await?
             .into_iter()
-            .all(|fully_awake| fully_awake))
+            .all(|fully_awake| fully_awake);
+        // A partial wake-up keeps the previous sleep state, as in Python.
+        if fully_awake {
+            self.inner.record_sleep_state(EngineSleepState::Awake);
+        }
+        Ok(fully_awake)
     }
 
     /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
@@ -1035,6 +1043,7 @@ impl EngineCoreClient {
         profile_prefix: Option<&str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<()> {
         let mut active = self.profile_active.lock().await;
         if *active {
@@ -1047,7 +1056,13 @@ impl EngineCoreClient {
         if let Err(error) = self
             .call_utility::<(), _>(
                 "profile",
-                (true, profile_prefix, delay_iterations, max_iterations),
+                (
+                    true,
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                    profiler_kwargs,
+                ),
             )
             .await
         {

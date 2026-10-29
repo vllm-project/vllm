@@ -173,6 +173,7 @@ mkdocs.yaml @hmellor
 /tools/pre_commit/.markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
 /tools/pre_commit @hmellor
+/tools/pre_commit/*_allowlist.txt
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
