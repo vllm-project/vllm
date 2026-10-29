@@ -13,20 +13,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import ijson
 import regex as re
-from mistral_common.protocol.instruct.tool_calls import (
-    NamedToolChoice as MistralNamedToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    Tool as MistralTool,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoice as MistralToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoiceEnum as MistralToolChoiceEnum,
+from mistral_common.exceptions import InvalidRequestException
+from mistral_common.protocol.instruct.request import (
+    ChatCompletionRequest as MistralChatCompletionRequest,
 )
 from mistral_common.tokens.tokenizers.base import SpecialTokens
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -40,6 +32,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -63,9 +56,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _ALPHANUMERIC = ascii_letters + digits
-_DEFAULT_JSON_SCHEMA: dict[str, Any] = {
-    "anyOf": [{"type": "object"}, {"type": "array"}]
-}
 
 # Special token strings as emitted/decoded by MistralTokenizer.
 _TOOL_CALLS = SpecialTokens.tool_calls.value
@@ -108,6 +98,41 @@ class MistralToolCall(ToolCall):
     @staticmethod
     def is_valid_id(id: str) -> bool:
         return id.isalnum() and len(id) == 9
+
+
+def _mistral_response_format(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Return the OpenAI-format response format to pass to mistral-common.
+
+    `structured_outputs` (`json`, `json_object`) takes precedence over
+    `response_format`, as in `structured_outputs_from_response_format`.
+    """
+    structured_outputs = request.structured_outputs
+    if structured_outputs is not None:
+        if structured_outputs.json_object is not None:
+            return {"type": "json_object"}
+        if structured_outputs.json is None:
+            raise ValueError(
+                "Unsupported request.structured_outputs for MistralParser. "
+                "Only `json` and `json_object` are supported."
+            )
+        schema = structured_outputs.json
+        if isinstance(schema, str):
+            check_json_nesting(schema)
+            schema = json.loads(schema)
+        # `structured_outputs.json` asks vLLM to enforce the schema.
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": schema, "strict": True},
+        }
+
+    if request.response_format is None:
+        return {"type": "text"}
+    if request.response_format.type not in ("text", "json_object", "json_schema"):
+        raise ValueError(
+            "MistralParser only accepts `text`, `json_object` or "
+            f"`json_schema`, got {request.response_format=}"
+        )
+    return request.response_format.model_dump(by_alias=True, exclude_none=True)
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
@@ -407,82 +432,32 @@ class MistralParser(ParserEngine):
                     request.response_format = None
             return request
 
-        json_schema: dict[str, Any] | None = None
-        if request.structured_outputs is not None:
-            if request.structured_outputs.json_object is not None:
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.structured_outputs.json is not None:
-                if isinstance(request.structured_outputs.json, str):
-                    check_json_nesting(request.structured_outputs.json)
-                    json_schema = json.loads(request.structured_outputs.json)
-                else:
-                    json_schema = request.structured_outputs.json
-            else:
-                raise ValueError(
-                    "Unsupported request.structured_outputs for MistralParser. "
-                    "Only `json` and `json_object` are supported."
-                )
-        elif (
-            request.response_format is not None
-            and request.response_format.type != "text"
-        ):
-            if request.response_format.type == "json_object":
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.response_format.type == "json_schema":
-                if request.response_format.json_schema is not None:
-                    json_schema = request.response_format.json_schema.json_schema
-                else:
-                    json_schema = _DEFAULT_JSON_SCHEMA
-            else:
-                raise ValueError(
-                    "MistralParser only accepts `text`, `json_object` or "
-                    f"`json_schema`, got {request.response_format=}"
-                )
-            request.response_format = None
+        response_format = _mistral_response_format(request)
+        # The grammar replaces response_format as the engine constraint.
+        request.response_format = None
 
         grammar_factory = self.model_tokenizer.grammar_factory
 
         # Rendering grammar is cached in mistral-common given tools, template and mode.
         template = grammar_factory.select_jinja_template()
 
-        mistral_tools = (
-            [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
-            if request.tools is not None
-            else None
-        )
+        try:
+            mistral_request = MistralChatCompletionRequest.from_openai(
+                **request.model_dump(
+                    include={"messages", "tools", "tool_choice", "parallel_tool_calls"},
+                    exclude_none=True,
+                ),
+                response_format=response_format,
+            )
+            lark_grammar = grammar_factory.get_grammar_for_chat_request(
+                request=mistral_request, template=template
+            )
+        except (ValidationError, InvalidRequestException) as e:
+            raise VLLMValidationError(str(e)) from e
 
-        tool_choice: MistralToolChoice
-        match request.tool_choice:
-            case "none" | "auto" | "required":
-                tool_choice = MistralToolChoiceEnum(request.tool_choice)
-            case None:
-                tool_choice = MistralToolChoiceEnum.auto
-            # _ == Named tool choice
-            case _:
-                tool_choice = MistralNamedToolChoice.model_validate(
-                    {
-                        "type": "function",
-                        "function": {"name": request.tool_choice.function.name},
-                    }
-                )
-
-        match tool_choice, json_schema is not None:
-            case MistralToolChoiceEnum.none, True:
-                lark_grammar = grammar_factory.get_lark_for_json_schema(
-                    template=template, json_schema=json_schema
-                )
-            case _, _:
-                lark_grammar = grammar_factory.get_lark_from_jinja(
-                    template=template,
-                    mode=tool_choice,
-                    tools=mistral_tools,
-                    json_schema=json_schema,
-                    parallel_tool_calls=request.parallel_tool_calls,
-                    json_only=False,
-                )
-
-        request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
-        request._grammar_from_parser = True
+        if lark_grammar is not None:
+            request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
+            request._grammar_from_parser = True
         return request
 
     def _build_guided_schema_pre_v11(
