@@ -4555,3 +4555,134 @@ l'`except` silencieux. **Non appliqué** : touche un conteneur prod, hors mandat
 3. **TTFT** : seule une sonde active le donne. `time_to_first_token_seconds` est **cumulatif depuis
    le boot** ⇒ **non reconstructible** par fenêtre. Le proxy `gen_rate`/`prompt_rate` du jsonl est
    un **débit**, pas une latence.
+
+---
+
+## 29/10 22:1xZ — Cycle surveillance : moteur sain, **préemptions 0 → 13 en 2 h** (dilution du hit préfixe), 400 window+1 ré-attribué, banc GPU-2 handed to la régie
+
+Cycle de 22:1xZ (hôte 23:1x locale, UTC+1). Moteur **sain** ; un seul signal nouveau, mesuré.
+
+### 1. Santé (read-only)
+
+| Sonde | Valeur |
+|---|---|
+| `/health` | **200 en 3,46 ms** |
+| `RestartCount` / `StartedAt` | **0** / **2026-10-29T15:34:06.895Z** (inchangé depuis le reboot) |
+| OOM dans le log | **0** (`--tail 20000`) |
+| Conteneurs | **3/3 Up** (moteur `healthy`, watchdog, télémétrie) |
+| VRAM | GPU 0 **22 762 MiB** · GPU 1 21 274 · GPU 2 45 (libre) |
+| `/dev/shm` hôte | **33 G / 63 G = 51 %** (plancher = le tier, aucun orphelin) |
+| Commit hôte | **280,8 / 407,8 Go = 68,9 %** (127 Go libres) |
+| `G:` DriveFS | **OK** (3,7 T, 648 G libres) |
+| nbaudit | `ok:true`, `consecutive_failures:0`, subpath `["19451:Image/"]` |
+| Watchdog | **3 887 sondes OK**, tous les WEDGE en **`fail 1/2`** (jamais 2/2), aucun RESTARTING/CRASH-LOOP |
+
+### 2. ★ Signal nouveau : les préemptions sont parties de zéro
+
+`vllm:num_preemptions_total` était à **0** au cycle de 21:11Z (soit 0 depuis le boot, 5,6 h).
+Il est à **11 à 22:12:55Z**, puis **13 à 22:14:37Z** — soit **+13 en ~2 h**, et **+2 en 102 s**
+pendant la mesure. Le signal n'est pas un pic, c'est une **montée continue**.
+
+Contexte lu au même instant :
+
+| Jauge | 22:12:55Z | 22:14:37Z |
+|---|---|---|
+| `kv_cache_usage_perc` | **0,9107** | 0,8678 |
+| `num_requests_running` | 8 | 9 |
+| `num_requests_waiting` | 3 (**dont 2 `capacity`**) | 1 (dont 0 `capacity`, 1 `deferred`) |
+| VRAM GPU 0 | 22 697 | 22 762 |
+
+### 3. ★ Le hit préfixe s'est effondré — et le mécanisme est mesuré
+
+Méthode retenue : **différence de compteurs entre deux instants**, pas le ratio cumulé
+(un ratio cumulé depuis le boot mélange des heures de charge très différentes).
+
+| Fenêtre | `queries` | `hits` | Hit |
+|---|---|---|---|
+| 21:11Z (relevé précédent) | 34,4 M | 31,6 M | **91,7 %** |
+| 22:12:55Z → 22:14:37Z (**102 s**) | **+463 801** | **+342 672** | **73,9 %** |
+| Cumulé depuis le boot (6,7 h) | 103,2 M | 75,2 M | **72,8 %** |
+
+Une requête de ~250 K tokens représente à elle seule **~15 600 `prefix_cache_queries`**
+(`prefix_match_unit=16`) : le compteur de requêtes est en réalité un compteur de **blocs de
+16 tokens**, pas de requêtes. Une poignée de re-prefills de 250 K tokens explique donc les
++68,8 M de requêtes/hour relevées entre 21:11Z et 22:14Z.
+
+**Cause la plus probable, non prouvée** : le trafic long-contexte ré-paye son contexte à chaque
+tour. Le census le confirme sur la fenêtre 3 h : **387 requêtes de corps > 100 Ko sur 587
+requêtes** venant de `90.65.170.144`, UA `Bun/1.3.14`. Ces prompts de 220-260 K tokens sont ce
+qui sature le KV (91 % à 22:12Z) et ce qui déclenche les préemptions. **Le lien de causalité
+reste une hypothèse** : je n'ai pas la corrélation requête-par-requête entre le 400 refusé et la
+préemption qui suit.
+
+### 4. 400 « maximum context length » — ré-attribution et escalade
+
+7 réponses 400 en 3 h, corps **888 Ko à 1,06 Mo**, message exact
+`prompt contains at least 262145 input tokens` (> 262 144). Attribution par les en-têtes
+`x_claudish_client` / `x_claudish_machine` (vivants depuis 28/10) :
+
+| machine | client | 400 |
+|---|---|---|
+| myia-po-2024 | unknown | **5** |
+| myia-po-2023 | unknown | 2 |
+
+La référence circulant au dashboard disait « tous po-2023 » : **elle est incomplète**, po-2024
+arrive en tête. Ces requêtes **passent par le hub** (les en-têtes d'attribution sont posés par le
+hub) et le 400 est **repassé au client** ⇒ #431 (« router un 400 max-context vers le cloud dans le
+même tour ») **ne couvre pas ce cas**. Escalade envoyée à `myia-ai-01:claudish`
+(`msg-20261029T221432-e3iva0`), sans clé ni valeur en clair.
+
+### 5. Une clé inconnue refusée 140 fois — sans effet, mais inexpliquée
+
+Empreinte `5cb29436afca` (schéma `auth_prefix` = `sha256(("Bearer "+clé)[:24]+"...")[:12]`),
+**140 requêtes, 401, 0 succès**, sur **20:36:10Z → 21:01:00Z**, puis plus rien.
+
+- `client` = **172.19.0.1** (passerelle Docker) et `host` = **`localhost:5002`** ⇒ **processus local
+  de la machine**, pas un client distant.
+- UA `OpenAI/Python 2.36.0` (137) + `Python-urllib/3.14` (3), path `/v1/chat/completions`.
+- Longueur de clé dans la classe 17 (même famille que MEDIUM, MINI, MICRO) — **pas** une clé
+  longue (len 64) du type hub/externe.
+- **Aucune correspondance** avec : MEDIUM courant (`be312daf7c1c`), MEDIUM périmé
+  (`b2082455ef36`, clé du siège web2), MINI (`5441acb6943a`), MICRO (`57e01bfcdd10`), clé hub
+  (`cbdef5ca3e1d`), clé hub précédente (`cf5c66fa5046`), ni avec les clés des 53 conteneurs de la
+  machine, ni avec `myia_vllm/.env`, `roo-extensions/.env`, `nanoclaw/.env`, `nanoclaw/deploy/.env`,
+  `~/.claudish/config.json`, `~/.claude.json`.
+
+**Pas une alerte sécurité** : 0 succès, aucune IP externe, origine locale, et la rafale s'est
+arrêtée d'elle-même. Mais **inconnue** — le seul juge possible est le propriétaire du processus.
+Signalé à l'user et consigné au registre (Q49). La piste la plus probable reste un **processus
+périmé** qui tient une ancienne clé en mémoire (le même mécanisme que les 6 processus stdio
+`sk_agent.py` orphelins trouvés par web2 le 29/10).
+
+À côté, `1f7f6080cb65` (30 × 401, UA `Go-http-client`, IP `116.202.50.2`) est **identifié** :
+c'est `LOCAL_MEDIUM_API_KEY` de `nanoclaw/.env` = une MEDIUM **périmée**. Inchangé, connu.
+
+### 6. Banc GPU-2 : la régie prend le lancement
+
+CoursIA-2 (régie) a repris le lancement du banc `axteam/Nanbeige4.3-33B-AWQ-4bit` :
+« le demandeur soumet, ne lance pas ; GPU 2 est le slot de la régie » et « tu es le SEUL lanceur
+sur le GPU 2 ». Deux fenêtres ont expiré sans lancement (20:30-21:00Z et 21:40-22:10Z).
+
+**Plafond mémoire : accord total sur 0,93.** Vérifié à la source dans notre fork :
+`vllm/v1/worker/utils.py:725` calcule `requested_memory = total_memory * gpu_memory_utilization`,
+et `:762` refuse si `free_memory < requested_memory` ⇒ **gpu-util est une fraction du TOTAL**, le
+libre ne sert que de garde de refus. Le plafond `free/total = 22,50/23,99 = 0,9378` mesuré par la
+régie et le nôtre 0,93 sont le même nombre. Mon 0,97-0,98 initial **retiré** (calculé sur le
+libre : erreur de base).
+
+Commande transmise dans le fil `vllm-demand-bench-nanbeige-axteam-20261029` :
+`run_guarded.py --max-commit-charge-pct 90 --limit-gib 24 --reserve-gib 4 -- … powershell -File
+D:\vllm\.tmp\serve_axteam.ps1`. Le script a été mis en conformité avec les 5 contraintes de la
+régie : lanceur PowerShell, `CUDA_DEVICE_ORDER`/`CUDA_VISIBLE_DEVICES=2` **sur la ligne `docker
+run`**, instrument canonique, plafond 0,93, heures UTC. `--max-num-seqs` gardé à **2** (pas 4) :
+le KV fp8 du Nanbeige est à **104 Kio/token**, 2×2048 = 416 Mio, ce qui laisse ~876 Mio pour les
+activations ; à 4 ce serait 832 Mio et la marge tombe trop juste.
+
+### 7. Ce qui n'a pas changé
+
+Verdict d'adoption du quant **inchangé et négatif pour raison d'architecture** : le Nanbeige est
+un `LlamaForCausalLM` dense, 52 couches, 8 KV heads, head_dim 128 ⇒ **106 496 éléments KV/token**
+(104 Kio FP8) contre **12,7 Kio/token** mesurés en prod (attention linéaire hybride) ⇒ ~5× moins
+de KV capacitaire, soit ~141-174 K tokens de KV GPU contre **831 723** aujourd'hui. Le banc ne
+mesure que la santé de la quantification, pas une adoption possible. Le user a de toute façon
+annoncé **Qwen 4 27B** comme remplaçant de cette lane (semaine du 02/11).
