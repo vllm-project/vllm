@@ -24,6 +24,7 @@ from tests.v1.kv_connector.unit.utils import (
     create_scheduler,
     create_vllm_config,
 )
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
@@ -49,12 +50,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
+    get_request_block_hasher,
+    init_none_hash,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
@@ -96,7 +100,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 def _as_mock(value: object) -> MagicMock:
@@ -230,6 +234,7 @@ def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
     eagle: bool = False,
     cache_hit_alignment_tokens: int | None = 4,
+    manager: OffloadingManager | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -245,6 +250,8 @@ def _make_partial_tail_scheduler(
     if recurrent_only:
         kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    if manager is not None:
+        spec.manager = manager
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
@@ -264,6 +271,21 @@ def _make_partial_tail_request(
     request.lora_request = None
     request.skip_reading_external_kv = False
     request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
+
+
+def _make_real_partial_tail_request(
+    scheduler: OffloadingConnectorScheduler, request_id: str
+) -> Request:
+    init_none_hash(sha256)
+    request = Request(
+        request_id=request_id,
+        prompt_token_ids=list(range(30)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
     scheduler.on_new_request(request)
     return request
 
@@ -502,6 +524,44 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_partial_tail_lookup_delays_duplicate_inflight_load():
+    """A second request must wait for an in-flight partial-tail load."""
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+
+    first = _make_real_partial_tail_request(scheduler, "first")
+    second = _make_real_partial_tail_request(scheduler, "second")
+
+    first_state = scheduler._req_status[first.request_id]
+    first_state.num_locally_computed_tokens = 16
+    first_state.update_offload_keys()
+    boundary_keys = [
+        scheduler._make_boundary_key(
+            first, group_config.group_idx, 28, first_state.req_context
+        )
+        for group_config in scheduler.config.kv_group_configs
+    ]
+    stored = manager.prepare_store(boundary_keys, first_state.req_context)
+    assert stored is not None
+    manager.complete_store(stored.keys_to_store, first_state.req_context)
+
+    assert scheduler.get_num_new_matched_tokens(first, 16) == (12, True)
+    scheduler.update_state_after_alloc(
+        first,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(11), KVCacheBlock(12)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(21)],
+            )
+        ),
+        num_external_tokens=12,
+    )
+    assert len(scheduler._jobs) == 1
+
+    assert scheduler.get_num_new_matched_tokens(second, 16) == (None, False)
+    assert len(scheduler._jobs) == 1
 
 
 def test_sync_partial_tail_load_targets_hashed_blocks():

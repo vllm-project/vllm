@@ -1220,6 +1220,10 @@ class OffloadingConnectorScheduler:
             key = self._make_boundary_key(
                 req, group_config.group_idx, key_tokens, req_context
             )
+            # The offload manager can report HIT as soon as the source chunk
+            # is ready, while its earlier GPU load is still in flight.  Do
+            # not schedule the same partial-tail transfer twice.
+            pending |= key in (self._chunks_being_loaded or ())
             result = self.manager.lookup(key, req_context)
             if result is LookupResult.MISS:
                 return False, pending
