@@ -50,7 +50,11 @@ C_WORDS = 8
 TAG_SHIFT = 18  # 18 token id bits (vocabulary < 2**18), 14 epoch tag bits
 TAG_MASK = 0x3FFF
 IDX_MASK = 0x3FFFF
-MAX_SPIN = 1 << 22  # polls before a wait gives up (and sets C_ERR)
+# a wait gives up (and sets C_ERR) after this long, as the specialized
+# decode's (mono/abi.py WAIT_SECONDS): the TP ranks reach a call seconds apart
+# at worst, a bound on polls gave up within a second
+WAIT_SECONDS = 10
+WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
 _MR = tl.constexpr(MAX_ROWS)
 _MK = tl.constexpr(MAX_RANKS)
 _MP = tl.constexpr(MAX_PROGS)
@@ -63,13 +67,26 @@ _TS = tl.constexpr(TAG_SHIFT)
 _TM = tl.constexpr(TAG_MASK)
 _IM = tl.constexpr(IDX_MASK)
 _TAG_CLEAR = tl.constexpr(~(TAG_MASK << TAG_SHIFT))
-_SPIN = tl.constexpr(MAX_SPIN)
+_WAIT = tl.constexpr(WAIT_TICKS)
 
 
 @triton.jit
 def _noise(seed, pos, keys):
     u = murmur3_uniform32(seed, pos + _DRAFT_NOISE_SALT, keys)
     return -tl.log(-_log1p_neg_stable(u))
+
+
+@triton.jit
+def _now():
+    """s_memrealtime: the 100 MHz device clock."""
+    return tl.inline_asm_elementwise(
+        "s_memrealtime $0\n s_waitcnt lgkmcnt(0)",
+        "=s",
+        [],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
 
 
 @triton.jit
@@ -101,12 +118,13 @@ def _poll(ptr, offs, mask, tag, err_ptr):
     ``tag``; return them with the tag cleared (INT64_MIN where masked)."""
     rec = tl.atomic_add(ptr + offs, 0, mask=mask, sem="relaxed", scope="sys")
     bad = tl.sum((mask & (((rec >> _TS) & _TM) != tag)).to(tl.int32))
-    it = 0
-    while (bad > 0) & (it < _SPIN):
+    t0 = _now()
+    late = False
+    while (bad > 0) & (not late):
         rec = tl.atomic_add(ptr + offs, 0, mask=mask, sem="relaxed", scope="sys")
         bad = tl.sum((mask & (((rec >> _TS) & _TM) != tag)).to(tl.int32))
-        it += 1
-    if it >= _SPIN:
+        late = _now() - t0 > _WAIT
+    if bad > 0:
         tl.atomic_xchg(err_ptr, 1, sem="relaxed", scope="gpu")
     return tl.where(mask, rec & _TAG_CLEAR, -9223372036854775807 - 1)
 
