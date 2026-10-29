@@ -388,3 +388,105 @@ class StatelessGroupCoordinator(GroupCoordinator):
         else:
             self.device_communicator.send(input_, dst)
             return None
+
+
+class _DetachedProcessGroup:
+    """Rank and size of a group whose peers have not joined. Any collective
+    fails instead of waiting for peers that are not there."""
+
+    def __init__(self, rank: int, size: int):
+        self._rank = rank
+        self._size = size
+
+    def rank(self) -> int:
+        return self._rank
+
+    def size(self) -> int:
+        return self._size
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(f"{name} needs the peers of a detached group")
+
+
+class _DetachedDeviceCommunicator:
+    """Carries the EP all2all manager of a detached group and nothing else."""
+
+    ca_comm = None
+    fi_pcie_ipc_ar_comm = None
+
+    def __init__(self, all2all_manager):
+        self.all2all_manager = all2all_manager
+
+    def checkpoint_prepare(self) -> None:
+        pass
+
+    def checkpoint_restore(self) -> None:
+        pass
+
+    def destroy(self) -> None:
+        pass
+
+
+class DetachedGroupCoordinator(StatelessGroupCoordinator):
+    """A stateless group whose peers have not joined yet.
+
+    An elastic EP rank that is checkpointed before it joins builds its model,
+    KV cache and CUDA graphs against these. They hold no process group, store
+    or communicator, so the checkpoint holds no connection to other ranks.
+    Joining replaces them with the real groups.
+    """
+
+    def __init__(
+        self,
+        group_ranks: list[list[int]],
+        local_rank: int,
+        group_name: str,
+        global_rank: int,
+        use_all2all: bool = False,
+    ):
+        self.unique_name = _get_unique_name(group_name)
+        _register_group(self)
+        self.rank = global_rank
+        self.local_rank = local_rank
+        from vllm.distributed.parallel_state import _WORLD
+
+        self.device_index = local_rank if _WORLD is None else _WORLD.device_index
+        self.ranks = next(ranks for ranks in group_ranks if global_rank in ranks)
+        self.world_size = len(self.ranks)
+        self.rank_in_group = self.ranks.index(global_rank)
+        self.backend = "nccl"
+        self.cpu_group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
+        self.device_group = self.cpu_group
+        self.tcp_store_group = None  # type: ignore[assignment]
+
+        from vllm.platforms import current_platform
+
+        self.device = torch.device(
+            f"cuda:{current_platform.logical_device_id_to_visible_device_id(self.device_index)}"
+        )
+        self.use_device_communicator = use_all2all
+        self.device_communicator = None
+        if use_all2all:
+            from vllm.distributed.device_communicators.all2all import (
+                NixlEPAll2AllManager,
+            )
+
+            self.device_communicator = _DetachedDeviceCommunicator(  # type: ignore[assignment]
+                NixlEPAll2AllManager.detached(self.rank_in_group, self.world_size)
+            )
+        self.mq_broadcaster = None
+        self.use_custom_op_call = True
+        self.use_cpu_custom_send_recv = False
+
+    def rebind(self, global_rank: int) -> None:
+        """Move this placeholder to another rank of the same group."""
+        assert global_rank in self.ranks, (
+            f"Rank {global_rank} is outside the group the rank was started for"
+        )
+        self.rank = global_rank
+        self.rank_in_group = self.ranks.index(global_rank)
+        self.cpu_group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
+        self.device_group = self.cpu_group
+
+    def destroy(self):
+        pass

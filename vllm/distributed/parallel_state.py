@@ -1564,6 +1564,34 @@ def _init_stateless_group(
     )
 
 
+def _init_elastic_ep_group(
+    group_ranks: list[list[int]],
+    group_name: str,
+    host: str,
+    backend: str,
+    coord_store: Store | None,
+    use_all2all: bool = False,
+) -> "StatelessGroupCoordinator":
+    """Create an elastic EP group, or its detached placeholder while this
+    rank is parked before joining."""
+    from vllm.distributed.stateless_coordinator import DetachedGroupCoordinator
+
+    world = get_world_group()
+    if isinstance(world, DetachedGroupCoordinator):
+        return DetachedGroupCoordinator(
+            group_ranks, world.local_rank, group_name, world.rank, use_all2all
+        )
+    assert coord_store is not None
+    return _init_stateless_group(
+        group_ranks,
+        group_name,
+        host,
+        backend,
+        coord_store=coord_store,
+        use_all2all=use_all2all,
+    )
+
+
 def _replace_active_groups(
     *,
     world: GroupCoordinator | None,
@@ -1815,6 +1843,13 @@ def _init_elastic_ep_world(
     group_ranks = [all_ranks[i : i + 1] for i in range(global_world_size)]
     if global_rank in all_ranks:
         group_ranks = [all_ranks]
+    if envs.VLLM_ELASTIC_EP_JOIN_FILE:
+        # A parked rank contacts no other rank until it joins.
+        from vllm.distributed.stateless_coordinator import DetachedGroupCoordinator
+
+        _WORLD = DetachedGroupCoordinator(group_ranks, local_rank, "world", global_rank)
+        _NODE_COUNT = 1
+        return
     coord_store = get_cached_tcp_store_client(
         parallel_config.data_parallel_master_ip, parallel_config._coord_store_port
     )
@@ -2123,10 +2158,12 @@ def initialize_model_parallel(
     parallel_config = config.parallel_config
     coord_store: Store | None = None
     if enable_elastic_ep:
-        coord_store = get_cached_tcp_store_client(
-            parallel_config.data_parallel_master_ip,
-            parallel_config._coord_store_port,
-        )
+        # A parked rank contacts no other rank until it joins.
+        if not envs.VLLM_ELASTIC_EP_JOIN_FILE:
+            coord_store = get_cached_tcp_store_client(
+                parallel_config.data_parallel_master_ip,
+                parallel_config._coord_store_port,
+            )
         # Use stateless world group for global information
         world_size = get_world_group().world_size
         rank = get_world_group().rank
@@ -2308,7 +2345,7 @@ def initialize_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
         with _elastic_join_warmup_ctx():
-            _DP = _init_stateless_group(
+            _DP = _init_elastic_ep_group(
                 group_ranks,
                 "dp",
                 parallel_config.data_parallel_master_ip,
@@ -2341,7 +2378,7 @@ def initialize_model_parallel(
         use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
             with _elastic_join_warmup_ctx():
-                _EP = _init_stateless_group(
+                _EP = _init_elastic_ep_group(
                     group_ranks,
                     "ep",
                     parallel_config.data_parallel_master_ip,
@@ -2367,7 +2404,7 @@ def initialize_model_parallel(
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 with _elastic_join_warmup_ctx():
-                    _EPLB = _init_stateless_group(
+                    _EPLB = _init_elastic_ep_group(
                         group_ranks,
                         "eplb",
                         parallel_config.data_parallel_master_ip,

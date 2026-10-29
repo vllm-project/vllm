@@ -441,6 +441,34 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group, tcp_store_group)
         self.support_fault_tolerance = True
 
+    @classmethod
+    def detached(cls, rank: int, world_size: int) -> "NixlEPAll2AllManager":
+        """A manager for a rank whose EP peers have not joined. Its buffer
+        is allocated without a NIXL agent and connects when the rank joins."""
+        from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+
+        manager = cls.__new__(cls)
+        manager.cpu_group = None
+        manager.tcp_store_group = None
+        manager.dp_group = get_dp_group()
+        manager.tp_group = get_tp_group()
+        manager.dp_rank = manager.dp_group.rank_in_group
+        manager.dp_world_size = manager.dp_group.world_size
+        manager.rank = rank
+        manager.world_size = world_size
+        manager.internode = False
+        manager.support_fault_tolerance = True
+        return manager
+
+    def rebind_rank(self, rank: int) -> None:
+        """Move a detached manager and its buffer to another EP rank. The
+        dispatch and combine kernels read the rank from device memory, so
+        CUDA graphs captured at the old rank stay valid."""
+        assert self.tcp_store_group is None, "only a detached rank can move"
+        if NixlEPAll2AllManager._buffer is not None:
+            NixlEPAll2AllManager._buffer.buffer.set_rank(rank)
+        self.rank = rank
+
     @property
     def max_num_ep_ranks(self) -> int:
         assert NixlEPAll2AllManager._buffer is not None
@@ -472,22 +500,33 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
+        detached = self.tcp_store_group is None
+        if detached and not hasattr(Buffer, "init_transport"):
+            raise RuntimeError(
+                "Parking an elastic EP rank needs a nixl_ep build with "
+                "Buffer.init_transport and Buffer.set_rank"
+            )
         buffer = Buffer(
             rank=self.rank,
-            tcp_store_group=self.tcp_store_group.store,
+            tcp_store_group=None if detached else self.tcp_store_group.store,
         )
+        # A detached rank allocates the buffers its CUDA graphs use but
+        # creates no NIXL agent, and connects when it joins.
         buffer.update_memory_buffers(
             num_ranks=max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
+            init_transport=not detached,
         )
-        ranks_to_connect = list(range(self.world_size))
-        buffer.connect_ranks(ranks_to_connect)
+        connected_ep_size = 0
+        if not detached:
+            connected_ep_size = self.world_size
+            buffer.connect_ranks(list(range(self.world_size)))
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
             max_num_ep_ranks=max_num_ep_ranks,
-            connected_ep_size=self.world_size,
-            active_ep_size=self.world_size,
+            connected_ep_size=connected_ep_size,
+            active_ep_size=connected_ep_size,
         )
 
     def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
@@ -558,17 +597,20 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
     @contextmanager
     def mask_remote_ranks(self) -> Iterator[None]:
-        peers = [rank for rank in range(self.world_size) if rank != self.rank]
         assert NixlEPAll2AllManager._buffer is not None
-        buffer = NixlEPAll2AllManager._buffer.buffer
+        state = NixlEPAll2AllManager._buffer
+        peers = [rank for rank in range(self.world_size) if rank != self.rank]
+        buffer = state.buffer
         for rank in peers:
             buffer.update_mask_buffer(rank, mask=True)
         torch.accelerator.synchronize()
         try:
             yield
         finally:
+            # Peers that are not connected yet stay masked until they are.
             for rank in peers:
-                buffer.update_mask_buffer(rank, mask=False)
+                if rank < state.active_ep_size:
+                    buffer.update_mask_buffer(rank, mask=False)
             torch.accelerator.synchronize()
 
     def get_handle(self, kwargs):
