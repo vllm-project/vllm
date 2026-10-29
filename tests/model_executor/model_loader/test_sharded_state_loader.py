@@ -362,6 +362,132 @@ def test_save_model_rejects_bad_pattern_before_overwrite(monkeypatch, tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
+@pytest.mark.parametrize("drop_transient_params", [False, True])
+@pytest.mark.parametrize("strategy", ["tensor", "attn_head"])
+def test_sharded_state_loader_kv_cache_scales_round_trip(
+    monkeypatch, tmp_path, strategy, drop_transient_params
+):
+    """ShardedStateLoader round-trips layers with KV-cache scale buffers,
+    including per-head (ATTN_HEAD) buffer shapes and shards where transient
+    scale/zero-point parameters were omitted."""
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsKVCacheMethod,
+    )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    _mock_pp_group(monkeypatch, 1, tp_rank=0)
+
+    class _DummyQuantConfig:
+        kv_cache_scheme = {
+            "type": "float",
+            "num_bits": 8,
+            "strategy": strategy,
+            "symmetric": True,
+        }
+
+        def get_name(self) -> str:
+            return "fp8"
+
+    class _DummyAttn(torch.nn.Module):
+        def __init__(self, use_ct: bool):
+            super().__init__()
+            self.kv_cache_dtype = "fp8"
+            self.num_kv_heads = 4
+            self.register_buffer("_k_scale", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("_v_scale", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("_q_scale", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("_prob_scale", torch.tensor(1.0, dtype=torch.float32))
+            self._k_scale_float = 1.0
+            self._v_scale_float = 1.0
+            self._q_scale_float = 1.0
+            self._prob_scale_float = 1.0
+            self._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32, device="cpu")
+            self._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32, device="cpu")
+            qcfg = _DummyQuantConfig()
+            self.quant_method = (
+                CompressedTensorsKVCacheMethod(qcfg)
+                if use_ct
+                else BaseKVCacheMethod(qcfg)
+            )
+            self.quant_method.create_weights(self)
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self, use_ct: bool):
+            super().__init__()
+            self.attn = _DummyAttn(use_ct=use_ct)
+
+    use_ct = strategy == "attn_head"
+    writer_model = _DummyModel(use_ct=use_ct)
+    with torch.no_grad():
+        if use_ct:
+            writer_model.attn.k_scale.copy_(torch.tensor([0.25, 0.5, 0.75, 1.25]))
+            writer_model.attn.v_scale.copy_(torch.tensor([0.5, 1.0, 1.5, 2.0]))
+            writer_model.attn.q_scale.copy_(torch.tensor([0.125, 0.25, 0.375, 0.5]))
+        else:
+            writer_model.attn.k_scale.copy_(torch.tensor(0.25))
+            writer_model.attn.v_scale.copy_(torch.tensor(0.5))
+            writer_model.attn.q_scale.copy_(torch.tensor(0.125))
+            writer_model.attn.prob_scale.copy_(torch.tensor(0.75))
+
+    model_cfg = SimpleNamespace(
+        model=str(tmp_path),
+        model_weights=None,
+        revision=None,
+        dtype=torch.float32,
+        quantization="fp8",
+        is_attention_free=False,
+        word_embeddings_untied_by_checkpoint=False,
+    )
+    process_weights_after_loading(writer_model, model_cfg, torch.device("cpu"))
+    if drop_transient_params:
+        for name in (
+            "k_scale",
+            "v_scale",
+            "q_scale",
+            "prob_scale",
+            "k_zero_point",
+            "v_zero_point",
+            "q_zero_point",
+        ):
+            if hasattr(writer_model.attn, name):
+                delattr(writer_model.attn, name)
+
+    ShardedStateLoader.save_model(writer_model, str(tmp_path))
+
+    reader_model = _DummyModel(use_ct=use_ct)
+    assert hasattr(reader_model.attn, "q_scale")
+    loader = ShardedStateLoader(LoadConfig(load_format="sharded_state"))
+    loader.load_weights(reader_model, model_cfg)
+    process_weights_after_loading(reader_model, model_cfg, torch.device("cpu"))
+
+    if drop_transient_params:
+        assert not hasattr(reader_model.attn, "q_scale")
+        assert not hasattr(reader_model.attn, "k_scale")
+        assert not hasattr(reader_model.attn, "v_scale")
+        assert not hasattr(reader_model.attn, "prob_scale")
+        assert not hasattr(reader_model.attn, "k_zero_point")
+    else:
+        assert hasattr(reader_model.attn, "q_scale") == hasattr(
+            writer_model.attn, "q_scale"
+        )
+        assert hasattr(reader_model.attn, "k_scale") == hasattr(
+            writer_model.attn, "k_scale"
+        )
+        assert hasattr(reader_model.attn, "v_scale") == hasattr(
+            writer_model.attn, "v_scale"
+        )
+    assert torch.equal(reader_model.attn._k_scale, writer_model.attn._k_scale)
+    assert torch.equal(reader_model.attn._v_scale, writer_model.attn._v_scale)
+    assert torch.equal(reader_model.attn._q_scale, writer_model.attn._q_scale)
+    assert reader_model.attn._k_scale_float == writer_model.attn._k_scale_float
+    assert reader_model.attn._v_scale_float == writer_model.attn._v_scale_float
+    assert reader_model.attn._q_scale_float == writer_model.attn._q_scale_float
+    assert torch.equal(reader_model.attn._k_scale_cpu, writer_model.attn._k_scale_cpu)
+    assert torch.equal(reader_model.attn._v_scale_cpu, writer_model.attn._v_scale_cpu)
+
+
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
     input_dir = hf_api().snapshot_download(

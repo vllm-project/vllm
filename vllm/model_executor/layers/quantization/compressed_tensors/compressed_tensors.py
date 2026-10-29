@@ -73,6 +73,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -1249,6 +1250,17 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed() or not hasattr(layer, "q_scale"):
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = layer._k_scale.max().item()
+                layer._v_scale_float = layer._v_scale.max().item()
+                layer._q_scale_float = layer._q_scale.max().item()
+                layer._k_scale_cpu.fill_(layer._k_scale_float)
+                layer._v_scale_cpu.fill_(layer._v_scale_float)
+            return
+        self._process_kv_scales_after_loading(layer)
+
+    def _process_kv_scales_after_loading(self, layer: torch.nn.Module) -> None:
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """

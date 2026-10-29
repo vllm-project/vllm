@@ -84,6 +84,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 layer._k_scale_float = layer._k_scale.item()
                 layer._v_scale_float = layer._v_scale.item()
                 layer._q_scale_float = layer._q_scale.item()
+                if hasattr(layer, "_prob_scale") and layer._prob_scale.numel() == 1:
+                    layer._prob_scale_float = layer._prob_scale.item()
                 layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
                 layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
             return
@@ -93,6 +95,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             assert not hasattr(layer, "k_scale")
             assert not hasattr(layer, "v_scale")
             assert not hasattr(layer, "prob_scale")
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = layer._k_scale.item()
+                layer._v_scale_float = layer._v_scale.item()
+                layer._q_scale_float = layer._q_scale.item()
+                if hasattr(layer, "_prob_scale") and layer._prob_scale.numel() == 1:
+                    layer._prob_scale_float = layer._prob_scale.item()
+                layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
+                layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
             return
 
         # Per-token-head quantized KV cache: scales are computed dynamically
