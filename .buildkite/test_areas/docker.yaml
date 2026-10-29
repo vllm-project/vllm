@@ -12,6 +12,7 @@ steps:
     - .buildkite/scripts/rocm/build-config.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
+    - docker/Dockerfile.rust
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
     - tests/tools/test_kernel_symbol_map.py
