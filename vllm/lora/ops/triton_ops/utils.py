@@ -335,10 +335,7 @@ def get_lora_op_configs(
 def supports_multicta_shrink(device: torch.device) -> bool:
     """Check basic device/toolchain requirements for experimental shrink."""
     supported = False
-    device_id = device.index if device.index is not None else 0
-    if current_platform.is_cuda() and current_platform.has_device_capability(
-        90, device_id=device_id
-    ):
+    if current_platform.is_cuda() and current_platform.has_device_capability(90):
         from vllm.triton_utils import triton
 
         supported = Version(triton.__version__) >= Version("3.8.0")
