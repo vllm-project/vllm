@@ -71,6 +71,63 @@ def apply_qsa_rmsnorm(
     return cast(torch.Tensor, norm(tensor))
 
 
+def _use_hip_norm_rope(
+    norm: GemmaRMSNorm,
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    tensor: torch.Tensor,
+) -> bool:
+    from vllm.platforms.rocm import on_gfx1100
+
+    return (
+        on_gfx1100()
+        and hasattr(torch.ops._rocm_C, "qsa_norm_rope_rdna3")
+        and tensor.dtype == torch.float16
+        and norm.weight.dtype == torch.float16
+        and tensor.dim() == 3
+        and tensor.shape[1] <= 8
+        and tensor.shape[2] == 128
+        and tensor.stride(2) == 1
+        and positions.dtype == torch.int64
+        and (positions.ndim == 1 or positions.shape[0] == 3)
+        and getattr(rotary_emb, "is_neox_style", False)
+        and rotary_emb.rotary_dim in (8, 16, 32, 64, 128)
+    )
+
+
+def apply_qsa_norm_rope(
+    norm: GemmaRMSNorm,
+    rotary_emb: nn.Module,
+    positions: torch.Tensor,
+    tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Gemma RMSNorm then the main attention's 1D/MRoPE rotation of [T, H, D]
+    heads; one HIP launch on gfx1100 instead of ~30 small ones."""
+    if not _use_hip_norm_rope(norm, rotary_emb, positions, tensor):
+        num_tokens, num_heads, head_dim = tensor.shape
+        normed = apply_qsa_rmsnorm(norm, tensor.reshape(-1, head_dim))
+        return apply_qsa_rope(
+            rotary_emb, positions, normed.reshape(num_tokens, num_heads, head_dim)
+        )
+    out = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+    cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
+    section = getattr(rotary_emb, "mrope_section", None) or (0, 0, 0)
+    torch.ops._rocm_C.qsa_norm_rope_rdna3(
+        tensor,
+        out,
+        norm.weight,
+        positions,
+        cache,
+        norm.variance_epsilon,
+        rotary_emb.rotary_dim,
+        section[0],
+        section[1],
+        section[2],
+        bool(getattr(rotary_emb, "mrope_interleaved", False)),
+    )
+    return out
+
+
 class QSAIndexer(nn.Module):
     """Replicated Q/K projection plus paged, weight-free QSA selection.
 
@@ -178,12 +235,8 @@ class QSAIndexer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
         q_raw, token_k = self.project(hidden_states)
-        q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        q = apply_qsa_rmsnorm(
-            self.q_layernorm,
-            q.reshape(-1, self.index_head_dim),
-        ).reshape_as(q)
-        q = apply_qsa_rope(self.rotary_emb, positions, q)
+        q = q_raw.view(-1, self.index_n_heads, self.index_head_dim)
+        q = apply_qsa_norm_rope(self.q_layernorm, self.rotary_emb, positions, q)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def normalize_compressed_keys(
@@ -192,15 +245,12 @@ class QSAIndexer(nn.Module):
         first_rope_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize pooled K and apply the first token's exact group position."""
-        keys = compressed_keys.reshape(-1, self.index_head_dim)
-        keys = apply_qsa_rmsnorm(self.k_layernorm, keys).reshape(
-            -1, 1, self.index_head_dim
-        )
+        keys = compressed_keys.reshape(-1, 1, self.index_head_dim)
         if getattr(self.rotary_emb, "mrope_section", None):
             positions = first_rope_positions.transpose(0, 1)
         else:
             positions = first_rope_positions[:, 0]
-        return apply_qsa_rope(self.rotary_emb, positions, keys)
+        return apply_qsa_norm_rope(self.k_layernorm, self.rotary_emb, positions, keys)
 
     def _metadata(
         self,

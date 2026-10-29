@@ -599,3 +599,50 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not hasattr(torch.ops._rocm_C, "qsa_norm_rope_rdna3"),
+    reason="Requires the gfx1100 QSA norm+rope kernel",
+)
+@pytest.mark.parametrize("mrope", [False, True], ids=["1d", "mrope"])
+@pytest.mark.parametrize("heads", [4, 1], ids=["q", "k"])
+def test_qsa_norm_rope_hip_matches_unfused(mrope: bool, heads: int) -> None:
+    """The fused HIP norm+rope reads strided Q/K rows and matches the unfused
+    GemmaRMSNorm + rotary. 1-D positions round like the eager rotary; the
+    MRoPE reference is a Triton kernel, so allow one fp16 ulp there."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    torch.manual_seed(0)
+    num_tokens, head_dim = 37, 128
+    with set_current_vllm_config(VllmConfig()):
+        rope = get_rope(
+            head_size=256,
+            max_position=1 << 16,
+            dtype=torch.float16,
+            rope_parameters={
+                "mrope_interleaved": True,
+                "mrope_section": [11, 11, 10],
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10000000,
+                "rope_type": "default",
+            },
+        ).cuda()
+        norm = GemmaRMSNorm(head_dim, eps=1e-6).cuda().half()
+        norm.weight.data.normal_(0.0, 0.3)
+        qk = torch.randn(num_tokens, 5 * head_dim, device="cuda").half() * 3
+        x = (qk[:, : 4 * head_dim] if heads == 4 else qk[:, 4 * head_dim :]).view(
+            num_tokens, heads, head_dim
+        )
+        positions = torch.randint(
+            0, 1 << 16, (3, num_tokens) if mrope else (num_tokens,), device="cuda"
+        )
+        assert indexer_qsa._use_hip_norm_rope(norm, rope, positions, x)
+        actual = indexer_qsa.apply_qsa_norm_rope(norm, rope, positions, x)
+        normed = indexer_qsa.apply_qsa_rmsnorm(norm, x.reshape(-1, head_dim))
+        expected = apply_qsa_rope(
+            rope, positions, normed.reshape(num_tokens, heads, head_dim)
+        )
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=4e-3)
