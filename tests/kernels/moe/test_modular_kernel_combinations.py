@@ -1052,10 +1052,16 @@ def _aiter_padding_matrix_worker(
             padded_config, unpadded_weights, unpadded_rank_tensors
         )
 
-    if padded_config.is_w4a16_mxfp4:
+    if (
+        padded_config.is_w4a16_mxfp4
+        and padded_config.activation == MoEActivation.SWIGLUOAI
+    ):
         # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
         # sign agreement, ~5x-small magnitude) instead of raising -- smoke
         # test only until https://github.com/vllm-project/vllm/pull/59766.
+        # SWIGLUOAI_UNINTERLEAVE isn't exempted: rocm_aiter_moe.py forces the
+        # same kernel path for it as SWIGLUOAI here (see rank_worker), so it
+        # gets the full check below instead.
         assert mk_out.shape == ref_out.shape, (
             f"{fe_name} output shape {mk_out.shape} != reference shape {ref_out.shape}."
         )
@@ -1226,11 +1232,15 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
     MXFP4 counterpart to test_aiter_moe_padding_matrix: W4A16 (mxfp4 weight,
-    unquantized activation) and W4A4 (both mxfp4). W4A16 is forced to
-    SWIGLUOAI -- AITER's heuristic-dispatch kernel only supports that
-    (ROCm/aiter#2419) -- and only smoke-tested (shape + finite), since
-    AITER_MXFP4_BF16 silently miscomputes SwiGLU-OAI pending #59766. W4A4
-    uses SILU and gets the full reference comparison.
+    unquantized activation) and W4A4 (both mxfp4). W4A16 uses
+    SWIGLUOAI_UNINTERLEAVE -- AITER's heuristic-dispatch kernel only has a
+    SWIGLUOAI-family specialization (ROCm/aiter#2419), and
+    SWIGLUOAI_UNINTERLEAVE hits that same kernel path here (see
+    rank_worker), so unlike literal SWIGLUOAI it isn't affected by the
+    AITER_MXFP4_BF16 bug (#59766) and gets the full reference comparison,
+    same as W4A4 (SILU). (This wasn't possible when this test was first
+    written -- the shared reference/NYI infra only learned to treat
+    SWIGLUOAI_UNINTERLEAVE this way in #62907.)
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
@@ -1250,7 +1260,9 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
         topks=_PADDING_TOPK,
         dtype=torch.bfloat16,
         quant_config=quant_config,
-        activation=MoEActivation.SWIGLUOAI if is_w4a16 else MoEActivation.SILU,
+        activation=(
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE if is_w4a16 else MoEActivation.SILU
+        ),
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
         fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
@@ -1357,10 +1369,13 @@ def _aiter_token_padding_worker(
         f"through {fe_name}."
     )
 
-    if config.is_w4a16_mxfp4:
+    if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
         # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
         # sign agreement, ~5x-small magnitude) instead of raising -- smoke
         # test only (finite real rows, already checked) until #59766 lands.
+        # SWIGLUOAI_UNINTERLEAVE isn't exempted: it hits the same kernel
+        # path as SWIGLUOAI here (see rank_worker), so it gets the full
+        # check below instead.
         return
 
     if config.weight_dtype == "mxfp4":
@@ -1470,11 +1485,13 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
 ):
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
-    MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. W4A16 is
-    forced to SWIGLUOAI -- AITER's heuristic-dispatch kernel only supports
-    that (ROCm/aiter#2419) -- and only smoke-tested (finite real rows, no
-    accuracy comparison), since AITER_MXFP4_BF16 silently miscomputes
-    SwiGLU-OAI pending #59766. W4A4 uses SILU and gets the full comparison.
+    MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. W4A16
+    uses SWIGLUOAI_UNINTERLEAVE -- AITER's heuristic-dispatch kernel only
+    has a SWIGLUOAI-family specialization (ROCm/aiter#2419), and
+    SWIGLUOAI_UNINTERLEAVE hits that same kernel path here (see
+    rank_worker), so unlike literal SWIGLUOAI it isn't affected by the
+    AITER_MXFP4_BF16 bug (#59766) and gets the full comparison, same as
+    W4A4 (SILU).
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
@@ -1494,7 +1511,9 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
         topks=_PADDING_TOPK,
         dtype=torch.bfloat16,
         quant_config=quant_config,
-        activation=MoEActivation.SWIGLUOAI if is_w4a16 else MoEActivation.SILU,
+        activation=(
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE if is_w4a16 else MoEActivation.SILU
+        ),
         prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
         fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
