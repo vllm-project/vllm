@@ -947,11 +947,23 @@ class PCPManager:
         self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None
     ) -> tuple[torch.Tensor, list[torch.Tensor] | None, InputBatch]:
         assert self._global_batch is not None
-        hidden_states = self.restore_hidden_states(hidden_states)
-        if aux_hidden_states is not None:
-            aux_hidden_states = [
-                self.restore_hidden_states(states) for states in aux_hidden_states
+        if (
+            not self._global_batch.has_prefill
+            and aux_hidden_states
+            and all(states.dtype == hidden_states.dtype for states in aux_hidden_states)
+        ):
+            states = [hidden_states, *aux_hidden_states]
+            widths = [state.shape[-1] for state in states]
+            restored = self.restore_hidden_states(torch.cat(states, dim=-1))
+            hidden_states, *aux_hidden_states = [
+                state.contiguous() for state in restored.split(widths, dim=-1)
             ]
+        else:
+            hidden_states = self.restore_hidden_states(hidden_states)
+            if aux_hidden_states is not None:
+                aux_hidden_states = [
+                    self.restore_hidden_states(states) for states in aux_hidden_states
+                ]
         return hidden_states, aux_hidden_states, self._global_batch
 
 

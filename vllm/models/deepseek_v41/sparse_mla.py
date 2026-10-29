@@ -88,6 +88,7 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
+        cache_positions: torch.Tensor | None = None,
     ) -> DeepseekSparseSWAMetadata:
         cm = common_attn_metadata
         if self.pcp_size > 1:
@@ -97,7 +98,9 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         if self.pcp_size > 1:
             metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
             assert cm.positions is not None
-            positions = get_pcp_group().all_gather(cm.positions, dim=0)
+            positions = cache_positions
+            if positions is None:
+                positions = get_pcp_group().all_gather(cm.positions, dim=0)
             # FULL graphs retain the capture-time metadata tensor addresses.
             metadata.cache_positions = self.cache_positions_buffer[
                 : positions.numel()

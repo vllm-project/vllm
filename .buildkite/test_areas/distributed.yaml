@@ -12,9 +12,12 @@ steps:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
+  - vllm/v1/worker/gpu/pcp_manager.py
+  - tests/models/test_deepseek_v41_pcp.py
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s models/test_deepseek_v41_pcp.py::test_pcp_decode_restore_preserves_hidden_states
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py

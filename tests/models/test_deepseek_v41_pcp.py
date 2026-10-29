@@ -14,6 +14,74 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
 
+from ..utils import multi_gpu_test
+
+
+def _pcp_decode_restore_worker(rank: int, port: int) -> None:
+    from vllm.config import (
+        CUDAGraphMode,
+        ParallelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.input_batch import InputBuffers
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    from ..v1.worker.test_gpu_pcp_manager import _make_global_decode_batch
+
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(rank)
+    config = VllmConfig(parallel_config=ParallelConfig(prefill_context_parallel_size=2))
+    with set_current_vllm_config(config), torch.device(device):
+        init_distributed_environment(2, rank, f"tcp://127.0.0.1:{port}", rank)
+        initialize_model_parallel(prefill_context_model_parallel_size=2)
+        try:
+            manager = PCPManager(
+                2, rank, device, True, max_num_reqs=4, max_num_tokens=8
+            )
+            batch = _make_global_decode_batch(
+                [16, 24, 32], InputBuffers(4, 8, device), device
+            )
+            local = manager.partition_batch(
+                batch,
+                BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=4, num_reqs=None
+                ),
+            )
+            hidden = local.positions[:, None].to(torch.float32).repeat(1, 8)
+            aux = [hidden + offset for offset in (100, 200, 300)]
+            restored, restored_aux, restored_batch = manager.restore_for_sampling(
+                hidden, aux
+            )
+            expected = batch.positions[:, None].to(torch.float32).repeat(1, 8)
+            assert restored_batch is batch
+            assert restored.is_contiguous()
+            assert restored_aux is not None and len(restored_aux) == 3
+            torch.testing.assert_close(restored, expected, rtol=0, atol=0)
+            for actual, offset in zip(restored_aux, (100, 200, 300)):
+                assert actual.is_contiguous()
+                torch.testing.assert_close(actual, expected + offset, rtol=0, atol=0)
+        finally:
+            destroy_model_parallel()
+            destroy_distributed_environment()
+
+
+@multi_gpu_test(num_gpus=2)
+def test_pcp_decode_restore_preserves_hidden_states():
+    """Packed PCP restoration preserves target/aux rows and request order."""
+    from vllm.utils.network_utils import get_open_port
+
+    torch.multiprocessing.spawn(
+        _pcp_decode_restore_worker, args=(get_open_port(),), nprocs=2
+    )
+
 
 @pytest.mark.parametrize("pcp_size", [1, 2])
 def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):

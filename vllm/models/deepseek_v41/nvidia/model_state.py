@@ -19,6 +19,7 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV41SparseSWAMetadataBuilder
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -160,17 +161,29 @@ def _gather_replay_batch_kernel(
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
-    """Hands the batch's replay starts to the sliding-window builders."""
+    """Shares replay starts and PCP positions across sliding-window builders."""
 
-    def __init__(self, replay_start: torch.Tensor) -> None:
+    def __init__(
+        self,
+        replay_start: torch.Tensor | None,
+        cache_positions: torch.Tensor | None = None,
+    ) -> None:
         self.replay_start = replay_start
+        self.cache_positions = cache_positions
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
-        if isinstance(attn_metadata_builder, DeepseekSparseSWAMetadataBuilder):
-            return {"replay_start": self.replay_start[:num_reqs]}
-        return {}
+        kwargs = {}
+        if self.replay_start is not None and isinstance(
+            attn_metadata_builder, DeepseekSparseSWAMetadataBuilder
+        ):
+            kwargs["replay_start"] = self.replay_start[:num_reqs]
+        if self.cache_positions is not None and isinstance(
+            attn_metadata_builder, DeepseekV41SparseSWAMetadataBuilder
+        ):
+            kwargs["cache_positions"] = self.cache_positions
+        return kwargs
 
 
 class DeepseekV41ModelState(DefaultModelState):
@@ -418,8 +431,15 @@ class DeepseekV41ModelState(DefaultModelState):
                 slot_mappings[cacheable_groups] = get_pcp_group().all_gather(
                     local_slot_mappings[cacheable_groups], dim=1
                 )
+        cache_positions = None
+        if self.pcp_size > 1 and not for_capture:
+            # All SWA groups use the same rank-major token positions.
+            cache_positions = get_pcp_group().all_gather(input_batch.positions, dim=0)
+        if replay_start is not None or cache_positions is not None:
             assert model_specific_attn_metadata is None
-            model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
+            model_specific_attn_metadata = ReplayAttnMetadata(
+                replay_start, cache_positions
+            )
         attn_metadata = self._build_attn_metadata(
             input_batch,
             cudagraph_mode,

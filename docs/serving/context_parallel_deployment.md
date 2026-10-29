@@ -58,6 +58,11 @@ capture sizes when increasing the batch-token limit. Use `--cudagraph-metrics`
 to check actual `FULL` and `PIECEWISE` execution counts; the configured mode
 alone does not prove either path ran.
 
+PCP gathers token positions once per batch for all SWA metadata groups. During
+decode, target and draft auxiliary hidden states with the same dtype share one
+gather before sampling. Each graph keeps its existing metadata buffers and
+request order; prefill hidden states continue to be restored separately.
+
 The example enables automatic prefix caching, which PCP bounded replay requires,
 and SWA bounded replay. Large
 piecewise graphs use an eager break to select the bounded decoder replay batch,
