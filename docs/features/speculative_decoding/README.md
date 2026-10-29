@@ -102,6 +102,23 @@ Mamba2 layers call `forward_mamba2_spec_rows(rows)` with a `Mamba2SpecRows`
 (ReplaySSM is refused with an extension); an extension that does not implement
 it raises at the first Mamba2 forward instead of verifying its drafts as chains.
 
+A registered method can similarly name a
+`SpeculativeMethodSpec.full_attn_verify_extension` factory. The ABI in
+`vllm/v1/attention/verify_extension.py` exposes frozen, data-only metadata and
+row views, and requires both the extension and attention backend to declare
+support for each other. A capable backend must attach the extension in its
+metadata builder and explicitly call `dispatch_full_attention_verify`; dispatch
+has no causal fallback.
+
+This is currently an ABI for out-of-tree attention backends, not an in-tree
+tree-attention implementation. `FlashAttentionBackend` and
+`RocmAttentionBackend` do not yet wire the metadata and forward paths, so a
+factory that returns an extension with either backend is rejected during
+metadata-builder setup. Backend wiring, feature validation (including mixed
+prefill/verify batches, sliding windows, quantized KV cache and context
+parallelism), and any tree-attention kernel remain pending and must not be
+implemented by silently falling back to chain attention.
+
 A speculator can also stop drafting when speculation no longer pays (for
 example, at large batch sizes). It sets `may_suspend_drafting = True` and
 overrides `suspend_drafting(num_reqs, req_ids)`, which Model Runner V2 asks once

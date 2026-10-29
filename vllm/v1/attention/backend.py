@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.verify_extension import (
+        FullAttentionVerifyBackend,
+        FullAttentionVerifyExtension,
+    )
     from vllm.v1.hisparse.runtime import HiSparseCacheHandle
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
@@ -227,6 +231,12 @@ class AttentionBackend(ABC):
         per-request boundaries, which the trimmed batch no longer matches.
         """
         return not cls.is_ssm()
+
+    @classmethod
+    def supports_full_attention_verify_extension(cls) -> bool:
+        """Whether the builder and forward path implement the full-attention
+        verify-extension ABI."""
+        return False
 
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -621,6 +631,21 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+
+    def set_full_attention_verify_extension(
+        self,
+        extension: "FullAttentionVerifyExtension",
+        backend: "FullAttentionVerifyBackend",
+    ) -> None:
+        """Attach an extension after construction.
+
+        A backend that advertises the capability must override this method and
+        carry the extension through its metadata to its forward dispatch.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not attach the full-attention "
+            f"verify extension for {backend.name}."
+        )
 
     @classmethod
     def get_cudagraph_support(

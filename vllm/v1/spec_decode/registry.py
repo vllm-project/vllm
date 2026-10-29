@@ -68,6 +68,12 @@ class SpeculativeMethodSpec:
     method verify non-chain drafts on gated delta net and Mamba2 layers of
     hybrid models."""
 
+    full_attn_verify_extension: str | None = None
+    """Lazy ``"package.module:factory"`` of a callable ``(vllm_config) ->
+    FullAttentionVerifyExtension | None`` (see
+    ``vllm/v1/attention/verify_extension.py``). A full-attention backend must
+    explicitly implement the matching builder and forward dispatch ABI."""
+
     def resolve_speculator_cls(self) -> type:
         return resolve_obj_by_qualname(self.speculator_cls.replace(":", "."))
 

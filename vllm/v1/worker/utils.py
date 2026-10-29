@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -337,6 +338,24 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        if (
+            isinstance(kv_cache_spec_builder, AttentionSpec)
+            and not isinstance(
+                kv_cache_spec_builder,
+                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
+            )
+            and not kv_cache_spec_builder.is_draft
+        ):
+            from vllm.v1.attention.verify_extension import (
+                FullAttentionVerifyBackend,
+                create_full_attn_verify_extension,
+            )
+
+            extension = create_full_attn_verify_extension(vllm_config, self.backend)
+            if extension is not None:
+                backend = FullAttentionVerifyBackend.from_backend(self.backend)
+                for builder in self.metadata_builders:
+                    builder.set_full_attention_verify_extension(extension, backend)
 
     def build_metadata(
         self,
