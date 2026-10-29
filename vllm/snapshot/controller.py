@@ -138,6 +138,7 @@ def restore_snapshot(
     # paths are frozen into the captured argv, so restore takes no --work-dir.
     work_dir = Path(manifest.work_dir)
     root_pid: int | None = None
+    failed = False
     try:
         root_pid = toolset.restore(artifact, manifest)
         # The tree is still waiting at the barrier.
@@ -155,6 +156,7 @@ def restore_snapshot(
             )
         toolset.complete_restore(root_pid)
     except BaseException as error:
+        failed = True
         if root_pid is not None:
             try:
                 toolset.cleanup(root_pid)
@@ -168,7 +170,10 @@ def restore_snapshot(
         raise SnapshotRestoreError(str(error)) from error
     finally:
         # Like a create, a restore removes a work directory it drew no
-        # record for keeping; the tree it leaves behind holds open files
-        # there, so their bytes simply live on as unlinked inodes.
-        if manifest.cleanup_work_dir:
+        # record for keeping. On success the released tree holds open files
+        # there, so their bytes live on as unlinked inodes. A failed restore
+        # keeps the directory instead: a tree the abort could not signal —
+        # or could not kill — polls its release marker to exit, and the
+        # marker is the only signal that directory holds.
+        if manifest.cleanup_work_dir and not failed:
             shutil.rmtree(work_dir, ignore_errors=True)
