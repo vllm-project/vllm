@@ -15,6 +15,8 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
+    _accumulate_kernel,
+    _refit_kernel,
 )
 
 pytest.importorskip("triton")
@@ -295,3 +297,34 @@ def test_feature_ignores_which_token_was_drawn():
         atol=2e-3,
         rtol=2e-3,
     )
+
+
+def test_warmup_covers_every_batch_size_and_the_refit():
+    """After warmup, no batch size and no refit may JIT-compile during serving."""
+    device = current_platform.device_type
+
+    def compiled_variants() -> set:
+        return {
+            (kernel.fn.__name__, key)
+            for kernel in (_accumulate_kernel, _refit_kernel)
+            for caches in kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 2
+    slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
+    num_accepted = torch.ones(REFIT_NUM_REQS, device=device)
+    features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device)
+    _drive_round(estimator, features[:1], num_accepted[:1], slots[:1])
+    estimator.warmup()
+    warmed = compiled_variants()
+
+    for num_reqs in (8, 300):
+        _drive_round(
+            estimator, features[:num_reqs], num_accepted[:num_reqs], slots[:num_reqs]
+        )
+    torch.accelerator.synchronize()
+
+    assert estimator._refits == 1
+    assert compiled_variants() == warmed
