@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import contextvars
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,20 +59,15 @@ def skip_graph_capture_tracing() -> Iterator[None]:
 def make_graph_capture_profiler(
     vllm_config: VllmConfig,
     subsystem: str | None = None,
-) -> AbstractContextManager[Any]:
-    """Build the one-shot capture profiler, or a nullcontext when disabled.
-
-    The single construction site for capture profilers, so callers that still
-    pass the profiler down their capture loops by hand inherit the same config
-    overrides and device activities as ``graph_capture_profiler``.
-    """
+) -> torch.profiler.profile | None:
+    """Build the one-shot capture profiler, or ``None`` when disabled."""
     profiler_config = vllm_config.profiler_config
     local_rank = get_world_group().local_rank
     if local_rank != 0 or not profiler_config.capture_torch_profiler:
         logger.info_once(
             "Rank %d: Torch profiler disabled for GPU graph capture", local_rank
         )
-        return nullcontext()
+        return None
 
     capture_config = graph_capture_profiler_config(profiler_config)
     worker_name = f"graph_capture_rank_{local_rank}"
@@ -114,11 +109,12 @@ def graph_capture_profiler(
         yield
         return
 
-    binding = _CaptureBinding(
-        profiler=make_graph_capture_profiler(vllm_config, subsystem),
-        label_prefix=label_prefix,
-    )
-    token = _active_binding.set(binding)
+    profiler = make_graph_capture_profiler(vllm_config, subsystem)
+    if profiler is None:
+        yield
+        return
+
+    token = _active_binding.set(_CaptureBinding(profiler, label_prefix))
     try:
         yield
     finally:
@@ -131,8 +127,8 @@ def graph_capture_step(num_tokens: int, mode: str) -> Iterator[None]:
 
     Records a ``capture_{num_tokens}_{mode}`` annotation, or
     ``capture_{num_tokens}_{label_prefix}_{mode}`` when the active binding
-    sets a prefix. Does nothing outside a ``graph_capture_profiler`` block, so
-    capture loops can call this unconditionally.
+    sets a prefix. Does nothing unless a ``graph_capture_profiler`` block is
+    actively profiling, so capture loops can call this unconditionally.
     """
     binding = _active_binding.get()
     if binding is None:

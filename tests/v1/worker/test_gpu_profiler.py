@@ -887,10 +887,10 @@ class TestGraphCaptureProfiler:
             ) as profile,
         ):
             profiler = graph_capture.make_graph_capture_profiler(config)
+            assert profiler is built
             with profiler:
                 pass
 
-        assert profiler is built
         profile.assert_called_once()
         kwargs = profile.call_args.kwargs
         assert kwargs["schedule"] is None
@@ -945,18 +945,26 @@ class TestGraphCaptureProfiler:
         assert default_torch_profiler_activities(device_type) == expected
 
     @pytest.mark.parametrize("local_rank,enabled", [(0, False), (1, True)])
-    def test_no_profiler_when_disabled_or_off_rank(self, local_rank, enabled):
+    def test_no_binding_when_disabled_or_off_rank(
+        self, annotation, local_rank, enabled
+    ):
+        """Capture without profiling must not pay for per-shape annotations."""
         config = MagicMock()
         config.profiler_config.capture_torch_profiler = enabled
 
-        with patch.object(
-            graph_capture,
-            "get_world_group",
-            return_value=MagicMock(local_rank=local_rank),
+        with (
+            patch.object(
+                graph_capture,
+                "get_world_group",
+                return_value=MagicMock(local_rank=local_rank),
+            ),
+            graph_capture_profiler(config),
         ):
-            profiler = graph_capture.make_graph_capture_profiler(config, None)
+            assert graph_capture._active_binding.get() is None
+            with graph_capture_step(32, "FULL"):
+                pass
 
-        assert isinstance(profiler, nullcontext)
+        annotation.assert_not_called()
 
     def test_nested_bind_keeps_outer_prefix(self, annotation):
         with (
