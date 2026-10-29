@@ -910,11 +910,19 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    pool_id: int = 0,
 ) -> None:
-    if not kv_cache_block_copies:
+    """Apply the copies of device pool ``pool_id``, whose caches are
+    ``kv_caches``."""
+    pairs = [
+        (copy.src_block_id, copy.dst_block_id)
+        for copy in kv_cache_block_copies
+        if copy.pool_id == pool_id
+    ]
+    if not pairs:
         return
 
-    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices_np = np.array(pairs, dtype=np.int64)
     indices: torch.Tensor | None = None
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()

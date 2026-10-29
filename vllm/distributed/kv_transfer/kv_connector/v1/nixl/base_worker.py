@@ -1156,6 +1156,14 @@ class NixlBaseConnectorWorker:
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
         )
+        # Private block pools (--draft-kv-pool) have their own block counts,
+        # which each region carries.
+        self._has_private_pools = bool(kv_cache_config.pool_num_blocks)
+        if self._has_private_pools and (self._has_mamba or self.use_host_buffer):
+            raise NotImplementedError(
+                "NIXL with --draft-kv-pool supports neither Mamba layers nor a "
+                "host transfer buffer."
+            )
 
     def _validate_remote_parallel_config(
         self, agent_metadata: NixlAgentMetadata
@@ -1730,7 +1738,9 @@ class NixlBaseConnectorWorker:
                 logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
                 assert logical_num_blocks is not None
             else:
-                logical_num_blocks = self.kv_cache_config.num_blocks
+                logical_num_blocks = self.kv_cache_config.num_blocks_of_pool(
+                    group.pool_id
+                )
             group_id = group_index
             num_blocks = (
                 logical_num_blocks
@@ -1787,19 +1797,22 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                # A connector that registers the backing as one memory region
-                # may need its length rounded up to a page boundary. Such a tail
-                # is shorter than one block, so it cannot make the storage
-                # segmented.
-                storage_is_block_major = (
-                    0 <= registration_len - num_blocks * block_stride < block_stride
-                )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
                 page_contiguous = (
                     cache.ndim > 1
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
+                )
+                # A connector that registers the backing as one memory region
+                # may need its length rounded up to a page boundary. Such a tail
+                # is shorter than one block, so it cannot make the storage
+                # segmented. Private block pools each take their own part of
+                # the backing, so a contiguous page view addresses its pool's
+                # blocks however the pools are laid out.
+                storage_is_block_major = (
+                    0 <= registration_len - num_blocks * block_stride < block_stride
+                    or (self._has_private_pools and page_contiguous)
                 )
                 # Block-outermost MLA: one block row holds every layer's page.
                 packed_mla = (

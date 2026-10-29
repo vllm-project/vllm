@@ -824,7 +824,10 @@ def set_dcp_capture_context(
         input_batch,
         block_tables,
         block_tables.cp_size * block_tables.cp_interleave,
-        kv_cache_config.num_blocks,
+        [
+            kv_cache_config.num_blocks_of_group(group_id)
+            for group_id in range(len(kv_cache_config.kv_cache_groups))
+        ],
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )
@@ -1084,6 +1087,8 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
+    if hasattr(runner, "kv_caches_by_pool"):
+        runner.kv_caches_by_pool.clear()
     if hasattr(runner, "attn_groups"):
         runner.attn_groups.clear()
     if hasattr(runner, "kv_cache_config"):

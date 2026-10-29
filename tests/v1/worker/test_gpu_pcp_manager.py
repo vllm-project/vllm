@@ -327,7 +327,7 @@ def test_dummy_context_updates_pcp_local_block_tables():
         input_batch,
         block_tables,
         context_len=3,
-        num_kv_blocks=16,
+        num_kv_blocks=[16] * len(local_block_tables),
         max_model_len=16,
         input_block_tables=local_block_tables,
     )
