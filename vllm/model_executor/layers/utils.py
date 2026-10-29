@@ -436,7 +436,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -518,6 +518,20 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1)).contiguous()
         out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
+
+    # Past wvSplitK's 5 rows, hipBLASLt on RDNA4 leaves much of the memory
+    # bandwidth unused up to about 128 rows.
+    if (
+        skinny_gemm_enabled
+        and on_rdna4()
+        and weight.stride(1) == 1
+        and (bias is None or bias.is_contiguous())
+    ):
+        from vllm.kernels.triton.skinny_gemm import skinny_gemm, skinny_gemm_config
+
+        config = skinny_gemm_config(n, m, k)
+        if config is not None:
+            return skinny_gemm(x, weight, bias, config)
 
     if rocm_aiter_ops.is_tgemm_enabled():
         from aiter.tuned_gemm import tgemm

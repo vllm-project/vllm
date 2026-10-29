@@ -26,6 +26,15 @@ def _on_gfx11() -> bool:
     return on_gfx11()
 
 
+def _on_rdna4() -> bool:
+    """RDNA4 check that is safe to evaluate at collection time on any platform."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_rdna4
+
+    return on_rdna4()
+
+
 @pytest.mark.parametrize("m", [1, 128])
 def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
     x = torch.randn(1, 64, dtype=torch.float16)
@@ -289,15 +298,16 @@ def test_rocm_unquantized_gemm_padded_weight_real_kernel(monkeypatch, dtype):
 
 
 @pytest.mark.parametrize("m", [1, 128])
-def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
-    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
-    # fall back to torch.nn.functional.linear.
+def test_rocm_unquantized_gemm_gfx11_n_gt_5_falls_back(monkeypatch, m):
+    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); on gfx11, n > 5
+    # must fall back to torch.nn.functional.linear.
     x = torch.randn(6, 64, dtype=torch.float16)
     weight = torch.randn(m, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
@@ -342,3 +352,138 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x_view = wvsplitkrc_mock.call_args.args[0]
     assert x_view.is_contiguous()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+def _mock_rdna4(monkeypatch):
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 32)
+
+
+@pytest.mark.parametrize("n", [6, 64, 128])
+def test_rocm_unquantized_gemm_rdna4_triton_skinny_path(monkeypatch, n):
+    from vllm.kernels.triton import skinny_gemm
+
+    x = torch.randn(n, 512, dtype=torch.bfloat16)
+    weight = torch.randn(4096, 512, dtype=torch.bfloat16)
+
+    _mock_rdna4(monkeypatch)
+    skinny_mock = MagicMock(
+        side_effect=lambda x, w, b, _: torch.nn.functional.linear(x, w, b)
+    )
+    monkeypatch.setattr(skinny_gemm, "skinny_gemm", skinny_mock)
+    wvsplitk_mock = MagicMock()
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    skinny_mock.assert_called_once()
+    wvsplitk_mock.assert_not_called()
+    torch.testing.assert_close(out, ref)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "too_many_rows",
+        "narrow_weight",
+        "k_not_multiple_of_64",
+        "fp32",
+        "transposed_weight",
+        "noncontiguous_bias",
+        "gfx11",
+    ],
+)
+def test_rocm_unquantized_gemm_rdna4_triton_skinny_falls_back(monkeypatch, case):
+    from vllm.kernels.triton import skinny_gemm
+
+    n = 129 if case == "too_many_rows" else 8
+    m = 256 if case == "narrow_weight" else 4096
+    k = 520 if case == "k_not_multiple_of_64" else 512
+    dtype = torch.float32 if case == "fp32" else torch.bfloat16
+    x = torch.randn(n, k, dtype=dtype)
+    weight = torch.randn(m, k, dtype=dtype)
+    bias = None
+    if case == "transposed_weight":
+        weight = torch.randn(512, 4096, dtype=dtype).t()
+    elif case == "noncontiguous_bias":
+        bias = torch.randn(8192, dtype=dtype)[::2]
+
+    _mock_rdna4(monkeypatch)
+    if case == "gfx11":
+        monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: True)
+        monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: False)
+    skinny_mock = MagicMock()
+    monkeypatch.setattr(skinny_gemm, "skinny_gemm", skinny_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, bias)
+    ref = torch.nn.functional.linear(x, weight, bias)
+
+    skinny_mock.assert_not_called()
+    torch.testing.assert_close(out, ref)
+
+
+def _spy_triton_skinny(monkeypatch) -> MagicMock:
+    from vllm.kernels.triton import skinny_gemm
+
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    spy = MagicMock(side_effect=skinny_gemm.skinny_gemm)
+    monkeypatch.setattr(skinny_gemm, "skinny_gemm", spy)
+    return spy
+
+
+@pytest.mark.skipif(not _on_rdna4(), reason="Triton skinny GEMM is RDNA4-only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("use_bias", [False, True])
+# N not a multiple of the N tile; K = 2880 is not a multiple of 128; few K steps.
+@pytest.mark.parametrize("m,k", [(4096, 4096), (2900, 2880), (6144, 256)])
+@pytest.mark.parametrize("n", [6, 13, 24, 33, 64, 100, 128])
+def test_rocm_unquantized_gemm_rdna4_triton_skinny_real_kernel(
+    monkeypatch, dtype, use_bias, m, k, n
+):
+    torch.manual_seed(0)
+    x = torch.randn(n, k, device="cuda", dtype=dtype)
+    weight = torch.randn(m, k, device="cuda", dtype=dtype) / k**0.5
+    bias = torch.randn(m, device="cuda", dtype=dtype) if use_bias else None
+    spy = _spy_triton_skinny(monkeypatch)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, bias)
+    ref = torch.nn.functional.linear(
+        x.float(), weight.float(), None if bias is None else bias.float()
+    ).to(dtype)
+
+    spy.assert_called_once()
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not _on_rdna4(), reason="Triton skinny GEMM is RDNA4-only")
+@pytest.mark.parametrize("layout", ["3d", "transposed_x", "padded_weight"])
+def test_rocm_unquantized_gemm_rdna4_triton_skinny_layouts(monkeypatch, layout):
+    torch.manual_seed(0)
+    k = 4096
+    if layout == "3d":
+        x = torch.randn(2, 8, k, device="cuda", dtype=torch.bfloat16)
+    elif layout == "transposed_x":
+        x = torch.randn(k, 16, device="cuda", dtype=torch.bfloat16).t()
+        assert x.stride() == (1, 16)
+    else:
+        x = torch.randn(16, k, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(4096, k, device="cuda", dtype=torch.bfloat16) / k**0.5
+    if layout == "padded_weight":
+        weight = _row_stride_padded(weight, 64)
+    spy = _spy_triton_skinny(monkeypatch)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x.float(), weight.float()).to(torch.bfloat16)
+
+    spy.assert_called_once()
+    assert out.shape == ref.shape
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
