@@ -35,8 +35,7 @@ else()
   # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
   # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
   # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
-  # (vllm-project/DeepGEMM#43), and the TRT-LLM NVFP4 weight layout
-  # for Muse Spark MegaMoE (vllm-project/DeepGEMM#47).
+  # (vllm-project/DeepGEMM#43).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
   set(_DEEPGEMM_UPSTREAM_TAG "5cdb145704ec4672ecf4b61441599521ce635df6")
 
