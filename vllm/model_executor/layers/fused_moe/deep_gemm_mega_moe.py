@@ -27,6 +27,10 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
     prepare_megamoe_nvfp4_inputs,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    RoutedExpertsCaptureLayout,
+    make_routed_experts_capture_layout,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -257,6 +261,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
             symmetric buffer is sized for it. Defaults to
             ``max_num_batched_tokens``. A caller that hands this layer only its
             sequence-parallel shard of the batch can pass the shard size.
+        input_sp_size: Input SP partition count, used to restore captured routes.
+            The caller shards the input; this module does not perform that split.
 
     """
 
@@ -279,6 +285,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
         fast_math: bool = True,
         max_num_tokens: int | None = None,
+        input_sp_size: int = 1,
         prefix: str = "",
     ):
         super().__init__()
@@ -295,6 +302,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         check_deep_gemm_mega_moe_supported(device, hidden_size, intermediate_size)
 
         self.prefix = prefix
+        self.input_sp_size = input_sp_size
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
@@ -339,6 +347,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def get_routed_experts_capture_layouts(
+        self, num_tokens_across_dp: tuple[int, ...], dp_rank: int
+    ) -> dict[int, RoutedExpertsCaptureLayout]:
+        return {
+            self.layer_id: make_routed_experts_capture_layout(
+                num_tokens_across_dp, dp_rank, sp_size=self.input_sp_size
+            )
+        }
 
     @property
     def has_fused_shared_experts(self) -> bool:

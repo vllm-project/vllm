@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -16,6 +16,11 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+        RoutedExpertsCaptureLayout,
+    )
 
 logger = init_logger(__name__)
 
@@ -194,6 +199,9 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    routed_experts_capture_layouts: dict[int, "RoutedExpertsCaptureLayout"] | None = (
+        None
+    )
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

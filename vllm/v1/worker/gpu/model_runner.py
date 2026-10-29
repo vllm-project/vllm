@@ -41,9 +41,16 @@ from vllm.distributed.aux_output_connector.worker import (
     get_aux_output_connector,
 )
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    prepare_routed_experts_capture_layouts,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -2093,6 +2100,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
+                if ubatch_state is None:
+                    get_forward_context().routed_experts_capture_layouts = (
+                        prepare_routed_experts_capture_layouts(
+                            self.model,
+                            input_batch.num_tokens_after_padding,
+                            dp_sync_state and dp_sync_state.num_tokens_across_dp,
+                            self.parallel_config.data_parallel_rank,
+                        )
+                    )
                 self.kv_connector.pre_forward(scheduler_output, input_batch)
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None

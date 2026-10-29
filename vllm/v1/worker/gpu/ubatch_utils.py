@@ -20,6 +20,9 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    prepare_routed_experts_capture_layouts,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -412,18 +415,26 @@ class UBatchRunner:
             num_tokens_across_dp = torch.full(
                 (dp_size,), num_tokens, dtype=torch.int32, device="cpu"
             )
-            forward_contexts.append(
-                create_forward_context(
-                    attn_metadata[i],
-                    self.vllm_config,
-                    dp_metadata=DPMetadata.make(
-                        self.parallel_config, num_tokens, num_tokens_across_dp
-                    ),
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    slot_mapping=slot_mappings_by_layer[i],
-                    is_padding=is_padding[i],
-                )
+            context = create_forward_context(
+                attn_metadata[i],
+                self.vllm_config,
+                dp_metadata=DPMetadata.make(
+                    self.parallel_config, num_tokens, num_tokens_across_dp
+                ),
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                slot_mapping=slot_mappings_by_layer[i],
+                is_padding=is_padding[i],
             )
+            with override_forward_context(context):
+                context.routed_experts_capture_layouts = (
+                    prepare_routed_experts_capture_layouts(
+                        self.model_state.model,
+                        num_tokens,
+                        num_tokens_across_dp,
+                        self.parallel_config.data_parallel_rank,
+                    )
+                )
+            forward_contexts.append(context)
         return forward_contexts
 
     def run(

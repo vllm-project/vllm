@@ -65,6 +65,7 @@ steps:
   key: v1-core
   timeout_in_minutes: 45
   source_file_dependencies: &v1-core-kv-metrics-deps
+    - vllm/forward_context.py
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"

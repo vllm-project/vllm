@@ -442,6 +442,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     described above for the monolithic case.
     """
 
+    def routing_capture_is_gathered(self) -> bool:
+        """Whether prepare gathers DP/SP rows before the monolithic router."""
+        raise NotImplementedError(
+            f"{type(self).__name__} must declare its routing capture placement"
+        )
+
     @abstractmethod
     def prepare(
         self,

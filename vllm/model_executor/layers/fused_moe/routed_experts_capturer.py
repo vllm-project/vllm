@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
 from functools import partial
 from typing import Protocol, runtime_checkable
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    RoutedExpertsCaptureLayout,
+    RoutedExpertsCaptureLayoutProvider,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
@@ -27,19 +29,6 @@ logger = logging.getLogger(__name__)
 class RoutedExpertsCaptureSource(Protocol):
     layer_id: int
     capture_fn: Callable[[torch.Tensor], None] | None
-
-
-@dataclass(frozen=True)
-class RoutedExpertsCaptureLayout:
-    """Restore this DP rank's rows; sizes and ranges stay fixed during graph replay."""
-
-    # Ordered (start, length) spans in input or rank-concatenated gathered rows.
-    source_ranges: tuple[tuple[int, int], ...]
-    # All group ranks participate, even with empty ranges. None skips gathering.
-    gather_group: GroupCoordinator | None = None
-    # Physical row counts in group order, agreed by all ranks; empty without a group.
-    # The backend must support the supplied sizes, including uneven/empty shards.
-    shard_sizes: tuple[int, ...] = ()
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -96,33 +85,25 @@ class RoutedExpertsCapturer:
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    def capture(
-        self,
-        layer_id: int,
-        topk_ids: torch.Tensor,
-        *,
-        layout: RoutedExpertsCaptureLayout | None = None,
-    ) -> None:
-        """Record logical IDs using explicit spans or default row restoration."""
+    def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
             raise IndexError(
                 f"routed-experts layer {layer_id} exceeds capture buffer "
                 f"layer count {self.device_buffer.shape[1]}"
             )
-
-        if layout is None:
-            ctx = get_forward_context()
-            local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
-        else:
-            local_topk_ids = self._capture_with_layout(topk_ids, layout)
+        layouts = get_forward_context().routed_experts_capture_layouts
+        if layouts is None or layer_id not in layouts:
+            raise ValueError(
+                f"Missing routed-experts capture layout for layer {layer_id}"
+            )
+        layout = layouts[layer_id]
+        if topk_ids.shape[0] != layout.input_rows:
+            raise ValueError("capture input rows do not match the declared layout")
         offset = dbo_current_ubatch_token_offset()
-        if layout is not None and offset + len(local_topk_ids) > len(
-            self.device_buffer
-        ):
+        if offset + layout.num_rows > len(self.device_buffer):
             raise ValueError("routed-experts rows exceed capture buffer capacity")
+        local_topk_ids = self._capture_with_layout(topk_ids, layout)
         self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
             local_topk_ids
         )
@@ -131,95 +112,18 @@ class RoutedExpertsCapturer:
     def _capture_with_layout(
         topk_ids: torch.Tensor, layout: RoutedExpertsCaptureLayout
     ) -> torch.Tensor:
-        if layout.gather_group is not None:
-            world_size = layout.gather_group.world_size
-            if len(layout.shard_sizes) != world_size:
-                raise ValueError("capture shard_sizes must match gather group size")
-            if any(size < 0 for size in layout.shard_sizes):
-                raise ValueError("capture shard_sizes must be non-negative")
-            rank = layout.gather_group.rank_in_group
-            if topk_ids.shape[0] != layout.shard_sizes[rank]:
-                raise ValueError("capture local rows do not match shard_sizes")
-            if world_size > 1:
-                topk_ids = layout.gather_group.all_gatherv(
-                    topk_ids.contiguous(), dim=0, sizes=list(layout.shard_sizes)
-                )
-        elif layout.shard_sizes:
-            raise ValueError("capture shard_sizes require a gather group")
-
+        if layout.gather_group is not None and layout.gather_group.world_size > 1:
+            topk_ids = layout.gather_group.all_gatherv(
+                topk_ids.contiguous(), dim=0, sizes=list(layout.shard_sizes)
+            )
         ranges = layout.source_ranges
         if not ranges:
             return topk_ids[:0]
-        if any(
-            start < 0 or length < 0 or start + length > len(topk_ids)
-            for start, length in ranges
-        ):
-            raise ValueError("capture source range exceeds available rows")
         if len(ranges) == 1:
             start, length = ranges[0]
             return topk_ids.narrow(0, start, length)
         return torch.cat(
-            [topk_ids.narrow(0, start, length) for start, length in ranges],
-            dim=0,
-        )
-
-    def _restore_local_topk_ids(
-        self, topk_ids: torch.Tensor, ctx: ForwardContext
-    ) -> torch.Tensor:
-        """Restore this DP rank's token rows, trimming trailing SP padding.
-
-        Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
-        then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
-        this priority when layout sizes coincide. PCP is unsupported.
-
-        Without DP metadata, use the pre-SP batch descriptor. Unknown counts
-        pass through; known counts must match a full, sharded or padded batch.
-        A full local batch avoids gathering, including zero/one-token batches
-        where only the publishing TP0 rank needs the real rows.
-        """
-        n = topk_ids.shape[0]
-        dp_metadata = ctx.dp_metadata
-        if dp_metadata is None:
-            if ctx.batch_descriptor is None:
-                return topk_ids
-            num_local_tokens = ctx.batch_descriptor.num_tokens
-        else:
-            num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
-            num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
-            if n == int(num_tokens_dp.sum().item()):
-                end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
-                return topk_ids[end - num_local_tokens : end]
-
-        if n == num_local_tokens:
-            return topk_ids
-
-        if dp_metadata is not None:
-            shard_sizes = dp_metadata.local_sizes
-            if shard_sizes is not None and n == sum(shard_sizes):
-                num_dp_ranks = len(num_tokens_dp)
-                if len(shard_sizes) % num_dp_ranks != 0:
-                    raise ValueError(
-                        "RoutedExpertsCapturer: gathered shard count "
-                        f"{len(shard_sizes)} is not divisible by DP rank count "
-                        f"{num_dp_ranks}"
-                    )
-                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
-                first_shard = self.dp_rank * shards_per_dp_rank
-                start = sum(shard_sizes[:first_shard])
-                return topk_ids[start : start + num_local_tokens]
-
-        shard_n = (num_local_tokens + self.tp_size - 1) // self.tp_size
-        if n == shard_n:
-            return get_tp_group().all_gather(topk_ids.contiguous(), dim=0)[
-                :num_local_tokens
-            ]
-        if dp_metadata is None and n == shard_n * self.tp_size:
-            return topk_ids[:num_local_tokens]
-
-        raise AssertionError(
-            f"RoutedExpertsCapturer: unexpected topk_ids batch dim {n} "
-            f"(local_tokens={num_local_tokens}, "
-            f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
+            [topk_ids.narrow(0, start, length) for start, length in ranges], dim=0
         )
 
     def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
@@ -248,18 +152,21 @@ def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
 ) -> None:
-    """Attach capture callbacks to the target model's MoE routers."""
+    """Bind capture callbacks and register the model's layout providers."""
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEExpertsMonolithic,
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-    num_bound = 0
+    bound_layers: set[int] = set()
+    providers: list[RoutedExpertsCaptureLayoutProvider] = []
     for module in model.modules():
+        if isinstance(module, RoutedExpertsCaptureLayoutProvider):
+            providers.append(module)
         if isinstance(module, RoutedExpertsCaptureSource):
             module.capture_fn = partial(capturer.capture, module.layer_id)
-            num_bound += 1
+            bound_layers.add(module.layer_id)
             continue
         if not isinstance(module, MoERunner):
             continue
@@ -280,15 +187,17 @@ def bind_routed_experts_capturer(
             module.routed_experts.routing_sink = RoutedExpertsSink(
                 fused_experts.moe_config, capture_fn
             )
-            num_bound += 1
         elif isinstance(module.router, BaseRouter):
             module.router.set_capture_fn(capture_fn)
-            num_bound += 1
         else:
             raise ValueError(
                 "Routed-experts capture is not supported with router "
                 f"{type(module.router).__name__}."
             )
+        bound_layers.add(module.layer_id)
 
-    if num_bound == 0:
+    if not bound_layers:
         raise ValueError("No supported MoE router found for routed-experts capture.")
+
+    model.routed_experts_capture_layers = frozenset(bound_layers)
+    model.routed_experts_capture_layout_providers = tuple(providers)

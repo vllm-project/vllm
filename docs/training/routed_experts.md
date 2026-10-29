@@ -52,3 +52,24 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 - The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
+
+## Backend capture layouts
+
+A model module can implement `get_routed_experts_capture_layouts(num_tokens_across_dp, dp_rank)` to return a mapping from layer IDs to `RoutedExpertsCaptureLayout`. `bind_routed_experts_capturer()` registers the provider modules alongside the capture callbacks; the layout provider can be an enclosing module rather than the module producing expert IDs. Rebind after replacing registered modules. Ordinary MoE uses `MoERunner` as its provider. Native MegaMoE uses `DeepGemmMegaMoEExperts`; callers declare the input SP partition count with its `input_sp_size` constructor argument (default: `1`, unsharded).
+
+Before each forward, activate its `ForwardContext` and finish preparing backend communication metadata. Then call `prepare_routed_experts_capture_layouts(model, num_tokens, num_tokens_across_dp, dp_rank)` and assign its result to `get_forward_context().routed_experts_capture_layouts`. The counts describe the execution batch, including execution padding. Providers can read backend metadata from that active context. Each microbatch or nested forward needs its own layouts.
+
+These types and helpers live in `vllm.model_executor.layers.fused_moe.routed_experts_capture_layout`. The built-in `make_routed_experts_capture_layout()` helper describes DP-major, evenly padded SP placement. Other backends construct layouts directly, without replacing the capturer or changing router signatures. For example, two physical shards of seven rows with three and two valid rows are described by:
+
+```python
+layout = RoutedExpertsCaptureLayout(
+    input_rows=7,
+    gather_group=tp_group,
+    shard_sizes=(7, 7),
+    source_ranges=((0, 3), (7, 2)),
+)
+```
+
+`input_rows` is this rank's row count at capture. `shard_sizes` follows group-rank order; `source_ranges` gives ordered `(start, length)` spans after the optional gather. The capturer gathers through `GroupCoordinator.all_gatherv()`, selects those spans, and writes logical expert IDs in local token order. Without a gather, leave `gather_group=None` and `shard_sizes=()`.
+
+Providers only describe layouts; they do not run collectives. Every bound capture layer needs a layout, and providers must not declare the same layer twice. All group members must agree on shard sizes and participate even when their selected spans are empty; the communicator must support the declared sizes. Layout metadata must remain fixed across graph replay. This extension does not remove the feature restrictions listed above.

@@ -31,8 +31,15 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    set_forward_context,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    prepare_routed_experts_capture_layouts,
+)
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
@@ -769,6 +776,14 @@ class ModelCudaGraphManager(CudaGraphManager):
                     batch_descriptor=batch_descriptor,
                     is_padding=is_padding,
                 ):
+                    get_forward_context().routed_experts_capture_layouts = (
+                        prepare_routed_experts_capture_layouts(
+                            model,
+                            num_tokens,
+                            num_tokens_across_dp,
+                            self.vllm_config.parallel_config.data_parallel_rank,
+                        )
+                    )
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
                         # run_pw_graph).

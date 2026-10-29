@@ -14,10 +14,11 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
+    get_forward_context,
     override_forward_context,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    make_routed_experts_capture_layout,
 )
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
@@ -68,6 +69,7 @@ def state(monkeypatch, request):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.data_parallel_rank = 0
     cfg.parallel_config.enable_expert_parallel = False
     cfg.parallel_config.prefill_context_parallel_size = getattr(request, "param", 1)
     cfg.aux_output_config.enable_return_routed_experts = False
@@ -181,29 +183,31 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and context.is_padding is None
 
 
-def test_replay_context_restores_tp_routing_rows(state):
-    """Capture uses the compact replay batch's size, not the outer batch's."""
+def test_replay_context_uses_compact_capture_layout(state):
+    """Build the SP layout for the compact replay batch, not the outer batch."""
+    count = len(REPLAY_ROWS)
+    group = MagicMock(world_size=2, rank_in_group=0)
+    shard_rows = (count + 1) // 2
+
+    class ReplayLayoutProvider(torch.nn.Module):
+        def get_routed_experts_capture_layouts(self, counts, rank):
+            context = get_forward_context()
+            assert context.batch_descriptor.num_tokens == counts[rank]
+            return {0: make_routed_experts_capture_layout(counts, rank, sp_size=2)}
+
+    state.model.routed_experts_capture_layout_providers = (ReplayLayoutProvider(),)
+    state.model.routed_experts_capture_layers = frozenset({0})
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
-    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    with patch("vllm.distributed.parallel_state.get_tp_group", return_value=group):
+        replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
     context = replay.forward_context
     assert context.is_padding is None and context.dp_metadata is None
-    count = len(REPLAY_ROWS)
     assert context.batch_descriptor.num_tokens == count
-    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer.dp_rank, capturer.tp_size = 0, 2
-    capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
-    expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
-    gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
-    with (
-        override_forward_context(context),
-        patch(
-            "vllm.model_executor.layers.fused_moe.routed_experts_capturer.get_tp_group"
-        ) as group,
-    ):
-        group.return_value.all_gather.return_value = gathered
-        capturer.capture(0, gathered[: (count + 1) // 2])
-    torch.testing.assert_close(capturer.device_buffer[:count, 0], expected)
-    assert (capturer.device_buffer[count:] == -1).all()
+    layout = context.routed_experts_capture_layouts[0]
+    assert layout.input_rows == shard_rows
+    assert layout.shard_sizes == (shard_rows, shard_rows)
+    assert layout.source_ranges == ((0, count),)
+    assert layout.gather_group is group
 
 
 def test_replay_batch_keeps_device_decode_boundaries(state):

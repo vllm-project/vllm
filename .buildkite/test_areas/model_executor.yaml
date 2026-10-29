@@ -66,6 +66,9 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/forward_context.py
+  - vllm/distributed/aux_output_connector
+  - vllm/v1/worker/gpu
   - vllm/model_executor/warmup
   - vllm/models/deepseek_v32/
   - tests/model_executor

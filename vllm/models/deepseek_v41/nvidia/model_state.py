@@ -11,7 +11,15 @@ import torch.nn as nn
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_pcp_group, get_pp_group
-from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    DPMetadata,
+    create_forward_context,
+    override_forward_context,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    prepare_routed_experts_capture_layouts,
+)
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
@@ -612,19 +620,31 @@ class DeepseekV41ModelState(DefaultModelState):
             kv_cache_config,
             model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
         )[first_swa]
+        context = create_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            dp_metadata=dp_metadata,
+            cudagraph_runtime_mode=cg_mode,
+            batch_descriptor=BatchDescriptor(num_tokens=num_padded),
+            slot_mapping=build_slot_mappings_by_layer(
+                kept_slot_mappings, kv_cache_config
+            ),
+            is_padding=kept_batch.is_padding if self.pcp_size > 1 else None,
+        )
+        with override_forward_context(context):
+            context.routed_experts_capture_layouts = (
+                prepare_routed_experts_capture_layouts(
+                    self.model,
+                    num_padded,
+                    dp_metadata.num_tokens_across_dp_cpu
+                    if dp_metadata is not None
+                    else None,
+                    self.vllm_config.parallel_config.data_parallel_rank,
+                )
+            )
         layers.replay_batch = ReplayBatch(
             self._kept_rows[:num_tokens],
-            create_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                dp_metadata=dp_metadata,
-                cudagraph_runtime_mode=cg_mode,
-                batch_descriptor=BatchDescriptor(num_tokens=num_padded),
-                slot_mapping=build_slot_mappings_by_layer(
-                    kept_slot_mappings, kv_cache_config
-                ),
-                is_padding=kept_batch.is_padding if self.pcp_size > 1 else None,
-            ),
+            context,
             run_graph,
             num_padded if self.pcp_size > 1 else None,
         )

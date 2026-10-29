@@ -28,7 +28,10 @@ from vllm.config import (
     ParallelConfig,
     VllmConfig,
 )
-from vllm.forward_context import create_forward_context
+from vllm.forward_context import create_forward_context, get_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_layout import (
+    make_routed_experts_capture_layout,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
@@ -42,7 +45,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     CudaGraphManager,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -531,6 +534,34 @@ def _make_dbo_config() -> VllmConfig:
     )
 
 
+def _make_capture_dbo_config(tmp_path) -> VllmConfig:
+    from transformers import MixtralConfig
+
+    MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=32,
+        num_experts_per_tok=1,
+    ).save_pretrained(tmp_path)
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float16",
+            max_model_len=32,
+            skip_tokenizer_init=True,
+        ),
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_dbo=True,
+            all2all_backend="deepep_low_latency",
+        ),
+    )
+
+
 def _make_model_inputs(num_tokens: int, device: torch.device) -> dict[str, Any]:
     return {
         "input_ids": torch.arange(num_tokens, device=device),
@@ -555,7 +586,9 @@ def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
     return UBatchRunner(
         vllm_config,
         torch.device("cuda:0"),
-        model_state=cast(ModelState, None),
+        model_state=DefaultModelState(
+            vllm_config, torch.nn.Identity(), None, torch.device("cuda:0")
+        ),
         attn_groups=[],
         kv_cache_config=cast(KVCacheConfig, None),
         max_num_reqs=MAX_NUM_REQS,
@@ -608,6 +641,13 @@ class _YieldingModel(torch.nn.Module):
         self.trace = trace
         self.capturer = capturer
 
+    def get_routed_experts_capture_layouts(self, num_tokens_across_dp, dp_rank):
+        metadata = get_forward_context().dp_metadata
+        assert metadata is not None
+        counts = tuple(metadata.num_tokens_across_dp_cpu.tolist())
+        assert counts == num_tokens_across_dp
+        return {0: make_routed_experts_capture_layout(counts, dp_rank)}
+
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         self.trace.append(("enter", dbo_current_ubatch_id()))
         out = input_ids.float().unsqueeze(-1) * 2 + positions.float().unsqueeze(-1)
@@ -619,20 +659,16 @@ class _YieldingModel(torch.nn.Module):
         return out
 
 
-def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCapturer:
-    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer.dp_rank = 0
-    capturer.tp_size = 1
-    capturer.device_buffer = torch.full(
-        (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
-    )
+def _make_capturer(num_tokens: int, config: VllmConfig) -> RoutedExpertsCapturer:
+    capturer = RoutedExpertsCapturer(num_tokens, config)
+    capturer.device_buffer.fill_(-1)
     return capturer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_ubatch_runner_overlaps_and_matches_single_batch():
+def test_ubatch_runner_overlaps_and_matches_single_batch(tmp_path):
     """Microbatches interleave at the yield point and produce the same output."""
-    vllm_config = _make_dbo_config()
+    vllm_config = _make_capture_dbo_config(tmp_path)
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
 
@@ -646,8 +682,19 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
     trace: list[tuple[str, int]] = []
-    capturer = _make_capturer(16, device)
+    capturer = _make_capturer(16, vllm_config)
     model = _YieldingModel(trace, capturer)
+    model.routed_experts_capture_layout_providers = (model,)
+    model.routed_experts_capture_layers = frozenset({0})
+    runner.model_state.model = model
+    ubatch_state = ubatch_state._replace(
+        forward_contexts=runner._make_forward_contexts(
+            ubatch_state.slices,
+            [{}, {}],
+            [{}, {}],
+            [None, None],
+        )
+    )
     output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
@@ -858,14 +905,9 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_capturable_run_replays_as_a_cudagraph():
+def test_capturable_run_replays_as_a_cudagraph(tmp_path):
     """Microbatched graph replay reads updated persistent input buffers."""
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True, all2all_backend="deepep_low_latency"
-        ),
-    )
+    vllm_config = _make_capture_dbo_config(tmp_path)
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
 
@@ -886,8 +928,19 @@ def test_capturable_run_replays_as_a_cudagraph():
         ],
     )
 
-    capturer = _make_capturer(num_tokens, device)
+    capturer = _make_capturer(num_tokens, vllm_config)
     model = _YieldingModel([], capturer)
+    model.routed_experts_capture_layout_providers = (model,)
+    model.routed_experts_capture_layers = frozenset({0})
+    runner.model_state.model = model
+    ubatch_state = ubatch_state._replace(
+        forward_contexts=runner._make_forward_contexts(
+            ubatch_state.slices,
+            [{}, {}],
+            [{}, {}],
+            [None, None],
+        )
+    )
     graph = torch.cuda.CUDAGraph()
     finish = runner.begin_capturable_run(
         model, model_inputs, ubatch_state, for_capture=True
@@ -1002,3 +1055,42 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+def test_capture_layouts_use_microbatch_execution_counts(tmp_path):
+    """Use the real context builder without CUDA execution or collectives."""
+    config = _make_capture_dbo_config(tmp_path)
+    model = _YieldingModel([])
+    model.routed_experts_capture_layout_providers = (model,)
+    model.routed_experts_capture_layers = frozenset({0})
+    state = DefaultModelState(config, model, None, torch.device("cpu"))
+    # Only CUDA resource creation and hardware queries are mocked.
+    with (
+        patch("torch.cuda.Stream"),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(
+            "vllm.v1.worker.ubatch_utils.current_platform.is_cuda", return_value=True
+        ),
+        patch("vllm.v1.worker.ubatch_utils.num_compute_units", return_value=80),
+    ):
+        runner = UBatchRunner(
+            config,
+            torch.device("cpu"),
+            state,
+            [],
+            KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+            max_num_reqs=4,
+        )
+    contexts = runner._make_forward_contexts(
+        [UBatchSlice(slice(0, 1), slice(0, 4)), UBatchSlice(slice(1, 2), slice(4, 8))],
+        [{}, {}],
+        [{}, {}],
+        [None, None],
+    )
+    for ctx in contexts:
+        assert ctx.dp_metadata is not None
+        assert ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [4, 4]
+        assert ctx.routed_experts_capture_layouts is not None
+        layout = ctx.routed_experts_capture_layouts[0]
+        assert layout.input_rows == layout.num_rows == 4
+        assert layout.source_ranges == ((0, 4),)
