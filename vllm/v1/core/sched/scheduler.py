@@ -296,22 +296,6 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-        self.draft_slots = (
-            speculative_config.max_num_new_slots_for_drafting
-            if speculative_config is not None
-            else 0
-        )
-        # Model Runner V2's DFlash/DSpark query pass has its own
-        # max_num_batched_tokens-row buffers: no charge once every request's
-        # 1 + num_spec_tokens queries fit them.
-        if (
-            speculative_config is not None
-            and speculative_config.method in ("dflash", "dspark")
-            and vllm_config.use_v2_model_runner
-            and self.scheduler_config.max_num_seqs * (1 + self.num_spec_tokens)
-            <= self.scheduler_config.max_num_batched_tokens
-        ):
-            self.draft_slots = 0
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
         # for all such groups, so the rewind matches every group's allocation.
@@ -733,7 +717,8 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        draft_slots = self.draft_slots
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
