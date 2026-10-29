@@ -476,27 +476,22 @@ class Qwen3NextAttention(nn.Module):
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            if self.use_fused_output_gate:
-                attn_output = self._fused_output_gate(attn_output, gate)
-            else:
+            if not self.use_fused_output_gate:
                 attn_output = attn_output * torch.sigmoid(gate)
+            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+                # Sigmoid gate, fused with o_proj's static FP8 input quant.
+                scale = self.o_proj.input_scale
+                attn_output = QuantizedActivation(
+                    data=fused_sigmoid_gate_mul(attn_output, gate, scale),
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8StaticTensorSym,
+                )
+            else:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
         output, _ = self.o_proj(attn_output)
         return output
-
-    def _fused_output_gate(
-        self, attn_output: torch.Tensor, gate: torch.Tensor
-    ) -> torch.Tensor | QuantizedActivation:
-        """Sigmoid gate, fused with o_proj's input quant when it is static FP8."""
-        if get_input_quant_key(self.o_proj) != kFp8StaticTensorSym:
-            return fused_sigmoid_gate_mul(attn_output, gate)
-        scale = self.o_proj.input_scale
-        return QuantizedActivation(
-            data=fused_sigmoid_gate_mul(attn_output, gate, scale),
-            scale=scale,
-            orig_dtype=attn_output.dtype,
-            orig_shape=attn_output.shape,
-            quant_key=kFp8StaticTensorSym,
-        )
 
 
 class Qwen3NextDecoderLayer(nn.Module):

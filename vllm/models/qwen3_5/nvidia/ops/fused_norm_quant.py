@@ -14,7 +14,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
-FP8_DTYPE = current_platform.fp8_dtype()
+FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = tl.constexpr(448.0)
 
 
@@ -68,7 +68,7 @@ def _gemma_add_rms_norm_quant_kernel(
     HAS_RESIDUAL: tl.constexpr,
     QUANT_NVFP4: tl.constexpr,
     WRITE_Y: tl.constexpr,
-    LAUNCH_PDL: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     # Index the row as [G, 8, 2]: G groups of 16 (one NVFP4 block each) of 8
     # (lo, hi) pairs, so block reductions and fp4 packing need no reshapes.
@@ -81,7 +81,7 @@ def _gemma_add_rms_norm_quant_kernel(
     )
     mask = cols < H
 
-    if LAUNCH_PDL:
+    if launch_pdl:
         tl.extra.cuda.gdc_wait()
     x = tl.load(x_ptr + row * H + cols, mask=mask, other=0.0)
     if HAS_RESIDUAL:
@@ -131,7 +131,7 @@ def _gemma_add_rms_norm_quant_kernel(
         q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
         tl.store(q_ptr + row * H + cols, q, mask=mask)
 
-    if LAUNCH_PDL:
+    if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
 
 
@@ -205,7 +205,6 @@ def gemma_add_rms_norm_quant(
         HAS_RESIDUAL=residual is not None,
         QUANT_NVFP4=nvfp4,
         WRITE_Y=write_y,
-        LAUNCH_PDL=launch_pdl,
         num_warps=16 if x.shape[0] <= max_m_16_warps else 4,
         launch_pdl=launch_pdl,
     )
