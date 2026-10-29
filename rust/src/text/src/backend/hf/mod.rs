@@ -15,10 +15,10 @@ use vllm_tokenizer::{
 
 use self::config::{GenerationConfig, load_generation_config};
 pub use self::config::{
-    HfSpecialTokens, HfTokenizerConfig, ModelConfig, NamedSpecialToken, load_model_config,
-    load_tokenizer_config,
+    HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
+    NamedSpecialToken, load_model_config, load_tokenizer_config,
 };
-pub use self::model_files::{ResolvedModelFiles, TokenizerSource};
+pub use self::model_files::{ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
 pub use self::overrides::HfOverrides;
 use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
