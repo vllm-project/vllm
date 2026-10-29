@@ -8,10 +8,12 @@ import math
 import warnings
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from functools import partial
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -642,18 +644,24 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
+_QUOTE_RE = re.compile(r"['\"]")
+_LITERAL_BODY_RE = {
+    quote: re.compile(r"\\.|" + quote, re.DOTALL)
+    for quote in ("'", '"', "'''", '"""')
+}
+_CTRL_CHAR_ESCAPES = {"\x00": "\\x00", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+_CTRL_CHAR_RE = re.compile(r"\\(?:\r\n|.)|[\x00\n\r\t]", re.DOTALL)
+
+
 def _iter_python_string_literals(
     text: str,
 ) -> Iterator[tuple[int, int | None, str, bool]]:
     """Yield quote offsets, delimiter and raw flag; a missing end is incomplete."""
     index = 0
-    while index < len(text):
-        if text[index] not in {"'", '"'}:
-            index += 1
-            continue
-        start = index
-        quote = text[index]
-        if text.startswith(quote * 3, index):
+    while (match := _QUOTE_RE.search(text, index)) is not None:
+        start = match.start()
+        quote = text[start]
+        if text.startswith(quote * 3, start):
             quote *= 3
         prefix_start = start
         while prefix_start and (
@@ -661,18 +669,16 @@ def _iter_python_string_literals(
         ):
             prefix_start -= 1
         raw = text[prefix_start:start].lower() in {"r", "br", "rb", "fr", "rf"}
-        index += len(quote)
-        while index < len(text):
-            if text[index] == "\\":
-                index += 2
-            elif text.startswith(quote, index):
-                index += len(quote)
+        index = start + len(quote)
+        body_re = _LITERAL_BODY_RE[quote]
+        while (match := body_re.search(text, index)) is not None:
+            index = match.end()
+            if match[0] == quote:
                 yield start, index, quote, raw
                 break
-            else:
-                index += 1
         else:
             yield start, None, quote, raw
+            return
 
 
 def escape_ctrl_chars_in_strings(text: str) -> str:
@@ -691,27 +697,33 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     Raw strings and legal control characters in triple-quoted strings are
     unchanged, as is text outside string literals.
     """
+    if not any(char in text for char in _CTRL_CHAR_ESCAPES):
+        return text
+
     out: list[str] = []
     cursor = 0
     for start, end, quote, raw in _iter_python_string_literals(text):
-        out.append(text[cursor : start + len(quote)])
+        body_start = start + len(quote)
         stop = len(text) if end is None else end - len(quote)
-        index = start + len(quote)
-        escapes = {"\x00": "\\x00"}
-        if len(quote) == 1:
-            escapes.update({"\n": "\\n", "\r": "\\r", "\t": "\\t"})
-        while index < stop:
-            char = text[index]
-            if char == "\\" and index + 1 < stop:
-                escape_end = index + (3 if text.startswith("\\\r\n", index) else 2)
-                out.append(text[index:escape_end])
-                index = escape_end
-                continue
-            out.append(char if raw else escapes.get(char, char))
-            index += 1
+        out.append(text[cursor:body_start])
+        body = text[body_start:stop]
+        if raw:
+            out.append(body)
+        else:
+            out.append(
+                _CTRL_CHAR_RE.sub(partial(_escape_ctrl_char, quote=quote), body)
+            )
         cursor = stop
     out.append(text[cursor:])
     return "".join(out)
+
+
+def _escape_ctrl_char(match: re.Match[str], quote: str) -> str:
+    """Escape one literal control character, leaving triple-quote legal ones."""
+    char = match[0]
+    if char[0] == "\\" or (len(quote) == 3 and char != "\x00"):
+        return char
+    return _CTRL_CHAR_ESCAPES[char]
 
 
 _RESERVED_KW_SUFFIX = "_pyreservedkw_"
