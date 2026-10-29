@@ -744,6 +744,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
+| `MingV3ASRForConditionalGeneration` | Ming-3.0-ASR | `inclusionAI/Ming-3.0-asr-tiny` | | |
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
