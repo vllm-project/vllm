@@ -1641,6 +1641,7 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    _rdma_prefetch: bool = True
 
     def __init__(
         self,
@@ -1656,6 +1657,8 @@ class Engram(nn.Module):
         # Layers sharing one stream serialize their offloaded lookups, so they
         # take turns instead of jointly starving decoder compute of SMs.
         self._prefetch_stream = prefetch_stream
+        engram_config = get_current_vllm_config().engram_config
+        self._rdma_prefetch = engram_config is None or engram_config.rdma_prefetch
         self.layer_hash_index = layer_hash_index
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
@@ -1764,7 +1767,9 @@ class Engram(nn.Module):
         current = stream = torch.cuda.current_stream()
         # Big lookups stall persistent main-stream kernels anyway: run them inline.
         _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
-        if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
+        if (self.embed_tokens.rdma_provider and not self._rdma_prefetch) or (
+            inline_min_tokens is not None and num_tokens >= inline_min_tokens
+        ):
             self.embed_tokens.lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream

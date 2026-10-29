@@ -58,6 +58,9 @@ class EngramConfig:
     rdma_provider: str | None = None
     """Experimental dotted module name for a remote Engram reader provider."""
 
+    rdma_prefetch: bool = True
+    """Allow remote Engram lookups to overlap decoder computation."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
