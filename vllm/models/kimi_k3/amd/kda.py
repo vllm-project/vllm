@@ -45,7 +45,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.kda_metadata import (
+    PREFILL_CONV_BLOCK_M,
+    KimiK3ROCmKDABackend,
+)
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
@@ -78,7 +81,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -192,8 +197,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        # AITER's Gluon kernels currently require FP32 recurrent states.
+        self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
+            rocm_aiter_ops.is_kda_gluon_decode_available()
+        )
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
@@ -201,6 +209,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
+            recurrent_state_dtype,
         )
         if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
@@ -254,7 +263,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
         self.kda_prefill_backend = backend
         if backend == "auto":
-            if self.use_safe_gate and rocm_aiter_ops.is_kda_gluon_prefill_available():
+            if (
+                recurrent_state_dtype == torch.float32
+                and self.use_safe_gate
+                and rocm_aiter_ops.is_kda_gluon_prefill_available()
+            ):
                 self.kda_prefill_backend = "gluon"
             elif is_fused_kda_chunk_supported():
                 self.kda_prefill_backend = "fused"
@@ -601,7 +614,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         has_initial_state=has_initial_state,
                         activation="silu",
-                        block_m=8,
+                        block_m=PREFILL_CONV_BLOCK_M,
                         metadata=m,
                         preserve_input_dtype=True,
                     )
