@@ -172,7 +172,13 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    DraftModelSpeculator,
+    DraftProposalGrammarContext,
+    DraftProposalGrammarRequest,
+    resolve_draft_proposal_grammar_readiness,
+    suppress_unready_draft_tokens,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
@@ -1202,6 +1208,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _remove_request(self, req_id: str) -> bool:
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
+        if (
+            self.speculator is not None
+            and self.speculator.uses_draft_proposal_grammar_bridge
+        ):
+            self.speculator.remove_draft_proposal_grammar_request(req_id)
         self.model_state.remove_request(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
@@ -1293,6 +1304,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
+                )
+            if (
+                self.speculator is not None
+                and self.speculator.uses_draft_proposal_grammar_bridge
+            ):
+                self.speculator.add_draft_proposal_grammar_request(
+                    DraftProposalGrammarRequest.from_sampling_params(
+                        req_id, new_req_data.sampling_params
+                    )
                 )
 
         if scheduler_output.scheduled_new_reqs:
@@ -2327,6 +2347,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_propose(
                     input_batch, num_sampled, num_rejected, self.sampler
                 )
+            draft_proposal_grammar_ready = None
+            if self.speculator.uses_draft_proposal_grammar_bridge:
+                grammar_context = DraftProposalGrammarContext.from_sampler_output(
+                    input_batch,
+                    sampler_output,
+                    num_sampled,
+                    num_rejected,
+                )
+                draft_proposal_grammar_ready = resolve_draft_proposal_grammar_readiness(
+                    grammar_context,
+                    self.speculator.prepare_draft_proposal_grammar(grammar_context),
+                )
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
@@ -2346,6 +2378,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_speculative_tokens=num_spec_tokens,
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
+                )
+            if draft_proposal_grammar_ready is not None:
+                suppress_unready_draft_tokens(
+                    draft_tokens, draft_proposal_grammar_ready
                 )
             if self.pcp_manager is not None:
                 self.pcp_manager.sync_drafts(
