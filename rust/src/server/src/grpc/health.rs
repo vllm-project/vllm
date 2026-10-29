@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tonic::server::NamedService;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
@@ -62,12 +62,43 @@ impl HealthMonitor {
         }
     }
 
-    /// Keep the health services in line with the engines until shutdown.
+    /// Run a gRPC server until shutdown, keeping the health services in line
+    /// with the engines.
+    ///
+    /// `server` builds the server from the signal that stops its listener. On
+    /// shutdown, every service except `liveness` reports `NOT_SERVING` before
+    /// that signal fires and before `force` can abort the server, so watchers
+    /// see the withdrawal before their connection closes. Returns `None` if
+    /// `force` aborted the server.
+    pub async fn serve<S: Future>(
+        self,
+        shutdown: CancellationToken,
+        force: impl Future<Output = ()>,
+        server: impl FnOnce(WaitForCancellationFutureOwned) -> S,
+    ) -> Option<S::Output> {
+        // Cancelled by `run` once the withdrawal is published.
+        let withdrawn = CancellationToken::new();
+        let server = server(withdrawn.clone().cancelled_owned());
+        let server = async {
+            tokio::select! {
+                output = server => Some(output),
+                // `force` fires with `shutdown` under `--shutdown-timeout 0`.
+                () = async { force.await; withdrawn.cancelled().await } => None,
+            }
+        };
+        // The graceful drain ends once `run` removes the services, ending
+        // their watches.
+        let (output, ()) = tokio::join!(server, self.run(shutdown, &withdrawn));
+        output
+    }
+
+    /// Keep the health services in line with the engines until shutdown,
+    /// cancel `withdrawn`, then remove the services, which ends their watches.
     ///
     /// `readiness` and `vllm.Inference` follow the engines' readiness. On
     /// shutdown, every service except `liveness` reports `NOT_SERVING`; on
     /// engine failure, `liveness` does too.
-    pub async fn run(mut self, shutdown: CancellationToken) {
+    async fn run(mut self, shutdown: CancellationToken, withdrawn: &CancellationToken) {
         let inference_service = InferenceGrpcService::NAME;
         let control_service = ControlGrpcService::NAME;
         let status = ServingStatus::NotServing;
@@ -126,6 +157,8 @@ impl HealthMonitor {
                 "server shutting down; closing gRPC health watches"
             );
         }
+        // Published, so the server may stop.
+        withdrawn.cancel();
 
         reporter.clear_service_status(inference_service).await;
         reporter.clear_service_status(control_service).await;
@@ -143,5 +176,93 @@ async fn set_readiness(reporter: &HealthReporter, ready: bool) {
     };
     for service in [READINESS_SERVICE, InferenceGrpcService::NAME] {
         reporter.set_service_status(service, status).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use futures::FutureExt as _;
+    use tonic::Request;
+    use tonic_health::pb::HealthCheckRequest;
+    use tonic_health::pb::health_server::Health as _;
+    use tonic_health::server::HealthService;
+
+    use super::*;
+
+    /// A monitor for ready, live engines, a way to read its statuses, and the
+    /// engine signals, which must outlive the test: a closed channel reads as
+    /// an engine failure.
+    async fn monitor() -> (HealthMonitor, HealthService, [watch::Sender<bool>; 2]) {
+        let (reporter, _) = tonic_health::server::health_reporter();
+        let health = HealthService::from_health_reporter(reporter.clone());
+        let (liveness_tx, liveness) = watch::channel(true);
+        let (readiness_tx, readiness) = watch::channel(true);
+        let engine = EngineHealth {
+            liveness,
+            readiness,
+        };
+        let monitor = HealthMonitor::register(reporter, engine).await;
+        (monitor, health, [liveness_tx, readiness_tx])
+    }
+
+    /// Whether `readiness` reports `SERVING`, read without yielding. By the
+    /// time the listener stops, the service is `NOT_SERVING` or removed.
+    fn serving(health: &HealthService) -> bool {
+        let request = Request::new(HealthCheckRequest {
+            service: READINESS_SERVICE.to_string(),
+        });
+        let response = health.check(request).now_or_never().expect("uncontended read");
+        response.is_ok_and(|response| response.get_ref().status == ServingStatus::Serving as i32)
+    }
+
+    #[tokio::test]
+    async fn listener_stops_after_readiness_is_withdrawn() {
+        let (monitor, health, _engine) = monitor().await;
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let serving_at_stop = monitor
+            .serve(shutdown, std::future::pending(), |stop| async move {
+                stop.await;
+                serving(&health)
+            })
+            .await;
+
+        assert_eq!(serving_at_stop, Some(false));
+    }
+
+    #[tokio::test]
+    async fn forced_abort_waits_until_readiness_is_withdrawn() {
+        /// Records readiness when the server is dropped, as an abort does.
+        struct Server {
+            health: HealthService,
+            serving_at_drop: Arc<Mutex<Option<bool>>>,
+        }
+        impl Drop for Server {
+            fn drop(&mut self) {
+                *self.serving_at_drop.lock().unwrap() = Some(serving(&self.health));
+            }
+        }
+
+        let (monitor, health, _engine) = monitor().await;
+        let serving_at_drop = Arc::new(Mutex::new(None));
+        let server = Server {
+            health,
+            serving_at_drop: serving_at_drop.clone(),
+        };
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let output = monitor
+            .serve(shutdown, async {}, |_stop| async move {
+                let _server = server;
+                std::future::pending::<()>().await
+            })
+            .await;
+
+        assert_eq!(output, None);
+        assert_eq!(*serving_at_drop.lock().unwrap(), Some(false));
     }
 }

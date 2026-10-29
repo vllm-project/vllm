@@ -487,18 +487,22 @@ async fn start_grpc_test_server(
 
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
-        let server = TonicServer::builder()
-            .add_service(health_service)
-            .add_service(control_service)
-            .add_service(inference_service)
-            .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-        let health_monitor = health_monitor.run(shutdown.clone());
-        let server = async move {
-            let result = server.await;
-            shutdown.cancel();
-            result
-        };
-        let (server_result, ()) = tokio::join!(server, health_monitor);
+        let server_shutdown = shutdown.clone();
+        let server_result = health_monitor
+            .serve(shutdown, std::future::pending(), |stop| {
+                let server = TonicServer::builder()
+                    .add_service(health_service)
+                    .add_service(control_service)
+                    .add_service(inference_service)
+                    .serve_with_incoming_shutdown(incoming, stop);
+                async move {
+                    let result = server.await;
+                    server_shutdown.cancel();
+                    result
+                }
+            })
+            .await
+            .expect("grpc server is never forced to abort");
         server_result.expect("grpc server");
     });
 
