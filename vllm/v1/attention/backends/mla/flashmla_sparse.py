@@ -750,8 +750,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             **mla_args,
         )
         self.softmax_scale = scale
-        # Prefill BF16 kernel requires 64 heads on Hopper and Blackwell.
+        # Keep padded workspaces for kernels without small-head support.
         self.prefill_padding = 64
+        self._sm_count = num_compute_units(torch.accelerator.current_device_index())
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
         # The kernels read queries as wide as the cache rows. A NoPE model on
@@ -1363,9 +1364,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of 64.
-        # Pad from q's head count, not self.num_heads: under DCP the heads are
-        # all-gathered before this.
+        # DCP can all-gather heads before this call.
         if actual_num_heads is None:
             actual_num_heads = q.shape[1]
         padded_num_heads = (
@@ -1373,7 +1372,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             // self.prefill_padding
             * self.prefill_padding
         )
-        if q.shape[1] < padded_num_heads:
+        # The padded kernel is faster before the small-head CTAs fill the GPU.
+        if (
+            current_platform.is_device_capability_family(90)
+            and actual_num_heads in (8, 16, 32)
+            and num_tokens > self._sm_count * (2 if actual_num_heads == 32 else 1)
+        ):
+            q = q[:, :actual_num_heads]
+            if out is not None:
+                out = out[:, :actual_num_heads]
+        elif q.shape[1] < padded_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for BF16 sparse prefill kernel"

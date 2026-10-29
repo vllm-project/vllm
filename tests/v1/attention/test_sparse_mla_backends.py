@@ -71,6 +71,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla import index_group as index_group_module
@@ -1382,6 +1383,91 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
         num_topk_tokens,
     )
     torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_waves", [1, 3])
+@pytest.mark.parametrize("actual_num_heads", [4, 8, 16, 32, 64, 128])
+@pytest.mark.parametrize("head_size", [512, 576])
+@pytest.mark.parametrize("padded_query", [False, True])
+def test_flashmla_bf16_preserves_unused_output_heads(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    actual_num_heads,
+    head_size,
+    padded_query,
+    query_waves,
+):
+    """Only larger batches use native heads, including gathered queries."""
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+    device = torch.device("cuda")
+    num_tokens = query_waves * num_compute_units(
+        torch.accelerator.current_device_index()
+    )
+    impl = FlashMLASparseImpl(
+        num_heads=8,
+        head_size=head_size,
+        scale=256**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=head_size - 512,
+        qk_head_dim=head_size - 256,
+        v_head_dim=256,
+        kv_b_proj=ColumnParallelLinear(512, 8 * 512, bias=False),
+    )
+    gen = torch.Generator(device=device).manual_seed(0)
+    padded_heads = max(64, actual_num_heads)
+    q = torch.randn(
+        num_tokens, padded_heads, head_size, generator=gen, device=device
+    ).bfloat16()
+    kv = torch.randn(128, 1, head_size, generator=gen, device=device).bfloat16()
+    indices = torch.arange(128, dtype=torch.int32, device=device).expand(
+        num_tokens, 1, -1
+    )
+    lengths = torch.tensor([1, 127, 128], dtype=torch.int32, device=device)[
+        torch.arange(num_tokens, device=device) % 3
+    ]
+    reference, _, reference_lse = flashmla.flash_mla_sparse_fwd(
+        q, kv, indices, impl.softmax_scale, topk_length=lengths
+    )
+    if not padded_query:
+        q = q[:, :actual_num_heads].contiguous()
+    out = torch.full(
+        (num_tokens, padded_heads, 512), 123.0, dtype=torch.bfloat16, device=device
+    )
+    output, lse = impl._bf16_flash_mla_kernel(
+        q,
+        kv,
+        indices,
+        lengths,
+        actual_num_heads=actual_num_heads if padded_query else None,
+        out=out if padded_query else None,
+    )
+    torch.testing.assert_close(
+        output, reference[:, :actual_num_heads], atol=2e-3, rtol=2e-2
+    )
+    torch.testing.assert_close(
+        lse, reference_lse[:, :actual_num_heads], atol=2e-4, rtol=2e-4
+    )
+    if padded_query:
+        if (
+            query_waves == 3
+            and current_platform.is_device_capability_family(90)
+            and actual_num_heads in (8, 16, 32)
+        ):
+            assert torch.all(out[:, actual_num_heads:] == 123)
+        else:
+            torch.testing.assert_close(out, reference, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
