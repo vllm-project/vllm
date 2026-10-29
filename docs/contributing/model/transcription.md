@@ -66,7 +66,11 @@ This is for controlling general behavior of the API when serving your model:
 
 See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server builds a [SpeechToTextParams][vllm.config.speech_to_text.SpeechToTextParams] object that bundles the resampled waveform, task parameters, and request-specific options. Your model receives this single object and returns a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server builds a [SpeechToTextParams][vllm.config.speech_to_text.SpeechToTextParams] object that bundles the resampled waveform, task parameters, and request-specific options. Your model receives this single object and returns a valid [PromptType][vllm.inputs.llm.PromptType].
+
+For transcription requests, `stt_params.extra_args` contains the optional `vllm_xargs` dictionary, which is also passed to `SamplingParams.extra_args`. Models can read request-specific frontend or prompt options here and should validate the options they consume. An omitted dictionary is `None`. Multipart clients can send `vllm_xargs` as a JSON string. These options apply to the request; do not use them to mutate the shared model configuration.
+
+There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 
@@ -194,7 +198,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
 
 The API server takes care of basic audio I/O and optional chunking before building prompts:
 
-- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `AudioResampler`.
+- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate`. Models can set specific `audio_resample_method` (e.g., `pyav`, `scipy`, `torchaudio`, etc) to decode at the native sample rate, then resample with `AudioResampler` before duration calculation and chunking. This can match a model's reference audio frontend without changing other models' defaults.
 - Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into chunks and generates a prompt per chunk. There is no overlap between chunks, overlap_chunk_second controls the size of the search window used to find the split point.
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
