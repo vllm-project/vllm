@@ -735,6 +735,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
+            pcp_size=self.parallel_config.prefill_context_parallel_size,
+            pcp_shard_decode_requests=self.parallel_config.pcp_shard_decode_requests,
         )
 
         self.block_tables = BlockTables(
@@ -1385,7 +1387,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.adaptive_verification is not None:
                 num_toks = self.adaptive_verification.get_num_tokens(
-                    num_tokens_per_req, draft_tokens
+                    {req_id: num_tokens_per_req[req_id] for req_id in req_ids}
+                    if self.pcp_manager is not None
+                    else num_tokens_per_req,
+                    draft_tokens,
+                    has_prefill=has_prefill,
                 )
 
         prefill_runs_as_decode_np = None
@@ -1590,7 +1596,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
             expanded_local_pos=expanded_local_pos,
-            num_scheduled_tokens=num_scheduled_tokens_upper_bound,
+            num_scheduled_tokens=(
+                num_scheduled_tokens_np
+                if adaptive_verification is not None and self.pcp_manager is not None
+                else num_scheduled_tokens_upper_bound
+            ),
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
@@ -1846,8 +1856,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dispatch_num_reqs = self.pcp_manager.get_num_reqs_for_dispatch(
                     num_reqs, batch_req_state.has_prefill
                 )
+                pcp_num_tokens = batch_req_state.num_scheduled_tokens
+                if (
+                    self.adaptive_verification is not None
+                    and scheduler_output.scheduled_spec_decode_tokens
+                ):
+                    assert self.adaptive_verification.pcp is not None
+                    assert self.adaptive_verification.pcp.num_tokens_per_req is not None
+                    pcp_num_tokens = self.adaptive_verification.pcp.num_tokens_per_req
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
-                    batch_req_state.num_scheduled_tokens,
+                    pcp_num_tokens,
                     batch_req_state.is_prefilling_np,
                 )
 

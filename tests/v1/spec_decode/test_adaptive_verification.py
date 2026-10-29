@@ -18,6 +18,56 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.pcp_adaptive_verification import select_pcp_drafts
+
+
+@pytest.mark.parametrize("sharded,expected", [(True, [1, 1]), (False, [0, 0])])
+def test_pcp_budget_prices_the_largest_local_graph(sharded, expected):
+    # Two requests fit in a two-token graph on each PCP rank. Charging the
+    # global token count would incorrectly reject both useful draft tokens.
+    counts = select_pcp_drafts(
+        np.array([[0.9, 0.5], [0.8, 0.4]]),
+        np.array([2, 2]),
+        np.ones(2, dtype=np.int32),
+        (np.zeros(3), np.array([1.0, 1.0, 1.1, 100.0, 100.0, 100.0, 100.0])),
+        4,
+        2,
+        sharded,
+        False,
+    )
+    np.testing.assert_array_equal(counts, expected)
+
+
+@pytest.mark.parametrize("budget", [0, 1, 3, 7])
+def test_pcp_draft_plan_respects_capacity_and_stable_ties(budget):
+    # A zero-capacity request must never receive drafts, even on a confidence
+    # tie; the sampler's one-chunk limit also bounds the total admitted rows.
+    counts = select_pcp_drafts(
+        np.ones((4, 3)),
+        np.array([3, 0, 1, 3]),
+        np.ones(4, dtype=np.int32),
+        (np.zeros(5), np.ones(20)),
+        budget,
+        4,
+        True,
+        False,
+    )
+    expected = [min(budget, 3), 0, min(max(budget - 3, 0), 1), max(budget - 4, 0)]
+    np.testing.assert_array_equal(counts, expected)
+
+
+def test_pcp_mixed_prefill_keeps_scheduled_verification():
+    counts = select_pcp_drafts(
+        np.array([[0.1, 0.01], [0.1, 0.01]]),
+        np.array([2, 0]),
+        np.array([1, 128]),
+        (np.zeros(3), np.arange(140) + 1.0),
+        2,
+        4,
+        True,
+        True,
+    )
+    np.testing.assert_array_equal(counts, [2, 0])
 
 
 def make_manager(
@@ -25,6 +75,7 @@ def make_manager(
 ) -> AdaptiveVerificationManager:
     num_reqs, num_steps = confidences.shape
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager.pcp = None
     manager.num_speculative_steps = num_steps
     manager._stale_confidences = [SimpleNamespace(np=confidences)]  # type: ignore[list-item]  # CPU-only confidence buffer.
     manager._stale_idx = 0

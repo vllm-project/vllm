@@ -57,6 +57,24 @@ Set `enable_adaptive_verification: false` to verify the full block for every req
 - Not supported with LoRA (the per-token LoRA mapping is built from CPU-side boundaries) or pipeline parallelism (cost curves and confidences exist only on the last rank).
 - Without a confidence head, `use_local_argmax_reduction` is rejected. The estimator needs the full draft logits, which local argmax reduction never materializes.
 
+## DeepSeek-V4.1 with PCP
+
+On NVIDIA GPUs, DeepSeek-V4.1 can use adaptive DSpark with prefill context
+parallelism and `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` CUDA graphs.
+The existing PCP restrictions still apply, including `PP=DP=DCP=1`.
+
+PCP uses the already-copied host confidences for both the total verification
+budget and each request's admitted draft count. All TP and PCP ranks agree on
+these counts before partitioning. This keeps the CPU and GPU query boundaries
+identical without adding a device-to-host wait. The target cost is indexed by
+the largest rank-local batch; the drafter remains replicated. Mixed prefill
+batches retain fixed-length verification.
+
+Enable `enable_adaptive_verification` in the existing DSpark speculative config;
+`num_speculative_tokens` remains the maximum draft length. Measure fixed and
+adaptive verification on the same workload: shorter verification is not
+necessarily faster at low concurrency.
+
 ## Tuning the cost profile
 
 Step costs are profiled against a synthetic KV context, 8192 tokens by default. Deployments serving much longer contexts may want to raise it so the profiled step reads a more realistic amount of cache (this matters a bit less for sparse attention models like DeepSeek-v4 since the cheap indexer is the main cost that scales with context length).
