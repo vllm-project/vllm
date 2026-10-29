@@ -61,6 +61,9 @@ class EngramConfig:
     rdma_prefetch: bool = True
     """Allow remote Engram lookups to overlap decoder computation."""
 
+    rdma_keep_prefill_rows: bool = False
+    """Retain all producer prefill rows instead of bounded decoder replay."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:

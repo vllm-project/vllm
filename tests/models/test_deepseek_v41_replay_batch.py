@@ -244,18 +244,21 @@ def test_remote_graph_requires_breakable_piecewise(eager, mode, breakable, allow
 
 
 @pytest.mark.parametrize(
-    "remote,role,keep_all",
+    "remote,role,keep_option,keep_all",
     [
-        (False, "kv_producer", False),
-        (True, "kv_consumer", False),
-        (True, "kv_producer", True),
-        (True, "kv_both", True),
+        (False, "kv_producer", False, False),
+        (True, "kv_consumer", True, False),
+        (True, "kv_producer", False, False),
+        (True, "kv_producer", True, True),
+        (True, "kv_both", True, True),
     ],
 )
-def test_remote_producer_keeps_prefill_rows(state, remote, role, keep_all):
-    """Remote P/D producer retains full context; other paths still trim."""
+def test_remote_producer_keeps_prefill_rows(state, remote, role, keep_option, keep_all):
+    """Only an opted-in remote producer retains the full context."""
     state.vllm_config.engram_config = EngramConfig(
-        rdma_provider="test_provider" if remote else None, dp_shared_memory=False
+        rdma_provider="test_provider" if remote else None,
+        rdma_keep_prefill_rows=keep_option,
+        dp_shared_memory=False,
     )
     state.vllm_config.kv_transfer_config = KVTransferConfig(
         kv_connector="test_connector", kv_role=role
