@@ -35,6 +35,13 @@ try:
 except ImportError:
     torchaudio = PlaceholderModule("torchaudio")  # type: ignore[assignment]
 
+try:
+    # silero_vad calls torch.set_num_threads(1) when imported.
+    with set_default_torch_num_threads():
+        import silero_vad
+except ImportError:
+    silero_vad = PlaceholderModule("silero_vad")  # type: ignore[assignment]
+
 
 # ============================================================
 # Aligned with `librosa.get_duration` function
@@ -399,17 +406,6 @@ class AudioResampler:
 # ============================================================
 
 
-def _import_silero_vad():
-    # silero_vad calls torch.set_num_threads(1) when imported, so import it
-    # only when VAD is used and keep the caller's thread count.
-    num_threads = torch.get_num_threads()
-    try:
-        import silero_vad
-    finally:
-        torch.set_num_threads(num_threads)
-    return silero_vad
-
-
 class VAD:
     def __init__(self):
         self.model = None
@@ -419,7 +415,6 @@ class VAD:
         if self._get_speech_timestamps is not None and self.model is not None:
             return
 
-        silero_vad = _import_silero_vad()
         # The sequence model runs one ONNX call per block of frames
         # instead of one per 32ms frame, so the GIL is released for
         # almost all of the VAD compute.
