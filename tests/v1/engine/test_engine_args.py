@@ -373,6 +373,7 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     the others in the block-count all-reduce."""
     import torch.distributed as dist
 
+    import vllm.v1.executor.uniproc_executor as uniproc_executor
     from vllm.v1.engine.core import EngineCore
     from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
 
@@ -393,9 +394,7 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
         reduced.append((value, op))
         return 1  # Some other rank reported "unsupported".
 
-    monkeypatch.setattr(
-        ExecutorWithExternalLauncher, "_all_reduce", staticmethod(all_reduce)
-    )
+    monkeypatch.setattr(uniproc_executor, "_all_reduce_world", all_reduce)
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     EngineCore._resolve_extensible_kv_cache(
@@ -416,7 +415,7 @@ def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_r
     """DP engines step in lockstep, warmup included, and the extensible cache
     adds warmup steps: an engine that could keep it follows a peer that
     cannot, and one that cannot reports its own reason."""
-    from vllm.config import ParallelConfig
+    import vllm.v1.engine.core as engine_core
     from vllm.v1.engine.core import EngineCore
 
     calls: list[str] = []
@@ -430,11 +429,11 @@ def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_r
     dp_group = object()
     reduced: list[tuple[object, int]] = []
 
-    def min_across_dp(group, value: int) -> int:
+    def all_reduce_int(group, value: int) -> int:
         reduced.append((group, value))
         return 0  # Some peer engine cannot use it.
 
-    monkeypatch.setattr(ParallelConfig, "min_across_dp", staticmethod(min_across_dp))
+    monkeypatch.setattr(engine_core, "all_reduce_int", all_reduce_int)
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     engine = _fake_engine(
@@ -449,14 +448,14 @@ def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_r
     ]
 
 
-def test_min_across_dp(monkeypatch):
-    """A MIN all-reduce over the DP group; without one (no DP, or dense models'
+def test_all_reduce_int(monkeypatch):
+    """A MIN all-reduce by default; without a group (no DP, or dense models'
     independent DP engines) or with a single rank, the value stands."""
     from types import SimpleNamespace
 
     import torch.distributed as dist
 
-    from vllm.config import ParallelConfig
+    from vllm.distributed.utils import all_reduce_int
 
     group = SimpleNamespace(size=lambda: 2)
     seen: list[tuple[object, object]] = []
@@ -466,11 +465,12 @@ def test_min_across_dp(monkeypatch):
         tensor.fill_(3)
 
     monkeypatch.setattr(dist, "all_reduce", all_reduce)
-    assert ParallelConfig.min_across_dp(None, 7) == 7
-    assert ParallelConfig.min_across_dp(SimpleNamespace(size=lambda: 1), 7) == 7
+    assert all_reduce_int(None, 7) == 7
+    assert all_reduce_int(SimpleNamespace(size=lambda: 1), 7) == 7
     assert seen == []
-    assert ParallelConfig.min_across_dp(group, 7) == 3
-    assert seen == [(dist.ReduceOp.MIN, group)]
+    assert all_reduce_int(group, 7) == 3
+    assert all_reduce_int(group, 7, dist.ReduceOp.MAX) == 3
+    assert seen == [(dist.ReduceOp.MIN, group), (dist.ReduceOp.MAX, group)]
 
 
 def test_executor_agrees_committable_blocks_across_workers():
