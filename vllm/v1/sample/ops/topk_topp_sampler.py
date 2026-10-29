@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON and not current_platform.is_cpu():
+    if HAS_TRITON:
         _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
             _topp_split_stats.register_warmup()

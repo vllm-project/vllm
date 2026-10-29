@@ -276,7 +276,10 @@ def set_dummy_context(
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
-@triton.jit
+# idx_mapping is only ever read one element at a time, so specializing on its
+# alignment buys nothing and costs a recompile the first time it comes in
+# unaligned -- which warmup cannot predict.
+@triton.jit(do_not_specialize_on_alignment=["idx_mapping_ptr"])
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
     next_prefill_tokens_ptr,
