@@ -135,3 +135,75 @@ class TestAffectedModulesUseSanitize:
         source = Path(spec.origin).read_text()
         assert "sanitize_message" in source, f"{module} does not call sanitize_message"
         assert "import" in source and "sanitize_message" in source
+
+
+def test_engine_dead_error_response_hides_log_oriented_message():
+    """Clients get a generic message with no reference to server internals."""
+    from vllm.entrypoints.serve.exception_handling.error_response import (
+        create_error_response,
+    )
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    exc = EngineDeadError()
+    err = create_error_response(exc)
+
+    assert err.error.code == 500
+    assert err.error.type == "InternalServerError"
+    assert err.error.message == EngineDeadError.CLIENT_MESSAGE
+    assert "stack trace" not in err.error.message
+    assert "log" not in err.error.message
+    assert "stack trace (above)" in str(exc)
+
+
+class TestSanitizeMessageReDoSResistance:
+    """Regression tests for GHSA-f2g9-pmwr-xwc7.
+
+    Verifies that sanitize_message performs bounded near-linear work
+    on adversarial slash-delimited input with no filename extension.
+    """
+
+    def test_slash_segments_no_extension_completes_quickly(self):
+        """50k slash-segments without dot-extension must complete in < 0.1s."""
+        import time
+
+        message = "/a" * 50000
+        t0 = time.perf_counter()
+        result = sanitize_message(message)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1, f"Took {elapsed:.2f}s (expected < 0.1s)"
+        assert result == message
+
+    def test_alphanumeric_control_completes(self):
+        """100k alphanumeric chars must complete near-instantly."""
+        import time
+
+        message = "a" * 100000
+        t0 = time.perf_counter()
+        result = sanitize_message(message)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1, f"Took {elapsed:.2f}s"
+        assert result == message
+
+    def test_linear_scaling(self):
+        """Verify near-linear scaling across input sizes."""
+        import time
+
+        times = []
+        for n in [1000, 10000, 50000]:
+            message = "/a" * n
+            t0 = time.perf_counter()
+            sanitize_message(message)
+            times.append(time.perf_counter() - t0)
+
+        ratio = times[-1] / max(times[0], 1e-9)
+        assert ratio < 100, (
+            f"50k/1k time ratio is {ratio:.0f}x (expected < 100x for linear)"
+        )
+
+    def test_path_redaction_still_works(self):
+        """Legitimate paths are still redacted after the fix."""
+        assert "<path>" in sanitize_message("Error in /app/server.py")
+        assert "<path>" in sanitize_message("at /workspace/vllm/engine.py")
+        assert "<path>" in sanitize_message(
+            "error at /usr/lib/python3.12/dist-packages/vllm/core.py"
+        )

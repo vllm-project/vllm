@@ -162,11 +162,14 @@ def test_routed_experts_loads_per_expert_biases():
     class Loader:
         quant_config = None
         quant_method = object()
+        _fused_shared_expert_quantizer = None
         moe_config = SimpleNamespace(
             is_act_and_mul=True,
             tp_rank=0,
+            num_experts=1,
             moe_parallel_config=SimpleNamespace(tp_size=1),
         )
+        expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
         _get_hidden_dim = staticmethod(RoutedExperts._get_hidden_dim)
         _narrow_expert_data_for_padding = staticmethod(
             RoutedExperts._narrow_expert_data_for_padding
