@@ -87,8 +87,8 @@ class KVTransferConfig:
 
     enable_early_recv: bool = False
     """Report completed KV loads before the next model output. Supported by
-    NixlConnector (pull) and MooncakeStoreConnector; see their usage guides for
-    supported configurations."""
+    NixlConnector (pull) and MooncakeStoreConnector; see the NIXL connector usage
+    guide for supported configurations."""
 
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
