@@ -451,6 +451,14 @@ for n in keep:  # docstring edits must not recompile either
     if isinstance(n, ast.FunctionDef) and ast.get_docstring(n):
         n.body = n.body[1:] or [ast.Pass()]
 open("/out/vllm/envs.py", "w").write(ast.unparse(ast.Module(keep, [])))
+import importlib.util as u  # the filter must not change what setup.py reads
+def load(path):
+    spec = u.spec_from_file_location("envs", path)
+    spec.loader.exec_module(mod := u.module_from_spec(spec))
+    return mod
+orig, pruned = load("envs.py"), load("/out/vllm/envs.py")
+for n in sorted(set(re.findall(r"\benvs\.(\w+)", setup)) & set(orig.environment_variables)):
+    assert getattr(orig, n) == getattr(pruned, n), f"envs.{n} differs: update csrc-inputs in Dockerfile.rocm"
 EOF
 
 # Native extensions only: copies just the files that affect the HIP/C++ build (and the map tool).

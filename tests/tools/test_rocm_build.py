@@ -186,13 +186,14 @@ def test_release_never_ships_images_from_the_ci_repo(tmp_path, mode):
     assert "vllm-ci-cache" not in stderr and "cache: own only" in stderr
 
 
-def test_ci_builds_reuse_the_trusted_images(tmp_path):
+@pytest.mark.parametrize("pull_request", ["7", "false"])
+def test_ci_builds_reuse_the_trusted_images(tmp_path, pull_request):
     status, stderr, calls = run_build(
         tmp_path,
         "base",
         ROCM_CI_REPO="rocm/vllm-dev",
         existing=TRUSTED_KEYED,
-        BUILDKITE_PULL_REQUEST="7",
+        BUILDKITE_PULL_REQUEST=pull_request,
     )
     assert status == 0, stderr
     assert not built_tags(calls, stderr)
@@ -239,6 +240,7 @@ def test_only_pr_builds_read_back_their_rocm_vllm_dev_namespace(
     assert (stderr.count("Reusing rocm/vllm-dev:") == 3) == is_pr
     assert (len(built_tags(calls, stderr)) == 3) != is_pr
     assert ("to: none" in stderr) != is_pr
+    assert is_pr or "cache: rocm/vllm-ci-cache" in stderr  # still reads main's cache
 
 
 def test_ci_build_uploads_the_kernel_symbol_map_when_asked(tmp_path):

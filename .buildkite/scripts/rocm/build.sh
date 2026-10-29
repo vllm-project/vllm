@@ -21,13 +21,15 @@
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
-#                                          reuse only rocm/vllm-ci images and cache, and write none)
+#                                          push these but never read them back, reuse only
+#                                          rocm/vllm-ci images and cache, and write no cache)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
 #                                          csrc objects come from the shared S3 sccache, as in CUDA)
 # Every untrusted build has the same rocm/vllm-dev credentials, so the prefixes keep names apart but
 # isolate nothing: any PR can overwrite another PR's tags and caches. Isolating PRs from each other
-# would take per-namespace credentials (ci-infra).
+# would take per-namespace credentials (ci-infra). The per-commit test image ($REPO:build-<id>) is
+# still pulled by tag, so a nightly's is PR-writable too until ci-infra pulls it by digest.
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
