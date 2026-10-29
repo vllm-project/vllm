@@ -80,6 +80,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
     layer = SimpleNamespace(
         _vllm_config=config,
         attn_backend=backend,
+        impl=object.__new__(backend.get_impl_cls()),
         kv_cache_dtype=cache_dtype,
         head_size=576,
         topk_buffer_width=None,

@@ -93,6 +93,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
+            # Draft prefill shares the target's padded attention metadata.
+            varlen_decode=self.enable_adaptive_verification,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -131,7 +133,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.target_attn_groups
+            if self.can_reuse_target_attn_metadata
+            else self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -266,6 +270,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            max_query_len=None if input_batch.has_prefill else int(max_query_len),
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
         )
@@ -276,6 +281,16 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         self._prepare_eplb_forward(num_tokens)
+
+        if not skip_attn_for_dummy_run:
+            attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                prefill_batch_desc.cg_mode,
+                for_capture=dummy_run
+                and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
+            )
 
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
