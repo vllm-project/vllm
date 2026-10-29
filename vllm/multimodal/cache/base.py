@@ -426,7 +426,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
     @override
     def get_cached_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
-        if (cached_item := self._cache.cache.get(mm_hash)) is not None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
             return cached_item.item, cached_item.prompt_updates
         return None
 
