@@ -30,6 +30,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
     select_candidate_blocks,
+    select_candidate_blocks_cooperative,
+    supports_cooperative_candidates,
 )
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     candidate_blocks_to_sparse_indices,
@@ -58,11 +60,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadata,
     SparseMQARowsMetadata,
-)
-
-from .candidate_topk import (
-    select_candidate_blocks_cooperative,
-    supports_cooperative_candidates,
 )
 
 # Fewest requests of a row-sharded decode step.

@@ -16,6 +16,9 @@ from torch import nn
 
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+    select_candidate_blocks_cooperative,
+)
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
@@ -42,9 +45,6 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.attention import (
 from vllm.models.deepseek_v41.nvidia.specialized_decode.attention import sparse_mla
 from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.aux_projections import (  # noqa: E501
     aux_projection_gemm,
-)
-from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.candidate_topk import (  # noqa: E501
-    select_candidate_blocks_cooperative,
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.indexer_k_store import (  # noqa: E501
     indexer_k_norm_rope_store_fp32,
