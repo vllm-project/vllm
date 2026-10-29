@@ -4445,3 +4445,29 @@ Aucune action moteur effectuée au redémarrage (autologon + Docker au logon ont
 ⚠ **Anomalie de la ressource partagée** : au moment du post, le dashboard `global` était à **102,7 %** de son plafond dur (52 597 / 51 200 o) et la **condensation était bloquée** — verrou détenu par `myia-po-2023:roo-extensions#804` (TTL 900 s). Message stocké quand même (split en 2 parts), mais la ressource reste au-dessus du seuil. À rendre au propriétaire, pas à corriger depuis cette lane.
 
 **Aucun geste moteur**, aucun redémarrage, aucun fichier d'une autre lane modifié : le remplacement de la ligne « 2 requêtes parallèles » est à appliquer par CoursIA sur son propre dépôt.
+
+## Issue roo-extensions#4434 (29/10 20:0xZ) — qualité des statuts condensés : mandat user, brief, et deux corrections qu'ils m'ont infligées
+
+**Mandat user** : « Ce que j'ai cru constater (à vérifier), c'est que le statut est globalement de moins bonne qualité qu'il a été dans le passé […] ça mérite une issue chez roo-extensions qu'on les laissera instruire, puisque l'outil est chez eux. » puis « Tu peux faire un message Claude-code à roo-extensions pour qu'il crée l'issue? ». Volonté explicite : traiter la **boucle d'auto-feedback** (une section perdue est entérinée par les condensations suivantes, un prompt inchangé ne rattrape pas une dérive installée) et passer en revue modèles/format/coûts.
+
+**Issue créée : [roo-extensions#4434](https://github.com/jsboige/roo-extensions/issues/4434)** — cinq volets, auto-feedback central, mesures vllm qualifiées **RAPPORTÉES**. Brief envoyé en DM `fa8a4024` à `roo-extensions-3c`, doublé sur `global` (crossPost 1/1). Aucun seuil, modèle ni routage changé par eux ; aucun fichier de leur dépôt touché par moi.
+
+**Mesures apportées (reproductibles)** — journal `%TEMP%\roo-state-manager-logs\roosync-20261029.log` :
+- `statusOutcome` : **1 `ok`** (primaire) / **8 `ok-with-fallback`** ; `cloud fallback condensation succeeded` = **16** ; disjoncteur `OPENED` = **4** (02:19:51, 07:32:35) + 2 « primary skipped » (07:34:58, 07:40:33).
+- **Le résumé passe sur le primaire, seule la JAMBE STATUT échoue** ⇒ le modèle local n'est pas indisponible.
+- Séquence type d'échec : 07:30:35 appel statut → 07:31:09 `stdin-end, graceful shutdown` (hôte MCP mort en pleine passe) → 07:32:05 `LLM status update timeout` (**90 s pile**).
+- **6 troncatures déterministes du statut en 6 h** (02:20:15, 06:39:57, 07:32:58, 07:36:53, 08:05:12, 08:06:52).
+
+**★ Ils ont corrigé deux de mes affirmations, et les deux corrections sont justes :**
+1. **Plafond réel = `MAX_STATUS_SIZE_BYTES = 15 * 1024` = 15 360 o** (`dashboard.ts:181`), pas 15 000. Mon « statut à 15 007 o pour un plafond 15 KB ⇒ dépassement » était **faux**. La vraie preuve est ailleurs et **plus accablante** : le champ `bestKB` du log donne la taille produite **avant** troncature — **17,5 / 19,3 / 17,5 / 19,4 / 17,0 / 20,6 KB** pour un plafond de 15,36 KB ⇒ **1,6 à 5,2 KB de statut généré jetés à chaque passe**. Le 15 006 stocké n'est pas un dépassement, c'est le *résultat* d'une coupe.
+2. **« 4 ouvertures = jusqu'à 2 h de contournement » est retiré** : un succès referme le disjoncteur et il y a eu 1 succès primaire. La durée de bypass n'est pas établie ; ce qui reste solide est **16 replis sur 17 passes**.
+
+**Leçon de méthode** : j'avais raison sur le symptôme et faux sur le mécanisme qui le prouve. C'est la contre-mesure du propriétaire qui a produit le bon chiffre (`bestKB`), pas ma déduction sur les octets du fichier. Une taille stockée sous un plafond ne dit rien de ce qui a été coupé — seule la taille d'entrée le dit.
+
+**FrogNano mesuré** (`mini-summarizer`, `frognano-4b`, n=1, prompt système exact + statut précédent + 3 messages réels) : **aucun fait inventé** (16 chiffres tous traçables), 8/8 sections respectées, **mais aplatit** — ~2,4 KB rendus pour une cible de 14,8 KB, et **perte des mesures GPU** (22 310 MiB / 99 % / 229 W). Inapte à la jambe statut ; plausible sur la jambe résumé. **n=1, aucune conclusion générale sur l'hallucination.**
+
+**Conséquence opérationnelle relevée** : le statut `global` n'a **pas été réécrit depuis 08:06Z** (mode `on-change`, `dashboard.ts:5606-5608`). Toute la flotte lit donc en ce moment un artefact tronqué — cas d'école concret pour le volet auto-feedback.
+
+**Q47 requalifiée** (user : « ça fait partie du package de l'issue, en fonction de ce qui sera décidé ») : le choix de modèle et de budget (Haiku sur les 200 $/mois Anthropic, prévenir Argumentum + 2025-Epita) n'est **pas un arbitrage séparé** — il se rend avec les résultats de #4434. Aucun engagement de crédit d'ici là.
+
+**Fourni à leur demande** : références de logs + commandes de reproduction, créneaux Swift propres (**10:00-16:00Z** et **après 22:00Z**, pic ~17-20Z), jauges à 18:05Z (KV 31,1 %, 1 en cours, 0 en attente, 0 préemption, GPU 0/1 80-81 %, GPU 2 libre). **Aucun run payant lancé, aucun déploiement GPU.**
