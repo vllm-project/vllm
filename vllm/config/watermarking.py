@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from pydantic_core import ArgsKwargs
 
 from vllm.config.utils import config
@@ -49,7 +49,7 @@ def _read_key_file(path: str) -> int:
     return key
 
 
-@config
+@config(config=ConfigDict(hide_input_in_errors=True))
 class WatermarkConfig:
     """Configuration for text watermark generation."""
 

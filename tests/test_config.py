@@ -4259,6 +4259,17 @@ def test_watermark_key_must_fit_in_64_bits():
         WatermarkConfig(key=2**64)
 
 
+def test_watermark_validation_errors_do_not_quote_the_key(tmp_path):
+    """Validation errors end up in logs; the input they would quote holds the key."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    for kwargs in ({"key": 2**64}, {"key": 987654321, "key_file": str(key_file)}):
+        with pytest.raises(ValidationError) as error:
+            WatermarkConfig(**kwargs)
+        assert str(kwargs["key"]) not in str(error.value)
+
+
 @pytest.mark.parametrize("alpha", [-0.1, 1.1])
 def test_watermark_alpha_must_be_a_probability(alpha):
     with pytest.raises(ValidationError):
