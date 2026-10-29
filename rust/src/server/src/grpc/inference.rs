@@ -139,7 +139,7 @@ impl InferenceServiceImpl {
             text_request.data_parallel_rank = data_parallel_rank;
 
             if !lora_name.is_empty() {
-                if !self.state.engine_core_client().ready_response().supports_lora {
+                if !self.state.engine_client().supports_lora() {
                     return Err(Status::failed_precondition(
                         "engine was not started with LoRA enabled",
                     ));

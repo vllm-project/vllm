@@ -51,7 +51,7 @@ pub async fn weight_checker(
     body: Result<Json<WeightCheckerRequest>, JsonRejection>,
 ) -> Result<Json<WeightCheckerResponse>, ApiError> {
     let Json(body) = body?;
-    let client = state.engine_core_client();
+    let client = state.engine_client();
     let no_args = || {
         (
             Vec::<JsonValue>::new(),

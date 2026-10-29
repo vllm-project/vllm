@@ -55,7 +55,7 @@ pub async fn start_profile(
     }
     info!("starting profiler");
     if let Err(error) = state
-        .engine_core_client()
+        .engine_client()
         .start_profile(
             body.profile_prefix.as_deref(),
             body.delay_iterations,
@@ -63,7 +63,10 @@ pub async fn start_profile(
         )
         .await
     {
-        if matches!(error, EngineCoreClientError::ProfileAlreadyActive) {
+        if matches!(
+            error,
+            vllm_llm::Error::EngineCoreClient(EngineCoreClientError::ProfileAlreadyActive)
+        ) {
             return Err(ApiError::conflict(
                 "A profiling session is already active. Call /stop_profile before \
                  starting another session."
@@ -80,7 +83,7 @@ pub async fn start_profile(
 pub async fn stop_profile(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
     info!("stopping profiler");
     state
-        .engine_core_client()
+        .engine_client()
         .stop_profile(None)
         .await
         .map_err(|error| utility_call_error("stop_profile", error))?;

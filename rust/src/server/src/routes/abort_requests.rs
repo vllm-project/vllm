@@ -27,7 +27,7 @@ pub async fn abort_requests(
     let request_ids = body.request_ids.unwrap_or_default();
 
     state
-        .chat
+        .engine_client()
         .abort(&request_ids)
         .await
         .map_err(|error| utility_call_error("abort_requests", error))?;

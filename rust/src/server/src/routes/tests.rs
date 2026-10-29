@@ -4192,7 +4192,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     .await;
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state.engine_core_client().is_healthy() {
+        while state.engine_client().is_healthy() {
             tokio::task::yield_now().await;
         }
     })
@@ -4203,7 +4203,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.is_empty(), "expected empty body, got {:?}", body);
     assert!(matches!(
-        state.engine_core_client().health_error().as_deref(),
+        state.engine_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
     ));
 
