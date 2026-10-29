@@ -162,7 +162,7 @@ def m3_config():
         parallel_config=ParallelConfig(),
         quant_config=None,
         cache_config=None,
-        kernel_config=SimpleNamespace(specialized_decode=None),
+        kernel_config=SimpleNamespace(specialized_decode=None, moe_backend="auto"),
     )
 
 
@@ -269,6 +269,10 @@ def test_m3_target_allocates_embedding_on_required_stage(
     )
     monkeypatch.setattr(model, "get_pp_group", pp)
     monkeypatch.setattr("vllm.distributed.parallel_state.get_pp_group", pp)
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
     monkeypatch.setattr(model, "VocabParallelEmbedding", lambda *_, **kw: _embed())
     monkeypatch.setattr(model, "make_layers", lambda *_, **kw: (0, 0, nn.ModuleList()))
     monkeypatch.setattr(model, "MiniMAXGemmaRMSNorm", lambda *_, **kw: nn.Identity())

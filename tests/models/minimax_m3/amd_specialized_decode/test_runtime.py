@@ -141,9 +141,13 @@ def _vllm_config(layers=60, **parallel):
 
 
 def test_config_refusals_report_every_reason():
-    assert specialized_decode_config(_vllm_config()).last_layer == 59
+    full_config = specialized_decode_config(_vllm_config())
+    assert full_config is not None
+    assert full_config.last_layer == 59
     # a truncated checkpoint: the sparse layers end at its last layer
-    assert specialized_decode_config(_vllm_config(layers=5)).last_layer == 4
+    truncated_config = specialized_decode_config(_vllm_config(layers=5))
+    assert truncated_config is not None
+    assert truncated_config.last_layer == 4
 
     config = _vllm_config(tensor_parallel_size=2, enable_expert_parallel=True)
     config.cache_config.block_size = 64
