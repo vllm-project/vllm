@@ -28,8 +28,7 @@ MING_ASR_ARGS = [
     "--trust-remote-code",
     "--max-model-len",
     "8192",
-    "--max-num-seqs",
-    "4",
+    *(ROCM_EXTRA_ARGS or ["--max-num-seqs", "4"]),
     "--max-num-batched-tokens",
     "1024",
     "--logits-processors",
@@ -38,8 +37,12 @@ MING_ASR_ARGS = [
 
 
 @pytest.fixture
-def ming_server(model_name):
-    args = ["--enforce-eager", *ROCM_EXTRA_ARGS, *MING_ASR_ARGS]
+def ming_server(model_name, request):
+    args = ["--enforce-eager", *MING_ASR_ARGS]
+    options = getattr(request, "param", {})
+    if options.get("enable_prefix_caching", False):
+        args = [arg for arg in args if arg != "--no-enable-prefix-caching"]
+        args.append("--enable-prefix-caching")
     with RemoteOpenAIServer(model_name, args) as remote:
         yield remote
 
@@ -153,7 +156,7 @@ async def test_basic_audio(mary_had_lamb, model_name):
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
     elif model_name == "inclusionAI/Ming-3.0-asr-tiny":
-        server_args += MING_ASR_ARGS
+        server_args = ["--enforce-eager", *MING_ASR_ARGS]
         extra_body = {
             "max_completion_tokens": 256,
             "vllm_xargs": json.dumps({"no_repeat_ngram_size": 10}),
@@ -260,6 +263,9 @@ async def test_ming_context(model_name, ming_server, ming_audio):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["inclusionAI/Ming-3.0-asr-tiny"])
+@pytest.mark.parametrize(
+    "ming_server", [{"enable_prefix_caching": True}], indirect=True
+)
 async def test_ming_chunk_policy_prefix_cache(model_name, ming_server, ming_audio):
     """Restoring a long request's chunk policy must reuse its cached prefix."""
     waveform, rate = sf.read(
