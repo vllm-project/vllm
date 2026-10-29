@@ -11,6 +11,7 @@ callback injected by the coordinator (which gates on ConnectAck).
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -54,6 +55,12 @@ class _InboundLoadState:
     # _P2P_LOAD_TIMEOUT_S or _PD_LOAD_TIMEOUT_S, fixed at submit time.
     timeout_s: float
     aborted_at: float | None = None
+    # Set together with aborted_at, when the load is reported failed. The
+    # peer may still be writing into its blocks, so their release waits on
+    # this event: set on AbortAck/TransferDone, or when the session closes.
+    release: threading.Event | None = None
+    # Its AbortAck timed out; only close() can release it now.
+    ack_expired: bool = False
 
 
 @dataclass
@@ -99,14 +106,18 @@ class LoadResult(NamedTuple):
     job_id: int
     kv_request_id: str
     success: bool
+    # A failed load whose blocks the peer may still write: release them
+    # once this is set.
+    deferred_release: threading.Event | None = None
 
 
 class ClientCloseResult(NamedTuple):
     """What the manager must fail when a peer session is torn down.
 
-    ``failed_jobs`` is the ``job_id`` of every load still in flight; each
-    becomes a ``JobResult(success=False)``. ``failed_req_ids`` is every
-    kv_request_id whose lookup() would otherwise defer forever on the dead
+    ``failed_jobs`` is the ``job_id`` of every load still in flight and not
+    yet reported; each becomes a ``JobResult(success=False)``.
+    ``failed_req_ids`` is every kv_request_id whose lookup() would otherwise
+    defer forever on the dead
     peer — the in-flight loads plus any request holding an unresolved
     symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
     that had a load job.
@@ -146,6 +157,9 @@ class ClientRole:
         # Per-request progress deadlines. Only newly resolved probes extend
         # them; additional keys and repeated scheduler polls do not.
         self._lookup_deadlines: dict[str, float] = {}
+        # First load whose AbortAck never arrived. Sticky: the peer has
+        # stopped confirming that its WRITEs ended, so the session faults it.
+        self._expired_abort_ack: tuple[str, int] | None = None
 
     # ------------------------------------------------------------------
     # State helpers
@@ -177,6 +191,29 @@ class ClientRole:
         self._active_loads.discard(kv_request_id)
         self._maybe_prune(kv_request_id)
 
+    def _abort_load(
+        self, kv_request_id: str, round_seq: int, load: _InboundLoadState
+    ) -> None:
+        """Send AbortFetch and report the load failed now, deferring the
+        release of its blocks until the peer confirms its WRITEs ended."""
+        self._send(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
+                AbortFetchMsg.ROUND_SEQ: round_seq,
+            }
+        )
+        load.aborted_at = time.monotonic()
+        load.release = threading.Event()
+        self._completed_loads.append(
+            LoadResult(
+                job_id=load.job_id,
+                kv_request_id=kv_request_id,
+                success=False,
+                deferred_release=load.release,
+            )
+        )
+
     @property
     def has_active_loads(self) -> bool:
         """True if any kv_request_id has a fetch in flight."""
@@ -189,6 +226,11 @@ class ClientRole:
             if now >= deadline:
                 return req_id, now - deadline + _LOOKUP_TIMEOUT_S
         return None
+
+    @property
+    def expired_abort_ack(self) -> tuple[str, int] | None:
+        """The first ``(kv_request_id, round_seq)`` whose AbortAck timed out."""
+        return self._expired_abort_ack
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,24 +303,16 @@ class ClientRole:
         while an earlier round's load is still in flight, so both can be
         owed at once.
 
-        Then drop all probe/lookup state. Keep aborted loads until their abort
-        acknowledgement or timeout produces a terminal result.
+        Then drop all probe/lookup state. Aborted loads are reported failed
+        at once and kept until their AbortAck (or the session's close)
+        releases their blocks.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
             return
-        if st.loads:
-            for round_seq, load in st.loads.items():
-                if load.aborted_at is not None:
-                    continue
-                self._send(
-                    {
-                        TYPE_KEY: AbortFetchMsg.TYPE,
-                        AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
-                        AbortFetchMsg.ROUND_SEQ: round_seq,
-                    }
-                )
-                load.aborted_at = time.monotonic()
+        for round_seq, load in st.loads.items():
+            if load.aborted_at is None:
+                self._abort_load(kv_request_id, round_seq, load)
         if st.peer_lookup_open:
             st.peer_lookup_open = False
             self._send(
@@ -302,7 +336,11 @@ class ClientRole:
         """Handle a TransferDoneMsg from the peer."""
         st = self._requests.get(kv_request_id)
         load = st.loads.pop(round_seq, None) if st is not None else None
-        if st is not None and load is not None:
+        if st is not None and load is not None and load.release is not None:
+            # Already reported failed; the peer's WRITEs are over.
+            load.release.set()
+            self._on_load_terminal(kv_request_id, st)
+        elif st is not None and load is not None:
             self._completed_loads.append(
                 LoadResult(
                     job_id=load.job_id,
@@ -331,20 +369,10 @@ class ClientRole:
         st = self._requests.get(kv_request_id)
         load = st.loads.pop(round_seq, None) if st is not None else None
         if st is not None and load is not None:
-            logger.warning(
-                "P2PSession %s: load request %s (job_id=%d) "
-                "completed with failure after abort",
-                self._peer_id,
-                kv_request_id,
-                load.job_id,
-            )
-            self._completed_loads.append(
-                LoadResult(
-                    job_id=load.job_id,
-                    kv_request_id=kv_request_id,
-                    success=False,
-                )
-            )
+            # Every abort reported the load failed when it was sent; the
+            # ack only releases its blocks.
+            assert load.release is not None
+            load.release.set()
             self._on_load_terminal(kv_request_id, st)
         else:
             # See on_transfer_done: same ambiguity (duplicate ack
@@ -482,54 +510,40 @@ class ClientRole:
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
 
-        Loads past their load timeout (``_P2P_LOAD_TIMEOUT_S`` or
-        ``_PD_LOAD_TIMEOUT_S``) get an AbortFetchMsg sent and
-        enter the aborting phase. Aborting loads past
-        ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed.
+        A load past its load timeout (``_P2P_LOAD_TIMEOUT_S`` or
+        ``_PD_LOAD_TIMEOUT_S``) gets an AbortFetchMsg and is reported failed
+        at once, with its blocks' release deferred. One whose AbortAck then
+        misses ``_ABORT_ACK_TIMEOUT_S`` is recorded in ``expired_abort_ack``,
+        so the session disconnects and close() releases it.
         """
         now = time.monotonic()
-        to_remove: list[tuple[str, int]] = []
         for req_id in self._active_loads:
             st = self._requests[req_id]
             assert st.loads
             for round_seq, load in st.loads.items():
                 if load.aborted_at is None:
                     if now - load.submitted_at >= load.timeout_s:
-                        load.aborted_at = now
                         logger.warning(
                             "P2PSession %s: %s round=%s timed out, sending abort",
                             self._peer_id,
                             req_id,
                             round_seq,
                         )
-                        self._send(
-                            {
-                                TYPE_KEY: AbortFetchMsg.TYPE,
-                                AbortFetchMsg.KV_REQUEST_ID: req_id,
-                                AbortFetchMsg.ROUND_SEQ: round_seq,
-                            }
-                        )
-                else:
-                    if now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S:
-                        to_remove.append((req_id, round_seq))
-                        self._completed_loads.append(
-                            LoadResult(
-                                job_id=load.job_id,
-                                kv_request_id=req_id,
-                                success=False,
-                            )
-                        )
-                        logger.warning(
-                            "P2PSession %s: abort_ack timed out for "
-                            "kv_request_id=%s round=%s",
-                            self._peer_id,
-                            req_id,
-                            round_seq,
-                        )
-        for req_id, round_seq in to_remove:
-            st = self._requests[req_id]
-            st.loads.pop(round_seq)
-            self._on_load_terminal(req_id, st)
+                        self._abort_load(req_id, round_seq, load)
+                elif (
+                    not load.ack_expired
+                    and now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S
+                ):
+                    load.ack_expired = True
+                    if self._expired_abort_ack is None:
+                        self._expired_abort_ack = (req_id, round_seq)
+                    logger.warning(
+                        "P2PSession %s: abort_ack timed out for "
+                        "kv_request_id=%s round=%s",
+                        self._peer_id,
+                        req_id,
+                        round_seq,
+                    )
 
         results = self._completed_loads
         self._completed_loads = []
@@ -541,10 +555,17 @@ class ClientRole:
         A request is failed if it has a load in flight (its job fails) or
         holds an unresolved symmetric-P2P probe (its lookup() would defer
         forever on an answer that can never arrive). See ``ClientCloseResult``.
+        The end of the session is the release point for every load already
+        reported failed: their deferred releases are set here.
         """
-        failed_jobs = [
-            load.job_id for st in self._requests.values() for load in st.loads.values()
-        ]
+        # Results never collected still owe their job an outcome.
+        failed_jobs = [r.job_id for r in self._completed_loads]
+        for st in self._requests.values():
+            for load in st.loads.values():
+                if load.release is not None:
+                    load.release.set()
+                else:
+                    failed_jobs.append(load.job_id)
         failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
