@@ -3,21 +3,18 @@
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &CompletionRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
-        && !served_model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
@@ -126,6 +123,7 @@ mod tests {
     use serde_json::json;
 
     use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
@@ -137,8 +135,8 @@ mod tests {
         .expect("parse request")
     }
 
-    fn served_names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served_names(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect(), false)
     }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> CompletionRequest {

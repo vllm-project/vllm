@@ -9,6 +9,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod model_names;
 mod render;
 mod routes;
 mod runtime;

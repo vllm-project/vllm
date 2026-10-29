@@ -75,7 +75,7 @@ pub(super) fn prepare_completion_request(
         .lora_request
         .as_ref()
         .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+        .unwrap_or_else(|| lora_resolution.model_names.primary().to_string());
 
     let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
@@ -231,6 +231,7 @@ mod tests {
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::completions::types::CompletionRequest;
     use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
@@ -241,7 +242,10 @@ mod tests {
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(
+                names.iter().map(|s| s.to_string()).collect(),
+                false,
+            ),
             lora_request: None,
         }
     }

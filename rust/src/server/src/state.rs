@@ -17,6 +17,7 @@ use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
+use crate::model_names::ServedModelNames;
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -170,9 +171,17 @@ impl AppState {
         Ok(self.lora_manager.served_loras().await)
     }
 
+    /// The base model names a request may select, before LoRA adapters.
+    pub(crate) fn base_model_names(&self) -> ServedModelNames {
+        ServedModelNames::new(
+            self.served_model_names.clone(),
+            self.api_server_options.skip_model_name_validation,
+        )
+    }
+
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
-        self.lora_manager.resolve_model(&self.served_model_names, model_name).await
+        self.lora_manager.resolve_model(self.base_model_names(), model_name).await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.

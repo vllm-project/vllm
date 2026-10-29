@@ -131,6 +131,17 @@ pub struct RenderArgs {
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
+    /// Accept any requested model name. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    skip_model_name_validation: bool,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -200,6 +211,7 @@ impl RenderArgs {
             hf_config,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
+            skip_model_name_validation: self.skip_model_name_validation,
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
@@ -539,6 +551,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub http_max_request_body_size: Option<usize>,
 
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub skip_model_name_validation: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -694,6 +720,9 @@ impl SharedRuntimeArgs {
             let size = parse_byte_count(&value)
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
             self.http_max_request_body_size = Some(size);
+        }
+        if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
+            self.skip_model_name_validation = parse_truthy_flag(&value)?;
         }
         Ok(())
     }
@@ -874,6 +903,7 @@ impl SharedRuntimeArgs {
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
+            skip_model_name_validation: self.skip_model_name_validation,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
@@ -983,6 +1013,12 @@ impl FromStr for LogStatsInterval {
 fn parse_int_flag(value: &str) -> Result<bool, String> {
     let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
     Ok(value != 0)
+}
+
+/// Parse a boolean flag environment variable as Python's
+/// `value.strip().lower() in ("1", "true")`; any other value is `false`.
+fn parse_truthy_flag(value: &str) -> Result<bool, String> {
+    Ok(matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
 /// Parse a byte count environment variable as a non-negative decimal integer.

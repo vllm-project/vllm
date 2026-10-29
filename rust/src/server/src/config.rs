@@ -80,6 +80,9 @@ pub struct ApiServerOptions {
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
     pub enable_tokenizer_info_endpoint: bool,
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,

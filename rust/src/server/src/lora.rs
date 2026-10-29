@@ -13,6 +13,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::config::LoraModulePath;
+use crate::model_names::ServedModelNames;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
@@ -121,7 +122,7 @@ impl LoadedLora {
 /// the model name resolves to a dynamic adapter.
 #[derive(Debug, Clone)]
 pub(crate) struct LoraModelResolution {
-    pub model_names: Vec<String>,
+    pub model_names: ServedModelNames,
     pub lora_request: Option<LoraRequest>,
 }
 
@@ -203,12 +204,11 @@ impl LoraManager {
     /// snapshot.
     pub async fn resolve_model(
         &self,
-        base_model_names: &[String],
+        base_model_names: ServedModelNames,
         model_name: Option<&str>,
     ) -> LoraModelResolution {
         let adapters = self.adapters.read().await;
-        let mut model_names = base_model_names.to_vec();
-        model_names.extend(adapters.keys().cloned());
+        let model_names = base_model_names.with_names(adapters.keys().cloned());
         let lora_request =
             model_name.and_then(|name| adapters.get(name)).map(LoadedLora::to_request);
 
@@ -353,7 +353,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{LoraPathAccessError, validate_lora_path_access};
+    use super::{LoadedLora, LoraManager, LoraPathAccessError, validate_lora_path_access};
+    use crate::model_names::ServedModelNames;
 
     fn temp_lora_dir(test_name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -366,6 +367,33 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("create temp lora dir");
         path
+    }
+
+    #[tokio::test]
+    async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
+        let manager = LoraManager::new();
+        manager.adapters.write().await.insert(
+            "adapter-a".to_string(),
+            LoadedLora {
+                lora_name: "adapter-a".to_string(),
+                lora_int_id: 1,
+                lora_path: "org/adapter-a".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+        );
+        let base = ServedModelNames::new(vec!["base".to_string()], true);
+
+        let resolution = manager.resolve_model(base.clone(), Some("adapter-a")).await;
+        assert_eq!(
+            resolution.lora_request.expect("adapter selected").lora_name,
+            "adapter-a"
+        );
+
+        let resolution = manager.resolve_model(base, Some("unknown")).await;
+        assert!(resolution.lora_request.is_none());
+        assert!(resolution.model_names.accepts(Some("unknown")));
+        assert_eq!(resolution.model_names.primary(), "base");
     }
 
     #[test]

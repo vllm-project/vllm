@@ -84,7 +84,7 @@ pub(super) fn prepare_chat_request(
         .lora_request
         .as_ref()
         .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+        .unwrap_or_else(|| lora_resolution.model_names.primary().to_string());
     let include_reasoning = request.include_reasoning;
     let echo = request
         .echo
@@ -482,6 +482,7 @@ mod tests {
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
@@ -498,7 +499,10 @@ mod tests {
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(
+                names.iter().map(|s| s.to_string()).collect(),
+                false,
+            ),
             lora_request: None,
         }
     }

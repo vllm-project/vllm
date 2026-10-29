@@ -134,7 +134,7 @@ impl InferenceServiceImpl {
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
             let mut text_request =
-                convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
+                convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 

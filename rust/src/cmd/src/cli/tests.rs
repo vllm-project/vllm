@@ -55,6 +55,10 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
+        // hidden flag.
+        "--skip-model-name-validation",
+        "True",
     ])
     .unwrap();
 
@@ -77,6 +81,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
+    assert!(config.skip_model_name_validation);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
@@ -94,6 +99,7 @@ fn render_args_allow_omitted_max_model_len() {
     let config = args.into_config();
 
     assert_eq!(config.max_model_len, None);
+    assert!(!config.skip_model_name_validation);
 }
 
 #[test]
@@ -238,6 +244,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -571,14 +578,16 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert!(!config.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(32 * 1024 * 1024)
     );
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
-    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, and
-    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, which bind these hidden flags.
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, and
+    // `VLLM_SKIP_MODEL_NAME_VALIDATION`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -586,13 +595,19 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1",
         "--http-max-request-body-size",
         "1048576",
+        "--skip-model-name-validation",
+        "1",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert!(config.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
     );
+    // Like Python, any value other than `1` or `true` leaves it off.
+    let config = parse(&["--skip-model-name-validation", "yes"]);
+    assert!(!config.api_server_options.skip_model_name_validation);
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
@@ -620,6 +635,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert!(!args.api_server_options().skip_model_name_validation);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -629,10 +645,12 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
+        ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert!(args.api_server_options().skip_model_name_validation);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -1548,6 +1566,7 @@ fn frontend_args_accept_json() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2469,6 +2488,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2634,6 +2654,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -2748,6 +2769,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -2950,6 +2972,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
