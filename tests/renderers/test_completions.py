@@ -11,7 +11,7 @@ import pybase64
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
@@ -19,6 +19,7 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.registry import RENDERER_REGISTRY
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -130,6 +131,53 @@ def _preprocess_prompt(
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "renderer_mode",
+    ["deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
+)
+async def test_native_hf_renderer_truncated_echo(tmp_path, renderer_mode):
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import OPTConfig, TokenizersBackend
+
+    from vllm.renderers.inkling_encoding import SPECIAL_TOKEN_SPELLINGS
+    from vllm.tokenizers.hf import get_cached_tokenizer
+
+    tokens = ["<unk>", "<bos>", "Hello", "world"]
+    tokens.extend(s[0] for s in SPECIAL_TOKEN_SPELLINGS.values())
+    vocab = {token: i for i, token in enumerate(tokens)}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = get_cached_tokenizer(
+        TokenizersBackend(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+            bos_token="<bos>",
+            add_bos_token=True,
+        )
+    )
+    OPTConfig(vocab_size=len(vocab)).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), dtype="float32", max_model_len=32)
+    )
+    renderer = RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
+    prompt = "<bos> Hello world"
+    params = TokenizeParams(
+        max_total_tokens=32,
+        truncate_prompt_tokens=3,
+        truncation_side="right",
+        needs_detokenization=True,
+    )
+    try:
+        (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
+        (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
+        for result in (sync, asynchronous):
+            assert result["prompt"] == "<bos> Hello"
+            assert result["prompt_token_ids"] == tokenizer.encode(prompt)[:3]
+    finally:
+        renderer.shutdown()
 
 
 class TestValidatePrompt:
