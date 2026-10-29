@@ -291,8 +291,6 @@ presets:
       # Admission stays at 48 sequences so mean ITL holds under 20 ms up to 64 clients; the rest queue.
       - "--max-num-seqs"
       - "48"
-      - "--gpu-memory-utilization"
-      - "0.9"
       # Qwen3.5 mixes Gated DeltaNet and attention layers; the hybrid manager keeps prefix caching across both.
       - "--no-disable-hybrid-kv-cache-manager"
       # vLLM sums --kv-offloading-size over the TP ranks: 80 GiB of host KV per rank.
