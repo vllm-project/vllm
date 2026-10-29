@@ -92,7 +92,6 @@ class RoutedExpertsWorkerConnector:
         *,
         vllm_config: VllmConfig,
         model: torch.nn.Module,
-        kv_cache_config: KVCacheConfig,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         capturer = RoutedExpertsCapturer(
@@ -100,6 +99,7 @@ class RoutedExpertsWorkerConnector:
         )
         bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
+        self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
@@ -111,11 +111,15 @@ class RoutedExpertsWorkerConnector:
         self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
             return
 
+        vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
@@ -135,7 +139,7 @@ class RoutedExpertsWorkerConnector:
             shape_per_token,
             hash_block_size,
             vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens,
+            vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
 
@@ -435,11 +439,9 @@ class PendingCombinedAuxOutput:
 class AuxOutputWorkerConnector:
     """Compose windowed hidden capture with optional routed-experts output."""
 
-    def __init__(self, *, vllm_config, model, kv_cache_config):
+    def __init__(self, *, vllm_config, model):
         self._routing = (
-            RoutedExpertsWorkerConnector(
-                vllm_config=vllm_config, model=model, kv_cache_config=kv_cache_config
-            )
+            RoutedExpertsWorkerConnector(vllm_config=vllm_config, model=model)
             if vllm_config.aux_output_config.enable_return_routed_experts
             else None
         )
@@ -449,6 +451,10 @@ class AuxOutputWorkerConnector:
             and get_tp_group().is_first_rank
             else None
         )
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        if self._routing is not None:
+            self._routing.initialize_output_storage(kv_cache_config)
 
     def begin_step(self, metadata):
         if self._hidden is not None and metadata is not None:
@@ -477,10 +483,6 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module, vllm_config: VllmConfig
 ) -> AuxOutputWorkerConnector:
-    return AuxOutputWorkerConnector(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=vllm_config,
-    )
+    return AuxOutputWorkerConnector(model=model, vllm_config=vllm_config)
