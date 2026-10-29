@@ -118,6 +118,7 @@ from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
+    HiSparseSlotInvalidator,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
@@ -2256,8 +2257,6 @@ def test_sparse_mla_index_groups_own_distinct_physical_buffers():
 def test_hisparse_index_group_preserves_row_width(
     monkeypatch, kv_cache_dtype, row_width, kv_dtype
 ):
-    monkeypatch.setattr(index_group_module, "_create_side_stream", MagicMock())
-    monkeypatch.setattr(index_group_module, "_create_event", MagicMock())
     create_handle = MagicMock(side_effect=lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(
         index_group_module, "create_hisparse_cache_handle", create_handle
@@ -3321,8 +3320,10 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     stale_row = flat_hot[stale_hot_slot].clone()
 
     flat_pool[8] += 1000
-    cache_handle.runtime.invalidate_written_slots(
-        torch.tensor([8], dtype=torch.int64, device=device), req_ids
+    HiSparseSlotInvalidator(request_state_indices)(
+        [cache_handle.runtime],
+        torch.tensor([8], dtype=torch.int64, device=device),
+        req_ids,
     )
     cache_handle.runtime.begin_forward()
     hot_indices = cache_handle.swap_in(
@@ -3337,6 +3338,40 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     idx = hot_indices.cpu().tolist()[0][0]
     assert not torch.equal(flat_hot[idx], stale_row)
     torch.testing.assert_close(flat_hot[idx].cpu(), flat_pool[8])
+
+
+@requires_hisparse_ops
+def test_hisparse_invalidation_covers_every_index_group():
+    """One launch drops a rewritten slot from each listed group's request row."""
+    device = torch.device(DEVICE_TYPE)
+    tables = [
+        torch.tensor(
+            [[5, 7, 9, 7, 1, 2, 3, 4], [7, 1, 2, 3, 7, 7, 7, 7]],
+            dtype=torch.int32,
+            device=device,
+        )
+        + offset
+        for offset in (0, 0, 100)
+    ]
+    expected = [table.clone() for table in tables]
+    leaders = [
+        SimpleNamespace(
+            index_group=SimpleNamespace(device_global_indices=table),
+            cache_ops=torch.ops._C_cache_ops,
+        )
+        for table in tables[:2]
+    ]
+    for table in expected[:2]:
+        table[1][table[1] == 7] = -1
+
+    HiSparseSlotInvalidator(torch.tensor([1, 0], dtype=torch.int32, device=device))(
+        leaders,
+        torch.tensor([7, 7], dtype=torch.int64, device=device),
+        torch.tensor([0, -1], dtype=torch.int32, device=device),
+    )
+
+    for table, want in zip(tables, expected):
+        torch.testing.assert_close(table, want)
 
 
 @requires_hisparse_ops
@@ -3765,7 +3800,9 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype
         device=device,
     )
 
-    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime = _make_hisparse_runtime(
+        row_width=row_width, block_size=block_size, kv_dtype=kv_dtype
+    )
     runtime.bind_source_cache(host_cache)
     staged = runtime.gather_prefill_cache(
         host_cache, plan, resident_cache=resident_cache
@@ -3807,7 +3844,9 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
     )
     host_cache = torch.zeros(4, block_size, row_width).pin_memory()
 
-    staged = HiSparseRuntime.gather_prefill_cache(None, host_cache, plan)
+    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime.bind_source_cache(host_cache)
+    staged = runtime.gather_prefill_cache(host_cache, plan)
 
     assert staged.shape[0] * block_size < 256
     backing_rows = staged.untyped_storage().nbytes() // (
