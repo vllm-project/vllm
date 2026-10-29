@@ -1385,13 +1385,20 @@ def fastsafetensors_weights_iterator(
             pl.close()
 
 
+_ENGRAM_WEIGHT_RE = re.compile(
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+)
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
+    *,
+    load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files
-    using instanttensor library."""
+    """Load with InstantTensor, optionally mapping Engram tables on CPU."""
     try:
         import instanttensor
     except ImportError as e:
@@ -1410,53 +1417,63 @@ def instanttensor_weights_iterator(
     else:
         process_group = world_group.device_group if world_group.world_size > 1 else None
 
-    device = current_platform.current_device()
+    gpu_weight_names: list[str] = []
+    cpu_weights: dict[str, list[str]] = {}
+    for path in hf_weights_files:
+        with safe_open(path, framework="pt") as metadata:
+            for name in metadata.keys():  # noqa: SIM118
+                # Engram tables can exceed device memory before TP sharding.
+                if load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
+                    cpu_weights.setdefault(path, []).append(name)
+                else:
+                    gpu_weight_names.append(name)
 
-    extra_kwargs: dict[str, Any] = {}
-    if local_expert_ids is not None:
-        checkpoint_names: list[str] = []
-        for path in hf_weights_files:
-            with safe_open(path, framework="pt") as metadata:
-                checkpoint_names.extend(metadata.keys())  # noqa: SIM118
-        # Every rank must make the same decision about collective loading.
-        empty_expert_ids: set[int] = set()
-        if any(should_skip_weight(name, empty_expert_ids) for name in checkpoint_names):
-            process_group = None
-            extra_kwargs["tensor_filter"] = [
-                name
-                for name in checkpoint_names
-                if not should_skip_weight(name, local_expert_ids)
-            ]
-            extra_kwargs["tensor_name_match_mode"] = "exact"
+    # Every rank must make the same decision about collective loading.
+    empty_expert_ids: set[int] = set()
+    filter_experts = local_expert_ids is not None and any(
+        should_skip_weight(name, empty_expert_ids) for name in gpu_weight_names
+    )
+    tensor_filter: list[str] | None = None
+    if cpu_weights or filter_experts:
+        process_group = None
+        tensor_filter = [
+            name
+            for name in gpu_weight_names
+            if not should_skip_weight(name, local_expert_ids)
+        ]
 
-    # copy=True yields tensors that own their memory, staying valid after the
-    # context exits or InstantTensor reuses its buffer.
-    with instanttensor.safe_open(
-        hf_weights_files,
-        framework="pt",
-        device=device,
-        process_group=process_group,
-        copy=True,
-        **extra_kwargs,
-    ) as f:
-        # Track bytes so the bar reports load throughput (GB/s).
-        pbar = tqdm(
-            total=f.total_tensor_size,
-            desc="Loading safetensors using InstantTensor loader",
-            disable=not enable_tqdm(use_tqdm_on_load),
-            bar_format=_BAR_FORMAT,
-            position=tqdm._get_free_pos(),
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            mininterval=1.0,
-        )
-        try:
+    if gpu_weight_names:
+        # copy=True keeps tensors valid after InstantTensor reuses its buffer.
+        with (
+            instanttensor.safe_open(
+                hf_weights_files,
+                framework="pt",
+                device=current_platform.current_device(),
+                process_group=process_group,
+                copy=True,
+                tensor_filter=tensor_filter,
+                tensor_name_match_mode="exact",
+            ) as f,
+            tqdm(
+                total=f.total_tensor_size,
+                desc="Loading safetensors using InstantTensor loader",
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+                position=tqdm._get_free_pos(),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                mininterval=1.0,
+            ) as pbar,
+        ):
             for name, tensor in f.tensors():
                 pbar.update(tensor.numel() * tensor.element_size())
                 yield name, tensor
-        finally:
-            pbar.close()
+
+    for path, names in cpu_weights.items():
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for name in names:
+                yield name, f.get_tensor(name)
 
 
 def pt_weights_iterator(

@@ -170,7 +170,7 @@ impl UnifiedParser for CombinedParser {
 mod tests {
     use std::sync::Arc;
 
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
     use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, Tokenizer};
     use xgrammar_structural_tag::ToolChoice;
     use xgrammar_structural_tag::builders::ReasoningMode;
@@ -218,8 +218,8 @@ mod tests {
 
     fn collect(parser: &mut dyn UnifiedParser, chunks: &[&str]) -> UnifiedParserOutput {
         let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
+        for chunk in decode_chunks(&tokenizer(), chunks) {
+            parser.parse_into(chunk, &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn combined_parser_emits_reasoning_and_text() {
         let tokenizer = Arc::new(tokenizer());
-        let reasoning = Qwen3ReasoningParser::create(tokenizer).unwrap();
+        let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
         let output = collect(&mut parser, &["<think>work</think>answer"]);
@@ -410,7 +410,9 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning(DecodedText::unattributed("work")),
+                UnifiedParserEvent::Reasoning(
+                    decode_chunks(tokenizer.as_ref(), &["work"]).remove(0)
+                ),
                 UnifiedParserEvent::Text("answer".to_string()),
             ]
         );
@@ -434,9 +436,9 @@ mod tests {
 
         let mut output = UnifiedParserOutput::default();
         for (token_id, text) in [
-            (1, "<think>"),
+            (256, "<think>"),
             (2, "reason"),
-            (3, "</think>"),
+            (257, "</think>"),
             (4, "answer"),
         ] {
             parser.parse_into(chunk(token_id, text), &mut output).unwrap();
@@ -444,7 +446,7 @@ mod tests {
         output.append(parser.finish().unwrap());
 
         // The reasoning tokens keep their attributions through the combined
-        // parser; marker tokens (1 and 3) are dropped with their spans.
+        // parser; marker tokens (256 and 257) are dropped with their spans.
         let reasoning_ids: Vec<u32> = output
             .events
             .iter()

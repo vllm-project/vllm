@@ -61,6 +61,9 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
     env.add_function("__hf_generation", render_generation);
+    env.add_function("strftime_now", |format: String| {
+        chrono::Local::now().format(&format).to_string()
+    });
     env.add_function("raise_exception", raise_exception);
 
     Ok(env)
@@ -255,6 +258,28 @@ mod tests {
         assert!(
             err.contains("failed to render jinja template"),
             "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strftime_now_matches_transformers_contract() {
+        // `strftime_now` renders local wall-clock time with strftime-style
+        // formats, like the transformers Jinja environment.
+        let template = CompiledChatTemplate::new(
+            "{{ strftime_now('literal') }}|{{ strftime_now('%Y-%m-%d') }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let result = template.apply(TemplateContext::default()).unwrap();
+
+        let (literal, date) = result.split_once('|').unwrap();
+        assert_eq!(literal, "literal");
+        let is_digit_at =
+            |range: std::ops::Range<usize>| date[range].chars().all(|c| c.is_ascii_digit());
+        assert!(
+            date.len() == 10 && is_digit_at(0..4) && is_digit_at(5..7) && is_digit_at(8..10),
+            "expected %Y-%m-%d date, got: {date}"
         );
     }
 

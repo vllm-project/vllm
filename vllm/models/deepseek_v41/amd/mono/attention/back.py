@@ -518,7 +518,9 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
@@ -644,19 +646,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-    )
-
-
 def wob_loads(c, task, pred=None):
     a = c["args"]
     return gemv_loads(c, a["wob"], a["wob_s"], c["d"].o_rows, task * ROWS, pred=pred)
@@ -743,19 +732,6 @@ def back_lds_members(s: int, d: Dims) -> dict:
         xsl: fx.Array[fx.Int32, rows * lds_row(d.group_k // 32), 16]
 
     return {"split": SplitLds, "gemv": GemvLds}
-
-
-def back_lds(s: int, d: Dims):
-    """K2's attention LDS: the union of ``back_lds_members``."""
-    m = back_lds_members(s, d)
-    SplitLds, GemvLds = m["split"], m["gemv"]
-
-    @fx.union
-    class BackLds:
-        split: SplitLds  # type: ignore[valid-type]
-        gemv: GemvLds  # type: ignore[valid-type]
-
-    return BackLds
 
 
 def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:

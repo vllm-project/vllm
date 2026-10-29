@@ -34,7 +34,6 @@ MAX_TOKENS = 48
 # KV record (V4 fp8_ds_mla): 576 B data rows (448 e4m3 | 64 bf16), then 8 B of
 # scales a token (7 UE8M0 + pad) after the block's rows
 DATA = 576
-SCALE_BYTES = 8
 
 # attention: a split is 16 keys; a token has at most TOPK + WINDOW keys
 BK = 16
