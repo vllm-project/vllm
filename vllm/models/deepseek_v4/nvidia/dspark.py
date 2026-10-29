@@ -70,12 +70,14 @@ _CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.self_attn\.kv_proj\.(.+)$")
 
 
 def _duplicate_context_wkv_weights(
-    weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
+    weights: Iterable[tuple[str, torch.Tensor]],
+    num_layers: int,
+    context_wkv_re: re.Pattern = _CONTEXT_WKV_RE,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Load every draft layer's WKV into the cross-layer projection."""
     for name, weight in weights:
         yield name, weight
-        match = _CONTEXT_WKV_RE.fullmatch(name)
+        match = context_wkv_re.fullmatch(name)
         if match is None:
             continue
         layer_idx = int(match.group(1))

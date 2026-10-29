@@ -84,9 +84,9 @@ def _fill(name: str, t: torch.Tensor) -> None:
         return
     elif "norm" in name:
         t.copy_(randn(0.1, 1.0))
-    elif name.endswith(("hc_attn_scale", "hc_ffn_scale")):
+    elif name.endswith(("attn_hc.scale", "ffn_hc.scale")):
         t.copy_(randn(0.5).abs() + 0.5)
-    elif name.endswith(("hc_attn_base", "hc_ffn_base", "attn_sink")):
+    elif name.endswith(("attn_hc.base", "ffn_hc.base", "sinks")):
         t.copy_(randn(0.1))
     elif name.endswith("embed_tokens.weight"):
         t.copy_(randn())
@@ -132,7 +132,7 @@ class MonoProbe:
 
         model = self.model_runner.model  # type: ignore[attr-defined]
         return {
-            extract_layer_index(m.attn.prefix): m
+            extract_layer_index(m.self_attn.prefix): m
             for m in model.modules()
             if isinstance(m, DeepseekV4DecoderLayer)
         }
@@ -155,7 +155,7 @@ class MonoProbe:
             md = get_forward_context().attn_metadata
             if not isinstance(md, dict):
                 return False
-            swa = md.get(layer.attn.swa_cache_layer.prefix)
+            swa = md.get(layer.self_attn.swa_cache_layer.prefix)
             return swa is not None and swa.num_prefills == 0
 
         def keys(layer_id, pos):
@@ -200,7 +200,7 @@ class MonoProbe:
             layer.register_forward_hook(hook(i), with_kwargs=True)
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
-            layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
+            layer.mlp.register_forward_pre_hook(gap, with_kwargs=True)
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]

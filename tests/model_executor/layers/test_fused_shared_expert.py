@@ -1018,53 +1018,38 @@ def test_aiter_fused_moe_validates_shared_expert_arguments() -> None:
 
 
 def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
-    """Mixed and all-excluded DSV4 checkpoints map shared experts correctly."""
+    """Mixed DSV4 checkpoints load each layer's shared expert where it lives."""
+    from transformers import DeepseekV4Config
+
+    from vllm.model_executor.models.utils import get_checkpoint_renaming_mapper
     from vllm.models.deepseek_v4.amd.model import (
         _make_deepseek_v4_weights_mapper,
         _redirect_shared_expert_name,
     )
 
     tensor = torch.empty(0)
-    fuse_by_layer = frozenset({6})
-    # Mixed: any fused layer puts the mapper in fused mode, which leaves the
-    # checkpoint .w2 names untouched; the loader redirects per layer.
-    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=True)
+    renaming = get_checkpoint_renaming_mapper(DeepseekV4Config(num_hidden_layers=8))
+    mapper = _make_deepseek_v4_weights_mapper("fp8")
     for raw, expected in [
         (
             "layers.5.ffn.shared_experts.w2.weight",
-            "model.layers.5.ffn.shared_experts.down_proj.weight",
+            "model.layers.5.mlp.shared_experts.down_proj.weight",
         ),
         (
             "layers.5.ffn.shared_experts.w2.scale",
-            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
+            "model.layers.5.mlp.shared_experts.down_proj.weight_scale_inv",
         ),
         (
             "layers.6.ffn.shared_experts.w2.weight",
-            "model.layers.6.ffn.experts.4.w2.weight",
+            "model.layers.6.mlp.experts.4.w2.weight",
         ),
         (
             "layers.6.ffn.shared_experts.w2.scale",
-            "model.layers.6.ffn.experts.4.w2.weight_scale_inv",
+            "model.layers.6.mlp.experts.4.w2.weight_scale_inv",
         ),
     ]:
-        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
-        assert _redirect_shared_expert_name(mapped, fuse_by_layer, 4) == expected
-
-    # All layers excluded (fused_shared_expert_layers == frozenset()) selects
-    # the unfused mapper, which renames .w2 -> .down_proj itself.
-    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=False)
-    for raw, expected in [
-        (
-            "layers.5.ffn.shared_experts.w2.weight",
-            "model.layers.5.ffn.shared_experts.down_proj.weight",
-        ),
-        (
-            "layers.5.ffn.shared_experts.w2.scale",
-            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
-        ),
-    ]:
-        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
-        assert _redirect_shared_expert_name(mapped, frozenset(), 4) == expected
+        [(mapped, _)] = list(mapper.apply(renaming.apply([(raw, tensor)])))
+        assert _redirect_shared_expert_name(mapped, frozenset({6}), 4) == expected
 
 
 class _FakeMoE(nn.Module):
@@ -1206,7 +1191,7 @@ def _make_deepseek_v4_shared_expert_checkpoint(
     layer: nn.Module, idx: int, fused: bool, exclude: bool
 ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]]:
     """Build DSV4's FP8 shared-expert / MXFP4 routed-slot checkpoint pairs."""
-    ffn = layer.ffn
+    ffn = layer.mlp
     if not fused:
         dtype = torch.bfloat16 if exclude else torch.float8_e4m3fn
         hidden = ffn.shared_experts.gate_up_proj.weight.shape[1]
@@ -1215,8 +1200,8 @@ def _make_deepseek_v4_shared_expert_checkpoint(
         down = torch.full((hidden, intermediate), idx + 1, dtype=dtype)
         return (
             [
-                (f"layers.{idx}.ffn.shared_experts.gate_up_proj.weight", gate_up),
-                (f"layers.{idx}.ffn.shared_experts.down_proj.weight", down),
+                (f"layers.{idx}.mlp.shared_experts.gate_up_proj.weight", gate_up),
+                (f"layers.{idx}.mlp.shared_experts.down_proj.weight", down),
             ],
             [
                 (ffn.shared_experts.gate_up_proj.weight, gate_up),
@@ -1234,9 +1219,9 @@ def _make_deepseek_v4_shared_expert_checkpoint(
     w2 = torch.full((hidden, intermediate // 2), idx + 1, dtype=torch.uint8)
     return (
         [
-            (f"layers.{idx}.ffn.shared_experts.w1.weight", w1),
-            (f"layers.{idx}.ffn.shared_experts.w3.weight", w3),
-            (f"layers.{idx}.ffn.shared_experts.w2.weight", w2),
+            (f"layers.{idx}.mlp.shared_experts.gate_proj.weight", w1),
+            (f"layers.{idx}.mlp.shared_experts.up_proj.weight", w3),
+            (f"layers.{idx}.mlp.shared_experts.down_proj.weight", w2),
         ],
         [
             (routed.w13_weight[slot].chunk(2, dim=0)[0], w1),
@@ -1439,10 +1424,7 @@ def test_models_fse_init(
     """Construction and loading preserve each shared expert's precision."""
     _print_warning_once.cache_clear()
     per_layer_fse = model_type != "deepseek_v4_cpu"
-    moe_attr = {
-        "minimax_m3": "block_sparse_moe",
-        "deepseek_v4": "ffn",
-    }.get(model_type, "mlp")
+    moe_attr = "mlp"
     shared_name = (
         "shared_experts"
         if model_type
@@ -1464,7 +1446,7 @@ def test_models_fse_init(
         )
     quantization_config: dict[str, Any] = (
         get_deepseek_v4_quark_config(
-            [f"layers.{idx}.ffn.shared_experts" for idx in range(2)] if exclude else []
+            [f"layers.{idx}.mlp.shared_experts" for idx in range(2)] if exclude else []
         )
         if model_type == "deepseek_v4"
         else {**deepcopy(_QUARK_FSE_CONFIG), "exclude": exclude}
@@ -1495,7 +1477,7 @@ def test_models_fse_init(
         )
         if model_type == "deepseek_v4":
             quantization_config.setdefault("layer_quant_config", {})[
-                "layers.1.ffn.shared_experts.w1"
+                "layers.1.mlp.shared_experts.gate_proj"
             ] = deepcopy(mxfp8_config)
         else:
             quantization_config.setdefault("layer_quant_config", {}).update(
@@ -1783,9 +1765,9 @@ def test_models_fse_init(
             # CPU never supports fused shared experts; the separate MLP is
             # always built and no routed slot is appended.
             for layer in model.layers:
-                assert layer.ffn.shared_experts is not None
+                assert layer.mlp.shared_experts is not None
                 assert (
-                    layer.ffn.experts.expert_map_manager.num_fused_shared_experts == 0
+                    layer.mlp.experts.expert_map_manager.num_fused_shared_experts == 0
                 )
         else:
             assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)

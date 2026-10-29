@@ -1752,16 +1752,18 @@ def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
     layer = _make_mhc_decoder_layer(hc_mult=hc_mult, hidden_size=hidden_size)
     _, _, mixes, norm_weight = _mhc_fused_post_pre_inputs(num_tokens, hidden_size)
     _, _, fn, hc_scale, hc_base, *_ = mixes
-    layer.hc_attn_fn.data.copy_(fn)
-    layer.hc_attn_scale, layer.hc_attn_base = hc_scale, hc_base
-    layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base = fn, hc_scale, hc_base
+    layer.ffn_hc = DeepseekV4HyperConnection(hc_mult, hidden_size)
+    for hc in (layer.attn_hc, layer.ffn_hc):
+        hc.fn.data.copy_(fn)
+        hc.scale.data.copy_(hc_scale)
+        hc.base.data.copy_(hc_base)
     norm = SimpleNamespace(weight=norm_weight, variance_epsilon=1e-6)
-    layer.attn_norm = layer.ffn_norm = norm
+    layer.input_layernorm = layer.post_attention_layernorm = norm
     layer.rms_norm_eps, layer.hc_eps, layer.hc_post_alpha = 1e-6, 1e-6, 1.0
     layer.hc_sinkhorn_iters = 20
     layer.use_sequence_parallel = False
-    layer.attn = lambda positions, x, _: x * 0.5
-    layer.ffn = lambda x, input_ids, metadata: x * 2.0
+    layer.self_attn = lambda positions, x, _: x * 0.5
+    layer.mlp = lambda x, input_ids, metadata: x * 2.0
     positions = torch.arange(num_tokens)
 
     x = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)

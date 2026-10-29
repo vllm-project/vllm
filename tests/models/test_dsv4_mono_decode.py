@@ -45,7 +45,7 @@ def _layer(ratio=md.CSA, tid2eid=None):
         topk_indices_buffer=torch.zeros(64, 1024, dtype=torch.int32),
     )
     ffn = SimpleNamespace(gate=SimpleNamespace(tid2eid=tid2eid))
-    return SimpleNamespace(attn=attn, ffn=ffn)
+    return SimpleNamespace(self_attn=attn, mlp=ffn)
 
 
 def _swa(**overrides):
@@ -126,7 +126,7 @@ def test_csa_step_runs_mono_with_its_topk(run, mode):
     out, calls = run(mode, layer=layer)
     assert out == ("x", "residual", "post_mix", "res_mix") and len(calls) == 1
     kwargs = calls[0][1]
-    assert kwargs["topk_indices"] is layer.attn.topk_indices_buffer
+    assert kwargs["topk_indices"] is layer.self_attn.topk_indices_buffer
     # the CSA cache: a 256-token page holds 64 compressed records
     assert kwargs["comp_cache"].shape == (4, 64, md.RECORD)
     assert kwargs["fold"] and kwargs["route_ids"] is None
@@ -173,9 +173,9 @@ def test_select_runs_the_compressor_then_the_indexer(run, ratio, indexed, expect
             log.append("topk")
 
     layer = _layer(ratio)
-    layer.attn.compressor = Compressor()
-    layer.attn.indexer = Indexer() if ratio == md.CSA else None
-    layer.attn.rotary_emb = layer.attn.indexer_rotary_emb = None
+    layer.self_attn.compressor = Compressor()
+    layer.self_attn.indexer = Indexer() if ratio == md.CSA else None
+    layer.self_attn.rotary_emb = layer.self_attn.indexer_rotary_emb = None
     _, calls = run(layer=layer)
     calls[0][1]["select"](normed, qr)
     assert log == expected
@@ -255,7 +255,7 @@ def test_other_steps_take_the_original_path(run, case):
 def _decoder_layer(layer_id=5, **attn):
     attn = (
         dict(
-            prefix=f"model.layers.{layer_id}.attn",
+            prefix=f"model.layers.{layer_id}.self_attn",
             compress_ratio=md.CSA,
             indexer=object(),
             kv_cache_dtype="fp8_ds_mla",
@@ -280,8 +280,8 @@ def _decoder_layer(layer_id=5, **attn):
         renormalize=True,
     )
     return SimpleNamespace(
-        attn=SimpleNamespace(**attn),
-        ffn=ffn,
+        self_attn=SimpleNamespace(**attn),
+        mlp=ffn,
         use_fused_mhc=True,
         fuse_mhc_rmsnorm=True,
     )

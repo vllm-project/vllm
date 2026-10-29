@@ -492,7 +492,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
     def random_moe(layer):
         """A layer's MoE (layer 0's routes by hash) and its exact reference."""
         with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
-            moe = DeepseekV4MoE(vc, prefix=f"model.layers.{layer}.ffn")
+            moe = DeepseekV4MoE(vc, prefix=f"model.layers.{layer}.mlp")
         _random_moe(
             moe,
             torch.Generator(device=device).manual_seed(2001 + rank + 10 * layer),

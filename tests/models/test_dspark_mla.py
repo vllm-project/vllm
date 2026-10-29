@@ -307,7 +307,7 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
         model=SimpleNamespace(
             layers=[
                 SimpleNamespace(
-                    ffn=SimpleNamespace(
+                    mlp=SimpleNamespace(
                         use_native_mega_moe=False,
                         use_mega_moe=False,
                         n_redundant_experts=4,
@@ -424,12 +424,11 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch, dspark_mod
             return stacked_output
 
     projection = StackedProjection()
-    layers = [
-        SimpleNamespace(
-            self_attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset)
-        )
-        for i in range(3)
+    attns = [
+        SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset) for i in range(3)
     ]
+    # V4 uses the Transformers name, V4.1 the original one
+    layers = [SimpleNamespace(self_attn=attn, attn=attn) for attn in attns]
     model = SimpleNamespace(
         config=SimpleNamespace(head_dim=4),
         context_wkv_proj=projection,

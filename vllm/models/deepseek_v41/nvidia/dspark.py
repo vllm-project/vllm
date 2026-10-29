@@ -67,6 +67,7 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -419,7 +420,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
-        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
+        weights = _duplicate_context_wkv_weights(
+            weights, len(self.model.layers), _CONTEXT_WKV_RE
+        )
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:

@@ -53,8 +53,8 @@ from vllm.transformers_utils.repo_utils import hf_api
 @pytest.mark.parametrize(
     "module_name,class_name,sink_name",
     [
-        ("mimo_v2_mtp", "MiMoV2MTP", "attention_sink_bias"),
-        ("mimo_v2_mtp", "MiMoV2OmniMTP", "attention_sink_bias"),
+        ("mimo_v2_mtp", "MiMoV2MTP", "sinks"),
+        ("mimo_v2_mtp", "MiMoV2OmniMTP", "sinks"),
         ("laguna", "LagunaModel", "sink"),
         ("qwen3_dflash", "DFlashQwen3Model", "attention_sink_bias"),
     ],
@@ -102,9 +102,9 @@ def test_attention_sink_model_loading_shards_once(
 @pytest.mark.parametrize(
     "module_name,class_name,attention_name,sink_name",
     [
-        ("deepseek_v4", "DeepseekV4Model", "attn", "attn_sink"),
+        ("deepseek_v4", "DeepseekV4Model", "self_attn", "sinks"),
         ("deepseek_v41", "DeepseekV4Model", "attn", "attn_sink"),
-        ("hy_v4", "HYV4Model", "self_attn", "learnable_sink_param"),
+        ("hy_v4", "HYV4Model", "self_attn", "sinks"),
     ],
 )
 def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
