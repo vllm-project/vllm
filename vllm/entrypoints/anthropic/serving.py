@@ -34,6 +34,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicTool,
     AnthropicToolChangeDefinition,
     AnthropicUsage,
+    translate_error_type,
 )
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
@@ -49,15 +50,26 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
+
+
+class _StreamError(Exception):
+    """Carries the ErrorInfo from an upstream ErrorResponse through the stream
+    converter so the SSE ``error`` event can reuse its status code to pick the
+    Anthropic error type."""
+
+    def __init__(self, error_info: ErrorInfo) -> None:
+        super().__init__(error_info.message)
+        self.error_info = error_info
 
 
 def _build_anthropic_usage(
@@ -143,6 +155,67 @@ def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
+class DisabledThinkingEffortResolver:
+    """Resolve and cache the effort used for Anthropic disabled thinking."""
+
+    def __init__(
+        self,
+        renderer: OnlineRenderer,
+        effort: AnthropicDisabledThinkingEffortOption = "auto",
+    ):
+        self._renderer = renderer
+        self._effort: AnthropicDisabledThinkingEffort | None = (
+            None if effort == "auto" else effort
+        )
+
+    async def resolve_for(
+        self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+    ) -> AnthropicDisabledThinkingEffort:
+        if request.thinking is None or request.thinking.type != "disabled":
+            return "none"
+        if self._effort is None:
+            self._effort = await self._probe()
+            logger.info(
+                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                self._effort,
+            )
+        return self._effort
+
+    async def _probe(self) -> AnthropicDisabledThinkingEffort:
+        """Use ``low`` if the renderer rejects or ignores ``none``.
+
+        ``none`` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        """
+        none_prompt = await self._render_probe_prompt("none")
+        if none_prompt is None:
+            return "low"
+        for effort in get_args(AnthropicEffort):
+            if await self._render_probe_prompt(effort) == none_prompt:
+                return "low"
+        return "none"
+
+    async def _render_probe_prompt(
+        self, effort: AnthropicDisabledThinkingEffort
+    ) -> tuple[list[int] | None, str | None] | None:
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hi"}],
+            reasoning_effort=effort,
+        )
+        try:
+            result = await self._renderer.render_chat(request)
+        except Exception:
+            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
+            return None
+        if isinstance(result, ErrorResponse):
+            return None
+        _, (engine_input,) = result
+        components = extract_prompt_components(
+            self._renderer.model_config, engine_input
+        )
+        return components.token_ids, components.text
+
+
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests."""
 
@@ -188,53 +261,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
-        # Resolved lazily from the renderer when "auto".
-        self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
-            None if disabled_thinking_effort == "auto" else disabled_thinking_effort
+        self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+            online_renderer, disabled_thinking_effort
         )
-
-    async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        if self._disabled_thinking_effort is None:
-            self._disabled_thinking_effort = (
-                await self._probe_disabled_thinking_effort()
-            )
-            logger.info(
-                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
-                self._disabled_thinking_effort,
-            )
-        return self._disabled_thinking_effort
-
-    async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        """Use ``low`` if the renderer rejects or ignores ``none``.
-
-        ``none`` is ignored when it renders the same prompt as a thinking
-        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
-        """
-        none_prompt = await self._render_probe_prompt("none")
-        if none_prompt is None:
-            return "low"
-        for effort in get_args(AnthropicEffort):
-            if await self._render_probe_prompt(effort) == none_prompt:
-                return "low"
-        return "none"
-
-    async def _render_probe_prompt(
-        self, effort: AnthropicDisabledThinkingEffort
-    ) -> tuple[list[int] | None, str | None] | None:
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Hi"}],
-            reasoning_effort=effort,
-        )
-        try:
-            result = await self.online_renderer.render_chat(request)
-        except Exception:
-            logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
-            return None
-        if isinstance(result, ErrorResponse):
-            return None
-        _, (engine_input,) = result
-        components = self._extract_prompt_components(engine_input)
-        return components.token_ids, components.text
 
     @classmethod
     def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
@@ -295,7 +324,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                 add_generation_prompt=False,
             )
             return False
-        except jinja2.TemplateError:
+        except Exception:
+            # Non-TemplateError failures (e.g. TypeError from filters on
+            # undefined variables) must not abort server startup.
             return True
 
     @staticmethod
@@ -816,9 +847,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = await self._get_disabled_thinking_effort()
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
@@ -1014,7 +1045,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             async for origin_chunk in generator:
                 if isinstance(origin_chunk, ErrorResponse):
-                    raise RuntimeError(origin_chunk.error.message)
+                    raise _StreamError(origin_chunk.error)
                 if first_item:
                     chunk = AnthropicStreamEvent(
                         type="message_start",
@@ -1214,11 +1245,19 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             for event in stop_active_block():
                 yield event
+            if isinstance(e, _StreamError):
+                # Reuse the ErrorResponse status code so the SSE error event
+                # uses the same Anthropic vocabulary as the non-streaming
+                # path (e.g. overloaded_error, not_found_error). The message
+                # was already sanitized by create_error_response upstream.
+                error_type = translate_error_type(e.error_info.code)
+                message = e.error_info.message
+            else:
+                error_type = "api_error"
+                message = sanitize_message(str(e))
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(
-                    type="internal_error", message=sanitize_message(str(e))
-                ),
+                error=AnthropicError(type=error_type, message=message),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
@@ -1229,9 +1268,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = await self._get_disabled_thinking_effort()
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
