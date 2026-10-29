@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
-    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -592,17 +591,14 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    alignments = [
-        group.kv_cache_spec.page_size_bytes
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-    ]
-    alignments.extend(
-        _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
-        for group in kv_cache_groups
-        for layer_name in group.layer_names
+    alignment = math.lcm(
+        *(
+            _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        )
     )
-    return round_up(bytes_per_block, math.lcm(*alignments))
+    return round_up(bytes_per_block, alignment)
 
 
 def validate_kv_cache_layout(

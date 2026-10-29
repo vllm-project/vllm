@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -102,16 +103,25 @@ def _fail_one_allocation(scheduler, call_number: int):
     )
 
 
-def test_gate_enabled_for_async_consumer():
+@pytest.mark.parametrize("reads_released_blocks", [False, True])
+def test_gate_enabled_for_async_consumer(reads_released_blocks):
     # Overlapping batches + consumer-side connector enables the gate. Async
     # scheduling (which would give >1 concurrent batches) is force-disabled on
     # CPU, where this test runs, and PP can't be built without GPUs, so force
     # max_concurrent_batches to exercise the enabled path on any platform.
-    with patch.object(
-        VllmConfig,
-        "max_concurrent_batches",
-        new_callable=PropertyMock,
-        return_value=2,
+    with (
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+        patch.object(
+            KVConnectorBase_V1,
+            "reads_released_blocks",
+            new_callable=PropertyMock,
+            return_value=reads_released_blocks,
+        ),
     ):
         scheduler = create_scheduler(
             model=MODEL,
@@ -119,6 +129,7 @@ def test_gate_enabled_for_async_consumer():
             use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
         )
     assert scheduler.defer_block_free
+    assert scheduler.defer_async_loads == reads_released_blocks
 
 
 def test_gate_disabled_without_connector():
