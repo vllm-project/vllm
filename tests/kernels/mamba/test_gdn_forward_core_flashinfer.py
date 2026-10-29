@@ -17,6 +17,7 @@ actual row the layer fails to write shows up.
 """
 
 import dataclasses
+import functools
 import types
 from unittest.mock import patch
 
@@ -236,18 +237,24 @@ def test_flashinfer_prefill_routes_match(case, state_dtype):
     torch.testing.assert_close(ssm_state, ref_ssm, atol=tol, rtol=tol)
 
 
+@pytest.mark.parametrize("use_cp", ["auto", False])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("prefill_lens", [[300], [300, 200]])
-def test_flashinfer_checkpointed_prefill_pool_matches_gather(prefill_lens, cached):
+def test_flashinfer_checkpointed_prefill_pool_matches_gather(
+    prefill_lens, cached, state_dtype, use_cp
+):
     """Prefix-caching (align mode) prefills emit checkpoints; with the pool
     route the outputs, final states and exported checkpoints match the gather
-    route."""
+    route. FlashInfer picks its CP kernel for these few rows under "auto";
+    use_cp=False forces the regular kernel that serving batches take, which
+    cannot checkpoint from a bf16 pool (those prefills gather instead)."""
     gen = torch.Generator(device="cuda").manual_seed(0)
     num_decodes, context = 2, 37 if cached else 0
     seq_lens = [64] * num_decodes + [n + context for n in prefill_lens]
     query_lens = [1] * num_decodes + prefill_lens
     common, weights, inputs, conv_state0, ssm_state0 = _setup(
-        seq_lens, query_lens, torch.float32, gen
+        seq_lens, query_lens, state_dtype, gen
     )
     fi_cfg, fi_builder = _builder("flashinfer")
     with set_current_vllm_config(fi_cfg):
@@ -275,8 +282,14 @@ def test_flashinfer_checkpointed_prefill_pool_matches_gather(prefill_lens, cache
     workspace = types.SimpleNamespace(
         get_simultaneous=lambda spec: [torch.empty(*spec[0], device="cuda")]
     )
-    with patch.object(
-        qwen_gdn_linear_attn, "current_workspace_manager", return_value=workspace
+    fi_chunk = functools.partial(
+        qwen_gdn_linear_attn.fi_chunk_gated_delta_rule, use_cp=use_cp
+    )
+    with (
+        patch.object(
+            qwen_gdn_linear_attn, "current_workspace_manager", return_value=workspace
+        ),
+        patch.object(qwen_gdn_linear_attn, "fi_chunk_gated_delta_rule", fi_chunk),
     ):
         out, conv, ssm = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
         meta_gather = dataclasses.replace(meta, prefill_initial_state_mode="mixed")
