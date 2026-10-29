@@ -181,10 +181,6 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
             torch.nn.Parameter(packed, requires_grad=False),
         )
 
-        # Free the original unpacked int8 weight (still registered as "weight")
-        # to avoid double-storing both int8 [N, K] and int32 [N, K/8] in memory.
-        delattr(layer, "weight")
-
     def apply_weights(
         self,
         layer: torch.nn.Module,
