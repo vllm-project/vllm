@@ -285,11 +285,12 @@ class DeepseekV41ModelState(DefaultModelState):
             params = new_req_data.sampling_params
             engram_config = self.vllm_config.engram_config
             kv_config = self.vllm_config.kv_transfer_config
-            # Preserve the full producer-side context until bounded replay is
-            # proven equivalent for disaggregated remote-table requests.
+            # Match local-table bounded replay by default; keep-all remains
+            # available as a conservative remote-table comparison mode.
             remote_producer = bool(
                 engram_config
                 and engram_config.rdma_provider
+                and engram_config.rdma_keep_prefill_rows
                 and kv_config
                 and kv_config.is_kv_producer
             )
