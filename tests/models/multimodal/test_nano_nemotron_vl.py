@@ -60,7 +60,7 @@ def test_nemotron_resized_normalization_matches_reference(
 
     if not do_cpu_normalize:
         assert output.dtype == torch.uint8
-        model = object.__new__(NemotronH_Nano_VL_V2)
+        model = _uninitialized_model()
         nn.Module.__init__(model)
         model.input_norm = FusedMMInputNorm(
             mean.flatten().tolist(), std.flatten().tolist(), 1.0 / 255.0
@@ -89,7 +89,7 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
     shape = (1, 7, 3 * 16 * 16)
     pixels = torch.randint(0, 256, shape, dtype=torch.uint8)
 
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = FusedMMInputNorm(image_mean, image_std, 1.0 / 255.0).to(_DEVICE)
     model.llm_dtype = torch.bfloat16
@@ -107,7 +107,7 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
 
 def test_nemotron_cpu_normalized_pixels_bypass_input_norm():
     pixels = torch.randn(1, 3, 16, 16)
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = None
 
@@ -175,7 +175,7 @@ def test_nemotron_processor_defers_normalization_to_device(
     # Normalizing on the device hands the encoder the same dtype as the CPU
     # path. Values differ only where the uint8 resize rounds or clips the
     # bicubic overshoot: a few elements by several levels, tiny on average.
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = FusedMMInputNorm(
         config.norm_mean, config.norm_std, 1.0 / 255.0
