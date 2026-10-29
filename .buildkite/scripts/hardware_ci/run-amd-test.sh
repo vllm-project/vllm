@@ -75,15 +75,14 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
   -o faulthandler_timeout=1500 \
   --timeout-method=thread"
 
-# A native fault prints its backtrace, and once pytest has its result, a fault in native
-# library teardown (where it has crashed with SIGSEGV after every test passed) exits with
-# that result instead of failing the job (amd_ci_teardown.py).
+# After its summary, a pytest process leaves without native library teardown, where it
+# has crashed with SIGSEGV after every test passed (amd_ci_fast_exit.py).
 # Installed into site-packages, not put on PYTHONPATH: commands that set PYTHONPATH themselves
 # still inherit PYTEST_ADDOPTS and must find the plugin.
 ci_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-cp "$ci_dir/amd_ci_teardown.py" \
+cp "$ci_dir/amd_ci_fast_exit.py" \
   "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/" || exit 1
-export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_teardown"
+export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_fast_exit"
 
 [[ $gpus == 0 ]] && export VLLM_TARGET_DEVICE=cpu
 

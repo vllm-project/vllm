@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Native fault handler for AMD CI pytest processes, loaded by amd_ci_teardown.py and
+// Native fault reporter for AMD CI pytest processes, loaded by amd_ci_fast_exit.py and
 // built into the CI image (docker/Dockerfile.rocm).
 //
-// On SIGSEGV, SIGBUS or SIGABRT it prints the native backtrace, which
-// names the library that faulted. Before it is armed, the fault then proceeds as
-// it would have (Python's faulthandler, then the default action), so a crash
-// during a test still fails the test. Once armed with pytest's exit status, a
-// fault is a teardown fault: it exits with that status instead.
+// On SIGSEGV, SIGBUS or SIGABRT it prints the native backtrace, which names the library
+// that faulted. The plugin installs it underneath Python's faulthandler, which prints the
+// Python traceback first and then hands the signal on. The fault then proceeds as it would
+// have, so it fails the test or the job as before.
 //
 // Not covered: a stack overflow in a thread other than the one that installed the
 // handler (no alternate signal stack there), as with Python's faulthandler.
@@ -24,7 +23,7 @@ static const char *const names[] = {"SIGSEGV", "SIGBUS", "SIGABRT"};
 #define NSIG_TRAPPED (sizeof signals / sizeof signals[0])
 
 static struct sigaction previous[NSIG_TRAPPED];
-static volatile sig_atomic_t armed, status, entered;
+static volatile sig_atomic_t entered;
 static int out = STDERR_FILENO;
 static char altstack[64 * 1024];
 
@@ -46,7 +45,6 @@ static void say_int(long v) {
 static void handle(int sig, siginfo_t *info, void *ctx) {
   size_t i;
   if (entered++) {  // faulted while reporting: finish without the report
-    if (armed) _exit(status);
     signal(sig, SIG_DFL);
     raise(sig);
     return;
@@ -56,15 +54,9 @@ static void handle(int sig, siginfo_t *info, void *ctx) {
     if (signals[i] == sig) say(names[i]);
   say(" in pid ");
   say_int(getpid());
-  say(armed ? ", after pytest finished\n" : "\n");
+  say("\n");
   void *frames[64];
   backtrace_symbols_fd(frames, backtrace(frames, 64), out);
-  if (armed) {
-    say("[amd-ci] a teardown fault, not a test result: exiting with pytest's status ");
-    say_int(status);
-    say("\n");
-    _exit(status);
-  }
   entered = 0;
   for (i = 0; i < NSIG_TRAPPED; i++) {
     if (signals[i] != sig) continue;
@@ -82,8 +74,7 @@ static void handle(int sig, siginfo_t *info, void *ctx) {
   raise(sig);  // a hardware fault would also re-fault on return; raise covers abort()
 }
 
-// (Re)install the handler, reporting to fd. Python's faulthandler restores the handler
-// it replaced when it is disabled, so the plugin installs again once faulthandler is done.
+// Install the handler, reporting to fd.
 int amd_ci_trap_install(int fd) {
   stack_t ss = {.ss_sp = altstack, .ss_size = sizeof altstack};
   struct sigaction sa, old;
@@ -95,7 +86,8 @@ int amd_ci_trap_install(int fd) {
   memset(&sa, 0, sizeof sa);
   sa.sa_sigaction = handle;
   // SA_NODEFER: a fault while reporting (an unwinder on a broken stack) re-enters the
-  // handler, which then exits, instead of the kernel killing the process with it blocked.
+  // handler, which then finishes without the report, instead of the kernel killing the
+  // process with the signal blocked.
   sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
   sigemptyset(&sa.sa_mask);
   for (i = 0; i < NSIG_TRAPPED; i++) {
@@ -104,10 +96,3 @@ int amd_ci_trap_install(int fd) {
   }
   return 0;
 }
-
-void amd_ci_trap_arm(int pytest_status) {
-  status = pytest_status;
-  armed = 1;
-}
-
-void amd_ci_trap_disarm(void) { armed = 0; }
