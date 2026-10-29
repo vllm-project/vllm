@@ -6,7 +6,6 @@ import os
 from collections.abc import Callable, Hashable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
 from itertools import accumulate
 from math import prod
 from typing import TypeVar, cast
@@ -47,15 +46,6 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
         _workspace_lane.reset(token)
 
 
-@dataclass
-class _RetainedRegion:
-    """The tail span of a scratch workspace last handed out by get_retained."""
-
-    key: Hashable
-    start: int
-    intact: bool
-
-
 class WorkspaceManager:
     """Manager for workspace allocation.
 
@@ -83,7 +73,9 @@ class WorkspaceManager:
         self._persistent_resources: list[dict[Hashable, object]] = [
             {} for _ in self._current_workspaces
         ]
-        self._retained: list[_RetainedRegion | None] = [
+        # Per slot, (key, start) of the tail span get_retained last handed out;
+        # cleared when a scratch request reaches into it or on reallocation.
+        self._retained: list[tuple[Hashable, int] | None] = [
             None for _ in self._current_workspaces
         ]
         self._locked: bool = False
@@ -211,9 +203,10 @@ class WorkspaceManager:
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
         current_workspace = self._ensure_workspace_size(total_bytes)
-        retained = self._retained[self._get_workspace_id()]
-        if retained is not None and total_bytes > retained.start:
-            retained.intact = False
+        workspace_id = self._get_workspace_id()
+        retained = self._retained[workspace_id]
+        if retained is not None and total_bytes > retained[1]:
+            self._retained[workspace_id] = None
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -248,14 +241,8 @@ class WorkspaceManager:
         workspace_id = self._get_workspace_id()
         current_workspace = self._ensure_workspace_size(num_bytes)
         start = (current_workspace.numel() - num_bytes) // 256 * 256
-        previous = self._retained[workspace_id]
-        intact = (
-            previous is not None
-            and previous.intact
-            and previous.key == key
-            and previous.start == start
-        )
-        self._retained[workspace_id] = _RetainedRegion(key, start, intact=True)
+        intact = self._retained[workspace_id] == (key, start)
+        self._retained[workspace_id] = (key, start)
         view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
         return view, intact
 
