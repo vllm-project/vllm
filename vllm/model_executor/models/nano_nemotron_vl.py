@@ -9,6 +9,7 @@
 
 import math
 import warnings
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from io import BytesIO
@@ -75,8 +76,11 @@ from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     HFMultiModalInputs,
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
+    ResolvedPromptUpdate,
     cached_encode,
 )
 from vllm.multimodal.video_prune.evs import (
@@ -696,6 +700,58 @@ class NanoNemotronVLMultiModalProcessor(
         new_mm_items = MultiModalDataItems(new_mm_items_dict)
 
         return new_mm_items, audio_items, has_audio
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs.
+
+        ``<video>`` is not a vocabulary token, so when it directly follows
+        non-whitespace text (``"Describe this clip.<video>"``) BPE merges it
+        with its neighbour (``".<"``, ``"video"``, ``">"``) and the token-level
+        match fails. The base class then re-applies the updates in text space
+        and re-encodes the joined text, but the same merge now happens between
+        the prompt text and the first frame separator of the replacement
+        (``".Frame"``), so the replacement token sequence is never found and
+        the request fails with "found 0 prompt placeholders". Encoding the
+        text segments separately keeps the replacement intact, as MiniCPM-V
+        already does for the same reason.
+        """
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        if not all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            new_token_ids, match_result = self._apply_prompt_updates_via_text(
+                token_ids,
+                mm_prompt_updates,
+                encode_segments_separately=True,
+            )
+
+        matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
+        for modality, update_idxs in match_result.items():
+            for item_idx, update_idx in enumerate(update_idxs):
+                assert update_idx is not None, (
+                    "Failed to apply prompt replacement for "
+                    f"mm_items[{modality!r}][{item_idx}]"
+                )
+
+                matched_updates[modality].append(
+                    [mm_prompt_updates[modality][item_idx][update_idx]]
+                )
+
+        placeholders = self._find_mm_placeholders(
+            new_token_ids,
+            dict(matched_updates),
+        )
+
+        return new_token_ids, placeholders
 
     def apply(
         self,
