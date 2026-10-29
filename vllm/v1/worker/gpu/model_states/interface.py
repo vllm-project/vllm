@@ -127,14 +127,22 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        """Hook run after the KV cache tensors are allocated and bound."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture the CUDA graphs this state runs inside the model's forward."""
+        """Capture the CUDA graphs this state runs inside the model's forward,
+        on ``stream``: the model graphs' capture stream."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:

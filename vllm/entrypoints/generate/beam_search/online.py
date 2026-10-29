@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import math
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -32,7 +33,11 @@ from vllm.utils.async_utils import collect_from_async_generator
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 from .choice_trie import ChoiceTrie
-from .utils import BeamSearchSequence, create_sort_beams_key_function
+from .utils import (
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+    get_beam_search_eos_token_ids,
+)
 
 logger = init_logger(__name__)
 
@@ -55,6 +60,7 @@ class BeamSearchOnlineMixin(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -65,8 +71,6 @@ class BeamSearchOnlineMixin(ABC):
         self.engine_client.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
-        eos_token_id = tokenizer.eos_token_id
-        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
         if prompt["type"] == "embeds":
             raise NotImplementedError("Embedding prompt not supported for beam search")
@@ -88,6 +92,15 @@ class BeamSearchOnlineMixin(ABC):
             watermarking=False,
             detokenize=False,
         )
+        params.configure_logprobs(
+            sampling_params, self.engine_client.input_processor.vllm_config
+        )
+        allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
+        eos_token_ids = get_beam_search_eos_token_ids(
+            self.engine_client.input_processor.generation_config_fields,
+            tokenizer.eos_token_id,
+        )
+        sort_beams_key = create_sort_beams_key_function(length_penalty)
 
         so_backend: StructuredOutputBackend | None = None
         so_key: tuple | None = None
@@ -133,7 +146,8 @@ class BeamSearchOnlineMixin(ABC):
                     over_cap_logprobs=over_cap_logprobs,
                     beam_width=beam_width,
                     temperature=temperature,
-                    eos_token_id=eos_token_id,
+                    eos_token_ids=eos_token_ids,
+                    allowed=allowed,
                     ignore_eos=ignore_eos,
                     include_stop_str_in_output=include_stop_str_in_output,
                     so_backend=so_backend,
@@ -143,6 +157,7 @@ class BeamSearchOnlineMixin(ABC):
                     vocab_size=vocab_size,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    priority=priority,
                 )
                 if error_output is not None:
                     yield error_output
@@ -158,7 +173,7 @@ class BeamSearchOnlineMixin(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            if beam.tokens[-1] == eos_token_id and not ignore_eos:
+            if beam.tokens[-1] in eos_token_ids and not ignore_eos:
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
@@ -203,7 +218,8 @@ class BeamSearchOnlineMixin(ABC):
         over_cap_logprobs: int,
         beam_width: int,
         temperature: float,
-        eos_token_id: int | None,
+        eos_token_ids: set[int],
+        allowed: set[int] | None,
         ignore_eos: bool,
         include_stop_str_in_output: bool,
         so_backend: StructuredOutputBackend | None,
@@ -213,6 +229,7 @@ class BeamSearchOnlineMixin(ABC):
         vocab_size: int,
         trace_headers: Mapping[str, str] | None,
         session_id: str | None,
+        priority: int,
     ) -> tuple[list[BeamSearchSequence], RequestOutput | None]:
         """Advance beam search by one token step.
 
@@ -265,7 +282,7 @@ class BeamSearchOnlineMixin(ABC):
         else:
             active_beams = all_beams
             beam_params_list = [sampling_params] * len(all_beams)
-            allowed_sets = [None] * len(all_beams)
+            allowed_sets = [allowed] * len(all_beams)
 
         tasks = []
         request_id_batch = f"{request_id}-{random_uuid()}"
@@ -283,6 +300,7 @@ class BeamSearchOnlineMixin(ABC):
                         lora_request=lora_request_item,
                         trace_headers=trace_headers,
                         session_id=session_id,
+                        priority=priority,
                     )
                 )
             )
@@ -325,24 +343,36 @@ class BeamSearchOnlineMixin(ABC):
 
             if result.outputs[0].logprobs is not None:
                 logprobs = result.outputs[0].logprobs[0]
-                allowed = allowed_sets[i]
+                if allowed is not None:
+                    logprobs = {
+                        token: score
+                        for token, score in sorted(
+                            logprobs.items(),
+                            key=lambda item: item[1].logprob,
+                            reverse=True,
+                        )
+                        if token in allowed and math.isfinite(score.logprob)
+                    }
+                    for score in logprobs.values():
+                        score.rank = None
+                beam_allowed = allowed_sets[i]
                 beam_produced = False
                 for token_id, logprob_obj in logprobs.items():
-                    if allowed is not None and token_id not in allowed:
+                    if beam_allowed is not None and token_id not in beam_allowed:
                         continue
                     candidate_logprob = current_beam.cum_logprob + logprob_obj.logprob
-                    if token_id == eos_token_id and not ignore_eos:
+                    if token_id in eos_token_ids and not ignore_eos:
                         beam_produced = True
                         completed.append(
                             BeamSearchSequence(
                                 orig_prompt=prompt,
-                                tokens=current_beam.tokens + [eos_token_id]
+                                tokens=current_beam.tokens + [token_id]
                                 if include_stop_str_in_output
                                 else current_beam.tokens,
                                 logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=candidate_logprob,
                                 finish_reason="stop",
-                                stop_reason=eos_token_id,
+                                stop_reason=token_id,
                             )
                         )
                     else:
@@ -357,8 +387,8 @@ class BeamSearchOnlineMixin(ABC):
                         )
                 if (
                     not beam_produced
-                    and allowed is not None
-                    and len(allowed) > _MAX_NUM_ALLOWED_TOKEN_IDS
+                    and beam_allowed is not None
+                    and len(beam_allowed) > _MAX_NUM_ALLOWED_TOKEN_IDS
                 ):
                     # Over-cap regime (see _build_online_so_params): the engine
                     # sampled unconstrained and none of its top logprobs fell
@@ -375,7 +405,7 @@ class BeamSearchOnlineMixin(ABC):
                         "logprobs were valid. Returning this beam as a "
                         "length-truncated output (stop_reason=%r).",
                         request_id,
-                        len(allowed),
+                        len(beam_allowed),
                         _MAX_NUM_ALLOWED_TOKEN_IDS,
                         over_cap_logprobs,
                         OVER_CAP_STOP_REASON,
