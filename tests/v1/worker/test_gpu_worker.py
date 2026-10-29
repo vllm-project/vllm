@@ -530,12 +530,46 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
     )
-    # The rank's committable count is both used for warmup and returned for
-    # the engine to agree on.
-    assert Worker.initialize_from_config(worker, kv_cache_config) == 42
-    assert runner.extensible_kv_cache.warmup_committable_blocks == 42
+    # Warmup commits what every rank can: another can commit two fewer.
+    monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)
+    Worker.initialize_from_config(worker, kv_cache_config)
+    assert runner.extensible_kv_cache.warmup_committable_blocks == 40
     assert log == ["initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
+
+
+@pytest.mark.parametrize(
+    ("local_reason", "any_rank_unsupported", "expected"),
+    [
+        (None, False, None),
+        (None, True, "another rank cannot use it"),
+        ("no VMM support", True, "no VMM support"),
+    ],
+)
+def test_ranks_agree_on_extensible_kv_cache(
+    monkeypatch: pytest.MonkeyPatch, local_reason, any_rank_unsupported, expected
+):
+    """Every rank in the world group (this engine's, and with MoE data
+    parallelism or the external launcher, its peers') must decide alike: one
+    that keeps the cache would wait in its block-count all-reduces for one
+    that dropped it."""
+    import torch.distributed as dist
+
+    from vllm.v1.worker.gpu_worker import Worker
+
+    reduced: list[tuple[int, object]] = []
+
+    def all_reduce_int(group, value: int, op) -> int:
+        reduced.append((value, op))
+        return int(any_rank_unsupported)
+
+    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", lambda: local_reason)
+    monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
+    monkeypatch.setattr(
+        gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
+    )
+    assert Worker.extensible_kv_cache_unsupported_reason(SimpleNamespace()) == expected
+    assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
 
 
 @pytest.mark.parametrize("connector_pool", [None, object()])

@@ -126,26 +126,14 @@ class Executor(ABC):
     def _init_executor(self) -> None:
         raise NotImplementedError
 
-    def initialize_from_config(
-        self, kv_cache_configs: list[KVCacheConfig]
-    ) -> int | None:
-        """Initialize the KV caches on the underlying workers.
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        """Initialize the KV caches on the underlying workers."""
+        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
 
-        Returns the blocks warmup may commit to an extensible KV cache on every
-        worker (the minimum), or None without one.
-        """
-        committable: list[int | None] = self.collective_rpc(
-            "initialize_from_config", args=(kv_cache_configs,)
-        )
-        return min((c for c in committable if c is not None), default=None)
-
-    def compile_or_warm_up_model(
-        self, num_committable_kv_blocks: int | None = None
-    ) -> list[CompilationTimes]:
+    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
         """Compile/warm up the model and capture cudagraphs on workers."""
-        args = () if num_committable_kv_blocks is None else (num_committable_kv_blocks,)
         compilation_times: list[CompilationTimes] = self.collective_rpc(
-            "compile_or_warm_up_model", args=args
+            "compile_or_warm_up_model"
         )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
+from torch.distributed import ReduceOp
 
 import vllm.envs as envs
 from vllm.config import (
@@ -53,9 +54,11 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
     get_tp_group,
+    get_world_group,
     resume_device_comms,
     suspend_device_comms,
 )
+from vllm.distributed.utils import all_reduce_int
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
@@ -125,6 +128,12 @@ from .gpu.warmup import run_kv_cache_sizing_warmup, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _min_across_ranks(value: int) -> int:
+    """Minimum of value over the world group: every rank of this engine and of
+    those that run in lockstep with it (MoE data parallel, external launcher)."""
+    return all_reduce_int(get_world_group().cpu_group, value)
 
 
 def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
@@ -921,13 +930,8 @@ class Worker(WorkerBase):
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     @instrument(span_name="Allocate KV cache")
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> int | None:
-        """Allocate GPU KV cache with the specified kv_cache_config.
-
-        Returns the blocks warmup may commit to an extensible KV cache on this
-        rank; the engine passes the minimum to `compile_or_warm_up_model`.
-        """
-        committable_blocks: int | None = None
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate GPU KV cache with the specified kv_cache_config."""
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -982,8 +986,10 @@ class Worker(WorkerBase):
                 kv_cache.reserved_headroom_bytes = getattr(
                     self, "peak_activation_memory", 0
                 )
-                committable_blocks = kv_cache.committable_blocks()
-                kv_cache.warmup_committable_blocks = committable_blocks
+                # Every rank must warm up the same shapes.
+                kv_cache.warmup_committable_blocks = _min_across_ranks(
+                    kv_cache.committable_blocks()
+                )
             else:
                 self.model_runner.initialize_kv_cache(
                     kv_cache_config, kv_cache_allocation_context=allocation_context
@@ -996,7 +1002,6 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
-        return committable_blocks
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
         from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
@@ -1011,7 +1016,14 @@ class Worker(WorkerBase):
         return connector.get_aligned_num_cpu_blocks()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
-        return vmm_unavailable_reason()
+        # Every rank must reach the same decision: one that keeps the feature
+        # would wait in the block-count all-reduces for one that dropped it.
+        reason = vmm_unavailable_reason()
+        if all_reduce_int(
+            get_world_group().cpu_group, int(reason is not None), ReduceOp.MAX
+        ):
+            return reason or "another rank cannot use it"
+        return None
 
     def kv_cache_commit_granule(self) -> int:
         """Bytes one physical KV cache commit is rounded to on this device."""
@@ -1033,23 +1045,15 @@ class Worker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_blocks
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(
-        self, num_committable_kv_blocks: int | None = None
-    ) -> CompilationTimes:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         if not self.use_v2_model_runner:
-            return self._compile_or_warm_up_model(num_committable_kv_blocks)
+            return self._compile_or_warm_up_model()
         # MRV2 warmup forwards record expert load like real ones.
         with self.model_runner.eplb.suppress():  # type: ignore
-            return self._compile_or_warm_up_model(num_committable_kv_blocks)
+            return self._compile_or_warm_up_model()
 
-    def _compile_or_warm_up_model(
-        self, num_committable_kv_blocks: int | None
-    ) -> CompilationTimes:
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
         if self.cache_config.enable_extensible_kv_cache:
-            if num_committable_kv_blocks is not None:
-                kv_cache = self._v2_model_runner().extensible_kv_cache
-                assert kv_cache is not None
-                kv_cache.warmup_committable_blocks = num_committable_kv_blocks
             # Track the transient peak of the warmup steps themselves; they
             # reach shapes (spec-decode drafts, encoder batches) profiling
             # does not, and `measure_kv_cache_blocks` keeps that peak free.
@@ -1242,12 +1246,15 @@ class Worker(WorkerBase):
         if self.cache_config.enable_extensible_kv_cache:
             kv_cache = self._v2_model_runner().extensible_kv_cache
             assert kv_cache is not None
-            num_kv_blocks = measure_kv_cache_blocks(
-                kv_cache,
-                self.vllm_config,
-                self.device,
-                init_free_memory=self.init_snapshot.free_memory,
-                requested_memory=int(self.requested_memory),
+            # Every rank must size the KV cache identically.
+            num_kv_blocks = _min_across_ranks(
+                measure_kv_cache_blocks(
+                    kv_cache,
+                    self.vllm_config,
+                    self.device,
+                    init_free_memory=self.init_snapshot.free_memory,
+                    requested_memory=int(self.requested_memory),
+                )
             )
 
         return CompilationTimes(
