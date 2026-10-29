@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from vllm.entrypoints.generate.structured_decisions.question_types import (
+from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
     Question,
@@ -59,6 +60,24 @@ def test_choice_prompt():
     )
 
 
+@pytest.mark.parametrize(
+    "q,body",
+    [
+        (choice(), "A: billing - money\nB: outage\nC: other\n"),
+        (noul(criteria={"true": "t", "false": "f"}), "yes: t\nno: f\n"),
+        (score(), "0: calm\n1: annoyed\n2: furious\n"),
+        # Instructions are kept as given, trailing newlines included.
+        (noul(instructions="Reply within the hour?\n\n"), "yes\nno\n"),
+    ],
+)
+def test_prompt_is_the_heading_then_the_body(q, body):
+    body += q.type.reply_instruction
+    assert q.type.body(q) == body
+    assert q.type.prompt(q) == f"Question: {q.instructions}\n{body}"
+    bare = replace(q, instructions="")
+    assert bare.type.prompt(bare) == body
+
+
 def test_choice_answer_shape():
     q = choice()
     answer = q.type.answer(q, [0.2, 0.7, 0.1], 0.5)
@@ -105,7 +124,7 @@ def test_noul_labels_and_prompt():
     assert q.labels == ("yes", "no")
     assert [a.name for a in q.options] == ["yes", "no"]
     assert q.type.prompt(q) == (
-        "Question: Reply within the hour?\nAnswer with yes or no only."
+        "Question: Reply within the hour?\nyes\nno\nAnswer with yes or no only."
     )
     described = noul(criteria={"true": "same day", "false": "later"})
     assert described.type.prompt(described) == (

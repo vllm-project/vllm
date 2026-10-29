@@ -67,7 +67,7 @@ class PoolerConfig:
     """
     Whether the engine-side late-interaction scorer may use the fused
     flash-maxsim Triton kernel. Disabled automatically when the API server
-    is started with `--no-enable-flash-late-interaction`; the reference
+    is started with `--disable-flash-late-interaction`; the reference
     scorer is used instead.
     """
 
@@ -83,7 +83,7 @@ class PoolerConfig:
     maximum position embeddings. When enabled, long inputs will be split into
     chunks, processed separately, and then aggregated using weighted averaging.
     This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
+    errors. Multimodal inputs are not supported. Defaults to False.
     """
     max_embed_len: int | None = None
     """

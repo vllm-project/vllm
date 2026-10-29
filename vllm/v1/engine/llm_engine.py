@@ -335,6 +335,7 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                weight_version=outputs.weight_version,
             )
 
             mm_processor_cache = self.renderer.mm_processor_cache
@@ -370,6 +371,7 @@ class LLMEngine:
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         if self._profile_session_active:
             raise ProfilerAlreadyActiveError()
@@ -383,6 +385,7 @@ class LLMEngine:
                 profile_prefix,
                 delay_iterations,
                 max_iterations,
+                profiler_kwargs=profiler_kwargs,
             )
         except BaseException:
             self._profile_session_active = False
