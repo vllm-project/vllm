@@ -27,6 +27,7 @@ struct ResponsesEventResponse {
 
 #[derive(serde::Deserialize)]
 struct ResponsesUsage {
+    input_tokens: Option<u64>,
     output_tokens: Option<u64>,
 }
 
@@ -180,8 +181,14 @@ impl ResponsesStream {
             // with `status: "incomplete"`; the spec also has `response.incomplete`.
             Some("response.completed" | "response.incomplete") => {
                 self.saw_terminal_event = true;
-                if let Some(n) = event.response.and_then(|r| r.usage?.output_tokens) {
-                    self.output.output_tokens = n as usize;
+                if let Some(usage) = event.response.and_then(|r| r.usage) {
+                    if let Some(n) = usage.output_tokens {
+                        self.output.output_tokens = n as usize;
+                    }
+                    // Same rule as `ChunkUsage::apply`: a zero keeps the client estimate.
+                    if let Some(n) = usage.input_tokens.filter(|&n| n > 0) {
+                        self.output.prompt_len = n as usize;
+                    }
                 }
             }
             kind if matches!(kind, Some("error" | "response.failed")) || event.error.is_some() => {
@@ -251,6 +258,21 @@ mod tests {
             }
         }
         stream.finish()
+    }
+
+    /// The terminal event's `usage.input_tokens` replaces the client estimate,
+    /// as in Python's `async_request_openai_responses`.
+    #[test]
+    fn test_terminal_usage_input_tokens_override_prompt_len() {
+        let output = run(&[
+            text_delta("Hi"),
+            event(
+                "response.completed",
+                ",\"response\":{\"usage\":{\"input_tokens\":128,\"output_tokens\":1}}",
+            ),
+        ]);
+        assert!(output.success, "{}", output.error);
+        assert_eq!((output.prompt_len, output.output_tokens), (128, 1));
     }
 
     #[test]

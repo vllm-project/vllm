@@ -261,6 +261,27 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=(TIER_LABEL,),
         )
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of primary-tier chunks of failed promotions whose release "
+                    "to the free pool is deferred until the tier confirms its I/O can "
+                    "no longer write to them, labeled by tier."
+                ),
+                labelnames=(TIER_LABEL,),
+            )
+        )
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of how long a failed promotion's primary-tier "
+                    "chunks were held before their deferred release completed, "
+                    "observed at release, labeled by tier, in seconds."
+                ),
+                labelnames=(TIER_LABEL,),
+                buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120),
+            )
+        )
         metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
             OffloadingHistogramMetadata(
                 documentation=(

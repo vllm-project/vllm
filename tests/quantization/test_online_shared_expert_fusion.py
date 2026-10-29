@@ -573,18 +573,19 @@ def test_online_quantization(
         "cannot be enabled" in warning
         for warning in logged_warnings
     )
-    if architecture == "MiniMaxM3SparseForCausalLM":
-        # TODO: Use resolve_layer_fused_shared_expert in MiniMax M3 and remove
-        # this branch once its virtual fused projections are registered.
-        assert logged_messages == ["Quantizing 0 layers of types: "]
-    else:
-        assert logged_messages == [
-            "Quantizing 2 layers of types: "
-            f"mlp.{shared_expert_name}.down_proj: 1 "
-            f"(from targets: {target_pattern}, mxfp4); "
-            f"mlp.{shared_expert_name}.gate_up_proj: 1 "
-            f"(from targets: {target_pattern}, mxfp4)"
-        ]
+    # MiniMax M3 now resolves fused shared experts per layer through
+    # `resolve_layer_fused_shared_expert`, so its virtual fused projections are
+    # registered and quantized like any other architecture.
+    moe_prefix = (
+        "block_sparse_moe" if architecture == "MiniMaxM3SparseForCausalLM" else "mlp"
+    )
+    assert logged_messages == [
+        "Quantizing 2 layers of types: "
+        f"{moe_prefix}.{shared_expert_name}.down_proj: 1 "
+        f"(from targets: {target_pattern}, mxfp4); "
+        f"{moe_prefix}.{shared_expert_name}.gate_up_proj: 1 "
+        f"(from targets: {target_pattern}, mxfp4)"
+    ]
 
 
 def test_online_gate_up_proj_target_disables_fse(
@@ -645,6 +646,6 @@ def test_online_gate_up_proj_target_disables_fse(
     ]
     assert logged_warnings == [
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be "
-        "enabled - skipping for this layer: online quantization targets only "
-        "part of the shared expert at model.layers.0.mlp.shared_experts."
+        "enabled - skipping shared-expert fusion: online quantization targets only "
+        "part of the shared expert at <shared_expert>."
     ]

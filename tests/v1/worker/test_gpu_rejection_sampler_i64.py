@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 155264
@@ -42,14 +43,16 @@ def _run(
         num_logits, VOCAB_SIZE, dtype=torch.bfloat16, device=device
     )
     full_target[roi_row : roi_row + LOGITS_PER_REQ] = target_logits
-    full_draft = torch.randn(
+    full_draft = DraftLogitsCache(
         max_num_reqs,
         NUM_SPECULATIVE_STEPS,
         VOCAB_SIZE,
         dtype=torch.bfloat16,
+        fill=0.0,
         device=device,
     )
-    full_draft[req_state_idx] = draft_logits
+    full_draft.values.normal_()
+    full_draft.values[req_state_idx] = draft_logits
 
     # Draft token for step i of request r lives at row r*LOGITS_PER_REQ + i + 1.
     draft_sampled = torch.zeros(num_logits, dtype=torch.int64, device=device)
@@ -80,7 +83,7 @@ def _run(
 
     sampled, num_sampled = rejection_sample(
         target_logits=full_target,
-        draft_logits=full_draft,
+        draft_logits_cache=full_draft,
         draft_sampled=draft_sampled,
         cu_num_logits=cu_num_logits,
         pos=pos,

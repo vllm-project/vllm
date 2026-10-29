@@ -467,7 +467,7 @@ class _ModuleOffloader:
             param_offloader.sync_cpu_storage()
 
         # Remove offloaders whose parameter was deleted during
-        # process_weights_after_loading (e.g. k_scale / v_scale).
+        # process_weights_after_loading (e.g. online requantization sources).
         deleted = [
             name
             for name, offloader in self._param_offloaders.items()
@@ -639,9 +639,8 @@ class _CpuParamOffloader(_BaseParamOffloader):
         self._cpu_storage: torch.Tensor | None = None
         self._gpu_buffer: torch.Tensor | None = None  # Store reference to GPU buffer
         # Set to True if the underlying nn.Parameter was deleted by
-        # process_weights_after_loading (e.g. transient KV-cache scale params
-        # such as k_scale/v_scale created by BaseKVCacheMethod.create_weights
-        # and deleted after copying into permanent _k_scale buffers).
+        # process_weights_after_loading (e.g. online requantization source
+        # params released after conversion).
         self._param_deleted: bool = False
 
         # Offload to CPU immediately to free GPU memory during model loading
@@ -750,12 +749,10 @@ class _CpuParamOffloader(_BaseParamOffloader):
         2. device_loading_context creates NEW CPU tensors when moving back
         3. Our old _cpu_storage would have pre-processed or stale data
 
-        If the parameter no longer exists on the module (e.g. transient
-        KV-cache scale parameters such as k_scale/v_scale that are created
-        by BaseKVCacheMethod.create_weights() and then deleted by
-        process_weights_after_loading() after copying their values into
-        permanent _k_scale buffers), the offloader marks itself as deleted
-        and skips the sync.  The caller (_ModuleOffloader.sync_cpu_storage)
+        If the parameter no longer exists on the module (e.g. online
+        requantization source parameters released by
+        process_weights_after_loading()), the offloader marks itself as
+        deleted and skips the sync.  The caller (_ModuleOffloader.sync_cpu_storage)
         is responsible for removing these stale entries.
         """
         try:

@@ -115,20 +115,30 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
     ) -> None:
         super().__init__()
+        # Per-token storage width in elements of ``dtype``.
+        self.head_size = head_dim
         if indexer_kv_dtype in ("fp8", "fp8_e4m3"):
-            cache_dtype = torch.float8_e4m3fn
+            cache_dtype = query_dtype = torch.float8_e4m3fn
         elif indexer_kv_dtype == "bf16":
-            cache_dtype = torch.bfloat16
+            cache_dtype = query_dtype = torch.bfloat16
+        elif indexer_kv_dtype == "nvfp4":
+            # Packed NVFP4 pages scored by the MSA Q8KV4 indexer with e4m3 Q.
+            cache_dtype, query_dtype = torch.uint8, torch.float8_e4m3fn
+            self.head_size = head_dim // 2 + head_dim // 16
         else:
             raise NotImplementedError(
                 f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
-                "MiniMax M3 indexer cache (only 'bf16' or 'fp8'/'fp8_e4m3')."
+                "MiniMax M3 indexer cache (only 'bf16', 'fp8'/'fp8_e4m3' or "
+                "'nvfp4')."
             )
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
-        # Side-cache storage dtype: bf16, or e4m3 for the fp8 score path.
+        # Side-cache storage dtype: bf16, e4m3 for the fp8 score path, or uint8
+        # for packed NVFP4.
         self.dtype = cache_dtype
+        # Index-query dtype the fused qk-norm/rope kernel emits.
+        self.query_dtype = query_dtype
         self.prefix = prefix
         self.cache_config = cache_config
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
@@ -147,7 +157,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
-            head_size=self.head_dim,
+            head_size=self.head_size,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
         )
@@ -392,6 +402,11 @@ class MiniMaxM3IndexerImpl(nn.Module):
             backend_cls=type(self).indexer_backend_cls,
         )
 
+    def reserve_workspace(self) -> None:
+        """Reserve the workspace-manager scratch ``forward`` needs; called from
+        the memory-profiling run, which skips ``forward``."""
+        return
+
     def forward(
         self,
         index_query: torch.Tensor,
@@ -501,8 +516,9 @@ def select_indexer_impl_cls(
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
-    used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
+    used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
     support.
     """
     if get_current_vllm_config().attention_config.minimax_m3_indexer_cp:
@@ -530,10 +546,9 @@ def select_indexer_impl_cls(
             tp_size,
         )
         return MiniMaxM3IndexerTritonCPImpl
-    if indexer_kv_dtype in ("mxfp4", "nvfp4"):
+    if indexer_kv_dtype == "mxfp4":
         raise NotImplementedError(
-            f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
-            "CuteDSL indexer impl."
+            "indexer_kv_dtype='mxfp4' is not supported by the MiniMax M3 indexer."
         )
     is_cuda = current_platform.is_cuda()
     is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
@@ -542,6 +557,28 @@ def select_indexer_impl_cls(
             f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 support."
         )
     is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
+    if indexer_kv_dtype == "nvfp4":
+        if not (
+            is_cuda
+            and (
+                current_platform.is_device_capability(100)
+                or current_platform.is_device_capability(103)
+                or current_platform.is_device_capability(107)
+            )
+        ):
+            raise NotImplementedError(
+                "indexer_kv_dtype='nvfp4' requires an SM100, SM103 or SM107 GPU."
+            )
+        from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+            MiniMaxM3IndexerNvfp4Impl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected NVFP4 (MSA Q8KV4 decode, Q8KV8 prefill) "
+            "[topk_blocks=%d]",
+            topk_blocks,
+        )
+        return MiniMaxM3IndexerNvfp4Impl
     use_msa = (
         is_sm100
         and topk_blocks == 16
@@ -627,6 +664,9 @@ class MiniMaxM3Indexer(nn.Module):
     @property
     def num_index_heads(self) -> int:
         return self.impl.num_index_heads
+
+    def reserve_workspace(self) -> None:
+        self.impl.reserve_workspace()
 
     def forward(
         self,

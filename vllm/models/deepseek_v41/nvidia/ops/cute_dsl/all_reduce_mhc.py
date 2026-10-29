@@ -34,10 +34,11 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
 from vllm.distributed import get_tp_group
-from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
-
-from .primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
+    ACTIVE_STAGE,
+    LAMPORT_GENERATIONS,
     NEGATIVE_ZERO_BF16_BITS,
+    NEXT_STAGE,
     QUAD_BF16,
     VEC_BF16,
     WARP_SIZE,
@@ -46,6 +47,7 @@ from .primitives import (
     current_cu_stream,
     f32_to_bf16_bits,
     fragment_has_negative_zero,
+    group_leader_block_sum,
     load_global_bf16_as_f32,
     load_global_u32x2,
     load_global_u32x4,
@@ -67,51 +69,14 @@ from .primitives import (
     to_cute,
     to_cute_dynamic,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
 
-LAMPORT_GENERATIONS = 3
-NEXT_STAGE = 0
-ACTIVE_STAGE = 1
 # One UE8M0 scale per 32 values: four adjacent threads' BF16 fragments.
 MXFP8_BLOCK = 32
 FRAGMENTS_PER_MXFP8_BLOCK = MXFP8_BLOCK // VEC_BF16
 # The swizzled scale layout tiles 128 rows by 4 scale columns.
 SCALE_TILE_ROWS = 128
 SCALE_TILE_COLS = 4
-
-
-@cute.jit
-def _group_leader_block_sum(
-    value: Float32,
-    warp_sums: cute.Tensor,
-    warps: cutlass.Constexpr[int],
-    leader_stride: cutlass.Constexpr[int],
-) -> Float32:
-    lane = cute.arch.lane_idx()
-    warp = cute.arch.warp_idx()
-    for offset in cutlass.range_constexpr(1, WARP_SIZE):
-        if cutlass.const_expr(offset >= leader_stride and (offset & (offset - 1)) == 0):
-            value = value + cute.arch.shuffle_sync_bfly(
-                value,
-                offset=offset,
-                mask=-1,
-                mask_and_clamp=31,
-            )
-    if lane == 0:
-        cute.arch.store((warp_sums + warp).llvm_ptr, value)
-    cute.arch.barrier()
-
-    result = Float32(0.0)
-    if warp == 0:
-        if lane < Int32(warps):
-            result = cute.arch.load(
-                (warp_sums + lane).llvm_ptr,
-                Float32,
-            )
-        result = cute.arch.warp_reduction_sum(result)
-        if lane == 0:
-            cute.arch.store(warp_sums.llvm_ptr, result)
-    cute.arch.barrier()
-    return cute.arch.load(warp_sums.llvm_ptr, Float32)
 
 
 class _SharedOnlyPublishDeviceKernel:
@@ -227,7 +192,7 @@ class _SharedOnlyPublishDeviceKernel:
         if cutlass.const_expr(self.release_before_store):
             if block == 0 and tidx == 0:
                 store_global_u32(
-                    stage_state.iterator + ACTIVE_STAGE,
+                    (stage_state.iterator + ACTIVE_STAGE).toint(),
                     stage,
                 )
             cute.arch.barrier()
@@ -270,7 +235,7 @@ class _SharedOnlyPublishDeviceKernel:
         if cutlass.const_expr(not self.release_before_store):
             if block == 0 and tidx == 0:
                 store_global_u32(
-                    stage_state.iterator + ACTIVE_STAGE,
+                    (stage_state.iterator + ACTIVE_STAGE).toint(),
                     stage,
                 )
             cute.arch.barrier()
@@ -523,7 +488,7 @@ class _QuadFinalizePublishDeviceKernel:
 
         if block == 0 and tidx == 0:
             store_global_u32(
-                stage_state.iterator + ACTIVE_STAGE,
+                (stage_state.iterator + ACTIVE_STAGE).toint(),
                 stage,
             )
         cute.arch.barrier()
@@ -826,7 +791,7 @@ class _LamportMHCDeviceKernel:
 
         if token == 0 and cluster_rank == 0 and tidx == 0:
             store_global_u32(
-                stage_state.iterator + NEXT_STAGE,
+                (stage_state.iterator + NEXT_STAGE).toint(),
                 (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
             )
         if cutlass.const_expr(self.enable_pdl):
@@ -861,7 +826,7 @@ class _LamportMHCDeviceKernel:
             smem = cutlass.utils.SmemAllocator()
             warp_sums = smem.allocate_array(Float32, self.warps)
             cluster_sums = smem.allocate_array(Float32, self.cluster_size)
-            cta_sum = _group_leader_block_sum(
+            cta_sum = group_leader_block_sum(
                 thread_sum,
                 warp_sums,
                 self.warps,

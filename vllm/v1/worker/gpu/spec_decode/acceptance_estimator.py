@@ -347,6 +347,7 @@ class OnlineAcceptanceEstimator:
         self.device = device
         self._steps_since_refit = 0
         self._refits = 0
+        self._accumulate_block_r = max(256, triton.next_power_of_2(max_num_reqs))
 
         # The learned coefficients used for predicting acceptance.
         self.slope = torch.full((1,), _INIT_SLOPE, dtype=torch.float32, device=device)
@@ -422,8 +423,8 @@ class OnlineAcceptanceEstimator:
             self.predictions.stride(0),
             self.counts,
             num_reqs,
-            BLOCK_R=max(256, triton.next_power_of_2(num_reqs)),
-            num_warps=1 if num_reqs <= 256 else 4,
+            BLOCK_R=self._accumulate_block_r,
+            num_warps=1 if self._accumulate_block_r <= 256 else 4,
         )
 
         self._steps_since_refit += 1
@@ -433,6 +434,19 @@ class OnlineAcceptanceEstimator:
 
         # Fit the coefficients to the accumulated statistics gathered over the
         # course of the last REFIT_INTERVAL steps.
+        self._refit()
+        self._refits += 1
+
+    def warmup(self) -> None:
+        """Drop warmup statistics and compile the refit kernel. A refit on
+        zeroed statistics leaves the coefficients unchanged."""
+        self.info.zero_()
+        self.grad.zero_()
+        self.counts.zero_()
+        self._steps_since_refit = 0
+        self._refit()
+
+    def _refit(self) -> None:
         _refit_kernel[(1,)](
             self.slope,
             self.intercepts,
@@ -446,7 +460,6 @@ class OnlineAcceptanceEstimator:
             DAMPING=self.DAMPING_OBSERVATIONS,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
-        self._refits += 1
 
     def predict(
         self,

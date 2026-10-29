@@ -49,7 +49,7 @@ __device__ __forceinline__ float ComputeGroupScale(
   constexpr int vec_size = 16 / sizeof(T);
 
   // copy global -> shared & compute absmax
-  auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
+  auto scalar_op_cache = [&] __device__(T& dst, const T& src) {
     float abs_v = fabsf(static_cast<float>(src));
     local_absmax = fmaxf(local_absmax, abs_v);
     dst = src;
@@ -85,7 +85,7 @@ __device__ __forceinline__ void QuantizeGroup(
   const float inv_y = 1.0f / y_s;
 
   // quantize shared -> global 8-bit
-  auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
+  auto scalar_op_quant = [&] __device__(DST_DTYPE& dst, const T& src) {
     float q = fminf(fmaxf(static_cast<float>(src) * inv_y, min_8bit), max_8bit);
     dst = DST_DTYPE(q);
   };

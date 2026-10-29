@@ -225,8 +225,8 @@ def _why_not(spec, num_reqs: int) -> str | None:
         return "Markov weights not bf16"
     if w1.shape[1] != w2.shape[1] or not (w1.is_contiguous() and w2.is_contiguous()):
         return "Markov weight layout"
-    if spec.draft_logits.dtype != torch.bfloat16:
-        return f"a {spec.draft_logits.dtype} draft logits cache"
+    if spec.draft_logits.values.dtype != torch.bfloat16:
+        return f"a {spec.draft_logits.values.dtype} draft logits cache"
     if head.markov_w2.quant_method.__class__.__name__ != "UnquantizedEmbeddingMethod":
         return "a quantized Markov head"
     return None
@@ -260,7 +260,7 @@ def sample_sequential(spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
     idx_map = spec.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
     sample_pos = spec.sample_pos[:num_sample].view(num_reqs, n_spec)
     assert idx_map.stride(1) == 1 and sample_pos.stride(1) == 1
-    cache = spec.draft_logits
+    cache = spec.draft_logits.values
     tokens = spec.draft_tokens
     use_fp64 = bool(spec.use_fp64_gumbel)
     bufs = _scratch(base_logits.device, vocab, use_fp64)

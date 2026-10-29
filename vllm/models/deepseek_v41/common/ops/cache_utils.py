@@ -602,8 +602,12 @@ def _dequantize_and_gather_k_nvfp4_kernel(
     quant_block: tl.constexpr,  # 16
     cache_block_size: tl.constexpr,
     block_stride: tl.constexpr,
+    TILE: tl.constexpr,  # tokens per iteration
 ):
-    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace."""
+    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace, TILE tokens
+    per iteration. A nibble placed as fp16 bits (sign at 15, exponent and
+    mantissa at 11:9) reads as e2m1 * 2^-14; times scale * 2^14 the fp32 product
+    is exact, so the bf16 result matches a direct decode."""
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -616,35 +620,52 @@ def _dequantize_and_gather_k_nvfp4_kernel(
     start_pos = seq_len - gather_len
 
     packed_bytes: tl.constexpr = head_dim // 2
+    group_bytes: tl.constexpr = quant_block // 2
+    # Byte b of a record packs elements 2b (low nibble) and 2b + 1, which share
+    # scale b // group_bytes: index the bytes as [scale, byte within group].
+    byte = (
+        tl.arange(0, scale_dim)[:, None] * group_bytes
+        + tl.arange(0, group_bytes)[None, :]
+    )
+    t = tl.arange(0, TILE)
     d = tl.arange(0, head_dim)
-    for i in range(worker_id, gather_len, num_workers):
+    block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+    out_row_ptr = out_ptr + batch_idx.to(tl.int64) * out_stride0
+    for tile_start in range(worker_id * TILE, gather_len, num_workers * TILE):
+        i = tile_start + t
+        valid = i < gather_len
         pos = start_pos + i
-        block_in_seq = pos // cache_block_size
-        pos_in_block = pos % cache_block_size
-
         physical_block_idx = tl.load(
-            block_table_ptr + batch_idx * max_blocks_per_seq + block_in_seq
+            block_table_row_ptr + pos // cache_block_size, mask=valid, other=0
         )
         page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
-        token_ptr = page + pos_in_block * (packed_bytes + scale_dim)
+        token_ptr = page + (pos % cache_block_size) * (packed_bytes + scale_dim)
 
-        packed = tl.load(token_ptr + tl.arange(0, packed_bytes))
-        # Even element in the low nibble, odd in the high nibble.
-        codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
-        # e2m1 magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
-        mag_code = codes & 7
-        e = (mag_code >> 1).to(tl.float32)
-        m = (mag_code & 1).to(tl.float32)
-        mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
-        vals = tl.where(codes >= 8, -mag, mag)
+        packed = tl.load(
+            token_ptr[:, None, None] + byte[None, :, :],
+            mask=valid[:, None, None],
+            other=0,
+        ).to(tl.int32)
+        sf = tl.load(
+            token_ptr[:, None] + packed_bytes + tl.arange(0, scale_dim)[None, :],
+            mask=valid[:, None],
+            other=0,
+        )
+        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32) * 16384.0
+        scale = scale[:, :, None]
 
-        sf = tl.load(token_ptr + packed_bytes + tl.arange(0, scale_dim))
-        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-        tiles = tl.reshape(vals, (scale_dim, quant_block))
-        dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
+        lo = packed & 0xF
+        hi = packed >> 4
+        lo = ((lo & 7) << 9) | ((lo & 8) << 12)
+        hi = ((hi & 7) << 9) | ((hi & 8) << 12)
+        lo = lo.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * scale
+        hi = hi.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * scale
+        dequant = tl.reshape(tl.join(lo, hi), (TILE, head_dim))
 
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
-        tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
+        out_ptrs = (
+            out_row_ptr + (offset + i).to(tl.int64)[:, None] * out_stride1 + d[None, :]
+        )
+        tl.store(out_ptrs, dequant.to(tl.bfloat16), mask=valid[:, None])
 
 
 # The per-token loop is a chain of dependent loads, so the grid has to hold
@@ -653,6 +674,7 @@ def _dequantize_and_gather_k_nvfp4_kernel(
 _GATHER_STEPS_PER_WORKER = 8
 _GATHER_MIN_WORKERS = 128
 _GATHER_MAX_WORKERS = 8192
+_NVFP4_GATHER_TILE = 8
 
 
 def gather_num_workers(max_gather_len: int | None) -> int:
@@ -682,9 +704,11 @@ def dequantize_and_gather_k_cache_triton(
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
     if k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN:
-        # Keep short gathers unchanged; cap total workers for multi-request chunks.
+        # One tile per worker up to the cap: the free width of ``out`` bounds
+        # every request's gather, and the kernel loops over any remainder.
         num_workers = min(
-            max(128, 2048 // max(1, num_reqs)), max(128, out.shape[1] - offset)
+            cdiv(max(1, out.shape[1] - offset), _NVFP4_GATHER_TILE),
+            _GATHER_MAX_WORKERS,
         )
         _dequantize_and_gather_k_nvfp4_kernel[(num_reqs, num_workers)](
             out,
@@ -701,6 +725,8 @@ def dequantize_and_gather_k_cache_triton(
             quant_block=V41_NVFP4_QUANT_BLOCK,
             cache_block_size=block_size,
             block_stride=k_cache.stride(0),
+            TILE=_NVFP4_GATHER_TILE,
+            num_warps=2,
         )
         return
 

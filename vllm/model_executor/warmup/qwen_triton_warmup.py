@@ -49,6 +49,8 @@ class _QwenGDNWarmupConfig:
     state_stride_token: int
     state_dtype: torch.dtype
     fused_spec_decode: bool = False
+    # The FlashInfer prefill takes exp(g) straight from fused_post_conv_prep.
+    post_conv_g_exp: bool = False
 
     @property
     def conv_dim(self) -> int:
@@ -141,6 +143,7 @@ def _qwen_gdn_warmup_config(
             fused_spec_decode=bool(
                 getattr(layer, "enable_fused_gdn_spec_decode", False)
             ),
+            post_conv_g_exp=getattr(layer, "gdn_prefill_backend", None) == "flashinfer",
         )
 
     if found_layer:
@@ -235,7 +238,7 @@ def _warm_fused_post_conv_kernel(
             config.k,
             config.v,
             apply_l2norm=True,
-            output_g_exp=False,
+            output_g_exp=config.post_conv_g_exp,
         )
 
 

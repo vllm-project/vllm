@@ -48,6 +48,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -662,6 +663,19 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
 
+def test_merge_keeps_aux_hidden_states_per_layer():
+    # EAGLE3 and DFlash targets return (hidden_states, [aux per layer]).
+    hidden = torch.arange(6.0).view(6, 1)
+    aux = [torch.arange(6.0).view(6, 1) + 10 * i for i in range(3)]
+    merged_hidden, merged_aux = merge_ubatch_outputs(
+        [(hidden[:2], [x[:2] for x in aux]), (hidden[2:], [x[2:] for x in aux])]
+    )
+    torch.testing.assert_close(merged_hidden, hidden)
+    assert len(merged_aux) == len(aux)
+    for merged, expected in zip(merged_aux, aux):
+        torch.testing.assert_close(merged, expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 @pytest.mark.parametrize("failed_ubatch", [0, 1])
 def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
@@ -1002,3 +1016,36 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("num_reqs", [3, 4, 5])
+def test_uniform_spec_decode_batches_split_on_request_boundaries(num_reqs: int):
+    # Verifying 2 drafts per request: 3 tokens each. A midpoint split would cut
+    # a request in two whenever num_reqs is odd, leaving neither microbatch a
+    # uniform decode.
+    query_len = 3
+    input_batch = _make_input_batch(
+        [query_len] * num_reqs, [64] * num_reqs, _make_buffers()
+    )
+    slices = create_ubatch_slices(input_batch, 2, uniform_token_count=query_len)
+    first, second = slices
+    assert first.token_slice.stop % query_len == 0
+    assert first.request_slice.stop == second.request_slice.start
+    assert first.num_tokens == query_len * (num_reqs // 2)
+    assert second.token_slice.stop == query_len * num_reqs
+
+
+def test_single_token_or_unknown_uniform_count_keeps_midpoint_split():
+    input_batch = _make_input_batch([3] * 5, [64] * 5, _make_buffers())
+    for uniform_token_count in (None, 1):
+        first, _ = create_ubatch_slices(
+            input_batch, 2, uniform_token_count=uniform_token_count
+        )
+        assert first.token_slice.stop == 15 // 2
+
+
+def test_too_few_requests_to_align_keeps_midpoint_split():
+    # One request cannot be split on a request boundary.
+    input_batch = _make_input_batch([4], [64], _make_buffers())
+    first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
+    assert first.token_slice.stop == 2

@@ -883,4 +883,14 @@ __all__ = [
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
     "compressed_qsa_slot_mapping",
+    "qsa_kv_cache_dtype",
 ]
+
+
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
+    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
+        return "auto"
+    return cache_config.cache_dtype

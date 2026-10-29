@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 __all__ = ["QuarkNVFP4"]
 
@@ -126,7 +126,8 @@ class QuarkNVFP4(QuarkScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_global_scale = layer.input_scale_2.max().to(torch.float32)
         replace_parameter(layer, "input_global_scale", input_global_scale)
-        del layer.input_scale_2
+        # Kernels read input_global_scale; the loaded param keeps its data.
+        retire_parameter(layer, "input_scale_2")
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
 
@@ -142,7 +143,7 @@ class QuarkNVFP4(QuarkScheme):
         weight_global_scale = weight_global_scale.max()
 
         replace_parameter(layer, "weight_global_scale", weight_global_scale)
-        del layer.weight_scale_2
+        retire_parameter(layer, "weight_scale_2")
 
         replace_parameter(
             layer, "alpha", layer.input_global_scale * layer.weight_global_scale

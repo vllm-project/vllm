@@ -59,7 +59,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -97,6 +96,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -1476,10 +1476,10 @@ class DeepseekV2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1629,12 +1629,9 @@ class DeepseekV2Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1659,8 +1656,11 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
             if _try_load_fp8_indexer_wk(

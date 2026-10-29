@@ -33,7 +33,7 @@ Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_process
     * Return whether this processor modifies logits for the request. The sampler skips the logits-processing pipeline for batches in which no request needs it
 
 * `apply_staged_writes(self) -> None` (optional):
-    * Flush host-side writes staged by `add_request()` to the device; called once per step before the forward pass
+    * Flush host-side writes staged by `add_request()` to the device; called before the forward pass of every step that admits new requests, so only state set in `add_request()` is flushed. Read data that changes every step from `ctx` in `apply()`
 
 * `validate_params(cls, sampling_params) -> None` (optional classmethod):
     * Raise `ValueError` for invalid per-request arguments (especially custom arguments); runs at request admission, so invalid arguments fail the request instead of reaching the sampler
@@ -70,7 +70,7 @@ The contrived example below implements a custom logits processor which masks out
 
         def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
             # Per-slot target; -1 means disabled. Staged on the host and
-            # flushed to the device once per step in apply_staged_writes().
+            # flushed to the device in apply_staged_writes().
             self.target_token = torch.full(
                 (req_states.max_num_reqs,), -1, dtype=torch.int64
             )
@@ -264,6 +264,6 @@ The examples below show how a user would pass a custom argument (`target_token`)
 
     2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Return `False` from `add_request()` for such requests so that the sampler can skip the logits-processing pipeline for batches in which no request needs it
 
-* Stage host-side writes in `add_request()` and flush them once per step in `apply_staged_writes()`, instead of writing device tensors directly; this is the discipline every built-in sampler state follows
+* Stage host-side writes in `add_request()` and flush them in `apply_staged_writes()`, instead of writing device tensors directly; this is the discipline every built-in sampler state follows
 
 * Since there is no removal hook, `add_request()` must fully (re)initialize the slot's state; do not rely on state left behind by the slot's previous occupant

@@ -7,6 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.model_loader.mtp_validation import (
     disable_mtp_completeness_check,
 )
@@ -158,9 +159,10 @@ def m3_config():
         speculative_config=SimpleNamespace(
             method="mtp", draft_model_config=SimpleNamespace(hf_config=hf_config)
         ),
+        parallel_config=ParallelConfig(),
         quant_config=None,
         cache_config=None,
-        kernel_config=SimpleNamespace(monokernel=False),
+        kernel_config=SimpleNamespace(monokernel=False, moe_backend="auto"),
     )
 
 
@@ -267,6 +269,10 @@ def test_m3_target_allocates_embedding_on_required_stage(
     )
     monkeypatch.setattr(model, "get_pp_group", pp)
     monkeypatch.setattr("vllm.distributed.parallel_state.get_pp_group", pp)
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
     monkeypatch.setattr(model, "VocabParallelEmbedding", lambda *_, **kw: _embed())
     monkeypatch.setattr(model, "make_layers", lambda *_, **kw: (0, 0, nn.ModuleList()))
     monkeypatch.setattr(model, "MiniMAXGemmaRMSNorm", lambda *_, **kw: nn.Identity())

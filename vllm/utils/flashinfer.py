@@ -29,6 +29,13 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
+def is_flashinfer_autotuning() -> bool:
+    """Whether a FlashInfer autotune(True) context is active."""
+    from flashinfer.autotuner import AutoTuner
+
+    return AutoTuner.get().is_tuning_mode
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1310,6 +1317,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
     "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",

@@ -860,19 +860,28 @@ class ServerRole:
         for kv_request_id, round_seq in list(self._pending_aborts):
             self._drain_abort(kv_request_id, round_seq)
 
-    def close(self) -> tuple[list[int], list[ReqContext]]:
-        """Tear down. Cancels inflight.
+    def close(
+        self,
+    ) -> tuple[list[int], list[ReqContext], dict[int, frozenset[int]]]:
+        """Tear down. Cancels inflight, retaining what may still write.
 
-        Returns ``(failed_store_job_ids, failed_serves)`` where
+        Returns ``(failed_store_job_ids, failed_serves, retained)``.
         ``failed_serves`` are synthetic lookup ctxs still owing a
         ``parent.on_request_finished``. The session is going away with no
         parent handle in hand, so the manager flushes these in its next
-        ``serve_external_requests``.
+        ``serve_external_requests``. ``retained`` maps each transfer NIXL
+        does not report terminal to the store jobs it still reads: like the
+        abort drain, close never releases such a transfer, so those jobs
+        stay pinned and are left out of ``failed_store_job_ids`` until the
+        transport reports the transfer stopped.
         """
-        failed_stores = list(self._store_jobs.keys())
-        self._store_jobs.clear()
+        retained: dict[int, frozenset[int]] = {}
         if self._inflight:
-            self._transport.cancel(list(self._inflight.keys()))
+            still = self._transport.cancel(list(self._inflight.keys()), mode="wait")
+            retained = {tid: frozenset(self._inflight[tid].job_ids) for tid in still}
+        held = set().union(*retained.values())
+        failed_stores = [jid for jid in self._store_jobs if jid not in held]
+        self._store_jobs.clear()
         self._inflight.clear()
         self._pending_store_results.clear()
         # Surface every synthetic ctx still owing on_request_finished so
@@ -888,7 +897,7 @@ class ServerRole:
         self._pending_aborts.clear()
         self._slow_aborts.clear()
         self._finished_lookup_ctxs.clear()
-        return failed_stores, failed_serves
+        return failed_stores, failed_serves, retained
 
     @property
     def has_inflight_transfers(self) -> bool:

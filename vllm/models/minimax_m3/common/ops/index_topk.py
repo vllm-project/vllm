@@ -703,15 +703,19 @@ def minimax_m3_index_score(
     )
     BLOCK_SIZE_Q = 64
     n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
-    SCORE_TARGET_GRID = 48
+    # Splits write disjoint score columns, preserving the unsplit result.
+    if current_platform.is_cuda() and current_platform.is_device_capability((12, 0)):
+        score_target_grid = 48
+    elif current_platform.is_cuda() and current_platform.is_device_capability_family(
+        90
+    ):
+        score_target_grid = 1056
+    else:
+        score_target_grid = 1
     split_k = max(
         1,
-        min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
+        min(max_block, score_target_grid // max(1, n_q_tiles * batch * num_idx_heads)),
     )
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
-    ):
-        split_k = 1
     grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,

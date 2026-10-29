@@ -8,14 +8,16 @@ import pytest
 import torch
 
 from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+from vllm.models.qwen4_exp.common.qsa_cache import (
+    QSAMetadataBuilder,
+    qsa_kv_cache_dtype,
+)
 from vllm.models.qwen4_exp.nvidia import indexer_qsa
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
-from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -431,6 +433,7 @@ def test_clearing_qsa_key_cache_releases_its_storage() -> None:
     references_before_bind = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
     raw_cache.bind_kv_cache(kv)
     assert raw_cache.key_cache.shape[-1] == 64
+    assert raw_cache.rope_position_cache is not None
     assert raw_cache.rope_position_cache.dtype == torch.int64
 
     clear_layer_kv_caches([raw_cache])

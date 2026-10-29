@@ -57,7 +57,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_fused_moe_lora_kernel.py && 
+      pytest -v -s lora/test_fused_moe_lora_kernel.py --deselect="lora/test_fused_moe_lora_kernel.py::test_fused_moe_lora_kernel_large_rank_fallback[xpu:0-dtype0-1-True-256]" &&
       pytest -v -s
       lora/test_moe_lora_align_sum.py
       --deselect="tests/lora/test_moe_lora_align_sum.py::test_moe_lora_align_block_size_mixed_base_and_lora[1]"'

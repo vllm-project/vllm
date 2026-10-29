@@ -45,6 +45,7 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
+use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::{LoggedOutput, chat_output_text, log_output};
 use crate::state::AppState;
@@ -74,6 +75,13 @@ pub async fn chat_completions(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_max_output_tokens(
+        "max_completion_tokens",
+        prepared.chat_request.sampling_params.max_tokens,
+        state.chat.engine_core_client().max_model_len(),
+    ) {
+        return error.into_response();
+    }
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,

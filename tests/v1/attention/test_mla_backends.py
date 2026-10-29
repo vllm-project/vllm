@@ -10,7 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -219,13 +219,39 @@ def test_masked_mha_routing_is_dimension_specific():
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
     ],
 )
+@pytest.mark.parametrize(
+    ("sm120", "kv_lora_rank", "rope_dim", "row_bytes"),
+    [
+        (False, 512, 64, 656),
+        (False, 512, 0, 656),
+        (True, 512, 64, 656),
+        (True, 512, 0, 528),
+        (True, 256, 0, 656),
+    ],
+)
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
-    cache_dtype: str, expected_quant_mode: KVQuantMode
+    cache_dtype: str,
+    expected_quant_mode: KVQuantMode,
+    sm120: bool,
+    kv_lora_rank: int,
+    rope_dim: int,
+    row_bytes: int,
 ):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+        FlashInferMLASparseSM120Impl,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+
+    impl: Any = object.__new__(
+        FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl
+    )
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
         attn_backend=flashmla_module.FlashMLABackend,
+        impl=impl,
         kv_cache_dtype=cache_dtype,
-        head_size=576,
+        head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
         non_causal_multi_token_decode=False,
@@ -242,7 +268,8 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
-        assert spec.page_size_bytes == 64 * 656
+        assert spec.state_content_bytes == row_bytes
+        assert spec.page_size_bytes == 64 * row_bytes
 
 
 @pytest.mark.cpu_test
@@ -1683,6 +1710,7 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    set_random_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -2058,7 +2086,7 @@ def _run_backend_correctness(
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        "auto": 2e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]

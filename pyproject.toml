@@ -226,6 +226,7 @@ FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
+stride_bse = "stride_bse"
 
 [tool.typos.default.extend-words]
 certifi = "certifi"
@@ -258,6 +259,10 @@ nd = "nd"
 eles = "eles"
 datas = "datas"
 ser = "ser"
+# numpy flags.writeable
+writeable = "writeable"
+# HF CLIP weight name
+layrnorm = "layrnorm"
 ure = "ure"
 VALU = "VALU"
 # Walsh-Hadamard Transform

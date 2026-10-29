@@ -720,6 +720,7 @@ def test_padded_moe_reload_releases_each_layer(
         has_bias=has_bias,
         tp_rank=tp_rank,
         tp_shard_with_padding=False,
+        num_experts=experts,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
@@ -735,7 +736,9 @@ def test_padded_moe_reload_releases_each_layer(
         layer.moe_config = config
         layer.quant_config = None
         layer.quant_method = method
-        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer.expert_map_manager = SimpleNamespace(
+            map_global_to_local=lambda i: i, num_fused_shared_experts=0
+        )
         layer._loaded_expert_biases = set()
         layer._fused_shared_expert_quantizer = None
         method.create_weights(

@@ -28,7 +28,8 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID  # noqa: E402
 
 
-def test_flashinfer_gdn_prefill_uses_int64_cu_seqlens(monkeypatch):
+def test_flashinfer_gdn_prefill_passes_cu_seqlens_through(monkeypatch):
+    """FlashInfer accepts int32 cu_seqlens; the wrapper must not cast them."""
     captured_cu_seqlens = None
 
     def fake_chunk_gated_delta_rule(**kwargs):
@@ -57,7 +58,7 @@ def test_flashinfer_gdn_prefill_uses_int64_cu_seqlens(monkeypatch):
     )
 
     assert captured_cu_seqlens is not None
-    assert captured_cu_seqlens.dtype == torch.int64
+    assert captured_cu_seqlens is cu_seqlens
     assert output.shape == q.shape
     assert final_state is None
 
@@ -99,7 +100,7 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
         torch.randn(1, num_tokens, num_qk_heads, head_dim, device=device), dim=-1
     ).bfloat16()
     v = torch.randn(1, num_tokens, num_v_heads, head_dim, device=device).bfloat16()
-    g = F.logsigmoid(torch.randn(1, num_tokens, num_v_heads, device=device))
+    g = F.logsigmoid(torch.randn(1, num_tokens, num_v_heads, device=device)).exp()
     beta = torch.sigmoid(torch.randn(1, num_tokens, num_v_heads, device=device))
     initial_state = 0.1 * torch.randn(
         len(query_lens), num_v_heads, head_dim, head_dim, device=device

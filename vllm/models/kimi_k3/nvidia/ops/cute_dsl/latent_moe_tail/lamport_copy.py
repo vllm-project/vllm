@@ -13,7 +13,7 @@ import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
 
-from .primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     VEC_BF16,
     fragment_is_dirty,
     load_global_u32x4,

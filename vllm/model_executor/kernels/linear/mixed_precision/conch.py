@@ -113,8 +113,8 @@ class ConchLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
         if self.config.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
-        elif self.w_zp_name is not None:
-            layer.register_parameter(self.w_zp_name, None)
+        else:
+            self._retire_unused_zp(layer)
 
     def apply_weights(
         self,
