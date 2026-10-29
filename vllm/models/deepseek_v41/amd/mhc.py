@@ -13,14 +13,11 @@ from vllm.model_executor.layers.mhc import (
 from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.torch_utils import aux_stream
 
-# MI355X TP2, TP4 and TP8 improve through 128 tokens, shrinking from about +5%
-# output throughput at 1 token to +0.3-2% at 96-128.
 MHC_OVERLAP_MAX_TOKENS = 128
 
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_config
-    # Validated and tuned on MI355X (gfx950) only.
     return (
         get_cdna_version() == 4
         and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
@@ -32,9 +29,8 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
 class MHCOverlapStream:
     """The global aux stream with the fork and join events of the overlap.
 
-    At the FFN seam the gates queue ahead of the shared experts on this stream,
-    so both stay off the routed experts' path. Every fork and join waits on its
-    event before the next records it, so all layers share the two events.
+    Every fork and join waits on its event before the next records it, so all
+    layers share the two events.
     """
 
     def __init__(self) -> None:
@@ -78,11 +74,8 @@ def mhc_pre_delayed_overlap(
 
     Returns residual, post_mix, comb_mix, layer_input, next_pre_mix. Only the
     residual and layer input are ready on the caller stream; call
-    ``overlap.join()`` before using the gates. The residual and gates match the
-    fused AITER seam bit for bit, since the gates are ``pre_delayed`` applied to
-    the same new residual; the layer input's RMSNorm sums its row in another
-    order, which can move it by up to one bf16 ulp. Seams without a post block,
-    a carried pre-mix or a fused norm run ``pre_delayed`` on the caller stream.
+    ``overlap.join()`` before using the gates. Seams without a post block, a
+    carried pre-mix or a fused norm run ``pre_delayed`` on the caller stream.
     """
     main = torch.cuda.current_stream()
     if (

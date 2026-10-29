@@ -177,9 +177,9 @@ def _mhc_post_collapse_rms_norm_kernel(
     H: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    """One token per program. The post-mix and collapse keep the expression
-    order of aiter's ``_mhc_fused_post_pre_delayed_rmsnorm_main_kernel``, so the
-    new residual is bit-identical to it."""
+    """The post-mix and collapse keep the expression order of aiter's
+    ``_mhc_fused_post_pre_delayed_rmsnorm_main_kernel``, so the new residual is
+    bit-identical to it."""
     t = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK_H)
     mask = cols < H
