@@ -602,6 +602,13 @@ The parsers route `to=self` and recipient-less messages to reasoning,
 ATEM tool-call extraction. `to=developer` messages are omitted. Framing
 special tokens are preserved for parsing and removed from surfaced content.
 
+Tool-call parameter values are JSON-decoded when possible. A top-level
+parameter whose schema admits a string (through `type`, `anyOf`/`oneOf`,
+`enum`/`const`, a local `$ref`, or `additionalProperties`) keeps the model's
+raw text unless that text decodes to another type the schema admits, such as
+`null` for an optional string. The Python `muse_glimmer` parser always
+JSON-decodes parameter values.
+
 The Rust frontend also provides a Muse unified parser under `muse` and
 `musespark1x`, and selects it automatically for Muse Spark model names.
 Existing automatic parser selection for Muse Glimmer is unchanged.

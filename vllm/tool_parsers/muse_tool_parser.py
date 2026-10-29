@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Sequence
+from typing import Any, TypeAlias
 
 import regex as re
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
@@ -98,6 +99,10 @@ _PARAM_RE = re.compile(
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 
+# Per tool: JSON types admitted by each listed parameter, and by any other
+# parameter (additionalProperties). None means unconstrained.
+_ParameterTypes: TypeAlias = tuple[dict[str, set[str] | None], set[str] | None]
+
 
 def _decode_value(raw: str):
     """JSON-decode a parameter value when possible, else keep the raw string.
@@ -108,6 +113,101 @@ def _decode_value(raw: str):
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return raw
+
+
+def _json_type(value: Any) -> str:
+    """JSON Schema type name of a decoded JSON value."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"
+
+
+def _resolve_ref(root: dict, ref: str) -> Any:
+    """Resolve a local JSON pointer such as ``#/$defs/Name`` against *root*."""
+    if not ref.startswith("#/"):
+        return None
+    node: Any = root
+    for part in ref[2:].split("/"):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part.replace("~1", "/").replace("~0", "~"))
+    return node
+
+
+def _schema_types(
+    schema: Any, root: dict, refs: dict[str, set[str] | None]
+) -> set[str] | None:
+    """JSON types a parameter schema admits, or ``None`` if it admits any.
+
+    Covers ``type`` (name or list), ``const``, ``enum``, local ``$ref``,
+    ``anyOf``/``oneOf`` (union) and ``allOf`` (intersection), so that e.g.
+    pydantic's ``Optional[str]`` (``anyOf: [string, null]``) counts as a string.
+    *refs* memoizes each ``$ref`` (a ref still being resolved counts as
+    unconstrained), keeping the walk linear in the schema size even when
+    ``$defs`` reference each other many times or cyclically.
+    """
+    if not isinstance(schema, dict):
+        return None
+    constraints: list[set[str] | None] = []
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        constraints.append({declared})
+    elif isinstance(declared, list):
+        constraints.append({t for t in declared if isinstance(t, str)})
+    if "const" in schema:
+        constraints.append({_json_type(schema["const"])})
+    if isinstance(schema.get("enum"), list):
+        constraints.append({_json_type(v) for v in schema["enum"]})
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        if ref not in refs:
+            refs[ref] = None
+            refs[ref] = _schema_types(_resolve_ref(root, ref), root, refs)
+        constraints.append(refs[ref])
+    for key in ("anyOf", "oneOf"):
+        if not isinstance(schema.get(key), list) or not schema[key]:
+            continue
+        union: set[str] = set()
+        for branch in schema[key]:
+            branch_types = _schema_types(branch, root, refs)
+            if branch_types is None:
+                break
+            union |= branch_types
+        else:
+            constraints.append(union)
+    if isinstance(schema.get("allOf"), list):
+        constraints.extend(_schema_types(s, root, refs) for s in schema["allOf"])
+    allowed: set[str] | None = None
+    for c in constraints:
+        if c is not None:
+            allowed = c if allowed is None else allowed & c
+    return allowed
+
+
+def _convert_value(raw: str, allowed: set[str] | None) -> Any:
+    """Decode a parameter value, keeping the raw text where a string is meant.
+
+    When the schema admits a string, the raw text is kept unless it decodes to
+    another type the schema also admits (``null`` for ``Optional[str]``, ``3``
+    for ``anyOf: [integer, string]``).
+    """
+    decoded = _decode_value(raw)
+    if allowed is None or "string" not in allowed:
+        return decoded
+    kind = _json_type(decoded)
+    if kind == "integer" and "number" in allowed:
+        kind = "number"
+    return decoded if kind != "string" and kind in allowed else raw
 
 
 def _iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
@@ -315,12 +415,17 @@ class MuseToolParser(ToolParser):
         return names
 
     @classmethod
-    def _string_parameters(
+    def _parameter_types(
         cls, request: ChatCompletionRequest | ResponsesRequest | None
-    ) -> dict[str, set[str]]:
+    ) -> dict[str, _ParameterTypes]:
+        """Per tool: the JSON types each top-level parameter admits.
+
+        The second element covers parameters not listed in ``properties``
+        (``additionalProperties``). ``None`` means unconstrained.
+        """
         if not cls._preserve_string_parameters:
             return {}
-        strings: dict[str, set[str]] = {}
+        types: dict[str, _ParameterTypes] = {}
         for tool in getattr(request, "tools", None) or []:
             function = getattr(tool, "function", None) or tool
             if isinstance(function, dict):
@@ -330,12 +435,20 @@ class MuseToolParser(ToolParser):
                 name = getattr(function, "name", None)
                 parameters = getattr(function, "parameters", None)
             if name and isinstance(parameters, dict):
-                strings[name] = {
-                    key
-                    for key, schema in parameters.get("properties", {}).items()
-                    if isinstance(schema, dict) and schema.get("type") == "string"
-                }
-        return strings
+                properties = parameters.get("properties")
+                if not isinstance(properties, dict):
+                    properties = {}
+                refs: dict[str, set[str] | None] = {}
+                types[name] = (
+                    {
+                        k: _schema_types(s, parameters, refs)
+                        for k, s in properties.items()
+                    },
+                    _schema_types(
+                        parameters.get("additionalProperties"), parameters, refs
+                    ),
+                )
+        return types
 
     @staticmethod
     def _normalize_name(emitted: str, registered: set[str]) -> str:
@@ -369,7 +482,7 @@ class MuseToolParser(ToolParser):
         cls,
         text: str,
         registered: set[str] | None = None,
-        strings: dict[str, set[str]] | None = None,
+        types: dict[str, _ParameterTypes] | None = None,
     ) -> list[ToolCall]:
         registered = registered or set()
         scoped = cls._tool_channel_text(text)
@@ -379,11 +492,11 @@ class MuseToolParser(ToolParser):
             if not name_m:
                 continue
             name = cls._normalize_name(name_m.group(1), registered)
-            string_parameters = (strings or {}).get(name, set())
+            properties, additional = (types or {}).get(name, ({}, None))
             args: dict = {}
             for pm in _PARAM_RE.finditer(invoke):
                 key, raw = pm.group("key"), pm.group("value")
-                args[key] = raw if key in string_parameters else _decode_value(raw)
+                args[key] = _convert_value(raw, properties.get(key, additional))
             tool_calls.append(
                 ToolCall(
                     function=FunctionCall(
@@ -422,7 +535,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             tool_calls = self._parse_tool_calls(
-                model_output, registered, self._string_parameters(request)
+                model_output, registered, self._parameter_types(request)
             )
             if not tool_calls:
                 # A tool block was opened but no COMPLETE
@@ -488,7 +601,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             calls = self._parse_tool_calls(
-                current_text, registered, self._string_parameters(request)
+                current_text, registered, self._parameter_types(request)
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text

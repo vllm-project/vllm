@@ -615,6 +615,119 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         assert json.loads(arguments) == expected
 
 
+def _parse_param(parser_class, parameters: dict, value: str) -> list:
+    """Parse one ``v`` parameter, non-streaming and streaming."""
+    function = {"name": "f", "parameters": parameters}
+    request = ChatCompletionRequest(
+        model="test",
+        messages=[],
+        tools=[{"type": "function", "function": function}],
+    )
+    raw = (
+        'to=f<|message|><atem:function_calls><atem:invoke name="f">'
+        f'<atem:parameter name="v">{value}</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eot|>"
+    )
+    calls = parser_class(object()).extract_tool_calls(raw, request).tool_calls
+    results = [json.loads(calls[0].function.arguments)["v"]]
+    parser = parser_class(object())
+    for end in range(7, len(raw) + 7, 7):
+        previous, current = raw[: end - 7], raw[:end]
+        delta = parser.extract_tool_calls_streaming(
+            previous, current, current[len(previous) :], [], [], [], request
+        )
+        if delta and delta.tool_calls:
+            results.append(json.loads(_fn_of(delta.tool_calls[0])[1])["v"])
+    assert len(results) == 2
+    return results
+
+
+_STRING_DEF = {"$defs": {"S": {"type": "string"}}}
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"properties": {"v": {"type": "string"}}},
+        {"properties": {"v": {"anyOf": [{"type": "string"}, {"type": "null"}]}}},
+        {"properties": {"v": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+        {"properties": {"v": {"type": ["string", "null"]}}},
+        {"properties": {"v": {"enum": ["1.10", "2.0"]}}},
+        {"properties": {"v": {"const": "1.10"}}},
+        {"properties": {"v": {"$ref": "#/$defs/S"}}, **_STRING_DEF},
+        {"properties": {"v": {"allOf": [{"$ref": "#/$defs/S"}]}}, **_STRING_DEF},
+        {"properties": {"v": {"allOf": [{"type": "string"}, {"minLength": 1}]}}},
+        {"properties": {}, "additionalProperties": {"type": "string"}},
+    ],
+    ids=[
+        "string",
+        "anyOf",
+        "oneOf",
+        "type_list",
+        "enum",
+        "const",
+        "ref",
+        "allOf_ref",
+        "allOf_constraint",
+        "additionalProperties",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    ["1.10", "1984", "true", '"q"', '{\n  "version": "1.4.0",\n  "build": 7\n}'],
+)
+def test_string_schema_forms_keep_raw_text(parameters, value):
+    """Values that decode to no other admitted type keep the ATEM text verbatim."""
+    assert _parse_param(MuseToolParser, parameters, value) == [value, value]
+
+
+@pytest.mark.parametrize(
+    "schema, value, expected",
+    [
+        # nullable string: null is still null, anything else stays text
+        ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "null", None),
+        ({"type": ["string", "null"]}, "null", None),
+        # a string-or-X union keeps a value of the other admitted type
+        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "25", 25),
+        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "1.10", "1.10"),
+        ({"type": ["number", "string"]}, "25", 25),
+        ({"enum": [1, "a"]}, "1", 1),
+        # no string admitted, or no type information: decode as before
+        ({"anyOf": [{"type": "number"}, {"type": "null"}]}, "1.10", 1.1),
+        ({"description": "untyped"}, "25", 25),
+        ({"anyOf": [{"type": "string"}, {}]}, "25", 25),
+    ],
+)
+def test_string_union_schemas(schema, value, expected):
+    parameters = {"properties": {"v": schema}}
+    assert _parse_param(MuseToolParser, parameters, value) == [expected, expected]
+
+
+def test_ref_cycles_and_shared_refs_resolve_quickly():
+    """$ref cycles terminate; shared $refs are walked once, not once per path."""
+    cyclic = {
+        "properties": {"v": {"$ref": "#/$defs/A"}},
+        "$defs": {
+            "A": {"anyOf": [{"$ref": "#/$defs/B"}, {"type": "string"}]},
+            "B": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}},
+        },
+    }
+    assert _parse_param(MuseToolParser, cyclic, "1.10") == ["1.10", "1.10"]
+    # Each def references the next one twice: 2**60 paths without memoization.
+    defs: dict[str, dict] = {
+        f"D{i}": {"anyOf": [{"$ref": f"#/$defs/D{i + 1}"}] * 2} for i in range(60)
+    }
+    defs["D60"] = {"type": "string"}
+    chain = {"properties": {"v": {"$ref": "#/$defs/D0"}}, "$defs": defs}
+    assert _parse_param(MuseToolParser, chain, "1.10") == ["1.10", "1.10"]
+
+
+def test_glimmer_keeps_decoding_optional_string():
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    parameters = {"properties": {"v": schema}}
+    assert _parse_param(MuseGlimmerToolParser, parameters, "1.10") == [1.1, 1.1]
+
+
 # --------------------------------------------------- reasoning token counting
 
 _SPECIALS = ["<|message|>", "<|start|>", "<|eom|>", "<|eot|>"]
