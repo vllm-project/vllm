@@ -15,6 +15,7 @@ from vllm.lora.request import LoRARequest
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NATIVE_MODEL_NAME = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
 BERT_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L6-v2"
+RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 PROMPTS = {
     "star_trek": "Does warp drive appear in Star Trek?",
     "new_zealand": "Wellington is the capital of New Zealand.",
@@ -23,13 +24,15 @@ EXPECTED_OUT = {
     "star_trek": [13.6640625, -13.6640625],
     "new_zealand": [-4.80078125, 8.6171875],
     "native": [-1.52734375],
+    "reranker": [-0.098132],
+    "reranker_lora": [-2.330126],
 }
 
 
 def _classify_logits(
     llm: LLM,
     prompts: list[str],
-    requests: LoRARequest | list[LoRARequest],
+    requests: LoRARequest | list[LoRARequest | None],
 ) -> torch.Tensor:
     params = [PoolingParams(task="classify", use_activation=False) for _ in prompts]
     outputs = llm.classify(
@@ -148,6 +151,38 @@ def test_lora_on_unsupported_module_is_rejected(tmp_path) -> None:
         llm.llm_engine.add_lora(LoRARequest("pooler", 1, pooler_adapter))
     assert llm.llm_engine.add_lora(LoRARequest("encoder", 2, encoder_adapter))
     assert set(llm.llm_engine.list_loras()) == {2}
+
+    del llm
+    cleanup_dist_env_and_memory()
+
+
+def test_multi_layer_head_with_modules_to_save(
+    bge_reranker_lora_files: str,
+) -> None:
+    # XLM-RoBERTa's head is classifier.dense followed by classifier.out_proj.
+    prompt = PROMPTS["new_zealand"]
+    llm = LLM(
+        model=RERANKER_MODEL_NAME,
+        runner="pooling",
+        dtype="float16",
+        enable_lora=True,
+        max_lora_rank=8,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+    )
+    actual = _classify_logits(
+        llm,
+        [prompt, prompt],
+        [LoRARequest("reranker", 1, bge_reranker_lora_files), None],
+    )
+
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([EXPECTED_OUT["reranker_lora"], EXPECTED_OUT["reranker"]]),
+        atol=2e-2,
+        rtol=2e-2,
+    )
 
     del llm
     cleanup_dist_env_and_memory()

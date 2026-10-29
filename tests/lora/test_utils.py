@@ -62,6 +62,11 @@ def test_parse_fine_tuned_lora_name_valid():
             "language_model.layers.9.mlp.down_proj",
             False,
         ),
+        # Classification heads saved through modules_to_save
+        LoRANameParserTestConfig("base_model.model.score.weight", "score", False),
+        LoRANameParserTestConfig(
+            "base_model.model.classifier.dense.bias", "classifier.dense", False
+        ),
         # Test with WeightsMapper
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
