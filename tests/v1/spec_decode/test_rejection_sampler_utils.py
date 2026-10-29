@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
@@ -17,6 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     gather_draft_sampled,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_global_logsumexp,
     rejection_sample,
 )
 
@@ -1602,3 +1604,53 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         rtol=0,
         atol=0,
     )
+
+
+@triton.jit
+def _global_logsumexp_probe_kernel(
+    local_max_ptr,
+    local_sumexp_ptr,
+    out_ptr,
+    vocab_num_blocks,
+    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+):
+    lse = _compute_global_logsumexp(
+        local_max_ptr,
+        PADDED_VOCAB_NUM_BLOCKS,
+        local_sumexp_ptr,
+        PADDED_VOCAB_NUM_BLOCKS,
+        0,
+        vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS,
+    )
+    tl.store(out_ptr, lse)
+
+
+def test_global_logsumexp_keeps_near_max_correction():
+    """Regresses #61383: a runner-up block trailing the max by ~14 in
+    logit-space used to vanish under fp32 rounding, collapsing the global
+    logsumexp to exactly the max (and the max token's probability to exactly
+    1.0) instead of the true, slightly-smaller value.
+    """
+    max_logit = 25.0
+    runner_up_logit = max_logit - 14.0
+    local_max = torch.tensor([max_logit, runner_up_logit], device="cuda")
+    # Each block contains exactly one token at its own local max, so each
+    # block's local sumexp (sum of exp(x - local_max) within the block) is 1.0.
+    local_sumexp = torch.tensor([1.0, 1.0], device="cuda")
+    out = torch.empty(1, dtype=torch.float64, device="cuda")
+
+    _global_logsumexp_probe_kernel[(1,)](
+        local_max,
+        local_sumexp,
+        out,
+        vocab_num_blocks=2,
+        PADDED_VOCAB_NUM_BLOCKS=2,
+    )
+
+    expected = max_logit + math.log1p(math.exp(runner_up_logit - max_logit))
+    result = out.item()
+    # Before the fix this is exactly `max_logit` (25.0): the correction term
+    # (~8.3e-7) is below fp32's ULP at this magnitude (~3e-6) and rounds away.
+    assert result != max_logit
+    assert result == pytest.approx(expected, abs=1e-9)

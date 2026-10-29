@@ -47,7 +47,15 @@ def _compute_global_logsumexp(
         other=0.0,
     )
     global_max = tl.max(maxes, axis=0)
-    global_lse = global_max + tl.log(tl.sum(sumexps * tl.exp(maxes - global_max)))
+    # fp64: at global_max ~= 25, fp32 ULP (~3e-6) rounds away log(sum_term)
+    # whenever the runner-up trails the max by >~14 in logit-space, silently
+    # collapsing a near-1.0 probability to exactly 1.0. This reduction is
+    # O(1) per block/request, so the fp64 cost is immaterial. Per-block terms
+    # must be cast to fp64 before the sum, not after: summing e.g. 1.0 and
+    # 8e-7 in fp32 already loses precision at fp32's ULP(1.0) (~1.2e-7),
+    # before the result ever reaches this function's own fp64 promotion.
+    terms = (sumexps * tl.exp(maxes - global_max)).to(tl.float64)
+    global_lse = global_max.to(tl.float64) + tl.log(tl.sum(terms, axis=0))
     return global_lse
 
 
@@ -92,9 +100,9 @@ def _compute_global_residual_mass(
         )
         target_logit = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + draft_token,
-        ).to(tl.float32)
+        ).to(tl.float64)
         m_b = tl.exp(target_logit - target_lse)
-        return prefix_joint_ratio * (1.0 - m_b)
+        return (prefix_joint_ratio * (1.0 - m_b)).to(tl.float32)
 
 
 @triton.jit
@@ -166,7 +174,7 @@ def _compute_global_logprobs_and_logsumexp(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
     )
-    target_log_prob = target_logit - target_lse
+    target_log_prob = target_logit.to(tl.float64) - target_lse
     if HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logit = (
@@ -190,11 +198,11 @@ def _compute_global_logprobs_and_logsumexp(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
-        draft_log_prob = draft_logit - draft_lse
+        draft_log_prob = draft_logit.to(tl.float64) - draft_lse
     else:
         # One-hot draft: q(token) = 1, log_q = 0.
-        draft_log_prob = 0.0
-        draft_lse = 0.0
+        draft_log_prob = tl.zeros((), tl.float64)
+        draft_lse = tl.zeros((), tl.float64)
     return target_log_prob, draft_log_prob, target_lse, draft_lse
 
 
@@ -402,7 +410,9 @@ def _compute_cumulative_log_p_kernel(
                     DRAFT_LOGITS_NUM_SHARDS,
                 )
             )
-            log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
+            log_p = tl.minimum(
+                log_p + (target_logprob - draft_logprob).to(tl.float32), 0.0
+            )
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
@@ -501,7 +511,7 @@ def _compute_local_residual_mass_kernel(
     p = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx - 1).to(tl.float32))
     m_b = tl.exp(target_log_probs)
     m_s = tl.exp(draft_log_probs)
-    partial = tl.sum(tl.maximum(p * m_b - m_s, 0.0), axis=0)
+    partial = tl.sum(tl.maximum(p * m_b - m_s, 0.0), axis=0).to(tl.float32)
     tl.store(
         local_residual_mass_ptr + logit_idx * local_residual_mass_stride + block_idx,
         partial,
@@ -584,8 +594,8 @@ def _rejection_kernel(
     # Freeze the accepted prefix and recovery stats until the window is confirmed.
     pending_rejection = tl.full((), -1, tl.int64)
     rejected_argmax = tl.full((), 0, tl.int64)
-    target_lse = 0.0
-    draft_lse = 0.0
+    target_lse = tl.zeros((), tl.float64)
+    draft_lse = tl.zeros((), tl.float64)
     verifying = True
     for i in range(num_draft_tokens):
         logit_idx = start_idx + i
@@ -934,7 +944,7 @@ def _resample_kernel(
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = target_logits - target_lse
+        target_log_probs = target_logits.to(tl.float64) - target_lse
         if USE_BLOCK_VERIFICATION:
             # Block residual is:
             #   max(p_tau * M_b(x) - M_s(x), 0) / Z.
@@ -946,14 +956,16 @@ def _resample_kernel(
                     tl.float32
                 )
             target_log_probs += log_p_tau
-        draft_log_probs = draft_logits - draft_lse
+        draft_log_probs = draft_logits.to(tl.float64) - draft_lse
         # Compute the residual:
         #   r(x) = max(p(x) - q(x), 0)
         # Gumbel sampling needs logits, so we compute it in log space:
         #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
         # The more numerically stable form is:
         #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
-        ratio = tl.exp(draft_log_probs - target_log_probs)
+        # draft_log_probs/target_log_probs carried the fp64 precision needed
+        # near the global LSE; downcast once combined into a log-ratio.
+        ratio = tl.exp((draft_log_probs - target_log_probs).to(tl.float32))
         residual_logits = tl.where(
             ratio < 1.0,
             target_log_probs + tldevice.log1p(-ratio),
@@ -1320,8 +1332,8 @@ def rejection_sample(
         num_reqs, num_speculative_steps + 1, dtype=torch.int64
     )
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
-    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float64)
+    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float64)
     _rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
