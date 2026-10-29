@@ -400,8 +400,8 @@ K_PADDING_CASES = [
 def test_fp8_scaled_mm_linear_kernel_pads_k(
     kernel_type, activation_quant_key, weight_quant_key, num_tokens, weight_shape
 ):
-    """The FP8 linear kernels zero-pad the weight's K to a multiple of 16 at
-    load and the input's K at apply, so a layer with an unaligned K runs."""
+    """On ROCm, the FP8 linear kernels zero-pad the weight's K to a multiple of
+    16 at load and the input's K at apply, so a layer with an unaligned K runs."""
     torch.manual_seed(0)
 
     n_dim, k_dim = weight_shape
