@@ -39,6 +39,7 @@ else:
     def get_cdna_version() -> int:
         return 0
 
+
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
