@@ -3567,12 +3567,13 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
-def test_fusion_pass_op_priority():
+def test_fusion_pass_op_priority(use_aiter):
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
-    # Default config, O2, rms_norm+quant fusion disabled
+    # Default config, O2, rms_norm+quant fusion enabled only by AITER's +quant_fp8
     cfg1 = VllmConfig()
-    assert not cfg1.compilation_config.pass_config.fuse_norm_quant
+    assert ("+quant_fp8" in cfg1.compilation_config.custom_ops) == use_aiter
+    assert cfg1.compilation_config.pass_config.fuse_norm_quant == use_aiter
 
     # rms_norm manually enabled, O1, rms_norm+quant fusion enabled
     cfg2 = VllmConfig(

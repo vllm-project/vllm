@@ -8,6 +8,7 @@ import torch
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     ActivationQuantFusionPass,
 )
@@ -65,6 +66,10 @@ class TestSiluMul(torch.nn.Module):
 
     def ops_in_model(self, do_fusion):
         if TEST_FP8 and do_fusion:
+            # The AITER pattern is replaced by native ops, so nothing is left
+            # to defunctionalize.
+            if rocm_aiter_ops.is_linear_fp8_enabled():
+                return []
             return [torch.ops._C.silu_and_mul_quant.default]
         else:
             return [torch.ops._C.silu_and_mul.default]
@@ -124,6 +129,10 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
     def ops_in_model(self, do_fusion):
         if TEST_FP8 and do_fusion:
+            # AITER's fused RMSNorm + quant op is functional, so there is
+            # nothing to defunctionalize.
+            if rocm_aiter_ops.is_linear_fp8_enabled():
+                return []
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
             return []
@@ -274,7 +283,10 @@ MODELS_AND_DO_FUSION = {
     reason="Only test on cuda and rocm platform",
 )
 def test_fix_functionalization(
-    model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
+    model_class: torch.nn.Module,
+    do_fusion: bool,
+    dtype: torch.dtype,
+    use_aiter: bool,
 ):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -295,12 +307,19 @@ def test_fix_functionalization(
     with set_current_vllm_config(vllm_config):
         assert RMSNorm.enabled()
         noop_pass = NoOpEliminationPass(vllm_config)
-        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        fusion_passes = [RMSNormQuantFusionPass(vllm_config)]
+        if rocm_aiter_ops.is_enabled():
+            from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+                RocmAiterRMSNormQuantFusionPass,
+            )
+
+            # Same order as the pass manager.
+            fusion_passes.insert(0, RocmAiterRMSNormQuantFusionPass(vllm_config))
         cleanup_pass = PostCleanupPass(vllm_config)
         act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
         passes = (
-            [noop_pass, fusion_pass, act_quant_fusion_pass, cleanup_pass]
+            [noop_pass, *fusion_passes, act_quant_fusion_pass, cleanup_pass]
             if do_fusion
             else [noop_pass, cleanup_pass]
         )

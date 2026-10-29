@@ -426,6 +426,7 @@ def test_piecewise_compilation_with_donated_buffers(monkeypatch, fresh_vllm_cach
             custom_ops=["all"],
             splitting_ops=["vllm::test_split_marker"],
             inductor_compile_config={"post_grad_custom_post_pass": store_donation_info},
+            pass_config={"fuse_rope_kvcache": False},
         )
     )
 

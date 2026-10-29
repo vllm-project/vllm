@@ -1418,14 +1418,19 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
+        from vllm._aiter_ops import rocm_aiter_ops
+
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         # TODO(Rohan138/dllehr-amd/rasmith) Change this to be an inclusive
         # check instead of exclusive check in the future.
+        # TODO(akaratza): drop the gfx942 gate once AITER_BRANCH includes
+        # ROCm/aiter#6300 (RNE bf16 stores; AITER RMSNorm truncates on gfx942).
         if (
             cc.cudagraph_mode != CUDAGraphMode.NONE
-            and envs.VLLM_ROCM_USE_AITER
+            and rocm_aiter_ops.is_enabled()
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
             and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
+            and not on_gfx942()
         ):
             rms_norm = ["aiter"] + default
         else:

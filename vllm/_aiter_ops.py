@@ -223,6 +223,17 @@ def is_aiter_found_and_supported() -> bool:
     return False
 
 
+def _aiter_enabled() -> bool:
+    """VLLM_ROCM_USE_AITER, defaulting to on only where AITER is supported.
+
+    An explicit setting is kept so RDNA4 can still opt in; the CDNA3+ paths
+    stay behind `if_aiter_supported` either way.
+    """
+    if envs.is_set("VLLM_ROCM_USE_AITER"):
+        return envs.VLLM_ROCM_USE_AITER
+    return is_aiter_found_and_supported()
+
+
 def is_aiter_found_and_supported_on_rdna4() -> bool:
     """RDNA4 (gfx12) analog of `is_aiter_found_and_supported()`.
 
@@ -2135,14 +2146,16 @@ class rocm_aiter_ops:
 
     This class centralizes the import and registration of AITER ops,
     and provides a unified interface for checking if AITER is enabled.
-    Operations are only available on supported gfx9
-    architectures when aiter is installed.
+    Operations are only available on CDNA3 or newer when aiter is installed.
 
     The class uses environment variables to control which features are enabled,
     allowing fine-grained control over which AITER optimizations are used.
 
     Environment Variables:
-        VLLM_ROCM_USE_AITER: Main toggle for all AITER operations.
+        VLLM_ROCM_USE_AITER: Main toggle for all AITER operations. Unset means
+            on for CDNA3 or newer with aiter installed. ``0`` turns it off; ``1``
+            is still gated by arch, except on RDNA4, where it opts into the
+            Triton-only path.
         VLLM_ROCM_USE_AITER_LINEAR: Controls GEMM and quantization ops.
         VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
         VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
@@ -2168,12 +2181,12 @@ class rocm_aiter_ops:
 
     Check Functions:
         All check functions (is_*_enabled) are decorated with @if_aiter_supported,
-        which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
-        (3) aiter library is installed. The check function then also verifies
-        the corresponding environment variable is enabled.
+        which verifies: (1) platform is ROCm, (2) device arch is CDNA3 or
+        newer, and (3) aiter library is installed. The check function then also
+        verifies the corresponding environment variable is enabled.
         i.e.                                             ___
         is_enabled() == current_platform.is_rocm() and      |     checked by
-                        current_platform.is_on_gfx9() and   | @if_aiter_supported
+                        get_cdna_version() > 2 and          | @if_aiter_supported
                         IS_AITER_FOUND and   _______________|
                         cls._AITER_ENABLED   -----> Check by the logic in `is_enabled()`
 
@@ -2207,7 +2220,7 @@ class rocm_aiter_ops:
         return cls._MOE_DISPATCH_POLICY
 
     # Check if the env variable is set
-    _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+    _AITER_ENABLED = _aiter_enabled()
     # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
     GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -2240,7 +2253,7 @@ class rocm_aiter_ops:
         for example, after monkey patching the env variables in the unit test,
         you can call this function to reload the env variables.
         """
-        cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+        cls._AITER_ENABLED = _aiter_enabled()
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE

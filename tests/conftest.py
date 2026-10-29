@@ -48,6 +48,7 @@ from tests.models.utils import (
     softmax,
 )
 from vllm import LLM, SamplingParams, envs
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -220,6 +221,15 @@ def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
     # so we need to make sure the async client is created anew
     global_http_connection.reuse_client = False
+
+
+@pytest.fixture(params=[False, True] if is_aiter_found_and_supported() else [False])
+def use_aiter(request, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", str(int(request.param)))
+        rocm_aiter_ops.refresh_env_variables()
+        yield request.param
+    rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.fixture

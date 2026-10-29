@@ -933,26 +933,44 @@ def test_rocm_attn_rejects_kv_connector(mock_vllm_config, mock_get_cdna_version)
 
 
 @pytest.mark.parametrize(
-    "aiter_found, expected_backend",
+    "aiter_found, use_aiter, expected_backend",
     [
-        (True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (False, AttentionBackendEnum.TRITON_ATTN),
+        (True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, True, AttentionBackendEnum.ROCM_AITER_FA),
+        (False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, AttentionBackendEnum.TRITON_ATTN),
     ],
 )
 def test_auto_selection_for_kv_connector(
-    aiter_found, expected_backend, mock_vllm_config, mock_get_cdna_version
+    aiter_found,
+    use_aiter,
+    expected_backend,
+    mock_vllm_config,
+    mock_get_cdna_version,
+    monkeypatch,
 ):
-    """Auto-selection with a KV connector and AITER enabled resolves to unified attn,
-    and to triton attn if AITER not enabled."""
+    """Auto-selection with a KV connector resolves to AITER FA when AITER is
+    enabled, to unified attn when it is found but disabled, and to triton attn
+    when it is not found."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import RocmPlatform
 
-    with patch(
-        "vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found
-    ):
-        backend_path = RocmPlatform.get_attn_backend_cls(
-            selected_backend=None,
-            attn_selector_config=_kv_connector_selector_config(),
-        )
+    try:
+        with (
+            monkeypatch.context() as m,
+            patch(
+                "vllm._aiter_ops.is_aiter_found_and_supported",
+                return_value=aiter_found,
+            ),
+        ):
+            m.setenv("VLLM_ROCM_USE_AITER", str(int(use_aiter)))
+            rocm_aiter_ops.refresh_env_variables()
+            backend_path = RocmPlatform.get_attn_backend_cls(
+                selected_backend=None,
+                attn_selector_config=_kv_connector_selector_config(),
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
 
     assert backend_path == expected_backend.get_path()
 
