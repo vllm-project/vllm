@@ -169,6 +169,7 @@ MULTIMODAL_MODELS = {
     "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
+    "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
     "AIDC-AI/Ovis2-1B": PPTestSettings.fast(),
     "AIDC-AI/Ovis2.5-2B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),

@@ -1151,6 +1151,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"},
     ),
+    "MolmoForCausalLM": _HfExamplesInfo(
+        "allenai/Molmo-7B-D-0924",
+        max_transformers_version="4.48",
+        transformers_version_reason={
+            "vllm": "Incorrectly-detected `tensorflow` import from processor."
+        },
+        extras={"olmo": "allenai/Molmo-7B-O-0924"},
+        trust_remote_code=True,
+    ),
     "Moondream3ForCausalLM": _HfExamplesInfo(
         "moondream/moondream3-preview",
         tokenizer="moondream/starmie-v1",

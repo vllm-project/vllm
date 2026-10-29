@@ -727,6 +727,14 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
     ),
+    "molmo": VLMTestInfo(
+        models=["allenai/Molmo-7B-D-0924"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=identity,
+        max_model_len=4096,
+        max_num_seqs=2,
+        patch_hf_runner=model_utils.molmo_patch_hf_runner,
+    ),
     "moondream3": VLMTestInfo(
         models=["moondream/moondream3-preview"],
         test_type=VLMTestType.IMAGE,
