@@ -1479,6 +1479,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
+            token_ids[start : start + length] = [0] * length
             pe_kwargs_items.append(
                 MultiModalKwargsItem(
                     {
@@ -1500,6 +1501,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 PlaceholderRange(offset=start, length=length, is_embed=None)
             )
 
+        engine_input["prompt_token_ids"] = token_ids
         cast(
             MultiModalKwargsItems[MultiModalKwargsItem | None],
             engine_input["mm_kwargs"],
