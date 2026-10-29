@@ -4308,3 +4308,36 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Sécurité** : **aucune IP externe nouvelle avec 200** — `?` 806/800 · site `90.65.170.144` 660/646 · web1 `37.187.180.135` 12/12 · **poste Paris `82.66.89.184` 4/4** (IP connue et réclamée, Q13).
 
 **Annexes** : nbaudit **ok 08:05:47Z**, `consecutive_failures 0`, **`subpath: ["19451:Image/"]` ⇒ vague 2 (Image/) armée et en production**. G: OK (705 Go libres, 82 %). Prouveur : aucune passe. Registre : **Q45 ouverte** (notre part du commit / tier 32→24 GiB).
+
+## Cycle 10:1xZ (29/10) — 🟢 moteur (sondes 0,65 s, 2 h sans un seul WEDGE) mais ⚠⚠ HÔTE : commit 97,6 %, à 0,2 pt de la panne du 24/09 ; ★ rafale 400 po-2024 à corps CROISSANTS
+
+**Prod** : health 200 (12,9 ms), RC=0, StartedAt stable 28/10 18:20:28Z (**16 h sans restart**), OOM 0, 3/3 Up, `/dev/shm` 33G/63G = 51 %. KV GPU **26,4 %** (75,5 % au cycle précédent — grosse détente), running 2, waiting 0. **Préemptions 28 (Δ+0, 5ᵉ cycle consécutif)**.
+
+**Batterie : 0,65 / 0,63 / 0,64 s** (préchauffe 0,30 s) — le meilleur relevé de la journée, cohérent avec la détente KV. **Watchdog : 3 903 `OK`, AUCUN nouveau WEDGE depuis 08:09:00Z** (deux heures sans un seul `fail`, première fois depuis la nuit).
+
+**Amortissement des préfixes** : cumulé **176,6 M / 292,0 M = 60,5 %** (59,4 % il y a 2 h), tier externe **93,5 M / 115,3 M = 81,1 %**. **Delta 2 h : +10,76 M hits / +12,81 M queries = 84,0 %**. `prompt_tokens_total` +13,04 M.
+
+**⚠⚠ MARGE COMMIT 97,6 % (377,0/386,4 Go, 9,4 Go libres)** — 94,8 → **97,6 % en deux heures (+2,8 pts)**. **La panne du 24/09 (Docker Desktop mort, ~68 min d'indispo, moteur ET hub) était à 97,8 %** : nous sommes à **0,2 point** de ce niveau. `vmmemWSL` privé **169,0 Go** (+7,1 en 2 h) avec un **WS plat à 83,5 Go** ⇒ la croissance est encore de l'**engagé non résident**, mais la direction ne s'inverse pas. RAM libre de l'hôte : **29,5 Go** (contre 41,6 Go il y a 2 h).
+
+**★ Inventaire mesuré des consommateurs `python.exe` (jamais fait avant)** — ~24 Go de mémoire privée engagée :
+
+| Type | Instances | Total | Parent |
+|---|---:|---:|---|
+| `markitdown_mcp` | **13** | **11,3 Go** | cmd.exe (vivant) |
+| `sk_agent.py` | 30 | 6,0 Go | python.exe (vivant) |
+| scripts de session (bash) | 2 | **3,0 Go** dont **2,8 Go pour UN script lancé 09:57Z** | bash.exe (vivant) |
+| `papermill_mcp` | 24 | 2,3 Go | claude.exe (vivant) |
+| `uv` (MCP en cache) | 7 | 0,8 Go | python.exe (vivant) |
+| `provider-consoles-reader` | 1 | 0,6 Go | bash.exe (vivant) |
+
+**Tous ont un parent VIVANT — aucun `parent=MORT`** ⇒ ce ne sont **pas des orphelins prouvés**, donc **aucune suppression** (règle : pas de destruction sans preuve de préservation, et GO user requis). Mais 13 instances de `markitdown_mcp` à 870 Mo pièce pour un seul type d'outil est un signal en soi : c'est un candidat sérieux pour rendre ~10 Go. **Question Q46 ouverte** — c'est le levier qui pourrait réellement bouger la marge (5,4 pts), contrairement au tier (2,1 pts).
+
+**★ 400 window+1 : 29/2 h — la rafale po-2024 a REPRIS, avec une signature nouvelle.** 26 requêtes de `myia-po-2024` entre **08:27:06Z et 08:38:41Z** (12 min, cadence 2-3 s) et surtout **des corps qui CROISSENT MONOTONEMENT : 890 524 → 1 002 085 octets** (33 pas, +3 330 o par essai en moyenne). C'est la preuve que le client **ré-essaie en s'ajoutant à lui-même** : chaque tentative échouée s'accumule dans l'historique, le contexte grossit, et le tour suivant est encore plus hors fenêtre. Ce n'est pas un prompt trop long qui arrive une fois, c'est une **boucle qui s'auto-aggrave** — exactement le cas que #431 doit intercepter (router au cloud dans le même tour, jamais de retry local). La rafale s'est arrêtée d'elle-même à 08:38:41Z. Plus **3 po-2023 isolés** (09:19:52, 09:48:46, 10:08:39Z) et **39/7 h** au total.
+
+**Trafic 2 h** : 393 lignes ~3,3 req/min. Attribution : sans en-têtes 300 · **po-2024 50** · ai-01 22 · po-2023 21. Corps : 101 dans 100K-1M, 2 >1M.
+
+**VRAM** : GPU 0 **23 329** (−13), GPU 1 **21 786** (plat, 3ᵉ cycle), GPU 2 **191** (vide, Q-006).
+
+**Sécurité** : **aucune IP externe nouvelle avec 200** — `?` 824/817 · site `90.65.170.144` 602/562 · web1 `37.187.180.135` 14/14 · poste Paris `82.66.89.184` 2/2 (connue).
+
+**Annexes** : condensation **stable — 6 refus du primaire au total aujourd'hui, aucun nouveau depuis 08:06:26Z**. nbaudit ok 10:06:17Z (`Image/`). G: OK mais **610 Go libres** (705 → 610 en 2 h, disque 84 %). Prouveur : aucune passe. Registre : **Q45** + **Q46** (nouvelle).
