@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from packaging.version import Version
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -310,6 +311,49 @@ def get_lora_op_configs(
 
     assert config_data is not None
     return config_data
+
+
+@lru_cache
+def get_lora_shrink_multicta_config(
+    batch: int, hidden_size: int, rank: int
+) -> dict[str, int]:
+    """Select cluster-shrink parameters with a batch-independent K partition."""
+    block_k = 128 if 256 < hidden_size <= 1024 else 256
+    block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
+    k_blocks = max(1, cdiv(hidden_size, block_k))
+    num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
+    block_m = 16 if batch < 128 else 32
+    block_n = min(32, max(16, next_power_of_2(rank)))
+    return {
+        "block_m": block_m,
+        "block_n": block_n,
+        "block_k": block_k,
+        "split_k": num_ctas,
+        "num_ctas": num_ctas,
+        "num_warps": 2 if block_m == 16 and block_n == 16 else 4,
+    }
+
+
+@lru_cache
+def supports_multicta_shrink(device: torch.device) -> bool:
+    """Check device and toolchain support for the experimental shrink kernel."""
+    if (
+        not current_platform.is_cuda()
+        or torch.cuda.get_device_capability(device)[0] < 9
+    ):
+        return False
+    from vllm.triton_utils import triton
+
+    if Version(triton.__version__) < Version("3.8.0"):
+        return False
+    try:
+        from cuda.bindings import driver
+    except ImportError:
+        return False
+    status, supported = driver.cuDeviceGetAttribute(
+        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH, device.index
+    )
+    return status == driver.CUresult.CUDA_SUCCESS and bool(supported)
 
 
 @lru_cache

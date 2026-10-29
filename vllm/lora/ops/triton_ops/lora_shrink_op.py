@@ -6,10 +6,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from functools import lru_cache
-
 import torch
-from packaging.version import Version
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -18,34 +15,15 @@ from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
     is_batch_invariant,
+    supports_multicta_shrink,
     supports_pdl,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # Batch-invariant shrink splits K into this many fixed partials (no atomics).
 _BI_SPLIT_K = 8
 logger = init_logger(__name__)
-
-
-@lru_cache
-def _supports_multicta_shrink(device: torch.device) -> bool:
-    if (
-        not current_platform.is_cuda()
-        or torch.cuda.get_device_capability(device)[0] < 9
-    ):
-        return False
-    if Version(triton.__version__) < Version("3.8.0"):
-        return False
-    try:
-        from cuda.bindings import driver
-    except ImportError:
-        return False
-    status, supported = driver.cuDeviceGetAttribute(
-        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH, device.index
-    )
-    return status == driver.CUresult.CUDA_SUCCESS and bool(supported)
 
 
 @triton.jit
@@ -286,7 +264,7 @@ def _lora_shrink(
         return
     use_multicta = False
     if envs.VLLM_LORA_SHRINK_USE_MULTICTA:
-        use_multicta = _supports_multicta_shrink(inputs.device)
+        use_multicta = supports_multicta_shrink(inputs.device)
         if not use_multicta:
             logger.warning_once(
                 "Multi-CTA LoRA shrink requires NVIDIA cluster launch support, "

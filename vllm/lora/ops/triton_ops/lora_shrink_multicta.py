@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.lora.ops.triton_ops.utils import get_lora_shrink_multicta_config
 from vllm.triton_utils import gl, gluon, triton
 
 
@@ -126,17 +127,6 @@ def _lora_shrink_multicta_kernel(
     )
 
 
-def _multicta_config(m: int, k: int, rank: int) -> tuple[int, int, int, int]:
-    # Only M tiling changes with batch size; K arithmetic stays fixed.
-    block_k = 128 if 256 < k <= 1024 else 256
-    block_k = min(block_k, max(32, triton.next_power_of_2(k)))
-    k_blocks = max(1, triton.cdiv(k, block_k))
-    num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
-    block_m = 16 if m < 128 else 32
-    block_n = min(32, max(16, triton.next_power_of_2(rank)))
-    return block_m, block_n, block_k, num_ctas
-
-
 def launch_lora_shrink_multicta(
     inputs: torch.Tensor,
     lora_ptr: torch.Tensor,
@@ -151,7 +141,9 @@ def launch_lora_shrink_multicta(
 ) -> None:
     m, k = inputs.shape
     nslices, _, rank = output.shape
-    bm, bn, bk, num_ctas = _multicta_config(m, k, rank)
+    config = get_lora_shrink_multicta_config(batch=m, hidden_size=k, rank=rank)
+    bm, bn, bk = config["block_m"], config["block_n"], config["block_k"]
+    num_ctas = config["num_ctas"]
     cga_layout = tuple((1 << bit, 0, 0) for bit in range(num_ctas.bit_length() - 1))
     grid = (triton.cdiv(m, bm) * triton.cdiv(rank, bn), nslices, num_active_loras)
     _lora_shrink_multicta_kernel[grid](
@@ -171,9 +163,9 @@ def launch_lora_shrink_multicta(
         bm,
         bn,
         bk,
-        num_ctas,
+        config["split_k"],
         cga_layout,
         num_ctas=num_ctas,
-        num_warps=2 if bm == 16 and bn == 16 else 4,
+        num_warps=config["num_warps"],
         enable_fp_fusion=False,
     )
