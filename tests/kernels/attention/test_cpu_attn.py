@@ -8,8 +8,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
@@ -17,6 +25,8 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
     should_use_zentorch_sdpa,
     zentorch_sdpa_attn,
 )
+from vllm.v1.attention.selector import AttentionSelectorConfig
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -801,6 +811,72 @@ def test_varlen_encoder_attention_amx(
         block_size=block_size,
         isa=isa,
     )
+
+
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@torch.inference_mode()
+def test_encoder_only_attention_ignores_default_causal(
+    sliding_window: int | None,
+) -> None:
+    """ENCODER_ONLY layers attend bidirectionally even though the encoder-only
+    runner leaves CommonAttentionMetadata.causal at its default (True)."""
+    set_random_seed(0)
+    seq_lens = [1, 37, 300]
+    num_heads, num_kv_heads, head_size = 4, 2, 128
+    block_size = 128
+    dtype = torch.float32
+    device = torch.device("cpu")
+    layer_name = "model.layers.0.self_attn.attn"
+    vllm_config = create_vllm_config(dtype=dtype, block_size=block_size)
+
+    with set_current_vllm_config(vllm_config):
+        layer = Attention(
+            num_heads,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads=num_kv_heads,
+            per_layer_sliding_window=sliding_window,
+            attn_type=AttentionType.ENCODER_ONLY,
+            prefix=layer_name,
+        )
+        spec = EncoderOnlyAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+        )
+        builder = layer.get_attn_backend().get_builder_cls()(
+            spec, [layer_name], vllm_config, device
+        )
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=seq_lens),
+            block_size,
+            device,
+            arange_block_indices=True,
+        )
+        common_attn_metadata.positions = torch.cat(
+            [torch.arange(seq_len) for seq_len in seq_lens]
+        )
+        attn_metadata = builder.build(0, common_attn_metadata)
+
+        num_tokens = sum(seq_lens)
+        query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
+        key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+        value = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+        output = torch.empty_like(query)
+        layer.impl.forward(
+            layer, query, key, value, torch.empty(0), attn_metadata, output
+        )
+
+    ref_output = ref_varlen_encoder_attn(
+        query=query,
+        key=key,
+        value=value,
+        seq_lens=seq_lens,
+        scale=head_size**-0.5,
+        sliding_window=sliding_window,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1e-4, rtol=1e-4)
 
 
 @torch.inference_mode()
@@ -1589,3 +1665,38 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
+
+
+def _select_attn_backend(kv_cache_dtype: str, use_mla: bool = False) -> str:
+    config = AttentionSelectorConfig(
+        head_size=576 if use_mla else 64,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=128,
+        use_mla=use_mla,
+    )
+    return CpuPlatform.get_attn_backend_cls(None, config)
+
+
+@pytest.mark.parametrize("fp8_isa", [True, False])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "bfloat16", "fp8", "turboquant_k8v4", "nvfp4"],
+)
+def test_cpu_attn_kv_cache_dtype_validation(
+    monkeypatch: pytest.MonkeyPatch, kv_cache_dtype: str, fp8_isa: bool
+) -> None:
+    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr("torch.cpu._is_avx512_supported", lambda: fp8_isa)
+
+    if kv_cache_dtype in ("auto", "bfloat16") or (kv_cache_dtype == "fp8" and fp8_isa):
+        assert _select_attn_backend(kv_cache_dtype).endswith("CPUAttentionBackend")
+    else:
+        with pytest.raises(ValueError, match=kv_cache_dtype):
+            _select_attn_backend(kv_cache_dtype)
+
+
+def test_cpu_mla_rejects_quantized_kv_cache() -> None:
+    assert "MLA" in _select_attn_backend("auto", use_mla=True)
+    with pytest.raises(ValueError, match="fp8"):
+        _select_attn_backend("fp8", use_mla=True)

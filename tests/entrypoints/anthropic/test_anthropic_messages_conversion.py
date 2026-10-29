@@ -32,6 +32,7 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
+    DisabledThinkingEffortResolver,
     _build_anthropic_usage,
 )
 from vllm.entrypoints.generate.base.protocol import (
@@ -1086,11 +1087,13 @@ async def test_stream_error_preserves_message_and_closes_block(block_type):
     events = _parse_sse_events(
         [event async for event in converter.message_stream_converter(source())]
     )
+    # The ErrorResponse produced by create_error_response(ValueError) carries
+    # HTTP 400, and the SSE path reuses the non-streaming status->type mapping.
     assert events[-1] == (
         "error",
         {
             "type": "error",
-            "error": {"type": "internal_error", "message": "backend failed"},
+            "error": {"type": "invalid_request_error", "message": "backend failed"},
         },
     )
     assert not any(event_type == "message_stop" for event_type, _ in events)
@@ -1450,6 +1453,27 @@ class TestDetectMergeInlineSystem:
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    def test_tools_none_check_template_merges(self):
+        """OLMo 3-style ``tools | tojson`` on undefined tools falls back to merge."""
+        template = (
+            "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+
+    def test_tools_loop_template_no_merge(self):
+        """Hermes-style ``for tool in tools`` must not raise in the probe."""
+        template = (
+            "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
+    def test_non_template_error_defaults_merge(self):
+        """A non-TemplateError render failure must not abort startup."""
+        template = "{{ undefined_var | tojson }}"
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
 
     @pytest.mark.parametrize(
         ("resolved", "expected"),
@@ -1813,7 +1837,7 @@ class TestClientErrorResponses:
 
     def test_validation_error_returns_bad_request(self):
         """A pydantic ValidationError during Anthropic->OpenAI conversion is
-        surfaced as a 400 BadRequestError, not a 500."""
+        surfaced as a 400 invalid_request_error, not a 500."""
         handler = MagicMock(spec=AnthropicServingMessages)
         handler.create_messages.side_effect = self._conversion_error()
 
@@ -1824,7 +1848,7 @@ class TestClientErrorResponses:
         assert response.status_code == HTTPStatus.BAD_REQUEST
         body = response.json()
         assert body["type"] == "error"
-        assert body["error"]["type"] == "BadRequestError"
+        assert body["error"]["type"] == "invalid_request_error"
         assert "at most 4 items" in body["error"]["message"]
 
     def test_vllm_client_error_returns_bad_request(self):
@@ -1839,7 +1863,7 @@ class TestClientErrorResponses:
             response = client.post("/v1/messages", json=self._request_body())
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
-        assert response.json()["error"]["type"] == "BadRequestError"
+        assert response.json()["error"]["type"] == "invalid_request_error"
 
     def test_generic_error_still_returns_internal_server_error(self):
         """Non-client errors keep the existing 500 behaviour."""
@@ -1851,7 +1875,7 @@ class TestClientErrorResponses:
             response = client.post("/v1/messages", json=self._request_body())
 
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        assert response.json()["error"]["type"] == "InternalServerError"
+        assert response.json()["error"]["type"] == "api_error"
 
     def test_count_tokens_validation_error_returns_bad_request(self):
         """The count_tokens route maps conversion errors to 400 as well."""
@@ -1865,7 +1889,7 @@ class TestClientErrorResponses:
             )
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
-        assert response.json()["error"]["type"] == "BadRequestError"
+        assert response.json()["error"]["type"] == "invalid_request_error"
 
 
 # ======================================================================
@@ -2046,18 +2070,82 @@ class TestProbeDisabledThinkingEffort:
 
     @staticmethod
     async def _probe(render):
-        obj = MagicMock(spec=AnthropicServingMessages)
-        obj.online_renderer = MagicMock()
-        obj.online_renderer.render_chat = AsyncMock(
-            side_effect=lambda req: ([], [render(req.reasoning_effort)])
+        renderer = MagicMock()
+        renderer.model_config.is_encoder_decoder = False
+        renderer.render_chat = AsyncMock(
+            side_effect=lambda req: (
+                [],
+                [{"prompt_token_ids": render(req.reasoning_effort)}],
+            )
         )
-        obj._extract_prompt_components = lambda engine_input: SimpleNamespace(
-            token_ids=engine_input, text=None
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
         )
-        obj._render_probe_prompt = (
-            AnthropicServingMessages._render_probe_prompt.__get__(obj)
+        return await resolver.resolve_for(request)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expected_effort", ["low", "none"])
+    async def test_resolution_is_cached(self, expected_effort):
+        renderer = MagicMock()
+        renderer.model_config.is_encoder_decoder = False
+
+        def render(request):
+            if expected_effort == "low":
+                raise ValueError("unsupported none")
+            return [], [{"prompt_token_ids": [int(request.reasoning_effort == "none")]}]
+
+        renderer.render_chat = AsyncMock(side_effect=render)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        calls = []
+        for request_cls, request_kwargs in (
+            (AnthropicMessagesRequest, {"max_tokens": 16}),
+            (AnthropicCountTokensRequest, {}),
+        ):
+            request = request_cls(
+                model="test",
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking={"type": "disabled"},
+                **request_kwargs,
+            )
+            assert await resolver.resolve_for(request) == expected_effort
+            calls.append(renderer.render_chat.await_count)
+        assert calls[0] == calls[1] > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])
+    async def test_explicit_effort_skips_probe(self, effort):
+        renderer = MagicMock()
+        renderer.render_chat = AsyncMock()
+        resolver = DisabledThinkingEffortResolver(renderer, effort)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
         )
-        return await AnthropicServingMessages._probe_disabled_thinking_effort(obj)
+        assert await resolver.resolve_for(request) == effort
+        renderer.render_chat.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "thinking",
+        [None, {"type": "enabled", "budget_tokens": 1024}, {"type": "adaptive"}],
+    )
+    async def test_other_thinking_modes_skip_probe(self, thinking):
+        renderer = MagicMock()
+        renderer.render_chat = AsyncMock(side_effect=ValueError("unsupported none"))
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = AnthropicMessagesRequest(
+            model="test",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+        )
+        assert await resolver.resolve_for(request) == "none"
+        renderer.render_chat.assert_not_awaited()
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
+        )
+        assert await resolver.resolve_for(request) == "low"
+        renderer.render_chat.assert_awaited_once()
 
     @staticmethod
     def _reject_none(effort):

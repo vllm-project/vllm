@@ -216,7 +216,7 @@ class cmake_build_ext(build_ext):
         # `num_jobs` is either the value of the MAX_JOBS environment variable
         # (if defined) or the number of CPUs available.
         num_jobs = envs.MAX_JOBS
-        if num_jobs is not None:
+        if isinstance(num_jobs, str) and num_jobs.isnumeric():
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
@@ -1624,6 +1624,12 @@ package_data = {
         "py.typed",
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
+        # Tuned kernel configs must be explicit: the setuptools-scm git
+        # file-finder is inactive when building from a .git-less tree
+        # (e.g. tarball/sdist builds), which silently drops them from
+        # the wheel and forces fallback to default launch configs.
+        "model_executor/layers/mamba/ops/configs/selective_state_update/*.json",
+        "kernels/helion/configs/*/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
