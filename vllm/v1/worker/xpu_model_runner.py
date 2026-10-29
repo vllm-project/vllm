@@ -24,8 +24,6 @@ class XPUModelRunner(GPUModelRunner):
     ):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-        # FIXME: To be verified.
-        self.cascade_attn_enabled = False
 
 
 class XPUModelRunnerV2(GPUModelRunnerV2):
@@ -63,9 +61,9 @@ def _torch_cuda_wrapper():
     torch.cuda.stream = partial(torch.xpu.stream)
     torch.cuda.set_stream = partial(torch.xpu.set_stream)
 
-    # torch.xpu.Event does not accept the ``blocking`` kwarg that
-    # torch.cuda.Event supports, so drop it here.
-    def _xpu_event(*args, blocking=None, **kwargs):
+    # torch.xpu.Event does not accept the ``blocking`` or ``external`` kwargs
+    # that torch.cuda.Event supports, so drop them here.
+    def _xpu_event(*args, blocking=None, external=None, **kwargs):
         return torch.xpu.Event(*args, **kwargs)
 
     torch.cuda.Event = _xpu_event
