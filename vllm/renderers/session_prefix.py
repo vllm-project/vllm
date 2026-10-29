@@ -19,6 +19,7 @@ from vllm.utils.session_prefix import (
     PrefixContext,
     SessionPrefixStore,
     lcp,
+    token_bound,
     token_bytes,
 )
 
@@ -111,6 +112,8 @@ def _alternation(literals: "Iterable[str]") -> str:
 class TokenSnapshot:
     text: str
     ids: list[int]
+    # Validated upper bound of ``ids`` (see token_bound), or None if unknown.
+    bound: int | None = None
 
 
 class SessionTokenCache:
@@ -142,6 +145,10 @@ class SessionTokenCache:
             ):
                 raise ValueError("unsupported tokenizer implementation or runtime")
             graph = json.loads(tokenizer.backend_tokenizer.to_str())
+            # Truncation and padding are runtime state that Transformers resets
+            # on every call from that call's arguments; an earlier truncating
+            # call must not make an audited backend look different.
+            graph["truncation"] = graph["padding"] = None
             digest = hashlib.sha256(
                 json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
@@ -255,16 +262,23 @@ class SessionTokenCache:
             if route == "exact":
                 assert old is not None
                 ids = old.ids.copy()
+                bound = old.bound
             elif route == "partial":
                 assert old is not None
-                ids = (
-                    old.ids[:tokens]
-                    + tokenizer(text[boundary:], **params.get_encode_kwargs())[
-                        "input_ids"
-                    ]
-                )
+                suffix = tokenizer(text[boundary:], **params.get_encode_kwargs())[
+                    "input_ids"
+                ]
+                ids = old.ids[:tokens] + suffix
+                # The reused prefix was validated when its snapshot was stored,
+                # so only the new suffix needs scanning for accounting.
+                bound = None
+                if old.bound is not None:
+                    suffix_bound = token_bound(suffix)
+                    if suffix_bound is not None:
+                        bound = max(old.bound, suffix_bound)
             else:
                 ids = tokenizer(text, **params.get_encode_kwargs())["input_ids"]
+                bound = token_bound(ids)
             maximum = params.max_input_tokens
             if maximum is not None and len(ids) > maximum:
                 # Native encoding caps the reported length at maximum + 1.
@@ -276,14 +290,14 @@ class SessionTokenCache:
                 1024
                 + sum(sys.getsizeof(part) for part in context.key)
                 + sys.getsizeof(text)
-                + token_bytes(ids)
+                + token_bytes(ids, bound)
             )
             reservation = self.store.reserve(context.key, size)
             if reservation is None:
                 self._count("capacity_declined")
                 return ids
             try:
-                context.stage(reservation, TokenSnapshot(text, ids.copy()), size)
+                context.stage(reservation, TokenSnapshot(text, ids.copy(), bound), size)
             except BaseException:
                 reservation.cancel()
                 raise

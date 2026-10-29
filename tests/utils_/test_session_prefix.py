@@ -12,6 +12,7 @@ from vllm.utils.session_prefix import (
     PrefixContext,
     SessionPrefixStore,
     lcp,
+    token_bound,
     token_bytes,
 )
 
@@ -61,6 +62,28 @@ def test_token_accounting_never_understates_owned_list_and_elements():
         assert token_bytes(ids) >= reference
         if all(type(i) is int and 0 <= i < (1 << 30) for i in ids):
             assert token_bytes(ids) == reference
+
+
+def test_validated_bound_matches_full_scan_accounting():
+    """A bound from validated parts charges what a full scan would."""
+
+    class IntSubclass(int):
+        pass
+
+    rng = random.Random(7)
+    prefix = [rng.randrange(151670) for _ in range(512)]
+    suffix = [rng.randrange(151670) for _ in range(64)]
+    combined = prefix + suffix
+    prefix_bound, suffix_bound = token_bound(prefix), token_bound(suffix)
+    assert prefix_bound is not None and suffix_bound is not None
+    bound = max(prefix_bound, suffix_bound)
+    assert bound == token_bound(combined)
+    assert token_bytes(combined, bound) == token_bytes(combined)
+    # An upper bound from a longer validated snapshot may only overstate.
+    assert token_bytes(prefix[:100], token_bound(prefix)) >= token_bytes(prefix[:100])
+    for invalid in ([True, 0], [IntSubclass(7)], [-1], [1 << 32], (1, 2), [1.0]):
+        assert token_bound(cast(list[int], invalid)) is None
+    assert token_bound([]) == 0
 
 
 def test_retired_reader_stays_charged_until_release():
