@@ -174,16 +174,26 @@ class ZmqServerTransport:
     routes a reply back to a specific peer by ZMQ identity.
     """
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int = 0) -> None:
         self._ctx = zmq.Context()
-        self._router = make_zmq_socket(
-            ctx=self._ctx,
-            path=make_zmq_path(scheme="tcp", host=host, port=port),
-            socket_type=zmq.ROUTER,
-            bind=True,
-        )
+        try:
+            self._router = make_zmq_socket(
+                ctx=self._ctx,
+                path=make_zmq_path(scheme="tcp", host=host, port=port),
+                socket_type=zmq.ROUTER,
+                bind=True,
+            )
+        except Exception:
+            self._ctx.destroy(linger=0)
+            raise
         self._poller = zmq.Poller()
         self._poller.register(self._router, zmq.POLLIN)
+
+    @property
+    def port(self) -> int:
+        """Return the actual bound port, including when port 0 was requested."""
+        endpoint = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
+        return int(endpoint.rsplit(":", 1)[1])
 
     def poll(self, timeout_ms: int = 0) -> list[tuple[bytes, bytes]]:
         """Wait up to timeout_ms for incoming messages, then drain all pending.

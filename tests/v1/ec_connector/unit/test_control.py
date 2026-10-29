@@ -70,6 +70,7 @@ def test_close_sets_alive_false():
 from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (  # noqa: E402
     ZmqClientConnection,
     ZmqClientTransport,
+    ZmqServerTransport,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr  # noqa: E402
 
@@ -283,3 +284,38 @@ def test_zmq_client_transport_close_closes_all_connections(
     dealer_a.close.assert_called()
     dealer_b.close.assert_called()
     assert transport._connections == {}
+
+
+def test_zmq_servers_allocate_distinct_reachable_ports():
+    """Simultaneous producers must publish usable ports without configuration."""
+    servers = []
+    client = ZmqClientTransport()
+    try:
+        for _ in range(2):
+            servers.append(ZmqServerTransport(host="127.0.0.1"))
+        assert len({server.port for server in servers}) == 2
+        for server in servers:
+            assert 0 < server.port <= 65535
+            conn = client.connect(("127.0.0.1", server.port))
+            conn.send(b"request")
+            messages = server.poll(timeout_ms=5000)
+            assert len(messages) == 1
+            identity, payload = messages[0]
+            assert payload == b"request"
+            server.send(identity, b"reply")
+            assert conn.dealer.poll(timeout=5000)
+            assert conn.recv() == [b"reply"]
+    finally:
+        client.close()
+        for server in servers:
+            server.close()
+
+
+def test_zmq_server_rejects_an_occupied_explicit_port():
+    server = ZmqServerTransport(host="127.0.0.1")
+    try:
+        with pytest.raises(zmq.ZMQError) as exc:
+            ZmqServerTransport(host="127.0.0.1", port=server.port)
+        assert exc.value.errno == zmq.EADDRINUSE
+    finally:
+        server.close()
