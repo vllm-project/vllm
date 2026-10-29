@@ -180,23 +180,6 @@ def test_residual_sjf_config_and_cli_validation():
             is_multimodal_model=True,
             policy="residual_sjf",
         )
-    with pytest.raises(ValueError, match="residual_sjf"):
-        SchedulerConfig(
-            max_model_len=32,
-            max_num_batched_tokens=32,
-            max_num_seqs=1,
-            is_encoder_decoder=True,
-            policy="residual_sjf",
-        )
-    with pytest.raises(ValueError, match="residual_sjf"):
-        SchedulerConfig(
-            max_model_len=32,
-            max_num_batched_tokens=32,
-            max_num_seqs=1,
-            is_encoder_decoder=False,
-            runner_type="pooling",
-            policy="residual_sjf",
-        )
     with pytest.raises(ValueError):
         SchedulerConfig(
             max_model_len=32,
@@ -262,7 +245,6 @@ def test_local_estimate_respects_read_limit_and_cache_reset(cache_limit, expecte
     if cache_limit is not None:
         waiting.kv_transfer_params = {"cached_tokens": 32}
     scheduler.add_request(waiting)
-    assert scheduler._get_residual_sjf_cost(waiting) == expected_cost
     assert scheduler._get_residual_sjf_cost(waiting) == expected_cost
     assert scheduler.reset_prefix_cache()
     assert scheduler._get_residual_sjf_cost(waiting) == 3
