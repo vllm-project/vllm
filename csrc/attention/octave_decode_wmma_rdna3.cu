@@ -16,6 +16,10 @@
 //
 // The query is rotated like K while it is staged into LDS; the output stays
 // rotated and octave_reduce rotates it back.
+//
+// Register budget: the sparse variants sit at 249-253 of 256 VGPRs with no
+// scratch. Any change here must be checked with -Rpass-analysis for
+// ScratchSize 0: a spill in this kernel corrupts the output.
 
 #include <cstdint>
 #include <torch/all.h>
