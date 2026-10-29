@@ -11,6 +11,7 @@ import torch
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -382,9 +383,13 @@ def warmup_kernels(
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
         # All PP ranks must run the same forwards to match sends and receives.
-        if model_runner.speculative_config is not None:
-            # Greedy batches skip logits processing, so rejection kernels
-            # also see model-dtype logits instead of FP32.
+        greedy_sampling_warmup = (
+            current_platform.is_cpu() and not model_runner.is_pooling_model
+        )
+        if model_runner.speculative_config is not None or greedy_sampling_warmup:
+            # Greedy batches skip logits processing, so the sampling and
+            # rejection kernels see model-dtype logits instead of FP32. Only CPU
+            # pays enough for that recompile to be worth a second pass here.
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
