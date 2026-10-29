@@ -2338,15 +2338,15 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
-                # Verified draft tokens exclude async padding slots. Proposed
-                # draft tokens also include those trimmed by the grammar
-                # before scheduling.
+                # Verified draft tokens exclude async padding slots. Sync
+                # scheduling records the drafter's proposal before trimming,
+                # async scheduling only sees the scheduled slots.
                 num_verified = num_draft_tokens
                 if scheduler_output.num_invalid_spec_tokens:
                     num_verified -= scheduler_output.num_invalid_spec_tokens.get(
                         req_id, 0
                     )
-                num_proposed = num_verified + request.num_trimmed_spec_tokens
+                num_proposed = max(num_verified, request.num_proposed_spec_tokens)
                 if num_verified_tokens_per_req is not None:
                     num_verified = num_verified_tokens_per_req[req_index]
                 spec_decoding_stats = self.make_spec_decoding_stats(
@@ -2857,12 +2857,10 @@ class Scheduler(SchedulerInterface):
             if request.use_structured_output:
                 # The grammar drops -1 padding, which is not a proposed draft.
                 spec_token_ids = strip_speculative_padding(spec_token_ids)
+            request.num_proposed_spec_tokens = len(spec_token_ids)
             # Add newly generated spec token ids to the request.
             request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
-            )
-            request.num_trimmed_spec_tokens = len(spec_token_ids) - len(
-                request.spec_token_ids
             )
 
     def update_draft_token_ids_in_output(

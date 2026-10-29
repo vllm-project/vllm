@@ -2895,7 +2895,9 @@ class _PrefixGrammar(StructuredOutputGrammar):
 def test_spec_decode_stats_keep_batch_after_all_padding_draft():
     # An async request whose draft slots are all padding proposes no draft
     # tokens. It must not reset the stats of other requests in the batch.
-    scheduler = create_scheduler(num_speculative_tokens=2)
+    scheduler = create_scheduler(
+        async_scheduling=True, num_speculative_tokens=2, speculative_method="ngram_gpu"
+    )
     requests = create_requests(num_requests=2, num_tokens=1)
     req_ids = [req.request_id for req in requests]
     req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
@@ -2908,7 +2910,7 @@ def test_spec_decode_stats_keep_batch_after_all_padding_draft():
         )
 
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
-    scheduler.update_draft_token_ids(DraftTokenIds(req_ids, [[1, 2], [1, 2]]))
+    # Async scheduling schedules placeholder draft slots for both requests.
     output = scheduler.schedule()
     output.num_invalid_spec_tokens = {req_ids[1]: 2}
     engine_outputs = scheduler.update_from_output(output, _mk_output([[1, 9], [5]]))
