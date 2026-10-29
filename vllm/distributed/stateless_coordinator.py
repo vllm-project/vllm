@@ -106,9 +106,9 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         backend = str(torch_distributed_backend)
         self.backend = backend
-        cpu_timeout = get_cpu_distributed_timeout_or_none()
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
         device_timeout = (
-            cpu_timeout if backend == "gloo" else get_distributed_timeout_or_none()
+            self.cpu_timeout if backend == "gloo" else get_distributed_timeout_or_none()
         )
         for idx, ranks in enumerate(group_ranks):
             if self.rank in ranks:
@@ -146,7 +146,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
                     listen_socket=socks[1] if socks else None,
-                    timeout=cpu_timeout,
+                    timeout=self.cpu_timeout,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,

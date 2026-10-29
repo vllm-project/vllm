@@ -70,13 +70,13 @@ RUN curl -LO https://github.com/gperftools/gperftools/releases/download/gperftoo
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VISION_VERSION=v0.28.0
+ARG TORCH_VISION_VERSION=v0.29.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -167,7 +167,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
         https://github.com/pytorch/torchcodec.git && \
     cd torchcodec && \
-    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu && \
     uv pip install pybind11 setuptools wheel && \
     pybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" && \
     export pybind11_DIR CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}" && \

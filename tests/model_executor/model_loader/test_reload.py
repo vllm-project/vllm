@@ -5,6 +5,8 @@ import importlib.machinery
 import inspect
 import sys
 import types
+from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -16,6 +18,7 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -39,23 +42,229 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
+    load_attention_sink,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "module_name,class_name,sink_name",
+    [
+        ("mimo_v2_mtp", "MiMoV2MTP", "attention_sink_bias"),
+        ("mimo_v2_mtp", "MiMoV2OmniMTP", "attention_sink_bias"),
+        ("laguna", "LagunaModel", "sink"),
+        ("qwen3_dflash", "DFlashQwen3Model", "attention_sink_bias"),
+    ],
+)
+def test_attention_sink_model_loading_shards_once(
+    monkeypatch, tp_rank, module_name, class_name, sink_name
+):
+    """Model loading must pass global sinks to the loader on cold load and reload."""
+    module = import_module(f"vllm.model_executor.models.{module_name}")
+    from vllm.model_executor.model_loader import weight_utils
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    for target in (module, weight_utils):
+        monkeypatch.setattr(
+            target, "get_tensor_model_parallel_rank", lambda: tp_rank, raising=False
+        )
+        monkeypatch.setattr(target, "get_tensor_model_parallel_world_size", lambda: 2)
+    cls = getattr(module, class_name)
+    model = cls.__new__(cls)
+    torch.nn.Module.__init__(model)
+    model.hf_to_vllm_mapper = WeightsMapper()
+    model.model = torch.nn.Module()
+    model.model.mtp = torch.nn.Module()
+    sink = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+
+    def sink_loader(param, loaded_weight):
+        assert loaded_weight.shape == (8,), "Sink was sharded before weight_loader"
+        load_attention_sink(param, loaded_weight)
+
+    sink.weight_loader = sink_loader
+    model.model.mtp.register_parameter(sink_name, sink)
+    name = f"model.mtp.{sink_name}"
+    checkpoint = torch.arange(8, dtype=torch.float32)
+    assert model.load_weights([(name, checkpoint)]) == {name}
+    assert torch.equal(sink, checkpoint.chunk(2)[tp_rank])
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    model.load_weights([(name, checkpoint + 10)])
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    assert torch.equal(sink, (checkpoint + 10).chunk(2)[tp_rank])
+    assert getattr(model.model.mtp, sink_name).data_ptr() == sink.data_ptr()
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize(
+    "module_name,class_name,attention_name,sink_name",
+    [
+        ("deepseek_v4", "DeepseekV4Model", "attn", "attn_sink"),
+        ("deepseek_v41", "DeepseekV4Model", "attn", "attn_sink"),
+        ("hy_v4", "HYV4Model", "self_attn", "learnable_sink_param"),
+    ],
+)
+def test_attention_sink_deepseek_hy_loading_uses_parameter_loader(
+    monkeypatch, tp_rank, module_name, class_name, attention_name, sink_name
+):
+    """DeepSeek and HY-V4 pass global sinks to the parameter's current loader."""
+    module = import_module(f"vllm.models.{module_name}.nvidia.model")
+    from vllm.model_executor.model_loader import weight_utils
+
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    cls = getattr(module, class_name)
+    model = cls.__new__(cls)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(tie_word_embeddings=False)
+    model.quant_config = None
+    model.get_expert_mapping = lambda: []
+    attention = torch.nn.Module()
+    layer = torch.nn.Module()
+    setattr(layer, attention_name, attention)
+    model.layers = torch.nn.ModuleList([layer])
+    sink = torch.nn.Parameter(torch.zeros(6), requires_grad=False)
+    attention.register_parameter(sink_name, sink)
+    checkpoint = torch.arange(8, dtype=torch.float32)
+    name = f"layers.0.{attention_name}.{sink_name}"
+
+    for offset in (0, 10):
+        weight = checkpoint + offset
+        sink.weight_loader = Mock(side_effect=load_attention_sink)
+        assert model.load_weights([(name, weight)]) == {name}
+        sink.weight_loader.assert_called_once_with(sink, weight)
+        assert torch.equal(sink[:4], weight.chunk(2)[tp_rank])
+        assert torch.isneginf(sink[4:]).all()
+
+
+def _gpt_oss_container(monkeypatch, quant_method=None):
+    """A minimal GptOssModel whose loading paths can be driven directly."""
+    from vllm.model_executor.models import gpt_oss
+
+    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    for name in ("get_dp_group", "get_ep_group", "get_pcp_group"):
+        monkeypatch.setattr(gpt_oss, name, lambda: group)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
+    model = gpt_oss.GptOssModel.__new__(gpt_oss.GptOssModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_local_experts=1, intermediate_size=32)
+    if quant_method is not None:
+        model.config.quantization_config = {"quant_method": quant_method}
+    model.parallel_config = SimpleNamespace(enable_expert_parallel=True)
+    model.layers = [
+        SimpleNamespace(
+            mlp=SimpleNamespace(
+                experts=SimpleNamespace(
+                    _quant_method=SimpleNamespace(weight_dtype=None)
+                )
+            )
+        )
+    ]
+    model.get_expert_mapping = lambda: []  # type: ignore[method-assign]
+    return model
+
+
+@pytest.mark.parametrize("quant_method", ["mxfp4", "quark", None])
+def test_gpt_oss_attention_sink_uses_parameter_loader(monkeypatch, quant_method):
+    """All quantization dispatch paths honor the sink's current weight loader."""
+    model = _gpt_oss_container(monkeypatch, quant_method)
+    model.sinks = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+    # A replacement loader must see the unsliced checkpoint even after reload
+    # wraps the parameter; bare model-specific copies would bypass this spy.
+    model.sinks.weight_loader = Mock(side_effect=default_weight_loader)
+    checkpoint = torch.arange(4, dtype=torch.float32)
+    assert model.load_weights([("sinks", checkpoint)]) == {"sinks"}
+    model.sinks.weight_loader.assert_called_once_with(model.sinks, checkpoint)
+    assert torch.equal(model.sinks, checkpoint)
+
+
+def test_gpt_oss_attention_sink_skips_missing_parameter(monkeypatch):
+    """A sink owned by another pipeline stage is skipped, not a KeyError."""
+    from vllm.model_executor.models import gpt_oss
+
+    model = _gpt_oss_container(monkeypatch)
+    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: True)
+    # The parameter does not exist on this rank, so loading must not touch it.
+    sinks = [("sinks", torch.arange(4, dtype=torch.float32))]
+    assert model.load_weights(sinks) == set()
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("padding", [0, 4])
+def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
+    """Reload must update the sink's kernel storage and restore its padding."""
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.get_tensor_model_parallel_rank",
+        lambda: tp_rank,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils."
+        "get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+
+    class SinkModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sink = torch.nn.Parameter(
+                torch.empty(4 + padding), requires_grad=False
+            )
+            self.sink.weight_loader = load_attention_sink
+            self.proj = torch.nn.Parameter(torch.zeros(16), requires_grad=False)
+            self.proj.weight_loader = default_weight_loader
+
+        def load_weights(self, weights):
+            params = dict(self.named_parameters())
+            for name, weight in weights:
+                param = params[name]
+                param.weight_loader(param, weight)
+
+    model = SinkModel()
+    checkpoint_sink = torch.arange(8, dtype=torch.float32)
+    model.load_weights([("sink", checkpoint_sink), ("proj", torch.ones(16))])
+    kernel_sink = model.sink
+    expected = torch.cat(
+        (
+            checkpoint_sink[4 * tp_rank : 4 * (tp_rank + 1)],
+            torch.full((padding,), -torch.inf),
+        )
+    )
+    assert torch.equal(kernel_sink, expected)
+    record_metadata_for_reloading(model)
+
+    for offset in (10, 20):
+        kernel_sink.data.fill_(0)
+        initialize_layerwise_reload(model)
+        assert model.sink.is_meta
+        model.load_weights(
+            [("sink", checkpoint_sink + offset), ("proj", torch.full((16,), offset))]
+        )
+        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+        expected[:4] = checkpoint_sink[4 * tp_rank : 4 * (tp_rank + 1)] + offset
+        assert torch.equal(kernel_sink, expected)
+        assert model.sink.data_ptr() == kernel_sink.data_ptr()
+        assert torch.equal(model.proj, torch.full((16,), offset))
 
 
 def _fp8_reload_unsupported() -> bool:
     """Whether the FP8 reload/online-quantize tests should be skipped.
 
-    ``supports_fp8()`` returns True on MI250 (gfx90a) because the general
-    quantization paths upcast FP8 weights, but gfx90a has no native FP8 and
-    cannot run these reload models, so treat it as unsupported here.
+    ``supports_fp8()`` returns True on MI250 (gfx90a) and RDNA3 (gfx11)
+    because the general quantization paths upcast FP8 weights, but neither has
+    native FP8 and cannot run these reload models, so treat them as
+    unsupported here.
     """
     if not current_platform.supports_fp8():
         return True
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx90a
+        from vllm.platforms.rocm import on_gfx11, on_gfx90a
 
-        return on_gfx90a()
+        return on_gfx90a() or on_gfx11()
     return False
 
 
@@ -511,6 +720,7 @@ def test_padded_moe_reload_releases_each_layer(
         has_bias=has_bias,
         tp_rank=tp_rank,
         tp_shard_with_padding=False,
+        num_experts=experts,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
@@ -526,7 +736,9 @@ def test_padded_moe_reload_releases_each_layer(
         layer.moe_config = config
         layer.quant_config = None
         layer.quant_method = method
-        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer.expert_map_manager = SimpleNamespace(
+            map_global_to_local=lambda i: i, num_fused_shared_experts=0
+        )
         layer._loaded_expert_biases = set()
         layer._fused_shared_expert_quantizer = None
         method.create_weights(
@@ -1160,6 +1372,64 @@ def test_reload_weights(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def _reload_with_lora_expert_names(worker) -> None:
+    """Reload the checkpoint under the names that LoRA-wrapped experts load."""
+
+    def lora_name(name: str) -> str:
+        parts = name.split(".")
+        if "experts" in parts[:-2] and parts[parts.index("experts") + 1].isdigit():
+            parts.insert(parts.index("experts") + 3, "base_layer")
+        return ".".join(parts)
+
+    path = Path(hf_api().snapshot_download(worker.vllm_config.model_config.model))
+    files = sorted(str(f) for f in path.glob("*.safetensors"))
+    weights = safetensors_weights_iterator(files, use_tqdm_on_load=False)
+    worker.reload_weights(
+        weights_iterator=((lora_name(name), weight) for name, weight in weights)
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
+)
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    lora_path = hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+    prompts = [
+        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+    ]
+
+    def prompt_logprobs(llm, lora_id):
+        lora_request = LoRARequest("sql", lora_id, lora_path) if lora_id else None
+        output = llm.generate_greedy_logprobs(
+            prompts,
+            max_tokens=1,
+            num_logprobs=None,
+            num_prompt_logprobs=0,
+            lora_request=lora_request,
+        )[0]
+        return [next(iter(token.values())).logprob for token in output[3][1:]]
+
+    with vllm_runner(
+        model_name="RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
+        enable_lora=True,
+        max_lora_rank=8,
+        max_loras=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=64,
+        max_num_seqs=1,
+    ) as llm:
+        before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
+        assert before[0] != before[1]
+        llm.collective_rpc(_reload_with_lora_expert_names)
+        after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
+    assert after == before
 
 
 def test_kv_scale_reload(vllm_runner):

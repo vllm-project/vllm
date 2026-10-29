@@ -101,6 +101,7 @@ def _run_engine_core_handshake(
         ec_transfer_config=None,
         is_mm_encoder_only=False,
         max_concurrent_batches=1,
+        num_hash_lookahead_tokens=0,
         model_config=SimpleNamespace(
             runner_type="generate",
             is_diffusion=False,

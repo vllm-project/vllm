@@ -1,0 +1,39 @@
+{
+    "thinking_mode": "thinking",
+    "reasoning_effort": "max",
+    "messages": [
+        {
+            "role": "system",
+            "content": "You are a helpful vision assistant."
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "请按“第一张、第二张”的顺序回答：第一张图"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "examples/images/carrots.jpeg"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "和第二张图"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "examples/images/corn.jpeg"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "中分别是什么食材？它们通常食用的部位分别是什么？"
+                }
+            ]
+        }
+    ]
+}
