@@ -36,7 +36,7 @@ Choose a value that divides the block size of every prefix-cacheable KV cache gr
 
 ### Evicting superseded Mamba states first
 
-In a multi-turn conversation, each turn caches the Mamba state at the end of its prompt. Once the next turn resumes from that state and caches a deeper one, the old state can only serve a request that stops exactly there, yet LRU keeps it as long as any other cached block. `--prefix-cache-eviction-policy mamba_aware_lru` evicts such superseded states before every other cached block, which leaves more of the cache to live conversations. The default, `lru`, keeps plain LRU order.
+In a multi-turn conversation, each turn caches the Mamba state at the end of its prompt. Once the next turn resumes from that state and caches a deeper one, the old state is superseded: later turns resume from the deeper state. Resuming also made the old state recently used, so LRU keeps it longer than the context of conversations that have been idle since. `--prefix-cache-eviction-policy mamba_aware_lru` evicts superseded states before every other cached block, which leaves more of the cache to live conversations. The default, `lru`, keeps plain LRU order.
 
 ```bash
 vllm serve <hybrid-model> \
@@ -44,7 +44,7 @@ vllm serve <hybrid-model> \
     --prefix-cache-eviction-policy mamba_aware_lru
 ```
 
-States that other prompts resume from, such as the shared-prefix junction, keep their LRU order. The policy pays off when multi-turn traffic, such as agentic coding sessions, fills the GPU prefix cache.
+A superseded state still serves requests that branch off between it and the deeper state, such as a regenerated turn or a forked sub-task, and those requests find it evicted sooner than under `lru`. Shared-prefix junction states keep their LRU order. The policy pays off when multi-turn traffic, such as agentic coding sessions, fills the GPU prefix cache.
 
 ## Example workloads
 
