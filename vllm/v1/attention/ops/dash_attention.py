@@ -3,7 +3,7 @@
 """DASH paged KV kernels and segmented FlashAttention/FlashInfer execution."""
 
 import math
-from functools import cache
+from functools import cache, lru_cache
 
 import torch
 
@@ -761,7 +761,10 @@ def _workspace(device):
     return torch.empty(128 * 1024**2, dtype=torch.uint8, device=device)
 
 
-@cache
+_flashinfer_graph_plans: dict[tuple, tuple] = {}
+
+
+@lru_cache(maxsize=8)
 def _flashinfer_plan(device, n, topk, bs, local, heads, kv_heads, dim, dtype):
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
@@ -838,9 +841,14 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
         )
         lse = lse.T
     elif backend == "FLASHINFER":
-        wrapper, packed = _flashinfer_plan(
-            device, n, topk, bs, local, heads, k.shape[1], dim, q.dtype
-        )
+        key = (device, n, topk, bs, local, heads, k.shape[1], dim, q.dtype)
+        plan = _flashinfer_graph_plans.get(key)
+        if plan is None:
+            plan = _flashinfer_plan(*key)
+            # Captured buffers must outlive eviction from the eager LRU.
+            if torch.cuda.is_current_stream_capturing():
+                _flashinfer_graph_plans[key] = plan
+        wrapper, packed = plan
         remote = (
             torch.arange(bs, device=device)[None, None]
             < used.view(n, groups)[:, :topk, None]

@@ -21,6 +21,8 @@ DEFAULT_MAX_PAGE_TOKENS = 20000
 
 def _force_token(logits: torch.Tensor, token_id: int) -> None:
     keep = logits[token_id].clone()
+    if not torch.isfinite(keep):
+        return
     logits[:] = -float("inf")
     logits[token_id] = keep
 
@@ -145,6 +147,9 @@ def _page_count_guard_kernel(
     elif (cap > 0) & (length - last - 1 >= cap):
         force = tl.where(markers < expected, page, eos)
     if force >= 0:
+        target = tl.load(Logits + row * LOGIT_STRIDE + force * LOGIT_COL_STRIDE)
+        if not ((target > -float("inf")) & (target < float("inf"))):
+            return
         for fill_start in range(0, VOCAB_SIZE, BLOCK):
             logit_pos = fill_start + offsets
             # Preserve the forced token's existing logit, including other masks.
@@ -177,6 +182,9 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
       the cap forces ``<PAGE>`` (next page) or EOS (last page);
     * prompts without a ``<PAGE>`` marker (single-page requests) pass
       through.
+
+    Forced transitions yield to existing token masks from other sampling
+    constraints when their target token is unavailable.
 
     Register it via the CLI::
 

@@ -28,6 +28,21 @@ class UnlimitedOCR2Renderer(HfRenderer):
             parameter="prompt",
         )
 
+    def validate_token_ids(
+        self, token_ids: Sequence[int], *, parameter: str | None = None
+    ) -> None:
+        super().validate_token_ids(token_ids, parameter=parameter)
+        image_id = self.model_config.hf_config.sparse_attention_config["image_token_id"]
+        # Pre-rendered scale-out inputs contain expanded image-token runs.
+        self._validate_pages(
+            token_ids,
+            [
+                i
+                for i, token in enumerate(token_ids)
+                if token == image_id and (i == 0 or token_ids[i - 1] != image_id)
+            ],
+        )
+
     def _validate_prompt(self, prompt: TokPrompt) -> None:
         # Validate before multimodal processing updates the sender cache.
         ids = cast(list[int], prompt.get("prompt_token_ids", []))

@@ -1247,6 +1247,8 @@ class DeepseekV2MLAAttention(nn.Module):
 
 
 class DeepseekV2DecoderLayer(nn.Module):
+    mha_attn_cls: type[nn.Module] = DeepseekAttention
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1285,11 +1287,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         attn_cls: typing.Any
         if use_mha:
-            attn_cls = DeepseekAttention
-            if getattr(config, "unlimited_ocr2", False):
-                from vllm.model_executor.layers.dash_attention import DASHAttention
-
-                attn_cls = DASHAttention
+            attn_cls = self.mha_attn_cls
         elif model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
@@ -1430,6 +1428,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
+    decoder_layer_cls = DeepseekV2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1471,7 +1470,7 @@ class DeepseekV2Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,

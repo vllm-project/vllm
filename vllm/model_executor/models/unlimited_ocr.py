@@ -69,6 +69,12 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
+from vllm.model_executor.layers.dash_attention import DASHAttention
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    DeepseekV2ForCausalLM,
+    DeepseekV2Model,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalKwargsItems
@@ -281,6 +287,18 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+
+class UnlimitedOCR2DecoderLayer(DeepseekV2DecoderLayer):
+    mha_attn_cls = DASHAttention
+
+
+class UnlimitedOCR2Model(DeepseekV2Model):
+    decoder_layer_cls = UnlimitedOCR2DecoderLayer
+
+
+class UnlimitedOCR2TextForCausalLM(DeepseekV2ForCausalLM):
+    model_cls = UnlimitedOCR2Model
 
 
 @MULTIMODAL_REGISTRY.register_processor(

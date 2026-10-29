@@ -895,6 +895,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
+    "UnlimitedOCR2TextForCausalLM": _HfExamplesInfo("baidu/Unlimited-OCR-2"),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
     ),

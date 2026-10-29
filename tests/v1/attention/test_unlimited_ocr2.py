@@ -568,3 +568,35 @@ def test_recomputed_output_remains_outside_remote_input_prefix(backend):
         torch.testing.assert_close(
             actual, expected[start:end], atol=0.00390625, rtol=0.01
         )
+
+
+def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
+    """Tail plans are evicted while captured plans keep their buffers alive."""
+    from vllm.v1.attention.ops.dash_attention import (
+        _flashinfer_plan,
+        flash_dash_attention,
+    )
+
+    torch.manual_seed(74)
+    for n in range(1, 17):
+        q = torch.randn(n, 4, 64, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(n * 24, 2, 64, device="cuda", dtype=q.dtype)
+        v = torch.randn_like(k)
+        used = torch.tensor([8, 16] * n, device="cuda", dtype=torch.int32)
+        used[-1] = 0
+        bias = torch.zeros(n, 1, device="cuda")
+
+        args = (q, k, v, used, bias, "FLASHINFER", 8, 16)
+        expected = flash_dash_attention(q, k, v, used, bias, "FLASH_ATTN", 8, 16)
+        actual = flash_dash_attention(*args)
+        torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)
+        if n == 3:
+            # Captured graphs require their input allocations to remain alive.
+            _captured_inputs = args
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = flash_dash_attention(*args)
+            captured_expected = expected
+    assert _flashinfer_plan.cache_info().currsize <= 8
+    graph.replay()
+    torch.testing.assert_close(captured, captured_expected, atol=0.00390625, rtol=0.01)

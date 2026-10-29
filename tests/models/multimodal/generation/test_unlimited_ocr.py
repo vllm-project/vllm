@@ -147,6 +147,18 @@ def test_unlimited_ocr2_batched_pages(
                     requests[:1], SamplingParams(max_tokens=1, extra_args=extra_args)
                 )
 
+        constrained = runner.llm.generate(
+            requests[:1],
+            SamplingParams(
+                temperature=0,
+                max_tokens=4,
+                ignore_eos=True,
+                allowed_token_ids=[100],
+                extra_args={"max_page_tokens": 1},
+            ),
+        )[0].outputs[0]
+        assert constrained.token_ids == [100] * 4
+
         # Reuse scheduler storage for a new request with a different first page.
         requests[0]["multi_modal_data"] = {"image": pages[1:]}
         result = runner.llm.generate(requests[:1], sampling)[0].outputs[0].text
@@ -177,13 +189,12 @@ def test_unlimited_ocr2_batched_pages(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
-    vllm_runner, monkeypatch, use_v2, backend
+    vllm_runner, monkeypatch, backend
 ):
     """Queue distinct cropped pages beyond the encoder cache's token budget."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     requests = []
     expected = ["The invoice total is 125 dollars.", "The access code is ORANGE 2468."]
     font = ImageFont.load_default(size=40)

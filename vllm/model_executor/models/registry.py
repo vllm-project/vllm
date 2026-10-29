@@ -214,6 +214,7 @@ _TEXT_GENERATION_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
+    "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
 }
 

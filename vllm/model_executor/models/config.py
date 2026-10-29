@@ -334,6 +334,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 0,
                 0,
             ]
+            text_config.architectures = ["UnlimitedOCR2TextForCausalLM"]
             text_config.unlimited_ocr2 = True
             text_config.sparse_attention_config = sparse
             window = sparse["sparse_local_block"] * sparse["sparse_block_size"]
@@ -360,6 +361,11 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "Unlimited-OCR-2 requires Model Runner V2; set "
+                "VLLM_USE_V2_MODEL_RUNNER=1"
+            )
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
         compilation = vllm_config.compilation_config
@@ -396,7 +402,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             "dual batch overlap": parallel.enable_dbo,
             "LoRA": vllm_config.lora_config is not None,
             "speculative decoding": vllm_config.speculative_config is not None,
-            "quantized weights": vllm_config.quant_config is not None,
+            "quantized weights": vllm_config.model_config.quantization is not None,
             "non-default KV dtype": vllm_config.cache_config.cache_dtype != "auto",
             "KV transfer": vllm_config.kv_transfer_config is not None,
         }

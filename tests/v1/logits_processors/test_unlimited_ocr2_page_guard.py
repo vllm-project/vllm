@@ -359,3 +359,27 @@ def test_out_of_vocab_guard_does_not_modify_logits_or_adjacent_storage(name):
     storage = torch.zeros(2, VOCAB_SIZE, device="cuda")
     v2.apply(storage[:1], _make_v2_ctx(1, [2]))
     assert torch.equal(storage, torch.zeros_like(storage))
+
+
+@_requires_cuda
+@pytest.mark.parametrize(
+    "output, forced", [([10, 11, 12], PAGE_ID), ([PAGE_ID, PAGE_ID], EOS_ID)]
+)
+def test_masked_forced_token_preserves_other_sampling_constraints(output, forced):
+    """A prior min_tokens/bad_words/grammar mask must not make the row all -inf."""
+    guard = PageCountGuard(PAGE_ID, EOS_ID, max_page_tokens=3)
+    prompt = [PAGE_ID, 100]
+    guard.seed_expected_pages(prompt)
+    logits = _logits()
+    logits[forced] = -float("inf")
+    original = logits.clone()
+    guard.step(output, logits)
+    assert torch.equal(logits, original)
+
+    v2 = _make_v2_guard()
+    assert v2.add_request(0, SamplingParams(extra_args={"max_page_tokens": 3}))
+    _commit(v2, prompt, output)
+    v2.apply_staged_writes()
+    actual = original.unsqueeze(0).cuda()
+    v2.apply(actual, _make_v2_ctx(1, [len(prompt) + len(output)]))
+    assert torch.equal(actual[0].cpu(), original)

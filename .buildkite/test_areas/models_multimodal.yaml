@@ -91,6 +91,7 @@ steps:
       -m core_model
       --ignore models/multimodal/generation/test_common.py
       --ignore models/multimodal/generation/test_ultravox.py
+      --ignore models/multimodal/generation/test_unlimited_ocr.py
       --ignore models/multimodal/generation/test_qwen2_5_vl.py
       --ignore models/multimodal/generation/test_qwen2_vl.py
       --ignore models/multimodal/generation/test_whisper.py

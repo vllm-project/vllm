@@ -201,3 +201,66 @@ async def test_v2_async_rendering_rejects_bad_layout_and_preserves_image_cache()
         assert len(first["mm_placeholders"]["image"]) == 1
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.parametrize(
+    "env, kwargs, message",
+    [
+        ("0", {}, "requires Model Runner V2"),
+        ("1", {"quantization": "fp8"}, "does not support quantized weights"),
+    ],
+)
+def test_v2_rejects_unsupported_runtime_before_loading(
+    monkeypatch, env, kwargs, message
+):
+    from vllm.engine.arg_utils import EngineArgs
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env)
+    with pytest.raises(ValueError, match=message):
+        EngineArgs(model="baidu/Unlimited-OCR-2", **kwargs).create_engine_config()
+
+
+def test_v2_preprocessed_features_validate_page_layout_at_admission():
+    """Pre-rendered scale-out inputs still need admission validation."""
+    from copy import deepcopy
+
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2",
+        max_model_len=4096,
+        mm_processor_kwargs={"crop_mode": False},
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    renderer = processor.renderer
+    try:
+        rendered = renderer.process_for_engine(
+            {
+                "prompt_token_ids": renderer.tokenizer.encode("<PAGE><image>Parse."),
+                "multi_modal_data": {
+                    "image": [Image.new("RGB", (1024, 1024), "white")]
+                },
+            },
+            0,
+        )
+        # InputProcessor receives already expanded image runs, as scale-out does.
+        valid = processor.process_inputs(
+            "valid", rendered, SamplingParams(), ("generate",)
+        )
+        assert valid.prompt_token_ids == rendered["prompt_token_ids"]
+        page = config.model_config.hf_config.sparse_attention_config["page_token_id"]
+        for ids in (
+            [x for x in rendered["prompt_token_ids"] if x != page],
+            [page] + rendered["prompt_token_ids"],
+        ):
+            invalid = deepcopy(rendered)
+            invalid["prompt_token_ids"] = ids
+            with pytest.raises(VLLMValidationError, match="<PAGE><image>"):
+                processor.process_inputs(
+                    "invalid", invalid, SamplingParams(), ("generate",)
+                )
+    finally:
+        renderer.shutdown()
