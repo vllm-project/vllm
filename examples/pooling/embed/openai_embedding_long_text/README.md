@@ -46,7 +46,7 @@ The key parameters for chunked processing are in the `--pooler-config`:
 
 ```json
 {
-  "pooling_type": "auto",
+  "pooling_type": "MEAN",
   "use_activation": true,
   "enable_chunked_processing": true,
   "max_embed_len": 3072000
@@ -54,7 +54,7 @@ The key parameters for chunked processing are in the `--pooler-config`:
 ```
 
 !!! note
-    `pooling_type` sets the model's own pooling strategy for processing within each chunk. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
+    `pooling_type` sets the model's own pooling strategy for processing within each chunk and must be one of `CLS`, `LAST` or `MEAN`. `service.sh` accepts `POOLING_TYPE=auto` and resolves it to one of these before building the config. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
 
 #### Chunked Processing Behavior
 
