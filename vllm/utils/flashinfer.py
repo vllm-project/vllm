@@ -893,12 +893,7 @@ if has_flashinfer():
         mutates_args=["k"],  # k tensor is modified in-place
     )
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_mm_fp4",
-        mutates_args=[],
-        device_types="cuda",
-    )
-    def flashinfer_mm_fp4(
+    def _flashinfer_mm_fp4(
         A: torch.Tensor,
         B: torch.Tensor,
         A_scale: torch.Tensor,
@@ -925,9 +920,6 @@ if has_flashinfer():
             backend=backend,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_fp4",
-    )
     def flashinfer_mm_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -941,6 +933,19 @@ if has_flashinfer():
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+
+    direct_register_custom_op(
+        op_name="flashinfer_mm_fp4",
+        op_func=_flashinfer_mm_fp4,
+        fake_impl=flashinfer_mm_fp4_fake,
+    )
+
+    def flashinfer_mm_fp4(*args, **kwargs) -> torch.Tensor:
+        # The custom op is only needed as a Dynamo boundary; in eager it adds
+        # dispatcher overhead to every linear call.
+        if torch.compiler.is_compiling():
+            return torch.ops.vllm.flashinfer_mm_fp4(*args, **kwargs)
+        return _flashinfer_mm_fp4(*args, **kwargs)
 
     @torch.library.custom_op(
         "vllm::flashinfer_mm_bf16_fp4",
@@ -1097,12 +1102,7 @@ if has_flashinfer():
             torch.empty(scale_size, dtype=torch.uint8, device=a.device),
         )
 
-    @torch.library.custom_op(
-        "vllm::mm_mxfp8",
-        mutates_args=[],
-        device_types="cuda",
-    )
-    def mm_mxfp8(
+    def _mm_mxfp8(
         A: torch.Tensor,
         B: torch.Tensor,
         A_scale: torch.Tensor,
@@ -1124,9 +1124,6 @@ if has_flashinfer():
             use_8x4_sf_layout=use_8x4_sf_layout,
         )
 
-    @torch.library.register_fake(
-        "vllm::mm_mxfp8",
-    )
     def mm_mxfp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1138,6 +1135,18 @@ if has_flashinfer():
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
+
+    direct_register_custom_op(
+        op_name="mm_mxfp8",
+        op_func=_mm_mxfp8,
+        fake_impl=mm_mxfp8_fake,
+    )
+
+    def mm_mxfp8(*args, **kwargs) -> torch.Tensor:
+        # See flashinfer_mm_fp4: skip the custom op outside of Dynamo tracing.
+        if torch.compiler.is_compiling():
+            return torch.ops.vllm.mm_mxfp8(*args, **kwargs)
+        return _mm_mxfp8(*args, **kwargs)
 
 
 def flashinfer_scaled_fp4_mm(
