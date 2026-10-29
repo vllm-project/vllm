@@ -1089,8 +1089,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank_tensor = torch.tensor(
             self.dcp_rank, dtype=torch.int32, device=self.device
         )
+        # Only decode tokens are expanded: at most next_n per request. Allocated
+        # after the memory profile, so it must not scale with the token budget.
+        max_decode_tokens = min(
+            scheduler_config.max_num_seqs * next_n,
+            scheduler_config.max_num_batched_tokens,
+        )
         self.expanded_block_table_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens, block_table_width),
+            (max_decode_tokens, block_table_width),
             dtype=torch.int32,
             device=self.device,
         )
@@ -1607,6 +1613,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
+            assert num_decode_tokens <= self.expanded_block_table_buffer.shape[0]
             if not self.supports_varlen:
                 torch.diff(
                     common_attn_metadata.query_start_loc[: num_decodes + 1],

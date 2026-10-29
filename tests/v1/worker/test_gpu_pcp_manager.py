@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 
 def _copy_to_cpu(value, device=None, dtype=None, out=None):
@@ -191,13 +192,15 @@ def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     )
     monkeypatch.setattr(pcp_manager_module, "get_pcp_group", lambda: group)
     draft_tokens = torch.full((1, 3), -1)
-    draft_logits = torch.full((4, 3, 8), -1.0)
+    draft_logits = DraftLogitsCache(
+        4, 3, 8, dtype=torch.float32, fill=-1.0, device="cpu"
+    )
 
     manager.sync_drafts(draft_tokens, torch.tensor([2]), draft_logits)
 
     torch.testing.assert_close(draft_tokens, root_tokens)
-    torch.testing.assert_close(draft_logits[2], root_logits[0])
-    assert (draft_logits[[0, 1, 3]] == -1).all()
+    torch.testing.assert_close(draft_logits.values[2], root_logits[0])
+    assert (draft_logits.values[[0, 1, 3]] == -1).all()
 
 
 @pytest.mark.parametrize(
