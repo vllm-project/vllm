@@ -246,9 +246,12 @@ def create_scheduler(
             kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
         )
     cache_config.num_gpu_blocks = kv_cache_config.num_blocks
-    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    )
+    scheduler_block_size = block_size
+    hash_block_size: int | None = None
+    if parallel_config is not None or len(kv_cache_config.kv_cache_groups) > 1:
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
     register_all_kvcache_specs(vllm_config)
     if scheduler_cls is None:
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
