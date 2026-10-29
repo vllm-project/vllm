@@ -328,6 +328,104 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
 
 
+_skinny_guard_warned: set[tuple[tuple[int, ...], int]] = set()
+
+# Cap used when the L3 size cannot be read: the MI355X value, the part
+# this guard was measured on (see envs.py for the cap).
+_SKINNY_GEMM_FALLBACK_WEIGHT_BYTES = 256 * 1024 * 1024
+
+
+def _amd_l3_cache_bytes(cache_info: list | None = None) -> int | None:
+    """The GPU's L3 (memory-side) cache size in bytes, or None.
+
+    The skinny-GEMM weight cap tracks this cache: past it a weight cannot
+    stay resident, and the skinny kernel's cost at n activation rows (~n
+    weight passes) pays HBM round trips instead. The device-properties
+    API exposes only the far smaller L2 (4 MiB on gfx950), so query the
+    L3 through AMD's amdsmi library: 256 MiB on MI355X, 128 MiB on
+    MI300X-class parts. `cache_info` (an amdsmi cache list) lets tests
+    drive the parse; the default queries the library.
+    """
+    if cache_info is None:
+        try:
+            import amdsmi
+
+            amdsmi.amdsmi_init()
+            try:
+                handles = amdsmi.amdsmi_get_processor_handles()
+                cache_info = amdsmi.amdsmi_get_gpu_cache_info(handles[0])["cache"]
+            finally:
+                amdsmi.amdsmi_shut_down()
+        except Exception:  # noqa: BLE001 -- optional lib, any failure -> fallback
+            return None
+    for cache in cache_info:
+        if cache.get("cache_level") == 3 and "DATA_CACHE" in cache.get(
+            "cache_properties", []
+        ):
+            return cache["cache_size"] * 1024  # amdsmi reports KB
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _skinny_gemm_max_weight_bytes() -> int:
+    """Effective skinny-GEMM weight cap in bytes, evaluated once.
+
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES > 0 overrides; 0 (the default)
+    derives the cap from the hardware L3 (memory-side) cache size,
+    falling back to _SKINNY_GEMM_FALLBACK_WEIGHT_BYTES where that cannot
+    be read. lmhead_skinny_guard_permits runs per decode step, so this is
+    computed on the first call only (env access in hot paths: #17067).
+    Tests that change the env var or mock the hardware read must call
+    cache_clear().
+    """
+    env_bytes = envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
+    if env_bytes > 0:
+        return env_bytes
+    return _amd_l3_cache_bytes() or _SKINNY_GEMM_FALLBACK_WEIGHT_BYTES
+
+
+def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
+    """Should this weight still take the wvSplitK skinny path at n?
+
+    wvSplitK_hf_sml's cost at n activation rows scales as ~n passes over
+    the weight (MI355X measurements in the PR description), so past the
+    last-level (memory-side) cache its effective bandwidth collapses:
+    every pass beyond the first is an HBM round trip. Weights above
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default: the memory-side cache
+    size, read from the hardware once at first use, 256 MiB on MI355X;
+    see envs.py for what the cap controls and how to tune it) therefore
+    skip the skinny path at 1 < n <= 5 and fall through to the generic
+    GEMM.
+
+    n == 1 always keeps wvSplitK: the n=1 kernel variant shows no
+    pathology on large weights, and its fall-through would be a numerics
+    change with no speed win, so single-row calls stay on the stock path.
+
+    Returns True (keep wvSplitK) when n <= 1 or the weight is under the
+    cap; otherwise returns False after emitting a census WARNING (once per
+    (shape, n) per process) naming the redirected site.
+    """
+    if n <= 1:
+        return True
+    max_bytes = _skinny_gemm_max_weight_bytes()
+    if weight.nbytes <= max_bytes:
+        return True
+    key = (tuple(weight.shape), n)
+    if key not in _skinny_guard_warned:
+        _skinny_guard_warned.add(key)
+        logger.warning(
+            "lm_head skinny-GEMM guard engaged: weight %s (%d bytes) exceeds "
+            "the weight cap %d (VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES, or the "
+            "hardware memory-side cache size when unset) at n=%d; skipping "
+            "wvSplitK for the generic GEMM fall-through",
+            tuple(weight.shape),
+            weight.nbytes,
+            max_bytes,
+            n,
+        )
+    return False
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -396,6 +494,7 @@ def rocm_unquantized_gemm_impl(
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
         and 0 < n <= 5
+        and lmhead_skinny_guard_permits(weight, n)
     )
 
     use_llmm1 = (
