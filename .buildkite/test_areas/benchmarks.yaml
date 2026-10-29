@@ -16,6 +16,7 @@ steps:
   - pytest -v -s benchmarks/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Benchmarks CLI"
       dind: false
       device: mi355_dpx
@@ -25,6 +26,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Attention Benchmark Smoke"
   key: attention-benchmarks-smoke-test-b200
+  automatic_shard: true
   device: b200-k8s
   num_gpus: 2
   optional: true
@@ -37,6 +39,7 @@ steps:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends FLASH_ATTN FLASHINFER --batch-specs "8q1s1k"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Attention Benchmark Smoke"
       dind: false
       device: mi355_2
