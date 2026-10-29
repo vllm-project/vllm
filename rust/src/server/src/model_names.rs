@@ -17,9 +17,19 @@ pub(crate) struct ServedModelNames {
 
 impl ServedModelNames {
     /// `names` must be non-empty; the first entry is the primary name.
-    pub fn new(names: Vec<String>, accept_any: bool) -> Self {
+    pub fn new(names: Vec<String>) -> Self {
         assert!(!names.is_empty(), "served model names must not be empty");
-        Self { names, accept_any }
+        Self {
+            names,
+            accept_any: false,
+        }
+    }
+
+    /// Also accept any other name, served by the base model
+    /// (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub fn with_accept_any(mut self, accept_any: bool) -> Self {
+        self.accept_any = accept_any;
+        self
     }
 
     /// Extend the names with more selectable names, such as loaded LoRA
@@ -64,7 +74,8 @@ mod tests {
     use super::ServedModelNames;
 
     fn served(accept_any: bool) -> ServedModelNames {
-        ServedModelNames::new(vec!["base".to_string(), "alias".to_string()], accept_any)
+        ServedModelNames::new(vec!["base".to_string(), "alias".to_string()])
+            .with_accept_any(accept_any)
     }
 
     #[test]

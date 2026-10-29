@@ -778,7 +778,7 @@ fn test_render_app_with(
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
-        served_model_names: ServedModelNames::new(vec!["render-model".to_string()], false),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)

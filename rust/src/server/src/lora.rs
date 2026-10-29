@@ -382,7 +382,7 @@ mod tests {
                 is_3d_lora_weight: false,
             },
         );
-        let base = ServedModelNames::new(vec!["base".to_string()], true);
+        let base = ServedModelNames::new(vec!["base".to_string()]).with_accept_any(true);
 
         let resolution = manager.resolve_model(base.clone(), Some("adapter-a")).await;
         assert_eq!(

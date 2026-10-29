@@ -584,7 +584,7 @@ mod tests {
     use crate::model_names::ServedModelNames;
 
     fn served() -> ServedModelNames {
-        ServedModelNames::new(vec!["test-model".to_string()], false)
+        ServedModelNames::new(vec!["test-model".to_string()])
     }
 
     fn base_request() -> pb::GenerateRequest {

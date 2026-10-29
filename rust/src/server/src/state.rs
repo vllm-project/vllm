@@ -173,10 +173,8 @@ impl AppState {
 
     /// The base model names a request may select, before LoRA adapters.
     pub(crate) fn base_model_names(&self) -> ServedModelNames {
-        ServedModelNames::new(
-            self.served_model_names.clone(),
-            self.api_server_options.skip_model_name_validation,
-        )
+        ServedModelNames::new(self.served_model_names.clone())
+            .with_accept_any(self.api_server_options.skip_model_name_validation)
     }
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.

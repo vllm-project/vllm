@@ -136,7 +136,7 @@ mod tests {
     }
 
     fn served_names(names: &[&str]) -> ServedModelNames {
-        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect(), false)
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
     }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> CompletionRequest {

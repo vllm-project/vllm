@@ -97,10 +97,11 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    let served_model_names = ServedModelNames::new(
-        crate::effective_served_model_names(&config.model, &config.served_model_name),
-        config.skip_model_name_validation,
-    );
+    let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
+        &config.model,
+        &config.served_model_name,
+    ))
+    .with_accept_any(config.skip_model_name_validation);
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);

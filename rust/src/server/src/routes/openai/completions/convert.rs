@@ -242,10 +242,7 @@ mod tests {
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: ServedModelNames::new(
-                names.iter().map(|s| s.to_string()).collect(),
-                false,
-            ),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }
