@@ -1001,7 +1001,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     if grid is not None
                     else torch.ones(len(seqs), dtype=torch.long)
                 )
-                hf_inputs["num_video_tokens"] = _count_embed_tokens(seqs)
+                video_token_id = cached_encode(
+                    tokenizer,
+                    self.info.get_hf_processor().video_token,
+                    add_special_tokens=False,
+                )[0]
+                hf_inputs["num_video_tokens"] = _count_embed_tokens(
+                    seqs, video_token_id
+                )
 
         hf_inputs.pop("input_ids")
 
