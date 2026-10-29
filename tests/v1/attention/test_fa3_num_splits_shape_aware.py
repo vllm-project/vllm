@@ -43,9 +43,7 @@ CONFIG_CAP = 32
     ],
 )
 def test_cap_on_h20(num_reqs: int, expected: int) -> None:
-    assert (
-        _shape_aware_num_splits(H20_SMS, KV_HEADS, num_reqs, CONFIG_CAP) == expected
-    )
+    assert _shape_aware_num_splits(H20_SMS, KV_HEADS, num_reqs, CONFIG_CAP) == expected
 
 
 def test_cap_never_exceeds_one_wave() -> None:
@@ -58,8 +56,7 @@ def test_cap_never_exceeds_one_wave() -> None:
 
 def test_cap_is_monotonic_in_batch() -> None:
     caps = [
-        _shape_aware_num_splits(H20_SMS, KV_HEADS, n, CONFIG_CAP)
-        for n in range(1, 65)
+        _shape_aware_num_splits(H20_SMS, KV_HEADS, n, CONFIG_CAP) for n in range(1, 65)
     ]
     assert caps == sorted(caps, reverse=True)
 
@@ -110,6 +107,7 @@ def test_no_global_constant_can_work() -> None:
     assert small > CONFIG_CAP // 2
     assert large == 2
     assert small != large
+
 
 class TestResolveNumSplits:
     """Precedence of the budget decision.
