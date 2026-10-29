@@ -1,0 +1,290 @@
+meta:
+  title: "GLM-5.1"
+  slug: "glm-5.1"
+  provider: "GLM (Z-AI)"
+  description: "GLM-5.1 refreshed version of GLM-5 — frontier-scale MoE language model (~744B total parameters) with MTP speculative decoding and thinking mode"
+  date_added: 2026-03-28
+  date_updated: 2026-10-05
+  tasks:
+    - text
+  performance_headline: "Refreshed GLM-5 series MoE with improved reasoning, coding, and agentic performance"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi325x: verified
+    mi350x: verified
+    mi355x: verified
+
+model:
+  model_id: "zai-org/GLM-5.1"
+  min_vllm_version: "0.24.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "744B"
+  active_parameters: "40B"
+  context_length: 202752
+  base_args:
+    - "--trust-remote-code"
+    - "--chat-template-content-format=string"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "GLM-4.7 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm47"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.7 reasoning parser — thinking mode enabled by default on requests"
+    args:
+      - "--reasoning-parser"
+      - "glm47"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding (3 draft tokens) — not yet supported on the AMD MXFP4 checkpoint"
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in Multi-Token Prediction, 3 draft tokens."
+        hardware:
+          mi355x: unsupported
+        args:
+          - "--speculative-config.method"
+          - "mtp"
+          - "--speculative-config.num_speculative_tokens"
+          - "3"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1786
+    description: "Full precision BF16 — requires multi-node deployment"
+  fp8:
+    model_id: "zai-org/GLM-5.1-FP8"
+    precision: fp8
+    vram_minimum_gb: 893
+    description: "Native FP8 checkpoint — 8xH200/H20 (141GB × 8) single-node serving"
+    hardware_overrides:
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691"
+      mi350x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691"
+  nvfp4:
+    model_id: "nvidia/GLM-5.1-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 446
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  mxfp4:
+    model_id: "amd/GLM-5.1-MXFP4"
+    precision: mxfp4
+    vram_minimum_gb: 447
+    min_vllm_version: "0.24.0"
+    supported_hardware:
+      - mi355x
+    description: "AMD Quark MXFP4 checkpoint — MoE weights quantized for MI355X (gfx950)"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8_e4m3"
+      - "-cc.pass_config.fuse_allreduce_rms=False"
+      - "--block-size=1"
+      - "--enable-prefix-caching"
+      - "--max-num-seqs"
+      - "64"
+    hardware_overrides:
+      mi355x:
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_USE_AITER_FP8BMM: "0"
+          VLLM_ROCM_USE_AITER_FP4BMM: "0"
+          VLLM_ROCM_USE_AITER_RMSNORM: "0"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+# Mooncake untested on MI355X so far — opt out until verified (the schema
+# only recognizes the literal "unsupported" value here). LMCache is left
+# fail-open (no hardware-scoped gate exists for it); see the MXFP4 guide
+# note below instead.
+kv_cache_strategy_hardware:
+  kv_store_distributed_mooncake:
+    mi355x: unsupported
+  kv_store_centralized_mooncake:
+    mi355x: unsupported
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--linear-backend"
+      - "aiter"
+      - "--moe-backend"
+      - "aiter"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+      # Loading the FP8 checkpoint on 8x MI325X can outlast the Rust
+      # frontend's 600 s default wait for the engine.
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-5.1 is a refreshed version of GLM-5, the 744B parameter frontier MoE model from Z-AI.
+  It keeps the asynchronous RL training recipe and delivers best-in-class open-source
+  performance on reasoning, coding, and agentic benchmarks. Both BF16 and native FP8
+  checkpoints are published.
+
+  Thinking mode is enabled by default; disable it by passing
+  `"chat_template_kwargs": {"enable_thinking": false}` in request extras.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.24.0 for the `glm47` reasoning parser.
+    Use the latest main branch if you need tool calling + MTP simultaneously.
+  - **Hardware (FP8):** 8xH200 or 8xH20 (141GB × 8)
+  - **DeepGEMM (FP8, NVIDIA):** install via `install_deepgemm.sh` from vLLM repo
+  - **Hardware (FP8, AMD):** 8x MI325X (256GB × 8) or 8x MI350X (288GB × 8), `vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691`; uses AITER, not DeepGEMM
+  - **Hardware (MXFP4):** 8x MI355X (gfx950), vLLM >= 0.24.0, `vllm/vllm-openai-rocm:latest`
+
+  ### Using Docker
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest zai-org/GLM-5.1-FP8 \
+      --tensor-parallel-size 8 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm47 \
+      --enable-auto-tool-choice \
+      --chat-template-content-format=string \
+      --served-model-name glm-5.1-fp8
+  ```
+
+  Use `vllm/vllm-openai:latest-cu129` for CUDA 12.x.
+
+  ### Install vLLM from Source
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install "vllm==0.24.0" --torch-backend=auto
+  uv pip install "transformers>=5.4.0"
+  ```
+
+  ## Launching the Server
+
+  ### FP8 on 8xH200 with MTP
+
+  ```bash
+  vllm serve zai-org/GLM-5.1-FP8 \
+       --tensor-parallel-size 8 \
+       --speculative-config.method mtp \
+       --speculative-config.num_speculative_tokens 3 \
+       --tool-call-parser glm47 \
+       --reasoning-parser glm47 \
+       --enable-auto-tool-choice \
+       --chat-template-content-format=string \
+       --served-model-name glm-5.1-fp8
+  ```
+
+  ### FP8 on AMD MI325X and MI350X
+
+  Select **MI325X** or **MI350X** and the **FP8** variant in the command builder above. The
+  generated command adds `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`,
+  `--linear-backend aiter` and `--moe-backend aiter`, and raises `VLLM_ENGINE_READY_TIMEOUT_S`
+  because loading the weights can take longer than the Rust frontend's 600 s default. The
+  Docker command uses the nightly build
+  `vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691`.
+
+  On 8x MI325X that command, with MTP enabled, serves the full 202,752-token context with a
+  1,292,544-token KV cache (6.38x maximum concurrency) and an MTP mean acceptance length of
+  2.72 with 3 draft tokens on a ~380-token greedy generation.
+
+  On 8x MI350X the same command serves the full context with a 1,587,312-token KV cache (7.83x
+  maximum concurrency) and an MTP mean acceptance length of 3.13 with 3 draft tokens on a
+  512-token greedy generation.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  # Thinking ON (default)
+  resp_on = client.chat.completions.create(
+      model="glm-5.1-fp8",
+      messages=[{"role": "user", "content": "Summarize GLM-5.1 in one sentence."}],
+      temperature=1,
+      max_tokens=4096,
+  )
+  print(resp_on.choices[0].message.reasoning)
+
+  # Thinking OFF
+  resp_off = client.chat.completions.create(
+      model="glm-5.1-fp8",
+      messages=[{"role": "user", "content": "Summarize GLM-5.1 in one sentence."}],
+      temperature=1,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  ```
+
+  ### cURL (Thinking ON)
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "glm-5.1-fp8",
+      "messages": [
+        {"role": "user", "content": "Summarize GLM-5.1 in one sentence."}
+      ],
+      "temperature": 1,
+      "max_tokens": 4096
+    }'
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model zai-org/GLM-5.1-FP8 \
+    --dataset-name random \
+    --random-input 8000 \
+    --random-output 1024 \
+    --request-rate 10 \
+    --num-prompts 32 \
+    --ignore-eos
+  ```
+
+  ## Troubleshooting
+
+  - **Accuracy drift:** Prefer the 0.19.0 stable release for best accuracy.
+  - **Tool calling + MTP:** If both are needed, use the latest vLLM main branch.
+  - **FP8 installation (NVIDIA):** DeepGEMM required for FP8 performance.
+  - **MXFP4 (MI355X):** MTP speculative decoding isn't yet supported on this checkpoint/kernel path. Mooncake and LMCache KV-store offload are still untested on MI355X — worth a check before leaning on them in production.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-5.1)
+  - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-5.1-FP8)
+  - [MXFP4 checkpoint](https://huggingface.co/amd/GLM-5.1-MXFP4)
+  - [DeepGEMM install script](https://github.com/vllm-project/vllm/blob/v0.16.0rc0/tools/install_deepgemm.sh)

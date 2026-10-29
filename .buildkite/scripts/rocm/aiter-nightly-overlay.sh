@@ -18,7 +18,7 @@
 #
 # Exit status:
 #   10  no wheel fits this ci_base
-#   11  the wheel does not install
+#   11  the wheel does not install or its modules do not load
 #   Anything else is unexpected and passed through as is.
 #   Buildkite retries this step once on exit status 1 or 2, which it treats as
 #   transient Docker/registry failures (amd_infra_retry in the template).
@@ -78,6 +78,10 @@ ARG CI_BASE_IMAGE
 FROM ${CI_BASE_IMAGE}
 ARG AITER_WHEEL_URL
 RUN python3 -m pip install --no-cache-dir "$AITER_WHEEL_URL"
+# A wheel built against a newer glibc or libstdc++ than ci_base installs fine
+# but fails every test that loads it; fail here instead.
+RUN aiter="$(python3 -c 'import importlib.util as u; print(u.find_spec("aiter").origin)')" \
+    && ! find "${aiter%/*}" -name '*.so' -exec ldd {} + 2>&1 | grep "version .* not found"
 EOF
 
 echo "--- :docker: Installing ${wheel_url##*/}"
@@ -90,7 +94,7 @@ if ! docker buildx build \
     -t "${BUILD_TAG}" \
     "${scratch}"; then
     fail 11 "the wheel does not install" \
-        "Installing ${wheel_url##*/} over ${ci_base} failed; see this step's log."
+        "Installing or loading ${wheel_url##*/} over ${ci_base} failed; see this step's log."
 fi
 
 docker push "${BUILD_TAG}"

@@ -35,6 +35,14 @@ from ..token_in_token_out.protocol import (
 
 logger = init_logger(__name__)
 
+# A stop string can span chunks, so cutting it needs text held back across
+# calls. The engine already does that for output_mode=text.
+_STREAM_STOP_STRINGS_ERROR = (
+    "stop strings are not supported by streaming derender because text "
+    "already sent cannot be cut. Use non-streaming derender or "
+    "output_mode=text on /inference/v1/generate which holds stop strings back."
+)
+
 
 class ServingDerender(BaseServing):
     def __init__(
@@ -198,6 +206,12 @@ class ServingDerender(BaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=gen.prompt_logprobs,
+            prompt_token_ids=(
+                gen.prompt_token_ids
+                if request.chat_request is not None
+                and request.chat_request.return_token_ids
+                else None
+            ),
             kv_transfer_params=gen.kv_transfer_params,
             metrics=gen.metrics,
         )
@@ -290,6 +304,9 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if request.chat_request is not None and request.chat_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
+
         if self.online_derenderer.parser is not None and request.chat_request is None:
             return self.create_error_response(
                 "chat_request is required when a tool or reasoning parser is "
@@ -370,6 +387,9 @@ class ServingDerender(BaseServing):
             )
             return self.create_error_response("invalid stream_state: derender failed")
 
+        if request.chat_request is not None and request.chat_request.return_token_ids:
+            chunk.prompt_token_ids = request.generate_chunk.prompt_token_ids
+
         logger.debug(
             "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
             request.generate_chunk.request_id,
@@ -392,6 +412,9 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.completion_request is not None and request.completion_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
 
         prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
         if prompt_ids_error is not None:

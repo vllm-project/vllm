@@ -27,6 +27,7 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -90,7 +91,7 @@ def _get_backend_priorities(
     use_mm_prefix: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.utils.torch_utils import is_quantized_kv_cache
+    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if use_mla:
         if device_capability.major == 10:
@@ -233,6 +234,10 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -733,6 +738,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_arch_support_pdl(cls) -> bool:
         try:
             device = torch.cuda.current_device()
@@ -802,7 +808,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        try:
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        except pynvml.NVMLError:
+            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
+            # device-level NVML memory query - nvidia-smi reports [N/A] for
+            # memory.total there. Fall back to the same source
+            # NonNvmlCudaPlatform reads.
+            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
     @with_nvml_context
