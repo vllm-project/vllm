@@ -19,7 +19,6 @@ from tests.distributed.cpu_test_utils import (
     spawn_cpu_workers as _spawn_workers,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
 
 if not current_platform.is_cpu():
     pytest.skip("CPU-only test", allow_module_level=True)
@@ -29,12 +28,6 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk  # noqa: E4
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
-
-HAS_CPU_SHM = hasattr(torch.ops._C, "init_shm_manager") and (
-    current_platform.get_cpu_architecture()
-    in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.POWERPC)
-)
-
 
 BLOCK_SIZE = [128, 128]
 _FP8_INFO = torch.finfo(torch.float8_e4m3fn)
@@ -132,10 +125,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params):
         rank, tp_size, dp_size, port, dp_port, enable_expert_parallel=True
     )
 
-    from vllm.distributed.device_communicators.cpu_communicator import (
-        CpuCommunicator,
-        _CPUSHMDistributed,
-    )
+    from vllm.distributed.device_communicators.cpu_communicator import CpuCommunicator
     from vllm.distributed.parallel_state import (
         get_ep_group,
         get_tp_group,
@@ -198,8 +188,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params):
         ep_group = get_ep_group()
         ep_communicator = ep_group.device_communicator
         assert isinstance(ep_communicator, CpuCommunicator)
-        if HAS_CPU_SHM:
-            assert isinstance(ep_communicator.dist_module, _CPUSHMDistributed)
+        assert ep_communicator.dist_module is torch.distributed
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
 

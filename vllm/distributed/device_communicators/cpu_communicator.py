@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
-    _CPUSHM_GROUP_KINDS = {"tp", "pp", "dp", "ep"}
+    _CPUSHM_GROUP_KINDS = {"tp", "pp"}
 
     def __init__(
         self,
@@ -57,13 +57,16 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
         # send/recv tensor_dict is only supported through the SHM communicator backend
         self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
-        # Cache ragged collective scratch buffers by tensor signature.
-        self._ragged_pad_buffers: dict[
-            tuple[torch.dtype, torch.device, tuple[int, ...]], torch.Tensor
-        ] = {}
-        self._ragged_gather_buffers: dict[
-            tuple[torch.dtype, torch.device, tuple[int, ...]], torch.Tensor
-        ] = {}
+        if unique_name.split(":", maxsplit=1)[0] in {"dp", "ep"}:
+            logger.info(
+                "CPU group %s uses %s: ranks=%s, rank_in_group=%d, "
+                "GLOO_SOCKET_IFNAME=%s.",
+                unique_name,
+                torch.distributed.get_backend(self.cpu_group),
+                self.ranks,
+                self.rank_in_group,
+                os.environ.get("GLOO_SOCKET_IFNAME", "auto"),
+            )
 
         if self.use_all2all:
             if self.all2all_backend not in (
@@ -170,22 +173,24 @@ class CpuCommunicator(DeviceCommunicatorBase):
         )
         return output_tensor
 
-    def _get_ragged_buffer(
-        self,
-        tensor: torch.Tensor,
-        rows: int,
-        buffers: dict[tuple[torch.dtype, torch.device, tuple[int, ...]], torch.Tensor],
-    ) -> torch.Tensor:
-        key = (tensor.dtype, tensor.device, tuple(tensor.shape[1:]))
-        buffer = buffers.get(key)
-        if buffer is None or buffer.shape[0] < rows:
-            buffer = torch.empty(
-                (rows,) + tensor.shape[1:],
-                dtype=tensor.dtype,
-                device=tensor.device,
+    def _validate_sizes(self, sizes: list[int]) -> None:
+        if len(sizes) != self.world_size or any(
+            not isinstance(size, int) or isinstance(size, bool) or size < 0
+            for size in sizes
+        ):
+            raise ValueError(
+                "sizes must contain one nonnegative integer per subgroup rank "
+                f"(world_size={self.world_size}), got {sizes}."
             )
-            buffers[key] = buffer
-        return buffer[:rows]
+
+    @staticmethod
+    def _validate_cpu_tensor(tensor: torch.Tensor) -> None:
+        if tensor.device.type != "cpu" or tensor.layout != torch.strided:
+            raise ValueError("CPU collectives require dense CPU tensors.")
+        if tensor.ndim == 0:
+            raise ValueError(
+                "CPU variable-size collectives require a tensor dimension."
+            )
 
     def _all_gatherv_uniform(
         self,
@@ -232,14 +237,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
         sizes: list[int],
     ) -> torch.Tensor:
         padded_rows = max(sizes)
-        padded_input = self._get_ragged_buffer(
-            tensor, padded_rows, self._ragged_pad_buffers
-        )
+        padded_input = tensor.new_zeros((padded_rows,) + tensor.shape[1:])
         padded_input[: tensor.shape[0]].copy_(tensor.contiguous())
 
-        gathered = self._get_ragged_buffer(
-            tensor, self.world_size * padded_rows, self._ragged_gather_buffers
-        )
+        gathered = tensor.new_empty((self.world_size * padded_rows,) + tensor.shape[1:])
         self.dist_module.all_gather_into_tensor(
             gathered,
             padded_input,
@@ -253,15 +254,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
         t: torch.Tensor,
         sizes: list[int] | None,
     ) -> torch.Tensor:
-        if sizes is not None:
-            assert t.shape[0] == sizes[self.rank_in_group], (
-                f"{t.shape[0]} != {sizes[self.rank_in_group]}"
-            )
-            if not any(sizes):
-                return t.new_empty((0,) + t.shape[1:])
-        elif t.shape[0] == 0:
-            return t.new_empty((0,) + t.shape[1:])
-
+        total_rows = sum(sizes) if sizes is not None else t.shape[0] * self.world_size
+        if total_rows == 0 or 0 in t.shape[1:]:
+            return t.new_empty((total_rows,) + t.shape[1:])
         if sizes is None or all(size == sizes[0] for size in sizes):
             return self._all_gatherv_uniform(t, t.shape[0])
         return self._all_gatherv_ragged(t, sizes)
@@ -277,11 +272,17 @@ class CpuCommunicator(DeviceCommunicatorBase):
             raise NotImplementedError("CpuCommunicator.all_gatherv only supports dim=0")
 
         if sizes is not None:
-            assert len(sizes) == self.world_size, f"{len(sizes)} != {self.world_size}"
-
-        if isinstance(input_, torch.Tensor):
-            return self._gather_single_gatherv(input_, sizes)
-        return [self._gather_single_gatherv(t, sizes) for t in input_]
+            self._validate_sizes(sizes)
+        tensors = [input_] if isinstance(input_, torch.Tensor) else input_
+        for tensor in tensors:
+            self._validate_cpu_tensor(tensor)
+            if sizes is not None and tensor.shape[0] != sizes[self.rank_in_group]:
+                raise ValueError(
+                    f"Local rows {tensor.shape[0]} do not match "
+                    f"sizes[{self.rank_in_group}]={sizes[self.rank_in_group]}."
+                )
+        gathered = [self._gather_single_gatherv(tensor, sizes) for tensor in tensors]
+        return gathered[0] if isinstance(input_, torch.Tensor) else gathered
 
     def reduce_scatterv(
         self,
@@ -290,37 +291,34 @@ class CpuCommunicator(DeviceCommunicatorBase):
         sizes: list[int] | None = None,
     ) -> torch.Tensor:
         """Reduce-scatter with variable output sizes via all_reduce + local slice."""
-        assert -input_.dim() <= dim < input_.dim(), (
-            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        self._validate_cpu_tensor(input_)
+        if not -input_.ndim <= dim < input_.ndim:
+            raise ValueError(f"Invalid dim {dim} for tensor with shape {input_.shape}.")
+        dim %= input_.ndim
+
+        if sizes is not None:
+            self._validate_sizes(sizes)
+            if input_.shape[dim] != sum(sizes):
+                raise ValueError(
+                    f"Scatter dimension {input_.shape[dim]} does not match "
+                    f"sum(sizes)={sum(sizes)}."
+                )
+        else:
+            if input_.shape[dim] % self.world_size:
+                raise ValueError(
+                    "Implicit reduce_scatterv requires the scatter dimension "
+                    f"{input_.shape[dim]} to be divisible by world_size "
+                    f"{self.world_size}."
+                )
+            sizes = [input_.shape[dim] // self.world_size] * self.world_size
+
+        reduced = input_.clone(memory_format=torch.contiguous_format)
+        if reduced.numel():
+            self.dist_module.all_reduce(reduced, group=self.device_group)
+        start = sum(sizes[: self.rank_in_group])
+        return reduced.narrow(dim, start, sizes[self.rank_in_group]).clone(
+            memory_format=torch.contiguous_format
         )
-        if dim < 0:
-            dim += input_.dim()
-
-        if sizes is not None:
-            assert len(sizes) == self.world_size, f"{len(sizes)} != {self.world_size}"
-            assert input_.shape[dim] == sum(sizes), (
-                f"{input_.shape[dim]} != {sum(sizes)}"
-            )
-        else:
-            assert input_.shape[dim] % self.world_size == 0, (
-                "Implicit reduce_scatterv requires the scatter dimension "
-                f"{input_.shape[dim]} to be divisible by world_size "
-                f"{self.world_size}."
-            )
-
-        out = input_.contiguous().clone()
-        if out.numel():
-            self.dist_module.all_reduce(out, group=self.device_group)
-
-        if sizes is not None:
-            start = sum(sizes[: self.rank_in_group])
-            end = start + sizes[self.rank_in_group]
-        else:
-            chunk = out.shape[dim] // self.world_size
-            start = self.rank_in_group * chunk
-            end = start + chunk
-
-        return out.narrow(dim, start, end - start).contiguous()
 
     def send_tensor_dict(
         self,

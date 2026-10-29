@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU communicator tests for DP SHM and EP dispatch paths."""
+"""CPU communicator tests for Gloo DP/EP and SHM TP/PP paths."""
 
 import os
 
@@ -190,7 +190,6 @@ def _sequence_parallel_worker(
 
     from vllm.distributed.device_communicators.cpu_communicator import (
         CpuCommunicator,
-        _CPUSHMDistributed,
     )
     from vllm.distributed.parallel_state import get_ep_group, get_tp_group
     from vllm.forward_context import get_forward_context
@@ -205,8 +204,7 @@ def _sequence_parallel_worker(
 
     ep_communicator = ep_group.device_communicator
     assert isinstance(ep_communicator, CpuCommunicator)
-    if HAS_CPU_SHM:
-        assert isinstance(ep_communicator.dist_module, _CPUSHMDistributed)
+    assert ep_communicator.dist_module is dist
 
     local_rows = expected_local_sizes[rank]
 
@@ -394,17 +392,16 @@ def _compile_fastpath_worker(
     dist.barrier()
 
 
-def _get_dp_shm_communicator():
+def _get_dp_gloo_communicator():
     from vllm.distributed.device_communicators.cpu_communicator import (
         CpuCommunicator,
-        _CPUSHMDistributed,
     )
     from vllm.distributed.parallel_state import get_dp_group
 
     dp_group = get_dp_group()
     communicator = dp_group.device_communicator
     assert isinstance(communicator, CpuCommunicator)
-    assert isinstance(communicator.dist_module, _CPUSHMDistributed)
+    assert communicator.dist_module is dist
     return dp_group, communicator
 
 
@@ -423,14 +420,13 @@ def _get_tp_shm_communicator():
     return tp_group, communicator
 
 
-def _ragged_shm_buffers_worker(
+def _ragged_output_lifetime_worker(
     rank, world_size, tp_size, dp_size, port, dp_port, size_patterns
 ):
     os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_ragged_buffers_{port}")
     _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
-    dp_group, communicator = _get_dp_shm_communicator()
+    dp_group, _ = _get_dp_gloo_communicator()
     small_sizes, large_sizes = size_patterns
-    previous_buffers = None
     results: list[tuple[torch.Tensor, torch.Tensor]] = []
     for sizes, scale in [(small_sizes, 1.0), (large_sizes, 2.0), (small_sizes, -1.0)]:
         hidden = _filled(sizes[rank], HIDDEN_SIZE, scale * (rank + 1))
@@ -443,21 +439,9 @@ def _ragged_shm_buffers_worker(
         for old_result, old_expected in results:
             torch.testing.assert_close(old_result, old_expected)
         results.append((result, expected))
-        key = (hidden.dtype, hidden.device, tuple(hidden.shape[1:]))
-        buffers = (
-            communicator._ragged_pad_buffers[key],
-            communicator._ragged_gather_buffers[key],
+        assert (
+            result.untyped_storage().nbytes() == result.numel() * result.element_size()
         )
-        capacity = max(small_sizes) if previous_buffers is None else max(large_sizes)
-        assert buffers[0].shape[0] == capacity
-        assert buffers[1].shape[0] == capacity * dp_size
-        if previous_buffers is not None:
-            for current, previous in zip(buffers, previous_buffers):
-                if sizes is large_sizes:
-                    assert current is not previous
-                else:
-                    assert current is previous
-        previous_buffers = buffers
     dist.barrier()
 
 
@@ -484,17 +468,14 @@ def _default_collectives_worker(
             _concat_rank_values([2, 2], HIDDEN_SIZE, 1.0),
         )
     torch.testing.assert_close(uniform, original)
-    if HAS_CPU_SHM:
-        _, communicator = _get_dp_shm_communicator()
-        assert not communicator._ragged_pad_buffers
-        assert not communicator._ragged_gather_buffers
+    _get_dp_gloo_communicator()
 
     empty = torch.empty((0, HIDDEN_SIZE), dtype=torch.float32)
     for sizes in ([0, 0], None):
         assert dp_group.all_gatherv(empty, sizes=sizes).shape == empty.shape
 
     with pytest.raises(
-        AssertionError,
+        ValueError,
         match="Implicit reduce_scatterv requires the scatter dimension",
     ):
         dp_group.reduce_scatterv(_filled(2, 3, float(rank + 1)), sizes=None)
@@ -553,59 +534,6 @@ def _dp_gloo_ragged_gather_worker(
     dist.barrier()
 
 
-def _dp_shm_group_name_worker(
-    rank,
-    world_size,
-    tp_size,
-    dp_size,
-    port,
-    dp_port,
-    params,
-):
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.config.parallel import ParallelConfig
-    from vllm.distributed.parallel_state import (
-        ensure_model_parallel_initialized,
-        get_dp_group,
-        init_distributed_environment,
-    )
-    from vllm.v1.worker.cpu_worker import _get_cpushm_dist_ident
-
-    dp_rank = rank // tp_size
-    tp_rank = rank % tp_size
-    distributed_init_method = f"tcp://127.0.0.1:{port}"
-
-    vllm_config = VllmConfig()
-    vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=tp_size,
-        data_parallel_size=dp_size,
-        data_parallel_rank=dp_rank,
-        data_parallel_master_ip="127.0.0.1",
-        _data_parallel_master_port_list=[int(dp_port)],
-    )
-    os.environ["VLLM_DIST_IDENT"] = _get_cpushm_dist_ident(
-        vllm_config.parallel_config,
-        distributed_init_method,
-    )
-
-    with set_current_vllm_config(vllm_config):
-        init_distributed_environment(
-            world_size=tp_size,
-            rank=tp_rank,
-            distributed_init_method=distributed_init_method,
-            local_rank=rank,
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(tp_size, 1, backend="gloo")
-
-        dp_group = get_dp_group()
-        communicator = dp_group.device_communicator
-        assert communicator is not None
-        assert communicator._all_group_ranks_share_shm_group_name()
-
-        dist.barrier()
-
-
 def _shm_all_reduce_worker(
     rank,
     world_size,
@@ -615,13 +543,11 @@ def _shm_all_reduce_worker(
     dp_port,
     params,
 ):
-    """Confirm TP and DP all-reduce use SHM and match Gloo."""
+    """Confirm TP all-reduce uses SHM and matches Gloo."""
     os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_shm_all_reduce_{port}")
     _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
-    group, _ = (
-        _get_tp_shm_communicator() if params == "tp" else _get_dp_shm_communicator()
-    )
+    group, _ = _get_tp_shm_communicator()
     tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4) + float(rank)
 
     ref = tensor.clone()
@@ -641,6 +567,184 @@ def _shm_all_reduce_worker(
     torch.testing.assert_close(shm_result, ref)
 
     dist.barrier()
+
+
+def _transport_worker(rank, world_size, tp_size, dp_size, port, dp_port, params):
+    os.environ["VLLM_DIST_IDENT"] = f"test_cpu_transport_{port}"
+    _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+    from vllm.distributed.device_communicators.cpu_communicator import (
+        _CPUSHMDistributed,
+    )
+    from vllm.distributed.parallel_state import (
+        GroupCoordinator,
+        get_dp_group,
+        get_ep_group,
+        get_tp_group,
+    )
+
+    for group in (get_dp_group(), get_ep_group()):
+        assert group.device_communicator.dist_module is dist
+        tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4) + rank
+        expected = tensor.clone()
+        dist.all_reduce(expected, group=group.cpu_group)
+        torch.testing.assert_close(group.all_reduce(tensor), expected, rtol=0, atol=0)
+
+    if tp_size == 1:
+        return
+
+    pp_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=rank,
+        torch_distributed_backend="gloo",
+        use_device_communicator=True,
+        group_name="pp",
+    )
+    for group in (get_tp_group(), pp_group):
+        if HAS_CPU_SHM:
+            assert isinstance(group.device_communicator.dist_module, _CPUSHMDistributed)
+        tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4) + rank
+        expected = tensor.clone()
+        dist.all_reduce(expected, group=group.cpu_group)
+        torch.testing.assert_close(group.all_reduce(tensor), expected, rtol=0, atol=0)
+    pp_group.destroy()
+
+
+def _rank_rows(rows, width, rank, dtype):
+    return (torch.arange(rows * width).reshape(width, rows).T + rank * 32).to(dtype)
+
+
+def _gather_contract_worker(rank, world_size, tp_size, dp_size, port, dp_port, params):
+    os.environ["VLLM_DIST_IDENT"] = f"test_cpu_gather_contract_{port}"
+    _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+    group, _ = _get_dp_gloo_communicator()
+    local_rank = group.rank_in_group
+    retained = []
+    patterns = [[3] + [1] * (dp_size - 1), [0] + [3] * (dp_size - 1)]
+    patterns += [[0] * dp_size, [2] * dp_size]
+    for sizes in patterns:
+        tensors = [
+            _rank_rows(sizes[local_rank], width, rank, dtype)
+            for width, dtype in (
+                (3, torch.float32),
+                (2, torch.bfloat16),
+                (1, torch.int64),
+            )
+        ]
+        originals = [tensor.clone() for tensor in tensors]
+        outputs = group.all_gatherv(tensors, sizes=sizes)
+        for tensor, original, output in zip(tensors, originals, outputs):
+            expected = torch.cat(
+                [
+                    _rank_rows(rows, tensor.shape[1], member, tensor.dtype)
+                    for rows, member in zip(sizes, group.ranks)
+                ]
+            )
+            assert output.dtype == tensor.dtype
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            torch.testing.assert_close(tensor, original, rtol=0, atol=0)
+            assert (
+                output.untyped_storage().nbytes()
+                == output.numel() * output.element_size()
+            )
+            retained.append((output, expected))
+        if sizes == [2] * dp_size:
+            torch.testing.assert_close(group.all_gatherv(tensors[0]), outputs[0])
+        empty_features = torch.empty((sizes[local_rank], 0), dtype=torch.float32)
+        assert group.all_gatherv(empty_features, sizes=sizes).shape == (sum(sizes), 0)
+        assert group.all_gatherv([], sizes=sizes) == []
+    for output, expected in retained:
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+def _scatter_contract_worker(rank, world_size, tp_size, dp_size, port, dp_port, params):
+    os.environ["VLLM_DIST_IDENT"] = f"test_cpu_scatter_contract_{port}"
+    _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+    group, _ = _get_dp_gloo_communicator()
+    retained = []
+    for sizes in ([3, 1], [0, 4], [0, 0], [2, 2], None):
+        splits = [2, 2] if sizes is None else sizes
+        for dim in (0, 1, -1):
+            for dtype in (torch.float32, torch.bfloat16):
+                shape = (sum(splits), 3) if dim == 0 else (3, sum(splits))
+                tensor = torch.arange(shape[0] * shape[1]).reshape(shape[::-1]).T
+                tensor = tensor.to(dtype) + rank * 32
+                original = tensor.clone()
+                reduced = tensor.clone()
+                dist.all_reduce(reduced, group=group.cpu_group)
+                expected = reduced.narrow(
+                    dim, sum(splits[: group.rank_in_group]), splits[group.rank_in_group]
+                ).clone()
+                output = group.reduce_scatterv(tensor, dim=dim, sizes=sizes)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                torch.testing.assert_close(tensor, original, rtol=0, atol=0)
+                assert output.is_contiguous()
+                assert (
+                    output.untyped_storage().nbytes()
+                    == output.numel() * output.element_size()
+                )
+                if output.numel():
+                    assert (
+                        output.untyped_storage().data_ptr()
+                        != tensor.untyped_storage().data_ptr()
+                    )
+                into_output = torch.empty_like(expected)
+                assert (
+                    group.reduce_scatterv_into_output(
+                        tensor, into_output, dim=dim, sizes=sizes
+                    )
+                    is into_output
+                )
+                torch.testing.assert_close(into_output, expected, rtol=0, atol=0)
+                retained.append((output, expected))
+    for output, expected in retained:
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+def _validation_worker(rank, world_size, tp_size, dp_size, port, dp_port, case):
+    os.environ["VLLM_DIST_IDENT"] = f"test_cpu_validation_{port}"
+    _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+    group, _ = _get_dp_gloo_communicator()
+    tensor = torch.ones((2, 3))
+    cases = {
+        "later_list_rows": lambda: group.all_gatherv(
+            [tensor, tensor[:1]], sizes=[2, 2]
+        ),
+        "gather_length": lambda: group.all_gatherv(tensor, sizes=[2]),
+        "gather_negative": lambda: group.all_gatherv(tensor, sizes=[-1, -1]),
+        "gather_fractional": lambda: group.all_gatherv(tensor, sizes=[2.0, 2.0]),
+        "gather_bool": lambda: group.all_gatherv(tensor[:1], sizes=[True, True]),
+        "gather_local_rows": lambda: group.all_gatherv(tensor, sizes=[1, 1]),
+        "gather_dim": lambda: group.all_gatherv(tensor, dim=1, sizes=[2, 2]),
+        "scatter_length": lambda: group.reduce_scatterv(tensor, dim=0, sizes=[2]),
+        "scatter_negative": lambda: group.reduce_scatterv(tensor, dim=0, sizes=[-1, 3]),
+        "scatter_fractional": lambda: group.reduce_scatterv(
+            tensor, dim=0, sizes=[0.5, 1.5]
+        ),
+        "scatter_bool": lambda: group.reduce_scatterv(
+            tensor, dim=0, sizes=[True, True]
+        ),
+        "scatter_total": lambda: group.reduce_scatterv(tensor, dim=0, sizes=[2, 2]),
+        "scatter_dim": lambda: group.reduce_scatterv(tensor, dim=2),
+        "scatter_indivisible": lambda: group.reduce_scatterv(tensor, dim=1),
+    }
+    with (
+        torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile,
+        pytest.raises(
+            (AssertionError, ValueError, TypeError, NotImplementedError)
+        ) as error,
+    ):
+        cases[case]()
+    collectives = [
+        event.key for event in profile.key_averages() if event.key.startswith("c10d::")
+    ]
+    assert collectives == [], (
+        f"Malformed arguments issued data collectives: {collectives}"
+    )
+    expected_error = NotImplementedError if case == "gather_dim" else ValueError
+    assert isinstance(error.value, expected_error)
 
 
 @pytest.mark.distributed
@@ -698,23 +802,22 @@ def test_cpu_ep_compile_ragged_fastpath_inductor():
 
 
 @pytest.mark.distributed
-def test_cpu_dp_group_ranks_share_shm_group_name():
+def test_cpu_dp_gloo_with_separate_worker_rendezvous():
     _spawn_workers(
-        _dp_shm_group_name_worker,
+        _dp_gloo_ragged_gather_worker,
         world_size=2,
         tp_size=1,
         dp_size=2,
-        params=None,
+        params=[2, 1],
         distributed_init_ports=[get_open_port(), get_open_port()],
         dp_port=get_open_port(),
     )
 
 
 @pytest.mark.distributed
-@pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
-def test_cpu_dp_all_gatherv_ragged_shm_buffers_reuse_and_grow():
+def test_cpu_dp_all_gatherv_retains_outputs_across_changed_sizes():
     _spawn_workers(
-        _ragged_shm_buffers_worker,
+        _ragged_output_lifetime_worker,
         world_size=2,
         tp_size=1,
         dp_size=2,
@@ -746,14 +849,69 @@ def test_cpu_dp_gloo_ragged_all_gatherv():
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
-@pytest.mark.parametrize(
-    "group,tp_size,dp_size", [("dp", 1, 6), ("tp", 2, 3)], ids=["dp6", "tp2-dp3"]
-)
-def test_cpu_shm_all_reduce_matches_gloo_without_fallback(group, tp_size, dp_size):
+def test_cpu_shm_all_reduce_matches_gloo_without_fallback():
     _spawn_workers(
         _shm_all_reduce_worker,
         world_size=6,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        params=group,
+        tp_size=2,
+        dp_size=3,
+        params=None,
     )
+
+
+@pytest.mark.distributed
+def test_cpu_dp_ep_uses_gloo_preserves_tp_pp_shm():
+    """DP/EP use Gloo while available TP/PP SHM keeps exact sums."""
+    _spawn_workers(_transport_worker, world_size=4, tp_size=2, dp_size=2, params=None)
+
+
+@pytest.mark.distributed
+def test_cpu_dp_all_reduce_matches_gloo():
+    """Six DP ranks retain the former SHM case's collective-value regression."""
+    _spawn_workers(_transport_worker, world_size=6, tp_size=1, dp_size=6, params=None)
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("dp_size", [2, 3])
+def test_cpu_all_gatherv_subgroup_contract(dp_size):
+    """Mixed noncontiguous tensors retain subgroup order, dtype and older outputs."""
+    _spawn_workers(
+        _gather_contract_worker,
+        world_size=2 * dp_size,
+        tp_size=2,
+        dp_size=dp_size,
+        params=None,
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_reduce_scatterv_subgroup_contract():
+    """SUM shards use subgroup rank and own compact storage for every scatter dim."""
+    _spawn_workers(
+        _scatter_contract_worker, world_size=4, tp_size=2, dp_size=2, params=None
+    )
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize(
+    "case",
+    [
+        "later_list_rows",
+        "gather_length",
+        "gather_negative",
+        "gather_fractional",
+        "gather_bool",
+        "gather_local_rows",
+        "gather_dim",
+        "scatter_length",
+        "scatter_negative",
+        "scatter_fractional",
+        "scatter_bool",
+        "scatter_total",
+        "scatter_dim",
+        "scatter_indivisible",
+    ],
+)
+def test_cpu_collectives_validate_before_data_collectives(case):
+    """Reject malformed arguments before issuing a real Gloo data collective."""
+    _spawn_workers(_validation_worker, world_size=2, tp_size=1, dp_size=2, params=case)
