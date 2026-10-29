@@ -177,7 +177,6 @@ def tp_all_gather(
             dist.all_gather(chunks, inp, group=group)
             return torch.cat(chunks, dim=dim)
 
-        # The first, a middle and the last dim.
         for dim in (0, 1, 2):
             inp = torch.randn((3, 4, 64), device=device).to(torch.bfloat16) + rank
             out = tensor_model_parallel_all_gather(inp, dim)
@@ -191,7 +190,6 @@ def tp_all_gather(
             inp.add_(1)
             graph.replay()
             assert torch.equal(out, expected(inp, dim))
-        # Eager and captured gathers all ran on AITER's first- or last-dim kernel.
         assert aiter_dims == [0, 0, -1, -1, -1, -1]
 
 
