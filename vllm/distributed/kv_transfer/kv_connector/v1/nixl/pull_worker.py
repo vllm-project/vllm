@@ -10,6 +10,7 @@ import numpy as np
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
+    _RemotePPStage,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
@@ -187,7 +188,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        pairs = self._dst_pairs[engine_id]
+        # None for a PP-sharded remote, whose stages pair the local cache groups.
+        pairs = self._dst_pairs.get(engine_id)
+        pp_stages = self._remote_pp_stages.get(engine_id)
         if not local_block_ids:
             # Region expansion cannot index empty groups. Pass empty specs to
             # _read_blocks so its existing cache-hit notification path runs.
@@ -195,7 +198,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif not pairs.groups_match:
+        elif pairs is not None and not pairs.groups_match:
             # The two sides put some layer in different cache groups: read each
             # region at its own blocks.
             if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
@@ -361,26 +364,35 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     else None
                 )
 
-            # Destination handle: remote_engine_id -> remote_rank -> handle.
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
-            ]
-
-            # Once a read routes the request to failure reporting, the
-            # scheduler may free and reuse its blocks, so no sibling READs
-            # may be posted (and P must not be notified).
-            if not self._read_blocks(
-                read_spec=spec,
-                request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_xfer_side_handle=local_xfer_side_handle,
-                local_dram_handle=local_dram_handle,
-                remote_xfer_side_handle=remote_xfer_side_handle,
-                expected_consumers=plan.local_consumers,
-                awaiting_kvs=meta.awaiting_kvs,
-            ):
-                return
+            # Destination handles: remote_engine_id -> remote_rank -> handle, or
+            # one per stage of a PP-sharded remote.
+            remote_reads: list[tuple[int, _RemotePPStage | None]]
+            if pp_stages:
+                remote_reads = [
+                    (stage.xfer_side_handles[spec.remote_rank], stage)
+                    for stage in pp_stages.values()
+                ]
+            else:
+                remote_reads = [
+                    (self.dst_xfer_side_handles[engine_id][spec.remote_rank], None)
+                ]
+            for remote_xfer_side_handle, pp_stage in remote_reads:
+                # Once a read routes the request to failure reporting, the
+                # scheduler may free and reuse its blocks, so no sibling READs
+                # may be posted (and P must not be notified).
+                if not self._read_blocks(
+                    read_spec=spec,
+                    request_id=req_id,
+                    dst_engine_id=engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    local_xfer_side_handle=local_xfer_side_handle,
+                    local_dram_handle=local_dram_handle,
+                    remote_xfer_side_handle=remote_xfer_side_handle,
+                    expected_consumers=plan.local_consumers,
+                    awaiting_kvs=meta.awaiting_kvs,
+                    pp_stage=pp_stage,
+                ):
+                    return
 
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
             # ..but we still need to notify the other remote ranks that we
@@ -390,7 +402,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != (0, read_specs[0].remote_rank):
+                # Every PP stage of the chosen rank was read and notified.
+                if rank_to_notify[1] != read_specs[0].remote_rank:
                     try:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
                     except Exception as e:
@@ -417,9 +430,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        pp_stage: _RemotePPStage | None = None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
+
+        With ``pp_stage``, the remote worker is that stage of a PP-sharded
+        remote and only the stage's pairs are read.
 
         Returns True when the read was posted (or was unnecessary), False
         when the request was routed to failure reporting — the caller must
@@ -456,12 +473,23 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Number of local workers that will notify this producer worker.
         # Propagate on notification so dst worker can wait before freeing.
         notif_id = f"{remote_request_id}:{expected_consumers}".encode()
+        remote_ranks = (pp_stage.pp_rank if pp_stage else 0, remote_rank)
+        pairs = pp_stage.pairs if pp_stage else self._dst_pairs[dst_engine_id]
+        by_region = read_spec.block_ids_by_region
 
-        # Full prefix cache hit: do not need to read remote blocks,
-        # just notify P worker that we have the blocks we need.
-        if not any(len(group) > 0 for group in local_block_ids):
+        # Full prefix cache hit, or none of the blocks are in a cache group the
+        # remote holds layers of (a PP stage's): do not need to read remote
+        # blocks, just notify P worker that we have the blocks we need.
+        read_keys = (
+            range(len(local_block_ids))
+            if self._has_mamba
+            else set(pairs.local if by_region else pairs.group)
+        )
+        if not any(
+            len(ids) > 0 and key in read_keys for key, ids in enumerate(local_block_ids)
+        ):
             # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
+            agent_name = self._remote_agents[dst_engine_id][remote_ranks]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
@@ -508,14 +536,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Get descs ids. Pair k reads remote region pairs.remote[k] into local
         # region pairs.local[k], at its cache group's blocks (its own regions'
         # blocks for region-mapped reads).
-        pairs = self._dst_pairs[dst_engine_id]
-        by_region = read_spec.block_ids_by_region
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
+            region_num_blocks=(
+                pp_stage.remote_num_blocks
+                if pp_stage
+                else (self.dst_region_num_blocks.get(dst_engine_id) or None)
+            ),
             pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
         )
         local_block_descs_ids = self._compute_desc_ids(
@@ -541,7 +571,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
-                    notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
+                    notif_agent=self._remote_agents[dst_engine_id][remote_ranks],
                     notif_id=notif_id,
                 )
                 return True
