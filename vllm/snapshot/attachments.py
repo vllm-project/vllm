@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import sys
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,13 +77,15 @@ def attachment_limits() -> tuple[int, int]:
 class GeneratedFile:
     """A file considered for snapshot capture and its content fingerprint.
 
-    ``fingerprint`` is a SHA-256 hex digest for content verification,
-    ``None`` when restore skips content verification, or
-    ``_CACHE_UNREADABLE`` when the file could not be read during capture.
+    ``fingerprint`` is a SHA-256 hex digest for content verification, or
+    ``None`` when restore never verifies the content. ``required`` marks a
+    file the restore reopens by path, so capture must fail when it cannot
+    carry it instead of skipping it.
     """
 
     path: str
     fingerprint: str | None = None
+    required: bool = False
 
 
 def fd_targets(pid: int) -> tuple[str, ...]:
@@ -185,7 +188,7 @@ def collect_generated_files(
     # semantics fit: a log an earlier restore appended to is left
     # alone, and the restoring reset crops it back.
     child_log = str(work_dir / "child.log")
-    references[child_log] = GeneratedFile(child_log)
+    references[child_log] = GeneratedFile(child_log, required=True)
     files = {
         **references,
         **_walked_cache_files(references, artifact_prefix, cache_prefixes),
@@ -242,11 +245,19 @@ def _referenced_generated_files(
                 # and a mapping; one fingerprint of the bytes is enough.
                 continue
             if _is_machine_state(target):
-                references[target] = GeneratedFile(target)
+                references[target] = GeneratedFile(target, required=True)
                 continue
             if not target.startswith(prefixes):
                 continue
-            references[target] = GeneratedFile(target, cache_fingerprint(Path(target)))
+            if target.endswith(".lock"):
+                references[target] = GeneratedFile(target, required=True)
+                continue
+            fingerprint = cache_fingerprint(Path(target))
+            if fingerprint == _CACHE_UNREADABLE:
+                raise SnapshotAttachmentError(
+                    f"cache file is referenced but unreadable: {target}"
+                )
+            references[target] = GeneratedFile(target, fingerprint, required=True)
     return references
 
 
@@ -292,11 +303,12 @@ def sha256_file(path: Path) -> str:
 
 
 # Recorded instead of a digest for files whose content is volatile by design.
+# In-place fingerprints use it for lock files; portable files use "cache".
 _CACHE_LOCKED = "locked"
 # Recorded instead of a digest when the bytes are warm state restore never
 # verifies; a target that already has its own is left alone.
 _CACHE = "cache"
-# Recorded instead of a digest for a file capture found but could not read.
+# An in-place fingerprint for a referenced file capture could not read.
 _CACHE_UNREADABLE = "unreadable"
 
 
@@ -342,11 +354,17 @@ def _install(source: Path, target: Path, *, fsync: bool) -> None:
     ``fsync`` publishes the bytes durably; a transient restore target skips
     it, because a restore that dies mid-copy rolls the file back anyway.
     """
-    temporary = target.parent / f".{target.name}.partial"
+    # A random name with O_EXCL refuses a symlink parked on it.
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".partial"
+    )
+    temporary = Path(temporary_name)
     try:
-        shutil.copyfile(source, temporary)
-        if fsync:
-            with open(temporary, "rb") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
+            with open(source, "rb") as source_handle:
+                shutil.copyfileobj(source_handle, handle)
+            if fsync:
+                handle.flush()
                 os.fsync(handle.fileno())
         os.chmod(temporary, stat.S_IMODE(source.lstat().st_mode))
         os.replace(temporary, target)
@@ -366,10 +384,11 @@ def capture_attachments(
 ) -> list[SnapshotAttachment]:
     """Copy files into the snapshot and record their paths, sizes, and digests.
 
-    If a copied file differs from its recorded SHA-256 digest, abort capture.
-    If an I/O or security check fails, or the tree let go of the file before
-    the image was written, skip it and print the reason to stderr: CRIU will
-    still need that file on the restore host if it references it.
+    Abort when a copied file differs from its recorded SHA-256 digest. A
+    required file — one the restore reopens by path — also fails capture on
+    an I/O or security error: skipping it would leave an artifact the
+    restore cannot bring back. An optional cache file is skipped with the
+    reason on stderr instead.
 
     Return metadata for the files successfully captured.
     """
@@ -389,19 +408,31 @@ def capture_attachments(
                 digest=digest,
                 size=staged.stat().st_size,
             )
-            if (
-                file.fingerprint is not None
-                and file.fingerprint != _CACHE_UNREADABLE
-                and file.fingerprint != attachment.digest
-            ):
+            if file.fingerprint is not None and file.fingerprint != attachment.digest:
                 raise SnapshotAttachmentError(
                     f"attachment changed since inventory: {path}"
                 )
         except (OSError, SnapshotSecurityError) as error:
-            print(f"snapshot attachment skipped: {path}: {error}", file=sys.stderr)
-            continue
+            if not file.required:
+                print(f"snapshot attachment skipped: {path}: {error}", file=sys.stderr)
+                continue
+            raise SnapshotAttachmentError(
+                f"cannot capture attachment the restore reopens: {path}: {error}"
+            ) from error
         attachments.append(attachment)
     return attachments
+
+
+def _payload_matches(attachment: SnapshotAttachment, path: Path) -> bool:
+    """Whether the artifact's own copy is intact.
+
+    A cache attachment carries no digest, so its size is the only signal.
+    """
+    if path.stat().st_size != attachment.size:
+        return False
+    if attachment.digest == _CACHE:
+        return True
+    return sha256_file(path) == attachment.digest
 
 
 def materialize_attachments(
@@ -429,6 +460,7 @@ def materialize_attachments(
                 )
             if target.exists():
                 _regular_stat(target)
+                # Cache semantics: whatever the target already holds stays.
                 if (
                     attachment.digest == _CACHE
                     or sha256_file(target) == attachment.digest
@@ -440,6 +472,13 @@ def materialize_attachments(
             target.parent.mkdir(parents=True, exist_ok=True)
             # The first walk only saw components that already existed.
             _check_target(target.parent)
+            # A copy truncated in transit fails here, not the engine.
+            _regular_stat(source)
+            if not _payload_matches(attachment, source):
+                raise SnapshotAttachmentError(
+                    f"attachment payload is truncated or differs since "
+                    f"capture: {target}"
+                )
             _install(source, target, fsync=False)
             created.append(target)
     except BaseException as error:

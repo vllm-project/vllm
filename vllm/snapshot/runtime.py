@@ -887,7 +887,7 @@ class LocalSnapshotTools:
         cleanup_work_dir: bool | None = None,
     ) -> SnapshotManifest:
         if work_dir is None:
-            work_dir = artifact
+            work_dir = Path(os.path.abspath(artifact))
             cleanup_work_dir = False
         identity = self.current_identity(inventory.gpu_uuid)
         redacted_argv = list(engine_argv)
@@ -1230,18 +1230,28 @@ class LocalSnapshotTools:
                 ) from error
             raise SnapshotRestoreError(f"captured PID is already occupied: {pid}")
         expected_root_pid = manifest.process_tree[0]
-        materialized: list[Path] = []
         staged_remaps: dict[str, tuple[int, int]] = {}
         work_dir = self._prepare_restore_work_dir(manifest)
         (work_dir / "release.json").unlink(missing_ok=True)
         (work_dir / "restored.pid").unlink(missing_ok=True)
         pidfile = work_dir / "restored.pid"
+        # Before any state changes: a failure here rolls back only the
+        # files materialization wrote, with no abort marker.
         try:
-            # CRIU reopens referenced files by their original paths.
-            # Ensure attachments are available at those paths before restoring.
             materialized = materialize_attachments(artifact, manifest.attachments)
+        except BaseException as error:
+            raise SnapshotRestoreError(str(error)) from error
+        try:
             self._verify_external_cache_files(manifest)
             self._reset_child_log(work_dir, artifact)
+        except BaseException as error:
+            leftovers = rollback_attachments(materialized)
+            if leftovers:
+                raise SnapshotRestoreError(
+                    f"{error}; attachments left behind: {', '.join(leftovers)}"
+                ) from error
+            raise
+        try:
             staged_remaps = self._restore_link_remaps(artifact)
             self._criu(
                 "restore",
