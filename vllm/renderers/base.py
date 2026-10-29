@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 import weakref
 from abc import ABC, abstractmethod
@@ -12,6 +13,7 @@ from functools import cached_property
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Generic, overload
 
+from transformers import TokenizersBackend
 from typing_extensions import TypeVar
 
 from vllm.exceptions import VLLMValidationError
@@ -48,6 +50,10 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import (
+    ThreadSafeHFTokenizerMixin,
+    maybe_make_thread_pool,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -213,6 +219,16 @@ class BaseRenderer(ABC, Generic[_T]):
             self._resources.callback(self._mm_processor_cache.close)
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
+
+        # Renderer worker threads share one tokenizer. HF fast tokenizers are
+        # not safe for concurrent use, so route calls through per-worker copies.
+        if isinstance(self.tokenizer, TokenizersBackend) and not isinstance(
+            self.tokenizer, ThreadSafeHFTokenizerMixin
+        ):
+            self.tokenizer = maybe_make_thread_pool(
+                copy.copy(self.tokenizer),
+                config.model_config.renderer_num_workers + 1,
+            )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
