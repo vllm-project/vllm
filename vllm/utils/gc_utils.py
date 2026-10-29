@@ -118,15 +118,16 @@ def freeze_gc_for_cudagraph_capture():
 
 
 def freeze_gc_heap() -> None:
-    """Freeze all objects tracked by the garbage collector. It should be invoked
-    after server init / warmup, to reduce GC overhead from static objects
-    during serving time.
+    """Run garbage collection and freeze all objects on the heap.
+
+    This should mostly be invoked at server init to exclude live objects from
+    in GC collect scans, and when unfreezing / refreezing to finalize the heap
+    for serving time to lower GC overhead.
     """
-    # Ensure all static objects are pushed down to the oldest generation for
-    # freeze
+    # Garbage collect all generations, then run a fast collection on gen 0
+    # only in case the initial collection created more cyclic garbage.
+    gc.collect()
     gc.collect(0)
-    gc.collect(1)
-    gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
 

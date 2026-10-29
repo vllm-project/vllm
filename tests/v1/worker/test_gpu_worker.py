@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm import LLM
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -536,3 +539,22 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+@create_new_process_for_each_test("spawn")
+def test_startup_heap_frozen_before_weight_loading(monkeypatch):
+    """Ensure objects alive before startup are frozen by the time weights
+    load, so the loader and memory-profiling gc.collect() calls skip them."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    frozen_before = gc.get_freeze_count()
+    frozen_at_load = 0
+    load_weights = DefaultModelLoader.load_weights
+
+    def spy_load_weights(self, model, model_config):
+        nonlocal frozen_at_load
+        frozen_at_load = gc.get_freeze_count()
+        return load_weights(self, model, model_config)
+
+    monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
+    LLM("facebook/opt-125m", enforce_eager=True)
+    assert frozen_at_load > frozen_before
