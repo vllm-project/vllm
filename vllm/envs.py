@@ -2284,9 +2284,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
     # Experimental deterministic LoRA shrink with an in-cluster split-K
-    # reduction. Requires NVIDIA cluster launch support (CC >= 9.0),
-    # cuda-python and Triton >= 3.8.0; unsupported systems use the original
-    # implementation. Defaults to disabled and does not enable batch invariance
+    # reduction. Requires NVIDIA CC >= 9.0 and Triton >= 3.8.0; otherwise uses
+    # the original implementation. Cluster launch limits are checked by
+    # Triton/CUDA at launch. Defaults to disabled and does not enable batch invariance
     # for other operators. Its rounding can differ from the two-stage kernel.
     "VLLM_LORA_SHRINK_USE_MULTICTA": lambda: bool(
         int(os.getenv("VLLM_LORA_SHRINK_USE_MULTICTA", "0"))

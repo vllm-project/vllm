@@ -9,7 +9,6 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm import envs
-from vllm.logger import init_logger
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
@@ -23,7 +22,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 # Batch-invariant shrink splits K into this many fixed partials (no atomics).
 _BI_SPLIT_K = 8
-logger = init_logger(__name__)
 
 
 @triton.jit
@@ -262,15 +260,9 @@ def _lora_shrink(
     if inputs.size(0) == 0:
         # An empty first call has no work to do.
         return
-    use_multicta = False
-    if envs.VLLM_LORA_SHRINK_USE_MULTICTA:
-        use_multicta = supports_multicta_shrink(inputs.device)
-        if not use_multicta:
-            logger.warning_once(
-                "Multi-CTA LoRA shrink requires NVIDIA cluster launch support, "
-                "compute capability >= 9.0, cuda-python and Triton >= 3.8.0; "
-                "using the original LoRA shrink implementation."
-            )
+    use_multicta = envs.VLLM_LORA_SHRINK_USE_MULTICTA and supports_multicta_shrink(
+        inputs.device
+    )
     partials: torch.Tensor | None = None
     if is_batch_invariant and not use_multicta:
         # Allocated before the no-LoRA return so profiling sees the scratch.
@@ -329,7 +321,9 @@ def _lora_shrink(
             lora_ids,
             num_active_loras.item(),
             scaling,
-            (lora_strides_d0, lora_strides_d1, lora_strides_d2),
+            lora_strides_d0,
+            lora_strides_d1,
+            lora_strides_d2,
         )
         return
 

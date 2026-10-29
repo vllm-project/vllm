@@ -206,12 +206,30 @@ def get_lora_op_configs(
     # Add support for fused_moe_lora ops
     assert op_type in [
         "shrink",
+        "shrink_multicta",
         "expand",
         "fused_moe_lora_w13_shrink",
         "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_shrink",
         "fused_moe_lora_w2_expand",
     ]
+
+    if op_type == "shrink_multicta":
+        # Keep K partitioning batch-independent and bypass legacy tuning tables.
+        block_k = 128 if 256 < hidden_size <= 1024 else 256
+        block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
+        k_blocks = max(1, cdiv(hidden_size, block_k))
+        num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
+        block_m = 16 if batch < 128 else 32
+        block_n = min(32, max(16, next_power_of_2(rank)))
+        return {
+            "block_m": block_m,
+            "block_n": block_n,
+            "block_k": block_k,
+            "split_k": num_ctas,
+            "num_ctas": num_ctas,
+            "num_warps": 2 if block_m == 16 and block_n == 16 else 4,
+        }
 
     # default config
     default = {}
@@ -314,46 +332,23 @@ def get_lora_op_configs(
 
 
 @lru_cache
-def get_lora_shrink_multicta_config(
-    batch: int, hidden_size: int, rank: int
-) -> dict[str, int]:
-    """Select cluster-shrink parameters with a batch-independent K partition."""
-    block_k = 128 if 256 < hidden_size <= 1024 else 256
-    block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
-    k_blocks = max(1, cdiv(hidden_size, block_k))
-    num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
-    block_m = 16 if batch < 128 else 32
-    block_n = min(32, max(16, next_power_of_2(rank)))
-    return {
-        "block_m": block_m,
-        "block_n": block_n,
-        "block_k": block_k,
-        "split_k": num_ctas,
-        "num_ctas": num_ctas,
-        "num_warps": 2 if block_m == 16 and block_n == 16 else 4,
-    }
-
-
-@lru_cache
 def supports_multicta_shrink(device: torch.device) -> bool:
-    """Check device and toolchain support for the experimental shrink kernel."""
-    if (
-        not current_platform.is_cuda()
-        or torch.cuda.get_device_capability(device)[0] < 9
+    """Check basic device/toolchain requirements for experimental shrink."""
+    supported = False
+    device_id = device.index if device.index is not None else 0
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+        90, device_id=device_id
     ):
-        return False
-    from vllm.triton_utils import triton
+        from vllm.triton_utils import triton
 
-    if Version(triton.__version__) < Version("3.8.0"):
-        return False
-    try:
-        from cuda.bindings import driver
-    except ImportError:
-        return False
-    status, supported = driver.cuDeviceGetAttribute(
-        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH, device.index
-    )
-    return status == driver.CUresult.CUDA_SUCCESS and bool(supported)
+        supported = Version(triton.__version__) >= Version("3.8.0")
+    if not supported:
+        logger.warning_once(
+            "Multi-CTA LoRA shrink requires NVIDIA compute capability >= 9.0 "
+            "and Triton >= 3.8.0; "
+            "using the original LoRA shrink implementation."
+        )
+    return supported
 
 
 @lru_cache

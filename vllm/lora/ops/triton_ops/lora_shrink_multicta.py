@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.lora.ops.triton_ops.utils import get_lora_shrink_multicta_config
+from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.triton_utils import gl, gluon, triton
 
 
@@ -13,36 +13,38 @@ def _lora_shrink_multicta_kernel(
     input_ptr,
     lora_ptr,
     out_ptr,
-    sorted_token_ids,
-    num_tokens_per_lora,
-    lora_token_start_loc,
-    lora_ids,
     M,
     N: gl.constexpr,
     K: gl.constexpr,
+    token_indices_sorted_by_lora_ids,
+    num_tokens_per_lora,
+    lora_token_start_loc,
+    lora_ids,
     scaling,
     lora_d0_stride: gl.constexpr,
     lora_d1_stride: gl.constexpr,
     lora_d2_stride: gl.constexpr,
-    NUM_SLICES: gl.constexpr,
     BLOCK_M: gl.constexpr,
     BLOCK_N: gl.constexpr,
     BLOCK_K: gl.constexpr,
     SPLIT_K: gl.constexpr,
+    SLICE_NUM: gl.constexpr,
     CGA_LAYOUT: gl.constexpr,
 ):
-    pid = gl.program_id(0)
-    pid_m = pid // gl.cdiv(N, BLOCK_N)
-    pid_n = pid % gl.cdiv(N, BLOCK_N)
-    slice_id = gl.program_id(1)
-    lora_idx = gl.program_id(2)
+    cta_n_num = gl.cdiv(N, BLOCK_N)
+    pid_m_n = gl.program_id(axis=0)
+    pid_m = pid_m_n // cta_n_num
+    pid_n = pid_m_n % cta_n_num
+    slice_id = gl.program_id(axis=1)
+    lora_idx = gl.program_id(axis=2)
     lora_id = gl.load(lora_ids + lora_idx)
     if lora_id == -1:
         return
     lora_m_size = gl.load(num_tokens_per_lora + lora_idx)
-    if pid_m * BLOCK_M >= lora_m_size:
+    cta_m_offset = pid_m * BLOCK_M
+    if cta_m_offset >= lora_m_size:
         return
-    token_start = gl.load(lora_token_start_loc + lora_idx)
+    lora_m_indices_start = gl.load(lora_token_start_loc + lora_idx)
 
     # The leading dimension represents independent K splits, one per CTA.
     a_layout: gl.constexpr = gl.BlockedLayout(
@@ -62,41 +64,54 @@ def _lora_shrink_multicta_kernel(
     mma_layout: gl.constexpr = gl.NVMMADistributedLayout(
         [2, 0], [1, gl.num_warps() // 2, 2], [1, 16, 8], cga_layout=CGA_LAYOUT
     )
-    sa = gl.arange(0, SPLIT_K, layout=gl.SliceLayout(1, gl.SliceLayout(2, a_layout)))
-    ma = gl.arange(0, BLOCK_M, layout=gl.SliceLayout(0, gl.SliceLayout(2, a_layout)))
-    ka = gl.arange(0, BLOCK_K, layout=gl.SliceLayout(0, gl.SliceLayout(1, a_layout)))
-    sb = gl.arange(0, SPLIT_K, layout=gl.SliceLayout(1, gl.SliceLayout(2, b_layout)))
-    kb = gl.arange(0, BLOCK_K, layout=gl.SliceLayout(0, gl.SliceLayout(2, b_layout)))
-    nb = gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, gl.SliceLayout(1, b_layout)))
-    row_offsets = pid_m * BLOCK_M + ma
-    rows = gl.load(
-        sorted_token_ids + token_start + row_offsets,
-        row_offsets < lora_m_size,
+    # A and B need separate K offsets because their layouts differ.
+    offset_sk_a = gl.arange(
+        0, SPLIT_K, layout=gl.SliceLayout(1, gl.SliceLayout(2, a_layout))
+    )
+    offset_m = cta_m_offset + gl.arange(
+        0, BLOCK_M, layout=gl.SliceLayout(0, gl.SliceLayout(2, a_layout))
+    )
+    offset_ak = gl.arange(
+        0, BLOCK_K, layout=gl.SliceLayout(0, gl.SliceLayout(1, a_layout))
+    )
+    offset_sk_b = gl.arange(
+        0, SPLIT_K, layout=gl.SliceLayout(1, gl.SliceLayout(2, b_layout))
+    )
+    offset_bk = gl.arange(
+        0, BLOCK_K, layout=gl.SliceLayout(0, gl.SliceLayout(2, b_layout))
+    )
+    offset_n = pid_n * BLOCK_N + gl.arange(
+        0, BLOCK_N, layout=gl.SliceLayout(0, gl.SliceLayout(1, b_layout))
+    )
+    ram = gl.load(
+        token_indices_sorted_by_lora_ids + lora_m_indices_start + offset_m,
+        offset_m < lora_m_size,
         other=0,
     ).to(gl.int64)
-    cols = pid_n * BLOCK_N + nb
-    if NUM_SLICES == 1:
-        weight_ptr = lora_ptr
+    if SLICE_NUM == 1:
+        cur_lora_ptr = lora_ptr
     else:
-        weight_ptr = gl.load(lora_ptr + slice_id).to(
+        cur_lora_ptr = gl.load(lora_ptr + slice_id).to(
             gl.pointer_type(input_ptr.dtype.element_ty)
         )
-    weight_ptr += lora_id.to(gl.int64) * lora_d0_stride
+    cur_lora_ptr += lora_id.to(gl.int64) * lora_d0_stride
 
     accumulator = gl.full((SPLIT_K, BLOCK_M, BLOCK_N), 0, gl.float32, mma_layout)
     for iteration in range(gl.cdiv(K, SPLIT_K * BLOCK_K)):
-        a_k = sa[:, None, None] * BLOCK_K + ka[None, None, :]
-        a_k += iteration * SPLIT_K * BLOCK_K
-        b_k = sb[:, None, None] * BLOCK_K + kb[None, :, None]
-        b_k += iteration * SPLIT_K * BLOCK_K
+        offset_k_a = offset_sk_a[:, None, None] * BLOCK_K + offset_ak[None, None, :]
+        offset_k_a += iteration * SPLIT_K * BLOCK_K
+        offset_k_b = offset_sk_b[:, None, None] * BLOCK_K + offset_bk[None, :, None]
+        offset_k_b += iteration * SPLIT_K * BLOCK_K
         a = gl.load(
-            input_ptr + rows[None, :, None] * K + a_k,
-            (row_offsets[None, :, None] < lora_m_size) & (a_k < K),
+            input_ptr + ram[None, :, None] * K + offset_k_a,
+            (offset_m[None, :, None] < lora_m_size) & (offset_k_a < K),
             other=0,
         )
         b = gl.load(
-            weight_ptr + cols[None, None, :] * lora_d1_stride + b_k * lora_d2_stride,
-            (cols[None, None, :] < N) & (b_k < K),
+            cur_lora_ptr
+            + offset_n[None, None, :] * lora_d1_stride
+            + offset_k_b * lora_d2_stride,
+            (offset_n[None, None, :] < N) & (offset_k_b < K),
             other=0,
         )
         a = gl.convert_layout(a, gl.DotOperandLayout(0, mma_layout, 2))
@@ -113,59 +128,82 @@ def _lora_shrink_multicta_kernel(
     partials = gl.convert_layout(accumulator, reduce_layout)
     result = gl.sum(partials, axis=0)
     out_layout: gl.constexpr = gl.SliceLayout(0, reduce_layout)
-    om = gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, out_layout))
-    on = gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, out_layout))
-    out_rows = gl.convert_layout(rows, gl.SliceLayout(1, out_layout))
-    out_cols = pid_n * BLOCK_N + on
-    out_offsets = (slice_id.to(gl.int64) * M + out_rows[:, None]) * N + out_cols[
-        None, :
-    ]
-    gl.store(
-        out_ptr + out_offsets,
-        result * scaling,
-        (pid_m * BLOCK_M + om[:, None] < lora_m_size) & (out_cols[None, :] < N),
+    offset_cm = gl.arange(0, BLOCK_M, layout=gl.SliceLayout(1, out_layout))
+    offset_cn = pid_n * BLOCK_N + gl.arange(
+        0, BLOCK_N, layout=gl.SliceLayout(0, out_layout)
     )
+    output_rows = gl.convert_layout(ram, gl.SliceLayout(1, out_layout))
+    c_ptr = (
+        out_ptr
+        + (slice_id.to(gl.int64) * M + output_rows[:, None]) * N
+        + offset_cn[None, :]
+    )
+    c_mask = (cta_m_offset + offset_cm[:, None] < lora_m_size) & (
+        offset_cn[None, :] < N
+    )
+    gl.store(c_ptr, result * scaling, mask=c_mask)
 
 
 def launch_lora_shrink_multicta(
     inputs: torch.Tensor,
-    lora_ptr: torch.Tensor,
-    output: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
+    lora_ptr_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
     num_tokens_per_lora: torch.Tensor,
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     num_active_loras: int,
     scaling: float,
-    lora_strides: tuple[int, int, int],
+    lora_strides_d0: int,
+    lora_strides_d1: int,
+    lora_strides_d2: int,
 ) -> None:
-    m, k = inputs.shape
-    nslices, _, rank = output.shape
-    config = get_lora_shrink_multicta_config(batch=m, hidden_size=k, rank=rank)
-    bm, bn, bk = config["block_m"], config["block_n"], config["block_k"]
-    num_ctas = config["num_ctas"]
-    cga_layout = tuple((1 << bit, 0, 0) for bit in range(num_ctas.bit_length() - 1))
-    grid = (triton.cdiv(m, bm) * triton.cdiv(rank, bn), nslices, num_active_loras)
+    M, K = inputs.shape
+    NUM_SLICES, _, N = output_tensor.shape
+    MAX_LORAS = lora_ids.size(0)
+    kernel_config = get_lora_op_configs(
+        "shrink_multicta",
+        max_loras=MAX_LORAS,
+        batch=M,
+        hidden_size=K,
+        rank=N,
+        num_slices=NUM_SLICES,
+    )
+    BLOCK_M = kernel_config["block_m"]
+    BLOCK_N = kernel_config["block_n"]
+    BLOCK_K = kernel_config["block_k"]
+    SPLIT_K = kernel_config["split_k"]
+    NUM_WARPS = kernel_config["num_warps"]
+    NUM_CTAS = kernel_config["num_ctas"]
+    assert NUM_CTAS is not None
+    CGA_LAYOUT = tuple((1 << bit, 0, 0) for bit in range(NUM_CTAS.bit_length() - 1))
+    grid = (
+        triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
+        NUM_SLICES,
+        num_active_loras,
+    )
     _lora_shrink_multicta_kernel[grid](
         inputs,
-        lora_ptr,
-        output,
-        sorted_token_ids,
+        lora_ptr_tensor,
+        output_tensor,
+        M,
+        N,
+        K,
+        token_indices_sorted_by_lora_ids,
         num_tokens_per_lora,
         lora_token_start_loc,
         lora_ids,
-        m,
-        rank,
-        k,
         scaling,
-        *lora_strides,
-        nslices,
-        bm,
-        bn,
-        bk,
-        config["split_k"],
-        cga_layout,
-        num_ctas=num_ctas,
-        num_warps=config["num_warps"],
+        lora_strides_d0,
+        lora_strides_d1,
+        lora_strides_d2,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        SPLIT_K,
+        NUM_SLICES,
+        CGA_LAYOUT,
+        num_ctas=NUM_CTAS,
+        num_warps=NUM_WARPS,
         enable_fp_fusion=False,
     )
