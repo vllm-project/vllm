@@ -842,9 +842,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
-                self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
-                )
+                if self.aux_output_connector is None:
+                    self.aux_output_connector = get_aux_output_connector(
+                        self.model, self.vllm_config
+                    )
+                self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1042,6 +1044,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
+        if self.vllm_config.aux_output_config.enabled:
+            self.aux_output_connector = get_aux_output_connector(
+                self.model, self.vllm_config
+            )
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
@@ -1293,8 +1299,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
             self.model_state.apply_staged_writes()
-        if self.sampler is not None:
-            self.sampler.apply_staged_writes()
+            if self.sampler is not None:
+                self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
@@ -1976,7 +1982,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 block_tables,
                 slot_mappings,
-                cg_mode=batch_desc.cg_mode,
+                batch_desc,
+                dp_sync_state,
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
