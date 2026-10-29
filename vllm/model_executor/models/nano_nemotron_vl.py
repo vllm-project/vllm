@@ -951,11 +951,16 @@ class NemotronH_Nano_VL_V2(
     lora_skip_prefixes = NemotronHForCausalLM.lora_skip_prefixes
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # RadioModel's own attention submodule is "attention", not "attn"
+            # (matching the Transformers RadioAttention naming); see
+            # RadioModel.hf_to_vllm_mapper for the equivalent weight-loading
+            # rename.
+            ".attn.": ".attention.",
+        },
         orig_to_new_prefix={
             "language_model.backbone": "language_model.model",
-            "vision_model.radio_model.model.blocks.": (
-                "vision_model.model.encoder.layers."
-            ),
+            "vision_model.radio_model.model.blocks.": "vision_model.encoder.layer.",
             "sound_projection.": "sound_encoder.projection.",
         },
     )
@@ -1678,7 +1683,7 @@ class NemotronH_Nano_VL_V2(
                 return 0, 0
 
         merge_size = int(round(1 / self.downsample_ratio))
-        num_skip = self.vision_model.model.patch_generator.num_skip
+        num_skip = self.vision_model.embeddings.num_skip
 
         if mm_kwargs is None:
             num_sequences = max(math.ceil(num_mm_embeds / self.num_image_token), 1)

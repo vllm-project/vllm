@@ -17,10 +17,8 @@ def _make_lora_count_model() -> NemotronH_Nano_VL_V2:
     object.__setattr__(model, "num_image_token", 256)
     object.__setattr__(model, "patch_size", 16)
     object.__setattr__(model, "video_temporal_patch_size", 2)
-    patch_generator = SimpleNamespace(num_skip=3)
-    vision_model = SimpleNamespace(
-        model=SimpleNamespace(patch_generator=patch_generator)
-    )
+    embeddings = SimpleNamespace(num_skip=3)
+    vision_model = SimpleNamespace(embeddings=embeddings)
     object.__setattr__(model, "vision_model", vision_model)
     sound_encoder = SimpleNamespace(
         encoder=SimpleNamespace(
@@ -56,7 +54,7 @@ def test_nano_nemotron_vl_maps_radio_lora_names():
     )
 
     assert parse_fine_tuned_lora_name(name, mapper) == (
-        "vision_model.model.encoder.layers.0.attn.qkv",
+        "vision_model.encoder.layer.0.attention.qkv",
         True,
     )
 
