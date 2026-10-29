@@ -482,6 +482,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             completion_tokens=completion_tokens,
                             total_tokens=prompt_tokens + completion_tokens,
                         )
+                    elif include_usage:
+                        # OpenAI sends `"usage": null` on every chunk before
+                        # the final usage chunk when usage is requested.
+                        chunk.usage = None
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
