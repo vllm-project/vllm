@@ -1198,43 +1198,90 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # When block_size != alignment_tokens, we need to skip by the
         # alignment period to find the next aligned candidate.
         from math import gcd
-        alignment_stride = max(1, alignment_tokens // gcd(alignment_tokens, block_size)) if block_size != alignment_tokens else 1
+
+        alignment_stride = (
+            max(1, alignment_tokens // gcd(alignment_tokens, block_size))
+            if block_size != alignment_tokens
+            else 1
+        )
 
         # Search from right to left with stride-based probing.
+        # Always check the rightmost block first, then probe at stride boundaries.
         i = max_num_blocks - 1
         while i >= 0:
-            # Probe at stride boundaries.
-            if i % stride != 0 and num_contiguous_blocks == 0:
+            # Probe at stride boundaries, but always check the rightmost block.
+            if (
+                i != max_num_blocks - 1
+                and i % stride != 0
+                and num_contiguous_blocks == 0
+            ):
                 i -= 1
                 continue
 
-            cached_block = block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids)
+            cached_block = block_pool.get_cached_block(
+                block_hashes[i], kv_cache_group_ids
+            )
             if cached_block:
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
-                if (
-                    num_contiguous_blocks == 0
-                    and block_size != alignment_tokens
-                    and ((i + 1) * block_size) % alignment_tokens != 0
-                ):
-                    i = (i // alignment_stride) * alignment_stride - 1
-                    continue
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
-                num_contiguous_blocks += 1
+
+                # Expand RIGHT to find the true end of the contiguous run before
+                # checking alignment: the run may extend past the probe index.
+                run_end = i
+                while run_end + 1 < max_num_blocks:
+                    next_cached = block_pool.get_cached_block(
+                        block_hashes[run_end + 1], kv_cache_group_ids
+                    )
+                    if not next_cached:
+                        break
+                    run_end += 1
+                    for computed, cached in zip(computed_blocks, next_cached):
+                        computed[run_end] = cached
+
+                num_contiguous_blocks = run_end - i + 1
+
+                # Skip the prefix match if the run end is not aligned with
+                # `alignment_tokens`; jump to the previous aligned boundary.
+                if (
+                    block_size != alignment_tokens
+                    and ((run_end + 1) * block_size) % alignment_tokens != 0
+                ):
+                    i = (
+                        (run_end + 1) // alignment_stride * alignment_stride
+                        - stride
+                        - 1
+                    )
+                    continue
+
+                # Expand LEFT from run_end to find the full run.
+                j = run_end - 1
+                while j >= 0:
+                    prev_cached = block_pool.get_cached_block(
+                        block_hashes[j], kv_cache_group_ids
+                    )
+                    if not prev_cached:
+                        break
+                    for computed, cached in zip(computed_blocks, prev_cached):
+                        computed[j] = cached
+                    num_contiguous_blocks += 1
+                    j -= 1
 
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
+                    # Keep the full run through `run_end` and preserve leading
+                    # NULL blocks for any skipped prefix.
                     for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks :]
+                        # Trim trailing blocks after run_end.
+                        del computed[run_end + 1 :]
                     match_found = True
                     break
 
-                # Continue expanding left on a hit.
-                i -= 1
+                # Run too short: continue searching left of the run start (j).
+                i = j
+                if block_size != alignment_tokens:
+                    i = ((i + 1) // alignment_stride) * alignment_stride - stride - 1
+                else:
+                    i -= stride
             else:
                 # Miss: reset contiguous count and jump past the stride.
                 num_contiguous_blocks = 0
