@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -128,6 +128,9 @@ from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
 from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
     norm_quant_trtllm_nvfp4,
 )
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
@@ -140,6 +143,12 @@ from vllm.transformers_utils.configs.muse_spark import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
+
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 logger = init_logger(__name__)
 
@@ -1814,6 +1823,44 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             self.logits_processor.scale = 1.0
 
         self.set_moe_parameters()
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.specialized_decode_config is None:
+            # decode_backend=auto: the runner's default state for this model.
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            return DefaultModelState
+        from vllm.models.muse_spark.nvidia.model_state import MuseSparkModelState
+
+        return MuseSparkModelState
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def _init_model(
         self,

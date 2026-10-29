@@ -11,7 +11,13 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -33,15 +39,75 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     materialize_residual_path_constants,
 )
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import decode_backend
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.muse_spark import MuseSparkDSparkConfig
 
 if TYPE_CHECKING or not current_platform.is_rocm():
-    from vllm.models.muse_spark.nvidia.model import MuseSpark1xDecoderLayer
+    from vllm.models.muse_spark.nvidia.model import (
+        MuseSpark1xDecoderLayer,
+        gather_columns,
+    )
 else:
     from vllm.models.muse_spark.amd.model import (  # type: ignore[assignment]
         MuseSpark1xDecoderLayer,
     )
+
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.draft import (
+        DraftDecode,
+    )
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.markov import (
+        MarkovSampler,
+    )
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+logger = init_logger(__name__)
+
+
+def _use_column_parallel_fc(enabled: bool, hidden_size: int, tp_size: int) -> bool:
+    """Whether to try the column-parallel draft fc, which the specialized
+    decode (``enabled``) selects."""
+    if not enabled:
+        return False
+    if tp_size == 1 or hidden_size % tp_size != 0:
+        logger.warning_once(
+            "The column-parallel DSpark draft fc needs a tensor parallel size "
+            "above 1 that divides the draft hidden size %d (got %d); using the "
+            "replicated DSpark draft fc.",
+            hidden_size,
+            tp_size,
+        )
+        return False
+    return True
+
+
+def _keep_column_parallel_fc(fc: ColumnParallelLinear) -> bool:
+    """Whether the built column-parallel fc is unquantized, the only tested case."""
+    if not isinstance(fc.quant_method, UnquantizedLinearMethod):
+        logger.warning_once(
+            "The column-parallel DSpark draft fc supports only an unquantized "
+            "draft fc (got %s); using the replicated DSpark draft fc.",
+            type(fc.quant_method).__name__,
+        )
+        return False
+    logger.info_once("Using the column-parallel DSpark draft fc.", scope="process")
+    return True
+
+
+def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
+    """Whether the deployment selects the Muse Spark specialized decode
+    (``additional_config={"decode_backend": "latency_specialized"}``) for the
+    draft. Not supported on ROCm, where the draft keeps the stock path."""
+    if decode_backend(vllm_config) != "latency_specialized":
+        return False
+    if current_platform.is_rocm():
+        logger.warning_once(
+            "The Muse Spark specialized decode is not supported on ROCm; the "
+            "DSpark draft keeps its stock layers and Markov loop."
+        )
+        return False
+    return True
 
 
 class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
@@ -121,15 +187,36 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             persistent=False,
         )
         self.has_separate_mask_embedding = False
-        self.fc = ReplicatedLinear(
-            input_size=config.target_hidden_size * len(self.target_layer_ids),
-            output_size=config.hidden_size,
-            bias=False,
-            params_dtype=vllm_config.model_config.dtype,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "fc"),
-            return_bias=False,
+        fc_input_size = config.target_hidden_size * len(self.target_layer_ids)
+        self.fc: ReplicatedLinear | ColumnParallelLinear
+        specialized = _uses_specialized_decode(vllm_config)
+        column_parallel_fc = _use_column_parallel_fc(
+            specialized,
+            config.hidden_size,
+            get_tensor_model_parallel_world_size(),
         )
+        if column_parallel_fc:
+            self.fc = ColumnParallelLinear(
+                input_size=fc_input_size,
+                output_size=config.hidden_size,
+                bias=False,
+                gather_output=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
+            column_parallel_fc = _keep_column_parallel_fc(self.fc)
+        if not column_parallel_fc:
+            self.fc = ReplicatedLinear(
+                input_size=fc_input_size,
+                output_size=config.hidden_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
         self.hidden_norm = MuseSpark1xRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -149,7 +236,14 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             has_weight=config.norm_affine,
             zero_centered_gamma=config.norm_zero_centered_gamma,
         )
-        self.markov_head = DSparkMarkovHead(
+        markov_head_cls: type[DSparkMarkovHead] = DSparkMarkovHead
+        if specialized:
+            from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+                markov,
+            )
+
+            markov_head_cls = markov.VocabParallelMarkovHead
+        self.markov_head = markov_head_cls(
             config.vocab_size,
             config.draft_vocab_size,
             config.markov_rank,
@@ -167,6 +261,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 bias=True,
                 with_markov=config.confidence_head_with_markov,
             )
+        # Under the specialized decode, the draft's forward once the weights
+        # are loaded (MuseSparkDSparkForCausalLM.load_weights).
+        self.specialized_decode = specialized
+        self.specialized_draft: DraftDecode | None = None
+        self._compilation_mode = vllm_config.compilation_config.mode
 
     def _build_fused_kv_buffers(self) -> None:
         layers_attn = [layer.self_attn for layer in self.layers]
@@ -209,6 +308,12 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         context_positions: torch.Tensor,
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
+        if self.specialized_draft is not None and (
+            self.specialized_draft.store_context_kv(
+                context_states, context_positions, context_slot_mapping
+            )
+        ):
+            return
         if not hasattr(self, "_num_attn_layers"):
             self._build_fused_kv_buffers()
         num_ctx = context_states.shape[0]
@@ -269,6 +374,8 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         hidden_states = (
             self.embed_input_ids(input_ids) if input_embeds is None else input_embeds
         )
+        if self.specialized_draft is not None:
+            return self.specialized_draft.run(positions, hidden_states)
         hidden_states = hidden_states.to(self.config.residual_dtype)
         for layer in self.layers:
             hidden_states, _ = layer(positions, hidden_states, None)
@@ -325,6 +432,15 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         else:
             self.output_multiplier = 1.0
         self.output_soft_cap_temp = self.config.output_soft_cap_temp
+        topk = getattr(self.config, "dspark_draft_topk", None)
+        if self.model.specialized_decode and topk is not None:
+            # The speculator's top-k loop never calls sample_sequential.
+            raise ValueError(
+                "The Muse Spark specialized decode runs the fused DSpark Markov "
+                "loop, which does not run here: dspark_draft_topk is set"
+            )
+        # The fused Markov loop under the specialized decode (sample_sequential).
+        self._markov_sampler: MarkovSampler | None = None
 
     def apply_output_logit_transform(self, logits: torch.Tensor) -> torch.Tensor:
         logits = logits.float() * self.output_multiplier
@@ -334,6 +450,70 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             )
         return logits
 
+    def output_logit_transform_params(self) -> tuple[float, float | None]:
+        """``(multiplier, soft_cap)`` of ``apply_output_logit_transform``.
+
+        The fused DSpark Markov loop computes the transform from these values
+        (``logits * multiplier``, then ``soft_cap * tanh(x / soft_cap)`` unless
+        ``soft_cap`` is None) instead of calling it, so a subclass that changes
+        the transform must override this too.
+        """
+        return self.output_multiplier, self.output_soft_cap_temp
+
+    def sample_sequential(
+        self,
+        speculator: "DSparkSpeculator",
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> bool:
+        """DSparkSpeculator._sample_sequential asks this first. Under the
+        specialized decode the fused Markov sampling loop samples the drafts
+        and this returns True; otherwise it returns False, having done nothing,
+        and the speculator runs its own loop."""
+        if not self.model.specialized_decode:
+            return False
+        if self._markov_sampler is None:
+            # Built on the first call (the memory-profiling run), from the
+            # speculator's sampling state.
+            self._markov_sampler = self._build_markov_sampler(speculator)
+        assert speculator.draft_logits is not None
+        self._markov_sampler.sample(
+            num_reqs,
+            head_hidden,
+            sample_indices=speculator.sample_indices,
+            sample_idx_mapping=speculator.sample_idx_mapping,
+            sample_pos=speculator.sample_pos,
+            input_ids=speculator.input_buffers.input_ids,
+            anchor_idx=speculator._anchor_idx,
+            seeds=speculator.seeds,
+            temperature=speculator.temperature,
+            draft_tokens=speculator.draft_tokens,
+            draft_logits=speculator.draft_logits,
+        )
+        return True
+
+    def _build_markov_sampler(self, speculator: "DSparkSpeculator") -> "MarkovSampler":
+        if speculator.use_confidence_head or speculator.use_acceptance_estimator:
+            raise ValueError(
+                "The Muse Spark specialized decode's fused DSpark Markov loop "
+                "computes neither the confidence head's outputs nor the "
+                "acceptance estimates: it does not run with adaptive verification."
+            )
+        from vllm.models.muse_spark.nvidia.specialized_decode.runtime.markov import (
+            build_markov_sampler,
+        )
+
+        return build_markov_sampler(
+            self,
+            draft_logits=speculator.draft_logits,
+            draft_topk=speculator._draft_topk,
+            watermarked=speculator.draft_watermarker is not None,
+            use_fp64_gumbel=speculator.use_fp64_gumbel,
+            sample_from_anchor=speculator.sample_from_anchor,
+            max_num_reqs=speculator.max_num_reqs,
+            num_steps=speculator.num_speculative_steps,
+        )
+
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Identical full-vocabulary heads may be shared with an FP32 target head.
         return self.logits_processor(
@@ -342,9 +522,12 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Target residuals are FP32; the training collator casts features before FC.
-        return super().combine_hidden_states(
-            hidden_states.to(self.model.fc.weight.dtype)
-        )
+        hidden_states = hidden_states.to(self.model.fc.weight.dtype)
+        out = super().combine_hidden_states(hidden_states)
+        if isinstance(self.model.fc, ColumnParallelLinear):
+            # Each rank holds its block of output columns for every token.
+            out = gather_columns(out.view(-1, out.shape[-1])).view(*out.shape[:-1], -1)
+        return out
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}
@@ -377,6 +560,14 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         )
         self.model._build_fused_kv_buffers()
         materialize_residual_path_constants(self.model)
+        if self.model.specialized_decode:
+            from vllm.models.muse_spark.nvidia.specialized_decode.runtime.draft import (
+                build_draft_decode,
+            )
+
+            self.model.specialized_draft = build_draft_decode(
+                self.model, self.model._compilation_mode
+            )
         return loaded
 
 
