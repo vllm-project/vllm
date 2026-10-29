@@ -228,6 +228,7 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 # Muse Spark K3 monokernel: threads an expert
 TPE = "TPE"
+stride_bse = "stride_bse"
 
 [tool.typos.default.extend-words]
 # Muse Spark monokernel: shuffled-weight / scale tags, o_proj flag region
@@ -264,6 +265,10 @@ nd = "nd"
 eles = "eles"
 datas = "datas"
 ser = "ser"
+# numpy flags.writeable
+writeable = "writeable"
+# HF CLIP weight name
+layrnorm = "layrnorm"
 ure = "ure"
 VALU = "VALU"
 # Walsh-Hadamard Transform
