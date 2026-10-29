@@ -36,6 +36,7 @@ from vllm.entrypoints.launchers.dp_supervisor import (
     CHILD_EXIT_GRACE_S,
     DPSupervisor,
     _build_vllm_dp_server_args,
+    build_rank_ports_server_args,
     infer_multi_port_external_lb_start_rank,
     validate_multi_port_external_lb_args,
 )
@@ -178,6 +179,86 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.data_parallel_hybrid_lb is False
     assert child_args.data_parallel_multi_port_external_lb is False
     assert child_args.api_server_count == 1
+
+
+def test_build_rank_ports_server_args_owns_all_local_ranks():
+    args = _make_unit_args(data_parallel_size=16, data_parallel_start_rank=8)
+    server_args, rank_ports = build_rank_ports_server_args(args)
+
+    # Each rank keeps the port its own server would have had, and the
+    # supervisor port serves requests for any local rank.
+    assert rank_ports == {8: 8000, 9: 8001, 10: 8002, 11: 8003}
+    assert server_args.port == 9256
+    assert server_args.data_parallel_start_rank == 8
+    assert server_args.data_parallel_size_local == 4
+    assert server_args.data_parallel_hybrid_lb is True
+    assert server_args.data_parallel_multi_port_external_lb is False
+    assert server_args.data_parallel_supervisor_port is None
+    assert server_args.api_server_count == 1
+    # The caller's args are left alone.
+    assert args.port == 8000
+    assert args.data_parallel_multi_port_external_lb is True
+
+
+def test_build_rank_ports_server_args_infers_start_rank_from_node_rank():
+    _, rank_ports = build_rank_ports_server_args(_make_unit_args())
+    assert rank_ports == {4: 8000, 5: 8001, 6: 8002, 7: 8003}
+
+
+def test_build_rank_ports_server_args_validates_like_the_supervisor():
+    with pytest.raises(ValueError, match="overlaps with child rank ports"):
+        build_rank_ports_server_args(
+            _make_unit_args(data_parallel_supervisor_port=8002)
+        )
+
+
+@pytest.mark.parametrize("rank_ports_env", ["0", "1"])
+def test_multi_port_rust_frontend_dispatch(monkeypatch, tmp_path, rank_ports_env):
+    """VLLM_RUST_FRONTEND_RANK_PORTS swaps the per-rank supervisor for one
+    Rust frontend that serves every local rank on its own port."""
+    from vllm.entrypoints.cli import serve
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    binary = tmp_path / "vllm-rs"
+    binary.touch()
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", str(binary))
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_RANK_PORTS", rank_ports_env)
+    calls = []
+    monkeypatch.setattr(
+        serve,
+        "run_multi_api_server",
+        lambda args, rank_ports=None: calls.append(("multi", args, rank_ports)),
+    )
+    monkeypatch.setattr(
+        serve, "run_dp_supervisor", lambda args: calls.append(("supervisor", args))
+    )
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        [
+            "--model",
+            "org/model",
+            "--data-parallel-size",
+            "8",
+            "--data-parallel-size-local",
+            "2",
+            "--data-parallel-start-rank",
+            "4",
+            "--data-parallel-multi-port-external-lb",
+        ]
+    )
+    serve.ServeSubcommand.cmd(args)
+
+    if rank_ports_env == "0":
+        assert [call[0] for call in calls] == ["supervisor"]
+        return
+    [(kind, server_args, rank_ports)] = calls
+    assert kind == "multi"
+    assert rank_ports == {4: args.port, 5: args.port + 1}
+    assert server_args.port == args.data_parallel_supervisor_port
+    assert server_args.data_parallel_hybrid_lb
+    assert not server_args.data_parallel_multi_port_external_lb
 
 
 def test_run_vllm_dp_server_uses_python_server_by_default(monkeypatch):

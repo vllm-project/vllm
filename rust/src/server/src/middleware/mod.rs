@@ -3,6 +3,7 @@
 
 mod auth;
 mod cors;
+mod data_parallel_rank;
 mod load;
 mod metrics;
 mod offload;
@@ -10,6 +11,7 @@ mod request_id;
 
 pub use auth::authenticate_api_key;
 pub use cors::{cors_layer, strip_cors_on_no_origin};
+pub(crate) use data_parallel_rank::{ListenerRank, with_data_parallel_rank};
 pub use load::track_server_load;
 pub use metrics::track_http_metrics;
 pub(crate) use offload::request_runtime_layer;

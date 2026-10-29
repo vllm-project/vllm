@@ -37,7 +37,7 @@ use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    ParserSelection, RankListener, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -706,6 +706,7 @@ impl SharedRuntimeArgs {
         self,
         listen_fd: i32,
         grpc_listen_fd: Option<i32>,
+        rank_listen_fds: &[RankListenFd],
         input_listener_fd: i32,
         output_listener_fd: i32,
         coordinator_address: Option<String>,
@@ -750,6 +751,13 @@ impl SharedRuntimeArgs {
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
+            rank_listeners: rank_listen_fds
+                .iter()
+                .map(|listen| RankListener {
+                    rank: listen.rank,
+                    mode: HttpListenerMode::InheritedFd { fd: listen.fd },
+                })
+                .collect(),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -829,6 +837,7 @@ impl SharedRuntimeArgs {
             served_model_name: self.served_model_name,
             listener_mode,
             grpc_listener_mode,
+            rank_listeners: Vec::new(),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -994,6 +1003,28 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
 
+/// One `--rank-listen-fd RANK=FD` value: an inherited listening socket and the
+/// data-parallel rank it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankListenFd {
+    /// Data-parallel rank (engine index).
+    pub rank: u32,
+    /// Inherited listening socket file descriptor.
+    pub fd: i32,
+}
+
+fn parse_rank_listen_fd(value: &str) -> Result<RankListenFd, String> {
+    let (rank, fd) = value
+        .split_once('=')
+        .ok_or_else(|| format!("expected RANK=FD, got {value:?}"))?;
+    let rank = rank.trim().parse().map_err(|e| format!("invalid rank in {value:?}: {e}"))?;
+    let fd = fd
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid file descriptor in {value:?}: {e}"))?;
+    Ok(RankListenFd { rank, fd })
+}
+
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     let mut args: SharedRuntimeArgs = serde_json::from_str(value)
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
@@ -1016,6 +1047,14 @@ pub struct FrontendArgs {
     /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_listen_fd: Option<i32>,
+    /// Additional inherited HTTP listening sockets, each bound to one
+    /// data-parallel rank, as `RANK=FD` (repeatable). Every request on such a
+    /// socket goes to that rank's engine, and its `/metrics` lists only that
+    /// engine's per-engine series, so one frontend can serve the ports of
+    /// several per-rank frontends. The supervisor that opens the sockets
+    /// decides which rank each one serves.
+    #[arg(long = "rank-listen-fd", value_name = "RANK=FD", value_parser = parse_rank_listen_fd)]
+    pub rank_listen_fds: Vec<RankListenFd>,
     /// Inherited frontend input ROUTER listener file descriptor.
     #[arg(long)]
     pub input_listener_fd: i32,
@@ -1050,6 +1089,7 @@ impl FrontendArgs {
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.grpc_listen_fd,
+            &self.rank_listen_fds,
             self.input_listener_fd,
             self.output_listener_fd,
             self.coordinator_address,

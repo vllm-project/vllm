@@ -17,7 +17,10 @@ from vllm.entrypoints.common.cli_args import (
 )
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
-from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
+from vllm.entrypoints.launchers.dp_supervisor import (
+    build_rank_ports_server_args,
+    run_dp_supervisor,
+)
 from vllm.entrypoints.launchers.launcher import create_server_socket
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -144,7 +147,11 @@ class ServeSubcommand(CLISubcommand):
             )
             args.api_server_count = 1
 
-        if is_multi_port:
+        if is_multi_port and rust_frontend_path and envs.VLLM_RUST_FRONTEND_RANK_PORTS:
+            # One Rust frontend serves every local rank on its own port.
+            server_args, rank_ports = build_rank_ports_server_args(args)
+            run_multi_api_server(server_args, rank_ports=rank_ports)
+        elif is_multi_port:
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
@@ -266,11 +273,21 @@ def run_headless(args: argparse.Namespace):
         logger.info("Shutting down.")
 
 
-def run_multi_api_server(args: argparse.Namespace):
+def run_multi_api_server(
+    args: argparse.Namespace, rank_ports: dict[int, int] | None = None
+):
+    """Run the engines and their API server(s) or Rust frontend.
+
+    ``rank_ports`` maps data-parallel ranks to extra ports the Rust frontend
+    listens on: every request there goes to that rank's engine, and
+    ``/metrics`` there lists only that engine's per-engine series.
+    """
     assert not args.headless
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
     )
+    if rank_ports and not rust_frontend_path:
+        raise ValueError("Data-parallel rank ports require the Rust frontend")
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
@@ -303,6 +320,12 @@ def run_multi_api_server(args: argparse.Namespace):
     if args.grpc_port is not None:
         grpc_host = "127.0.0.1" if args.uds else (args.host or "")
         grpc_sock = create_server_socket((grpc_host, args.grpc_port), reuse_port=False)
+    # Bind the rank ports up front too, so a taken port fails before the
+    # engines start.
+    rank_socks = {
+        rank: create_server_socket((args.host or "", port), reuse_port=False)
+        for rank, port in (rank_ports or {}).items()
+    }
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     propagate_flash_late_interaction(args, engine_args)
@@ -355,6 +378,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 binary_path=rust_frontend_path,
                 sock=sock,
                 grpc_sock=grpc_sock,
+                rank_socks=rank_socks,
                 args=args,
                 input_listener=zmq_listeners.inputs[0],
                 output_listener=zmq_listeners.outputs[0],

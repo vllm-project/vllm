@@ -115,6 +115,33 @@ def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
         )
 
 
+def build_rank_ports_server_args(
+    args: argparse.Namespace,
+) -> tuple[argparse.Namespace, dict[int, int]]:
+    """Turn multi-port external LB args into one server for all local ranks.
+
+    Returns the args of a single `vllm serve` that owns every local DP rank
+    (hybrid LB from the inferred start rank) and listens on the supervisor
+    port, plus the port each DP rank listens on: --port + local rank, the same
+    port the per-rank servers would have used. Only the Rust frontend can
+    serve the rank ports.
+    """
+    validate_multi_port_external_lb_args(args)
+    start_rank = infer_multi_port_external_lb_start_rank(args)
+    rank_ports = {
+        start_rank + local_rank: args.port + local_rank
+        for local_rank in range(args.data_parallel_size_local)
+    }
+    server_args = copy.copy(args)
+    server_args.port = args.data_parallel_supervisor_port
+    server_args.data_parallel_start_rank = start_rank
+    server_args.data_parallel_hybrid_lb = True
+    server_args.data_parallel_multi_port_external_lb = False
+    server_args.data_parallel_supervisor_port = None
+    server_args.api_server_count = 1
+    return server_args, rank_ports
+
+
 def _build_vllm_dp_server_args(
     args: argparse.Namespace, local_rank: int
 ) -> argparse.Namespace:

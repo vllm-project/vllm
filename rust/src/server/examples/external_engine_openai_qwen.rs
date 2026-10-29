@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             port,
         },
         grpc_listener_mode: None,
+        rank_listeners: Vec::new(),
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
         tool_strict_level: None,

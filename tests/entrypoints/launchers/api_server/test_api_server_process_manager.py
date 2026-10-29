@@ -575,6 +575,73 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
         grpc_sock.close()
 
 
+def test_rust_frontend_inherits_rank_listeners(monkeypatch):
+    """Each rank socket reaches the frontend as an inherited RANK=FD pair."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model"]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    rank_socks = {
+        rank: socket.socket(socket.AF_INET, socket.SOCK_STREAM) for rank in (5, 4)
+    }
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    input_fd = input_listener.socket.fileno()
+    output_fd = output_listener.socket.fileno()
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=4,
+            engine_count=2,
+            data_parallel_size=8,
+            rank_socks=rank_socks,
+        )
+        [(cmd, kwargs)] = popen_calls
+        rank_fds = {rank: s.fileno() for rank, s in rank_socks.items()}
+        pairs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--rank-listen-fd"]
+        assert pairs == [f"4={rank_fds[4]}", f"5={rank_fds[5]}"]
+        assert list(kwargs["pass_fds"]) == [
+            sock.fileno(),
+            input_fd,
+            output_fd,
+            rank_fds[4],
+            rank_fds[5],
+        ]
+        assert all(s.get_inheritable() for s in rank_socks.values())
+    finally:
+        sock.close()
+        for s in rank_socks.values():
+            s.close()
+
+
 def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
     """No child owns the listeners when Popen fails, so the parent removes them."""
     from vllm.entrypoints.common.cli_args import make_arg_parser

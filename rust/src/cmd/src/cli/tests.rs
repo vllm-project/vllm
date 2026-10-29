@@ -9,7 +9,7 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
-    ReasoningEffort, RendererSelection,
+    RankListener, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -1492,6 +1492,7 @@ fn frontend_args_accept_json() {
                 FrontendArgs {
                     listen_fd: 3,
                     grpc_listen_fd: None,
+                    rank_listen_fds: [],
                     input_listener_fd: 999999,
                     output_listener_fd: 999998,
                     coordinator_address: Some(
@@ -2609,6 +2610,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 port: 8000,
             },
             grpc_listener_mode: None,
+            rank_listeners: [],
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
@@ -2723,6 +2725,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 port: 8000,
             },
             grpc_listener_mode: None,
+            rank_listeners: [],
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
@@ -2925,6 +2928,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 fd: 3,
             },
             grpc_listener_mode: None,
+            rank_listeners: [],
             tool_call_parser: None,
             reasoning_parser: None,
             tool_strict_level: None,
@@ -3158,4 +3162,86 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     );
     let engine = args.to_managed_engine_config(1234);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+}
+
+/// Parse a `frontend` command for DP ranks [4, 6) of 8 with extra arguments.
+fn parse_frontend_for_ranks_4_and_5(extra: &[&str]) -> Result<Cli, clap::Error> {
+    let mut argv = vec![
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--engine-start-index",
+        "4",
+        "--engine-count",
+        "2",
+        "--data-parallel-size",
+        "8",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
+    ];
+    argv.extend_from_slice(extra);
+    Cli::try_parse_from(argv)
+}
+
+fn frontend_config_for_ranks_4_and_5(extra: &[&str]) -> Config {
+    let cli = parse_frontend_for_ranks_4_and_5(extra).unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    args.into_config()
+}
+
+#[test]
+fn frontend_rank_listen_fds_become_rank_listeners() {
+    let config =
+        frontend_config_for_ranks_4_and_5(&["--rank-listen-fd", "4=5", "--rank-listen-fd", "5=6"]);
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::InheritedFd { fd: 3 }
+    );
+    assert_eq!(
+        config.rank_listeners,
+        vec![
+            RankListener {
+                rank: 4,
+                mode: HttpListenerMode::InheritedFd { fd: 5 },
+            },
+            RankListener {
+                rank: 5,
+                mode: HttpListenerMode::InheritedFd { fd: 6 },
+            },
+        ]
+    );
+    config.validate().unwrap();
+}
+
+#[test]
+fn frontend_rank_listener_outside_the_engine_range_is_rejected() {
+    let config = frontend_config_for_ranks_4_and_5(&["--rank-listen-fd", "6=5"]);
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("rank 6"), "{error}");
+}
+
+#[test]
+fn frontend_duplicate_rank_listeners_are_rejected() {
+    let config =
+        frontend_config_for_ranks_4_and_5(&["--rank-listen-fd", "4=5", "--rank-listen-fd", "4=6"]);
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("more than one"), "{error}");
+}
+
+#[test]
+fn frontend_rank_listen_fd_rejects_malformed_values() {
+    for value in ["4", "x=5", "4=y", "-1=5"] {
+        assert!(
+            parse_frontend_for_ranks_4_and_5(&["--rank-listen-fd", value]).is_err(),
+            "{value:?} should be rejected"
+        );
+    }
 }

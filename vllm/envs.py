@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
+    VLLM_RUST_FRONTEND_RANK_PORTS: bool = False
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -1466,6 +1467,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
     # or VLLM_USE_RUST_BENCH=1.
     "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_cli_path(),
+    # With VLLM_USE_RUST_FRONTEND and --data-parallel-multi-port-external-lb,
+    # run one Rust frontend for all local DP ranks instead of one `vllm serve`
+    # per rank. The frontend listens on --port + local rank for each rank, as
+    # the per-rank servers would, and on --data-parallel-supervisor-port for
+    # requests balanced across the local ranks.
+    "VLLM_RUST_FRONTEND_RANK_PORTS": lambda: bool(
+        int(os.getenv("VLLM_RUST_FRONTEND_RANK_PORTS", "0"))
+    ),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -2400,6 +2409,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
+        # Frontend launch topology only; does not affect compiled graphs.
+        "VLLM_RUST_FRONTEND_RANK_PORTS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",

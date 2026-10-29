@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::str::FromStr;
@@ -44,6 +44,20 @@ pub enum HttpListenerMode {
     /// Adopt an already-open listening socket inherited from a supervisor
     /// process.
     InheritedFd { fd: i32 },
+}
+
+/// An additional HTTP listener bound to one data-parallel rank.
+///
+/// It serves the same API as the main listener, but every request is routed to
+/// `rank`'s engine and `/metrics` lists only that engine's per-engine series,
+/// so one frontend can stand in for one frontend per rank (multi-port external
+/// load balancing) behind a router that addresses ranks by port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RankListener {
+    /// Data-parallel rank (engine index) the listener is pinned to.
+    pub rank: u32,
+    /// How the listener obtains its socket.
+    pub mode: HttpListenerMode,
 }
 
 /// Which coordinator implementation should be active when one is present for a
@@ -286,6 +300,9 @@ pub struct Config {
     pub listener_mode: HttpListenerMode,
     /// gRPC listener setup. When `None`, no gRPC server is started.
     pub grpc_listener_mode: Option<HttpListenerMode>,
+    /// Additional HTTP listeners, one per data-parallel rank. Empty unless the
+    /// frontend serves several ranks on their own ports.
+    pub rank_listeners: Vec<RankListener>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -404,7 +421,33 @@ impl Config {
             );
         }
         self.transport_mode.validate()?;
+        self.validate_rank_listeners()?;
 
+        Ok(())
+    }
+
+    /// Check that every rank listener names a distinct rank this frontend
+    /// connects to.
+    fn validate_rank_listeners(&self) -> Result<()> {
+        let start = match &self.transport_mode {
+            TransportMode::Bootstrapped {
+                engine_start_index, ..
+            } => u64::from(*engine_start_index),
+            TransportMode::HandshakeOwner { .. } => 0,
+        };
+        let end = start + self.engine_count() as u64;
+        let mut seen = HashSet::new();
+        for listener in &self.rank_listeners {
+            let rank = u64::from(listener.rank);
+            if !(start..end).contains(&rank) {
+                bail!(
+                    "rank listener for data-parallel rank {rank} is outside the connected engine range [{start}, {end})"
+                );
+            }
+            if !seen.insert(listener.rank) {
+                bail!("more than one rank listener for data-parallel rank {rank}");
+            }
+        }
         Ok(())
     }
 
