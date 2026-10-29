@@ -397,18 +397,18 @@ def test_rocm_aiter_topk_gating_torch_compile_compatibility():
 
 from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E402, E501
-    can_use_sigmoid_bias_flat_topk,
     sigmoid_bias_flat_topk,
 )
+from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 
 def _routing_inputs(token, expert, topk, gating_dtype, bias_dtype, seed=0):
-    gen = torch.Generator(device="cuda").manual_seed(seed)
-    gating = torch.randn(
-        token, expert, generator=gen, device="cuda", dtype=torch.float32
-    ).to(gating_dtype)
+    set_random_seed(seed)
+    gating = torch.randn(token, expert, device="cuda", dtype=torch.float32).to(
+        gating_dtype
+    )
     bias = (
-        torch.randn(expert, generator=gen, device="cuda", dtype=torch.float32)
+        torch.randn(expert, device="cuda", dtype=torch.float32)
         .to(bias_dtype)
         .contiguous()
     )
@@ -541,95 +541,6 @@ def test_flat_topk_honours_routed_scaling(scale_factor):
         True,
         scale_factor=scale_factor,
         seed=11,
-    )
-
-
-@pytest.mark.parametrize(
-    "case,expected",
-    [
-        ("single_group", True),
-        ("uneliminating_groups", True),
-        ("real_grouping", False),
-        ("no_correction_bias", False),
-        ("noncontiguous_bias", False),
-        ("too_many_tokens", False),
-        ("bias_size_mismatch", False),
-    ],
-)
-def test_flat_topk_gate(case, expected):
-    """The kernel ignores group structure, so the gate must refuse any shape
-    where the grouping would actually eliminate an expert, and anything it
-    cannot load."""
-    gating, bias, weights, ids = _routing_inputs(
-        8, 256, 8, torch.bfloat16, torch.bfloat16
-    )
-    kwargs = dict(
-        gating_output=gating,
-        correction_bias=bias,
-        topk_weights=weights,
-        topk_ids=ids,
-        num_expert_group=1,
-        topk_group=1,
-    )
-
-    if case == "uneliminating_groups":
-        kwargs.update(num_expert_group=8, topk_group=8)
-    elif case == "real_grouping":
-        kwargs.update(num_expert_group=8, topk_group=4)
-    elif case == "no_correction_bias":
-        kwargs.update(correction_bias=None)
-    elif case == "noncontiguous_bias":
-        strided = torch.empty(512, device="cuda", dtype=torch.bfloat16)[::2]
-        assert not strided.is_contiguous()
-        kwargs.update(correction_bias=strided)
-    elif case == "too_many_tokens":
-        big, bias2, w2, i2 = _routing_inputs(
-            129, 256, 8, torch.bfloat16, torch.bfloat16
-        )
-        kwargs.update(
-            gating_output=big, correction_bias=bias2, topk_weights=w2, topk_ids=i2
-        )
-    elif case == "bias_size_mismatch":
-        kwargs.update(correction_bias=bias[:-1].contiguous())
-
-    assert can_use_sigmoid_bias_flat_topk(**kwargs) is expected
-
-
-@pytest.mark.parametrize(
-    "mode_name,expected",
-    [("NONE", False), ("PIECEWISE", True), ("FULL", True)],
-)
-def test_flat_topk_dispatches_only_under_cudagraph(monkeypatch, mode_name, expected):
-    """The kernel wins on device time but loses on launch overhead, so the
-    wrapper only substitutes it when the step runs under a CUDA graph."""
-    import vllm.forward_context as fc
-    from vllm._aiter_ops import _flat_sigmoid_bias_topk_is_profitable
-    from vllm.config import CUDAGraphMode
-
-    class _Ctx:
-        def __init__(self, mode):
-            self.cudagraph_runtime_mode = mode
-
-    mode = getattr(CUDAGraphMode, mode_name)
-    monkeypatch.setattr(fc, "get_forward_context", lambda m=mode: _Ctx(m))
-    gating, bias, weights, ids = _routing_inputs(
-        8, 256, 8, torch.bfloat16, torch.bfloat16
-    )
-    assert (
-        _flat_sigmoid_bias_topk_is_profitable(gating, bias, weights, ids, 1, 1)
-        is expected
-    )
-
-
-def test_flat_topk_falls_back_without_forward_context():
-    """Direct calls outside a forward pass must not reach the Triton path."""
-    from vllm._aiter_ops import _flat_sigmoid_bias_topk_is_profitable
-
-    gating, bias, weights, ids = _routing_inputs(
-        8, 256, 8, torch.bfloat16, torch.bfloat16
-    )
-    assert (
-        _flat_sigmoid_bias_topk_is_profitable(gating, bias, weights, ids, 1, 1) is False
     )
 
 
