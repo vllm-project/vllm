@@ -983,14 +983,39 @@ def test_quantization_config_parser_int4_methods(quant_method):
     vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
 
     attn_result = AttentionMetrics.get_parser().parse(vllm_config)
-    assert attn_result.weight_byte_size == 0.5, (
-        f"Expected 0.5 for {quant_method}, got {attn_result.weight_byte_size}"
+    # gpt_oss_mxfp4 quantizes MoE experts only; its attention weights stay
+    # at the mock model dtype (bfloat16, 2 bytes).
+    expected_attn = 2 if quant_method == "gpt_oss_mxfp4" else 0.5
+    assert attn_result.weight_byte_size == expected_attn, (
+        f"Expected {expected_attn} for {quant_method}, got {attn_result.weight_byte_size}"
     )
 
     ffn_result = FfnMetrics.get_parser().parse(vllm_config)
     assert ffn_result.weight_byte_size == 0.5, (
         f"Expected 0.5 for {quant_method}, got {ffn_result.weight_byte_size}"
     )
+
+
+def test_gpt_oss_mxfp4_attention_keeps_model_dtype():
+    """gpt_oss_mxfp4: attention stays BF16, FFN experts are MXFP4 (0.5)."""
+
+    class MockQuantConfig:
+        def get_name(self):
+            return "gpt_oss_mxfp4"
+
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        intermediate_size=8192,
+        num_hidden_layers=1,
+    )
+    vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
+
+    attn_result = AttentionMetrics.get_parser().parse(vllm_config)
+    assert attn_result.weight_byte_size == 2
+
+    ffn_result = FfnMetrics.get_parser().parse(vllm_config)
+    assert ffn_result.weight_byte_size == 0.5
 
 
 # FP8 / INT8 quantization methods (weight_byte_size == 1)
@@ -1025,14 +1050,25 @@ def test_quantization_config_parser_fp8_methods(quant_method):
 
 
 def test_quantization_config_parser_unknown_method():
-    # An unrecognized quant method falls back to the model dtype size.
+    """Test that an unrecognized quant method falls back to the model
+    dtype weight size instead of dropping the component."""
+
     class MockQuantConfig:
         def get_name(self):
             return "unknown_quant_method"
-    hf_config = Qwen3Config(hidden_size=2048, num_attention_heads=16, intermediate_size=8192, num_hidden_layers=1)
+
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        intermediate_size=8192,
+        num_hidden_layers=1,
+    )
     vllm_config = create_mock_vllm_config(hf_config, quant_config=MockQuantConfig())
+
+    # Mock dtype is bfloat16, so the fallback weight size is 2 bytes.
     attn_result = AttentionMetrics.get_parser().parse(vllm_config)
     assert attn_result.weight_byte_size == 2
+
     ffn_result = FfnMetrics.get_parser().parse(vllm_config)
     assert ffn_result.weight_byte_size == 2
 
