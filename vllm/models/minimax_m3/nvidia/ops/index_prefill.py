@@ -85,6 +85,56 @@ def prepare_indexer_metadata(
 
 
 @triton.jit
+def _q8kv4_shard_lengths(
+    SeqLens,
+    Lengths,
+    num_reqs,
+    INDEX_SCALE: tl.constexpr,
+    INDEX_OFFSET: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    request = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = request < num_reqs
+    seq = tl.load(SeqLens + request, mask, other=0)
+    # The last query's B128 page: the request's history page count.
+    history = tl.maximum(seq - 1, 0) // 128
+    # Shard columns c whose global page c * INDEX_SCALE + INDEX_OFFSET is
+    # history (non-negative operands, so // is exact floor division).
+    owned = tl.maximum(history - INDEX_OFFSET + INDEX_SCALE - 1, 0) // INDEX_SCALE
+    tl.store(Lengths + request, owned * 128 + 8, mask)
+
+
+def prepare_q8kv4_shard_lengths(
+    seq_lens: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    index_scale: int,
+    index_offset: int,
+) -> None:
+    """Lengths that make the Q8KV4 decode indexer score every owned column.
+
+    The indexer scores ``(length - 1) // 128`` pages and stores a page only
+    below a query slot's own page ``(length - 8 + slot) // 128``. Handed
+    ``owned * 128 + 8``, all eight slots sit one page past the owned history
+    columns, so every one is scored and stored for every slot, uncausally;
+    zero-length (padding) requests score nothing. The real causal cut is the
+    candidate publish's, from the global page counts.
+    """
+    num_reqs = seq_lens.numel()
+    assert lengths.shape == (num_reqs,) and lengths.dtype == torch.int32
+    assert seq_lens.dtype == torch.int32 and num_reqs > 0
+    assert index_scale in (1, 2) and 0 <= index_offset < index_scale
+    _q8kv4_shard_lengths[(triton.cdiv(num_reqs, 256),)](
+        seq_lens,
+        lengths,
+        num_reqs,
+        index_scale,
+        index_offset,
+        256,
+    )
+
+
+@triton.jit
 def _prefill_window_metadata(
     QueryStart,
     SeqLens,

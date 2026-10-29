@@ -541,3 +541,9 @@ prefill mode it supports, dequantizes each rank's shard pages to FP8 as the
 unsharded NVFP4 prefill does and then all-gathers them, so it moves FP8 rather
 than NVFP4 bytes over NVLink. Other prefill modes, or `indexer_decode_cp` at
 TP4, keep a replicated NVFP4 index cache and log why.
+At TP2 with `--block-size 256`, each rank's half of a page is itself a stock
+128-row NVFP4 index page, so decode with eight queries per request (seven
+speculative tokens) scores it with the unsharded indexer's MSA Q8KV4 kernel
+over all index heads, with the same numerics. Other query lengths, TP sizes
+and page sizes use the sharded scorer; set
+`VLLM_MINIMAX_M3_ICP_Q8KV4_DECODE=0` to use it everywhere.

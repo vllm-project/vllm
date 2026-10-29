@@ -1032,7 +1032,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
             assert index_md.index_slot_mapping is not None
             index_slot_mapping = index_md.index_slot_mapping
-            prefetch_index_history = index_md.decode is not None
+            # The stock Q8KV4 scorer reads nothing before its PDL wait, so the
+            # insert keeps PDL there; the CuTe DSL scorer prefetches history.
+            prefetch_index_history = (
+                index_md.decode is not None and index_md.decode_q8kv4 is None
+            )
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):

@@ -18,16 +18,21 @@ back to Triton otherwise, writing into the decode region. Only the top-k is
 shared with prefill.
 
 Sharded decode selects local candidates and merges them at each head owner.
+At TP2 with 256-token pages, a rank's shard of an NVFP4 index page is itself a
+stock 128-row NVFP4 page (global B128 page ``2 * column + rank``), so uniform
+eight-query decode scores it with the stock MSA Q8KV4 decode indexer over all
+index heads; the CuTe DSL sharded scorer serves every other case.
 
 ``fmha_sm100`` imports are function-local so this module is import-safe on
 AMD / non-SM100.
 """
 
+import os
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -92,6 +97,23 @@ _COMM_OWNER: weakref.ReferenceType | None = None
 _COMM_GROUP: weakref.ReferenceType | None = None
 _COMM_SHAPE: tuple[int, ...] | None = None
 
+# Only P256 at TP2 leaves each rank whole 128-row pages, laid out as a stock
+# NVFP4 index page: [128 x 64 B e2m1 codes][128 x 8 B e4m3 scales].
+Q8KV4_SHARD_TP = 2
+Q8KV4_SHARD_PAGE_SIZE = 256
+NVFP4_ROW_BYTES = 72
+# Query slots of a Q8KV4 decode tile. Only full tiles leave the scores as the
+# contiguous [tokens, heads, columns] rows the candidate publish reads.
+Q8KV4_QUERY_LEN = 8
+# Total index heads the Q8KV4 decode indexer scores in one launch at TP2.
+Q8KV4_HEADS = (2, 4)
+# Widest page table the Q8KV4 decode indexer accepts.
+Q8KV4_MAX_PAGES = 8192
+# "0" keeps the CuTe DSL sharded scorer on P256 TP2 too (A/B comparisons).
+Q8KV4_DECODE_ENV = "VLLM_MINIMAX_M3_ICP_Q8KV4_DECODE"
+# (device index, heads) whose Q8KV4 score kernel is compiled.
+_Q8KV4_WARM: set[tuple[int, int]] = set()
+
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
     """Indexer side-cache backend selecting the MSA builder."""
@@ -131,6 +153,24 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 
 
 @dataclass
+class MiniMaxM3IndexerMSAQ8KV4Decode:
+    """The stock Q8KV4 decode indexer, planned over this rank's P256 shard pages.
+
+    Shard column ``c`` of a request is its 256-token page ``c``, which holds
+    global B128 page ``2 * c + rank``. ``lengths`` hands the indexer
+    ``owned * 128 + 8``: all eight query slots sit one page past the request's
+    last history column, so every owned history column is scored for every
+    slot, uncausally. The candidate publish keeps the causal cut: it ranks only
+    columns below a query's own page, and that page is forced, never ranked.
+    """
+
+    wrapper: Any  # BatchDecodeIndexerQ8KV4Wrapper in CUDA-graph mode
+    lengths: torch.Tensor  # [B] int32, the lengths the indexer is handed
+    block_table: torch.Tensor  # [B, W] int32, the indexer's page table
+    width: int  # W score columns: one per 256-token page
+
+
+@dataclass
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     """Decode reuses the inherited base ``decode`` field (the Triton decode
     metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
@@ -158,6 +198,8 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     topk_num_valid_pages: torch.Tensor | None = None
     # Stable insert slots for this rank's index-K rows; -1 skips other ranks.
     index_slot_mapping: torch.Tensor | None = None
+    # Set when this step's sharded decode scores with the stock Q8KV4 indexer.
+    decode_q8kv4: MiniMaxM3IndexerMSAQ8KV4Decode | None = None
 
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -269,6 +311,109 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 dtype=torch.float32,
                 device=device,
             )
+        # Stock Q8KV4 decode over P256 TP2 NVFP4 shard pages: one CUDA-graph
+        # wrapper per padded decode batch size, re-planned outside capture
+        # every step. Every condition is the same on all TP ranks.
+        self.q8kv4_decode = False
+        self.q8kv4_plans: dict[int, MiniMaxM3IndexerMSAQ8KV4Decode] = {}
+        if self.index_k_tp > 1 and kv_cache_spec.dtype == torch.uint8:
+            hf_config = vllm_config.model_config.hf_config
+            text_config = getattr(hf_config, "text_config", hf_config)
+            reason = q8kv4_shard_decode_reason(
+                index_k_tp=self.index_k_tp,
+                page_size=self.page_size,
+                total_index_heads=self.num_index_heads * self.index_k_tp,
+                max_decode_query_len=self.max_decode_query_len,
+                local_blocks=text_config.sparse_attention_config.get(
+                    "sparse_local_block", 0
+                ),
+            )
+            self.q8kv4_decode = reason is None
+            if self.q8kv4_decode:
+                logger.info_once(
+                    "MiniMax M3 index-K CP: %d-query decode scores the P%d TP%d "
+                    "NVFP4 shard pages with the stock Q8KV4 indexer",
+                    Q8KV4_QUERY_LEN,
+                    self.page_size,
+                    self.index_k_tp,
+                )
+            else:
+                logger.info_once(
+                    "MiniMax M3 index-K CP: NVFP4 decode keeps the CuTe DSL "
+                    "sharded scorer (%s)",
+                    reason,
+                )
+
+    def _plan_q8kv4_decode(
+        self, block_table: torch.Tensor, seq_lens: torch.Tensor
+    ) -> MiniMaxM3IndexerMSAQ8KV4Decode | None:
+        """Plan the stock Q8KV4 decode indexer over this rank's shard pages.
+
+        Runs in ``build()``, outside CUDA graph capture, every step: the
+        wrapper of a padded batch size keeps its page table, lengths, scheduler
+        and score buffers, so a captured step replays the latest plan."""
+        from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
+            prepare_q8kv4_shard_lengths,
+        )
+
+        num_reqs = seq_lens.shape[0]
+        plan = self.q8kv4_plans.get(num_reqs)
+        if plan is None:
+            plan = self._new_q8kv4_plan(block_table)
+            if plan is None:
+                return None
+            self.q8kv4_plans[num_reqs] = plan
+        if plan.block_table.data_ptr() != block_table.data_ptr():
+            plan.block_table.copy_(block_table, non_blocking=True)
+        index_scale = self.page_size // PAGE_SIZE
+        prepare_q8kv4_shard_lengths(
+            seq_lens,
+            plan.lengths,
+            index_scale=index_scale,
+            index_offset=self.index_k_rank * index_scale // self.index_k_tp,
+        )
+        plan.wrapper.plan(plan.block_table, plan.lengths, query_len=Q8KV4_QUERY_LEN)
+        return plan
+
+    def _new_q8kv4_plan(
+        self, block_table: torch.Tensor
+    ) -> MiniMaxM3IndexerMSAQ8KV4Decode | None:
+        from vllm.third_party.fmha_sm100.sparse import BatchDecodeIndexerQ8KV4Wrapper
+
+        comm = get_comm()
+        num_reqs, width = block_table.shape
+        heads = self.num_index_heads * self.index_k_tp
+        # The scores reuse the CuTe DSL scorer's buffer ([max_decode_tokens, H,
+        # cdiv(max_model_len, 1024) * 4] fp32, at least B * 8 * H * W): a step
+        # takes one of the two scorers in every layer, and layers run in order.
+        need = BatchDecodeIndexerQ8KV4Wrapper.score_buffer_size(
+            num_reqs, width, num_heads=heads
+        )
+        if comm is None or width > Q8KV4_MAX_PAGES or comm.scores.numel() < need:
+            logger.warning_once(
+                "MiniMax M3 index-K CP: a %d x %d-page Q8KV4 decode exceeds the "
+                "Q8KV4 page table or the decode score buffer; it keeps the CuTe "
+                "DSL sharded scorer",
+                num_reqs,
+                width,
+            )
+            return None
+        if not block_table.is_contiguous():
+            block_table = torch.empty(
+                block_table.shape, dtype=torch.int32, device=block_table.device
+            )
+        lengths = torch.empty(num_reqs, dtype=torch.int32, device=block_table.device)
+        _warm_up_q8kv4_scores(BatchDecodeIndexerQ8KV4Wrapper, heads, block_table.device)
+        wrapper = BatchDecodeIndexerQ8KV4Wrapper(
+            num_heads=heads,
+            use_cuda_graph=True,
+            block_table_buffer=block_table,
+            seq_lens_buffer=lengths,
+            score_buffer=comm.scores.view(-1),
+        )
+        return MiniMaxM3IndexerMSAQ8KV4Decode(
+            wrapper=wrapper, lengths=lengths, block_table=block_table, width=width
+        )
 
     def build(
         self,
@@ -344,6 +489,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             unified_scores.fill_(_SCORE_SENTINEL)
 
         decode: MiniMaxM3IndexerDecodeMetadata | None = None
+        decode_q8kv4: MiniMaxM3IndexerMSAQ8KV4Decode | None = None
         if num_decodes > 0:
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
@@ -359,6 +505,16 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
             )
+            # num_decodes counts the zero-length requests that pad a full CUDA
+            # graph batch, so the tile holds exactly the decode token rows.
+            if (
+                self.q8kv4_decode
+                and decode_query_len == Q8KV4_QUERY_LEN
+                and num_decode_tokens == num_decodes * Q8KV4_QUERY_LEN
+            ):
+                decode_q8kv4 = self._plan_q8kv4_decode(
+                    block_table[:num_decodes], seq_lens[:num_decodes]
+                )
 
         prefill: MiniMaxM3IndexerMSAPrefillMetadata | None = None
         if num_prefills > 0:
@@ -533,6 +689,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             topk_max_query_len=common_attn_metadata.max_query_len,
             topk_num_valid_pages=num_valid_pages,
             index_slot_mapping=index_slot_mapping,
+            decode_q8kv4=decode_q8kv4,
         )
 
 
@@ -612,23 +769,36 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     and comm.num_layers > 1
                     and md.prefill_msa is None
                 )
-                scores = comm.scores[:nd]
                 index_scale = 2 if page_size == 256 else 1
                 index_offset = comm.rank * index_scale // comm.world
-                sharded_score.minimax_m3_index_decode_score_sharded_cutedsl(
-                    index_q[:nd],
-                    kv,
-                    d.block_table,
-                    d.seq_lens,
-                    comm.rank,
-                    d.decode_query_len,
-                    d.max_decode_query_len,
-                    scores,
-                    page_size=page_size,
-                    world_size=comm.world,
-                    use_pdl=True,
-                    prefetch_history=True,
-                )
+                q8kv4 = md.decode_q8kv4
+                if q8kv4 is not None:
+                    # P256 TP2 shard pages are stock NVFP4 pages: the stock
+                    # Q8KV4 indexer scores every owned history column for all
+                    # heads into [B, 8 * H, W] rows (slot * H + head), i.e. the
+                    # contiguous [nd, H, W] the publish reads. It writes no
+                    # column at or past the last query's own page, which the
+                    # publish reads only as a forced page (local_blocks >= 1).
+                    assert self.local_blocks >= 1
+                    scores = q8kv4.wrapper._run_scores(index_q[:nd], kv).view(
+                        nd, -1, q8kv4.width
+                    )
+                else:
+                    scores = comm.scores[:nd]
+                    sharded_score.minimax_m3_index_decode_score_sharded_cutedsl(
+                        index_q[:nd],
+                        kv,
+                        d.block_table,
+                        d.seq_lens,
+                        comm.rank,
+                        d.decode_query_len,
+                        d.max_decode_query_len,
+                        scores,
+                        page_size=page_size,
+                        world_size=comm.world,
+                        use_pdl=True,
+                        prefetch_history=True,
+                    )
                 sharded_score.minimax_m3_index_select_publish_candidates(
                     scores,
                     num_valid_pages[:nd],
@@ -893,6 +1063,66 @@ def _unsupported_reason(
     if total_index_heads * max_decode_query_len(vllm_config) > 32:
         return "index heads x decode query length exceed the score kernel's 32"
     return None
+
+
+def q8kv4_shard_decode_reason(
+    *,
+    index_k_tp: int,
+    page_size: int,
+    total_index_heads: int,
+    max_decode_query_len: int,
+    local_blocks: int,
+) -> str | None:
+    """Why the stock Q8KV4 decode indexer cannot score an NVFP4 index-K shard,
+    or None. Static, so every TP rank and CUDA graph agrees."""
+    if os.getenv(Q8KV4_DECODE_ENV, "1") == "0":
+        return f"{Q8KV4_DECODE_ENV}=0"
+    if (index_k_tp, page_size) != (Q8KV4_SHARD_TP, Q8KV4_SHARD_PAGE_SIZE):
+        return (
+            f"P{page_size} at TP{index_k_tp} shards are not stock 128-row pages "
+            f"(needs P{Q8KV4_SHARD_PAGE_SIZE} at TP{Q8KV4_SHARD_TP})"
+        )
+    if total_index_heads not in Q8KV4_HEADS:
+        return f"{total_index_heads} index heads (needs one of {Q8KV4_HEADS})"
+    if max_decode_query_len != Q8KV4_QUERY_LEN:
+        return (
+            f"decode query length {max_decode_query_len} "
+            f"(needs {Q8KV4_QUERY_LEN}: 1 + 7 speculative tokens)"
+        )
+    if local_blocks < 1:
+        # It stores no causal score for a query's own page.
+        return "local_blocks=0 ranks the query's own page"
+    if not any(current_platform.is_device_capability(c) for c in (100, 103, 107)):
+        return "the Q8KV4 decode indexer needs SM100, SM103 or SM107"
+    return None
+
+
+def _warm_up_q8kv4_scores(
+    wrapper_cls: Any, num_heads: int, device: torch.device
+) -> None:
+    """Compile the Q8KV4 decode score kernel before a CUDA graph captures it.
+
+    MSA refuses to compile during capture, and the mixed-batch warmup decodes
+    one query per request, which never takes this path. The compiled kernel
+    is keyed by device and head count, not shapes, so one empty plan (eight
+    query slots on page 0: no history page) builds it."""
+    key = (device.index or 0, num_heads)
+    if key in _Q8KV4_WARM:
+        return
+    wrapper = wrapper_cls(num_heads=num_heads)
+    wrapper.plan(
+        torch.zeros((1, 1), dtype=torch.int32, device=device),
+        torch.full((1,), Q8KV4_QUERY_LEN, dtype=torch.int32, device=device),
+    )
+    wrapper._run_scores(
+        torch.zeros(
+            (Q8KV4_QUERY_LEN, num_heads, 128),
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        ),
+        torch.zeros((1, PAGE_SIZE, NVFP4_ROW_BYTES), dtype=torch.uint8, device=device),
+    )
+    _Q8KV4_WARM.add(key)
 
 
 class _IndexKInitError(RuntimeError):
