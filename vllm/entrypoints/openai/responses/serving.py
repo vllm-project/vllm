@@ -208,6 +208,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
@@ -446,6 +447,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(request, raw_request)
+            data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -525,6 +527,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=True if request._grammar_from_parser else None,
                 max_tool_calls=request.max_tool_calls,
@@ -648,6 +651,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        data_parallel_rank: int | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
         max_tool_calls: int | None = None,
@@ -677,6 +681,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=reasoning_ended,
             )

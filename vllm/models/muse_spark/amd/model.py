@@ -29,6 +29,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaMLP, LlamaModel
@@ -212,7 +213,7 @@ class MuseSpark1xMoE(nn.Module):
         hidden_size = config.moe_hidden_size
         # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
         # BF16-accumulating kernels for these shapes.
-        self.pooler = ReplicatedLinear(
+        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
             bias=False,
@@ -220,7 +221,7 @@ class MuseSpark1xMoE(nn.Module):
             prefix=f"{prefix}.pooler",
         )
         self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler = ReplicatedLinear(
+        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
             config.hidden_size,
             bias=False,
@@ -229,28 +230,33 @@ class MuseSpark1xMoE(nn.Module):
         )
         self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
-        self.pre_expert_norm = MuseSpark1xRMSNorm(
-            hidden_size=hidden_size,
-            eps=config.rms_norm_eps,
-            has_weight=True,
-            is_post_norm=False,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=2 * layer_idx + 2,
-            output_norm_gain_center_type="zero",
-        )
+        if self.pooler is not None:
+            self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
+                hidden_size=hidden_size,
+                eps=config.rms_norm_eps,
+                has_weight=True,
+                is_post_norm=False,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=2 * layer_idx + 2,
+                output_norm_gain_center_type="zero",
+            )
+        else:
+            self.pre_expert_norm = None
 
         self.intermediate_size = config.moe_intermediate_size
 
-        self.post_expert_norm = MuseSpark1xRMSNormWithInputScale(
-            hidden_size=hidden_size,
-            eps=config.post_norm_eps,
-            has_weight=True,
-            is_post_norm=True,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=None,
-            output_norm_gain_center_type="zero",
+        self.post_expert_norm: MuseSpark1xRMSNorm | None = (
+            MuseSpark1xRMSNormWithInputScale(
+                hidden_size=hidden_size,
+                eps=config.post_norm_eps,
+                has_weight=True,
+                is_post_norm=True,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=None,
+                output_norm_gain_center_type="zero",
+            )
         )
         self.experts: nn.Module = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -317,13 +323,21 @@ class MuseSpark1xMoE(nn.Module):
     def _experts_take_expanded_input(self) -> bool:
         """Whether the experts consume one input row per route (AITER MXFP4)."""
         norm = self.pre_expert_norm
-        return norm.variance_size_override is None and isinstance(
-            self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+        return (
+            norm is not None
+            and norm.variance_size_override is None
+            and isinstance(
+                self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+            )
         )
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.pooler is None:
+            return hidden_states
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
+        if norm is None:
+            return hidden_states
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
             return fused_rmsnorm_expand(
                 hidden_states,
@@ -348,7 +362,8 @@ class MuseSpark1xMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        experts_out, _ = self.unpooler(experts_out)
+        if self.unpooler is not None:
+            experts_out, _ = self.unpooler(experts_out)
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
@@ -488,8 +503,18 @@ class MuseSpark1xAttention(nn.Module):
         )
 
         # GPT-J style: rotates interleaved adjacent channel pairs.
-        self.rotary_emb = (
-            RotaryEmbedding(
+        self.rotary_emb: RotaryEmbedding | None = None
+        self.shares_rotary_emb = self.use_rope and not is_draft
+        if self.shares_rotary_emb:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -497,13 +522,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -585,6 +607,9 @@ class MuseSpark1xAttention(nn.Module):
             rotary_dim = self.rotary_emb.rotary_dim
 
         if self.fused_qk_norm_rope_kv_insert:
+            assert not self.shares_rotary_emb or (
+                cos_sin_cache is not None and cos_sin_cache.dtype == torch.float32
+            ), "the shared target RoPE cache must stay fp32"
             rocm_fused_qk_norm_rope_kv_insert(
                 qkv,
                 positions,
@@ -704,9 +729,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,

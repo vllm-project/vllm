@@ -153,6 +153,42 @@ class Config:
         return wd if wd is not None else self.quant_dtype
 
     @property
+    def activation_situ_beta(self) -> float | None:
+        """SituGLU gate beta (Kimi-K3 convention); None for non-SITU
+        activations, matching FusedMoEConfig's own default."""
+        return 4.0 if self.activation == MoEActivation.SITU else None
+
+    @property
+    def activation_situ_linear_beta(self) -> float | None:
+        """SituGLU up linear_beta (Kimi-K3 convention); None for non-SITU
+        activations, matching FusedMoEConfig's own default."""
+        return 25.0 if self.activation == MoEActivation.SITU else None
+
+    @property
+    def swiglu_limit(self) -> float | None:
+        """Clamp limit for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3 convention,
+        see vllm/transformers_utils/configs/minimax_m3.py); None otherwise,
+        matching FusedMoEConfig's own default."""
+        return 7.0 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+
+    @property
+    def swiglu_alpha(self) -> float | None:
+        """Sigmoid scale for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3 convention);
+        chosen to match SWIGLUOAI's own fixed alpha so both activations
+        produce identical math, differing only in gate/up layout. None
+        otherwise, matching FusedMoEConfig's own default."""
+        return (
+            1.702 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+        )
+
+    @property
+    def swiglu_beta(self) -> float | None:
+        """Up-projection bias for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3
+        convention); chosen to match SWIGLUOAI's own fixed up bias. None
+        otherwise, matching FusedMoEConfig's own default."""
+        return 1.0 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+
+    @property
     def is_per_act_token_quant(self) -> bool:
         assert self.quant_config is not None
         return self.quant_config.per_act_token_quant
@@ -603,6 +639,7 @@ class RankTensors:
 def reference_moe_impl(
     config: Config, weights: WeightTensors, rank_tensors: RankTensors
 ) -> torch.Tensor:
+    reference_activation = config.activation
     if config.quant_dtype == "nvfp4":
         quant_blocksize = 16
         dtype = config.dtype
@@ -680,14 +717,19 @@ def reference_moe_impl(
         a = rank_tensors.hidden_states
         w1_q, w1_scale_q = weights.w1, weights.w1_scale
         if config.is_w4a16_mxfp4:
-            assert config.activation == MoEActivation.SWIGLUOAI
-            # SwigluOAIAndMul expects gate/up interleaved row order
-            # (x[..., ::2], x[..., 1::2]), not the contiguous [gate; up]
-            # halves that `weights.w1` is generated in. Mirror the same
-            # reorder `_maybe_convert_weights_for_experts()` applies before
-            # the real MK-path AITER kernel call.
+            assert config.activation in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            )
+            # rocm_aiter_moe.py forces gate_mode=INTERLEAVE and the same
+            # "swiglu" activation_method for any W4A16 mxfp4 call regardless
+            # of activation, so SWIGLUOAI_UNINTERLEAVE's kernel math here is
+            # identical to SWIGLUOAI's. Reference must use the matching
+            # interleaved-reading op (SwigluOAIAndMul), not
+            # SiluAndMulWithClamp's packed-halves reading.
             w1_q = _interleave_gate_up_rows(w1_q)
             w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
+            reference_activation = MoEActivation.SWIGLUOAI
         w1 = upcast_from_mxfp(w1_q, w1_scale_q, dtype, axis=-1)
         w2 = upcast_from_mxfp(weights.w2, weights.w2_scale, dtype, axis=-1)
         a_scale = None
@@ -715,7 +757,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
-        activation=config.activation,
+        activation=reference_activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -724,6 +766,11 @@ def reference_moe_impl(
         block_shape=block_shape,
         apply_router_weights_on_input=config.topk == 1
         and config.supports_apply_weight_on_input(),
+        activation_situ_beta=config.activation_situ_beta,
+        activation_situ_linear_beta=config.activation_situ_linear_beta,
+        swiglu_limit=config.swiglu_limit,
+        swiglu_alpha=config.swiglu_alpha,
+        swiglu_beta=config.swiglu_beta,
     )
 
 
@@ -766,6 +813,11 @@ def make_modular_kernel(
         intermediate_size_per_partition_unpadded=(
             config.intermediate_size_per_partition_unpadded
         ),
+        activation_situ_beta=config.activation_situ_beta,
+        activation_situ_linear_beta=config.activation_situ_linear_beta,
+        swiglu_limit=config.swiglu_limit,
+        swiglu_alpha=config.swiglu_alpha,
+        swiglu_beta=config.swiglu_beta,
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
