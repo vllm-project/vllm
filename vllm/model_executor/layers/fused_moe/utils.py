@@ -137,7 +137,7 @@ def resolve_layer_fused_shared_expert(
                 if quant_method_metadata is None:
                     continue
 
-                source, quant_key_str, target_pattern, _, quant_method_cls = (
+                source, quant_key_str, target_pattern, _, quant_method_cls, _ = (
                     quant_method_metadata
                 )
 

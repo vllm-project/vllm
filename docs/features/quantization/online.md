@@ -86,12 +86,22 @@ vllm serve <model> --quantization-config '{"moe":{"activation":"mxfp8"}}'
 vllm serve <model> --quantization-config.moe.activation mxfp8
 ```
 
-### Activation overrides on already-quantized checkpoints
+### Activation overrides
 
-For checkpoint-quantized models, `quantization_config` lets you pick an
-activation format independently of the baked-in weights. The supported
-overrides are checkpoint-specific; today this is wired up for MXFP4 MoE
-checkpoints (gpt-oss) where you can opt into FP8 activations:
+`quantization_config` lets you select an activation format independently of
+the weight format. For online quantization, it can be used to override the default
+activation quantization.
+
+For example, to enable MXFP4 MoE weights along MXFP8 activations:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B --quantization online \
+    --quantization-config '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'
+```
+
+For pre-quantized models, the supported activation overrides are specific to each
+weight quantization type; today this is for example available for MXFP4
+MoE checkpoints where you can opt into e.g. FP8 activations:
 
 ```bash
 vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8

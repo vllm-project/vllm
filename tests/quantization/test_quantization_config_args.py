@@ -6,6 +6,8 @@ import pytest
 
 from tests.quantization.utils import quant_config_args, quant_spec
 from vllm.config.quantization import (
+    _ONLINE_SHORTHANDS,
+    _WEIGHT_QUANT_KEY_NAMES,
     QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
@@ -23,7 +25,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
@@ -31,9 +36,23 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 # ---- QuantSpec ------------------------------------------------------------
 
 
+def test_args_resolve_ambiguous_strings_by_field():
+    args = QuantizationConfigArgs(moe={"weight": "mxfp8", "activation": "mxfp8"})
+    assert args.moe == QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+
+    assert QuantSpec(weight="mxfp8").weight is kMxfp8Static
+    args = QuantizationConfigArgs(moe=QuantSpec(weight="mxfp8"))
+    assert args.moe is not None
+    assert args.moe.weight is kMxfp8Static
+
+    args = QuantizationConfigArgs(moe={"weight": "mxfp4", "activation": "mxfp4"})
+    assert args.moe == QuantSpec(weight=kMxfp4Static, activation=kMxfp4Dynamic)
+    assert QuantSpec(weight="mxfp4").weight is kMxfp4Static
+
+
 def test_quant_spec_resolves_string_to_quant_key():
     spec = quant_spec(weight="mxfp8", activation="fp8_per_token")
-    assert spec.weight == kMxfp8Dynamic
+    assert spec.weight == kMxfp8Static
     assert spec.activation == kFp8DynamicTokenSym
 
 
@@ -41,6 +60,13 @@ def test_quant_spec_accepts_quant_key_directly():
     spec = QuantSpec(weight=kFp8StaticTensorSym)
     assert spec.weight is kFp8StaticTensorSym
     assert spec.activation is None
+
+
+def test_quant_spec_equality_ignores_explicit_field_metadata():
+    assert QuantSpec(weight=kFp8StaticTensorSym) == QuantSpec(
+        weight=kFp8StaticTensorSym,
+        activation=None,
+    )
 
 
 def test_quant_spec_string_representation_uses_quantization_name():
@@ -94,8 +120,17 @@ def test_args_string_shorthand_missing_slot_raises():
 )
 def test_args_accepts_dict_form(activation, expected):
     args = quant_config_args(moe={"activation": activation})
-    assert args.moe == QuantSpec(weight=None, activation=expected)
+    assert args.moe is not None
+    assert args.moe.weight is None
+    assert args.moe.activation is expected
     assert args.linear is None
+
+
+def test_online_shorthands_do_not_set_activation_defaults():
+    for args in _ONLINE_SHORTHANDS.values():
+        for spec in (args.linear, args.moe):
+            if spec is not None:
+                assert "activation" not in spec.fields_set
 
 
 def test_targets_reject_non_string_keys():
@@ -146,7 +181,9 @@ def test_resolve_activation_override(quantization, activation, expected):
     )
     assert args is not None
     assert args.linear is None
-    assert args.moe == QuantSpec(weight=None, activation=expected)
+    assert args.moe is not None
+    assert args.moe.weight is None
+    assert args.moe.activation is expected
 
 
 def test_resolve_merges_explicit_over_shorthand():
@@ -159,6 +196,19 @@ def test_resolve_merges_explicit_over_shorthand():
     assert args is not None
     assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
+    assert "activation" not in args.linear.fields_set
+
+
+def test_resolve_preserves_explicit_null_activation():
+    args = resolve_quantization_config(
+        "fp8_per_tensor",
+        {"linear": {"activation": None}},
+    )
+    assert args.linear == QuantSpec(
+        weight=kFp8StaticTensorSym,
+        activation=None,
+    )
+    assert args.linear.fields_set == frozenset({"weight", "activation"})
 
 
 def test_resolve_quantization_config_with_checkpoint_quantization():
@@ -170,11 +220,13 @@ def test_resolve_quantization_config_with_checkpoint_quantization():
 
 
 def test_quant_key_names_round_trip():
-    # Every advertised name should round-trip through QuantSpec without error
-    # and produce the same QuantKey it maps to.
+    # Every advertised name should round-trip through QuantSpec activation
+    # parsing without error and produce the same QuantKey it maps to.
     for name, expected in QUANT_KEY_NAMES.items():
-        assert quant_spec(weight=name).weight == expected, name
         assert quant_spec(activation=name).activation == expected, name
+        # Ambiguous names (e.g. "mxfp8") resolve to the static key for weights.
+        expected_weight = _WEIGHT_QUANT_KEY_NAMES.get(name, expected)
+        assert quant_spec(weight=name).weight == expected_weight, name
 
 
 def test_static_block_weight_paired_with_dynamic_block_activation():

@@ -157,7 +157,14 @@ def is_shared_expert_quant_fse_compatible(
                     f"{shared_expert_prefix}",
                 )
 
-            _, _, _, shared_quant_spec, shared_method_cls = shared_expert_target
+            (
+                _,
+                _,
+                _,
+                shared_quant_spec,
+                shared_method_cls,
+                shared_activation_key,
+            ) = shared_expert_target
             if shared_method_cls in (None, UnquantizedLinearMethod):
                 return (
                     False,
@@ -166,15 +173,11 @@ def is_shared_expert_quant_fse_compatible(
                 )
             assert issubclass(shared_method_cls, OnlineLinearBase)
 
-            # NOTE: We can not rely on shared_quant_spec.activation_quant_key
-            # as _ONLINE_SHORTHANDS: dict[str, QuantSpec] in quantization.py
-            # does not define the default activation quant key.
-            # `online_quant_config.resolve_quant_method_cls` should return the
-            # activation quant key as well. Only some online methods define it
-            # on the class, so compare the weight key first.
+            # `resolve_quant_method_cls` returns the resolved activation quant
+            # key (user override, or the method's default).
             if shared_quant_spec.weight != routed_weight_key or (
                 moe_backend != "aiter_mega_moe"
-                and shared_method_cls.activation_quant_key != routed_activation_key
+                and shared_activation_key != routed_activation_key
             ):
                 return (
                     False,

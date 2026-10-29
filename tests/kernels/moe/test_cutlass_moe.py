@@ -495,7 +495,11 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
     scales into the layout the kernel expects."""
     if not CutlassExpertsMxfp4._supports_current_device():
         pytest.skip("CUTLASS mxfp4 MoE is not supported on this GPU")
-    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle.MoEKernelOracle,
+        "get_user_moe_activation_override",
+        staticmethod(lambda: (None, False)),
+    )
 
     set_random_seed(7)
     e, m, n, k, topk = 8, 33, 256, 512, 2

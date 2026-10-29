@@ -116,7 +116,11 @@ def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
     config.moe_backend = requested_backend
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle.MoEKernelOracle,
+        "get_user_moe_activation_override",
+        staticmethod(lambda: (None, False)),
+    )
     monkeypatch.setattr(
         mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [SupportedExperts]
     )
@@ -136,7 +140,7 @@ def mxfp4_oracle_config():
     from unittest.mock import patch
 
     with patch(
-        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+        "vllm.model_executor.layers.fused_moe.oracle.base.get_current_vllm_config"
     ) as mock_get_config:
         mock_get_config.return_value.model_config.quantization_config = None
         yield

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         RoutedExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import replace_parameter
 
 
@@ -42,7 +44,19 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     FP8 with block-32 scales) during weight loading.
     """
 
-    activation_quant_key: QuantKey | None = None
+    default_activation_quant_key = kMxfp8Dynamic
+
+    def __init__(
+        self,
+        activation_quant_key: "QuantKey | None" = kMxfp8Dynamic,
+    ):
+        super().__init__(activation_quant_key)
+        # TODO: remove once `init_mxfp8_linear_kernel` truly supports None
+        # activation quant key (currently ignored)
+        if self.activation_quant_key is None:
+            raise NotImplementedError(
+                "online MXFP8 linear quantization does not support activation=null"
+            )
 
     def create_weights(
         self,
@@ -71,7 +85,10 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
-        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
+        self.kernel = init_mxfp8_linear_kernel(
+            weight_shape=layer.weight.shape,
+            activation_quant_key=self.activation_quant_key,
+        )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -103,13 +120,27 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
+    default_activation_quant_key = kMxfp8Dynamic
 
-    def __init__(self, *, moe: FusedMoEConfig):
-        super().__init__(moe)
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        activation_quant_key: "QuantKey | None" = kMxfp8Dynamic,
+    ):
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
+        # TODO: remove once `select_mxfp8_moe_backend` truly supports None
+        # activation quant key (currently ignored)
+        if activation_quant_key is None:
+            raise NotImplementedError(
+                "online MXFP8 MoE quantization does not support activation=null"
+            )
 
-        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            activation_key=activation_quant_key,
+        )
 
     def create_weights(
         self,

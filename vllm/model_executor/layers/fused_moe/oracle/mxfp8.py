@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kMxfp8Dynamic,
     kMxfp8Static,
 )
@@ -107,6 +108,7 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
+    activation_key: QuantKey | None = None,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
 
@@ -114,6 +116,12 @@ def select_mxfp8_moe_backend(
         A tuple of (fp8_backend, experts_cls).
 
     """
+    if activation_key not in (None, kMxfp8Dynamic):
+        raise NotImplementedError(
+            "MXFP8 MoE only supports MXFP8 dynamic activations, got "
+            f"activation_key={activation_key}."
+        )
+
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)

@@ -146,7 +146,11 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
     monkeypatch.setattr(
         current_platform, "is_device_capability_family", lambda cap: cap == capability
     )
-    monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
+    monkeypatch.setattr(
+        mxfp4.MoEKernelOracle,
+        "get_user_moe_activation_override",
+        staticmethod(lambda: (user_override, user_override is not None)),
+    )
     monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
 
     schema = mxfp4._humming_input_schema(kMxfp8Dynamic)

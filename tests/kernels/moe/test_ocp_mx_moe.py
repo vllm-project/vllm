@@ -2148,7 +2148,11 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch.setattr(
         mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [UnsupportedExperts]
     )
-    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle.MoEKernelOracle,
+        "get_user_moe_activation_override",
+        staticmethod(lambda: (None, False)),
+    )
     monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
 
@@ -2205,7 +2209,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
         return [Experts]
 
     monkeypatch.setattr(mxfp4_oracle, "backend_to_kernel_cls", backend_to_kernel_cls)
-    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle.MoEKernelOracle,
+        "get_user_moe_activation_override",
+        staticmethod(lambda: (None, False)),
+    )
     moe_config = make_dummy_moe_config()
     moe_config.moe_backend = moe_backend
 

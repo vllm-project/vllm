@@ -20,7 +20,10 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
     ref_nvfp4_quant,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    weight_amax,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -65,6 +68,11 @@ def _quantize_nvfp4(
 class _LMHeadNvfp4Method(OnlineLinearBase):
     """Weight-only NVFP4 lm_head copy on the platform's W4A16 kernel;
     activations stay in the model dtype."""
+
+    default_activation_quant_key = None
+
+    def __init__(self, activation_quant_key: QuantKey | None = None):
+        super().__init__(activation_quant_key)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         packed, scales, global_scale = _quantize_nvfp4(layer.weight)
