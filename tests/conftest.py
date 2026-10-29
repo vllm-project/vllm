@@ -251,12 +251,16 @@ def dist_init():
 
 
 @pytest.fixture
-def default_vllm_config():
+def default_vllm_config(monkeypatch):
     """Set a default VllmConfig for tests that directly test CustomOps or pathways
     that use get_current_vllm_config() outside of a full engine context.
     """
     from vllm.config import VllmConfig, set_current_vllm_config
 
+    # Creating a breakable-by-default model config sets
+    # VLLM_USE_BREAKABLE_CUDAGRAPH process-wide; shield the default config
+    # from such leaks (it would flip custom_ops to "all").
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     config = VllmConfig()
     with set_current_vllm_config(config):
         yield config
@@ -817,10 +821,10 @@ class HfRunner:
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
-        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-            # drop prompt logprobs
-            if tok_idx == 0:
-                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+        for tok_logprobs in seq_logprobs:
+            # Keep only the last position: the first step (and every step when
+            # use_cache=False) also returns logprobs for the preceding tokens.
+            tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
             topk = tok_logprobs.topk(num_logprobs)
 
             tok_logprobs_dct = {}

@@ -10,6 +10,10 @@ from vllm.v1.worker.gpu.sample.gumbel import (
     tl_rand32,
 )
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
+from vllm.v1.worker.gpu.spec_decode.draft_logits import (
+    DraftLogitsCache,
+    draft_logits_row,
+)
 
 
 @triton.jit
@@ -141,6 +145,7 @@ def _compute_global_logprobs_and_logsumexp(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -170,7 +175,10 @@ def _compute_global_logprobs_and_logsumexp(
         draft_logit = (
             tl.load(
                 draft_logits_ptr
-                + req_state_idx * draft_logits_stride_0
+                + tl.maximum(
+                    draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr), 0
+                )
+                * draft_logits_stride_0
                 + draft_step * draft_logits_stride_1
                 + token,
                 mask=mask,
@@ -229,6 +237,7 @@ def _compute_local_logits_stats_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits]
     expanded_idx_mapping_ptr,
     # [num_logits]
@@ -297,7 +306,10 @@ def _compute_local_logits_stats_kernel(
             draft_logits = (
                 tl.load(
                     draft_logits_ptr
-                    + req_state_idx * draft_logits_stride_0
+                    + tl.maximum(
+                        draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr), 0
+                    )
+                    * draft_logits_stride_0
                     + draft_step_idx * draft_logits_stride_1
                     + block_offsets,
                     mask=mask,
@@ -337,6 +349,7 @@ def _compute_cumulative_log_p_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -386,6 +399,7 @@ def _compute_cumulative_log_p_kernel(
                     draft_logits_ptr,
                     draft_logits_stride_0,
                     draft_logits_stride_1,
+                    draft_logits_row_mapping_ptr,
                     draft_local_max_ptr,
                     draft_local_max_stride,
                     draft_local_sumexp_ptr,
@@ -419,6 +433,7 @@ def _compute_local_residual_mass_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -479,6 +494,7 @@ def _compute_local_residual_mass_kernel(
         draft_logits_ptr,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_row_mapping_ptr,
         draft_local_max_ptr,
         draft_local_max_stride,
         draft_local_sumexp_ptr,
@@ -528,6 +544,7 @@ def _rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -676,6 +693,7 @@ def _rejection_kernel(
                         draft_logits_ptr,
                         draft_logits_stride_0,
                         draft_logits_stride_1,
+                        draft_logits_row_mapping_ptr,
                         draft_local_max_ptr,
                         draft_local_max_stride,
                         draft_local_sumexp_ptr,
@@ -793,6 +811,7 @@ def _seeded_resample_argmax(
         None,  # logits_cache_col_ptr
         None,  # logits_cache_source_ptr
         0,  # logits_cache_source_stride
+        None,  # logits_cache_row_mapping_ptr
         vocab_size,
         IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
@@ -817,6 +836,7 @@ def _resample_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_reqs]
     draft_rejected_logsumexp_ptr,
     # [num_reqs]
@@ -911,7 +931,10 @@ def _resample_kernel(
         draft_logits = (
             tl.load(
                 draft_logits_ptr
-                + req_state_idx * draft_logits_stride_0
+                + tl.maximum(
+                    draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr), 0
+                )
+                * draft_logits_stride_0
                 + resample_idx * draft_logits_stride_1
                 + block,
                 mask=mask,
@@ -1085,8 +1108,7 @@ def _insert_resampled_kernel(
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits: torch.Tensor | None,
+    draft_logits_cache: DraftLogitsCache | None,
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
@@ -1117,6 +1139,11 @@ def rejection_sample(
     fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    draft_logits = None
+    draft_logits_row_mapping = None
+    if draft_logits_cache is not None:
+        draft_logits = draft_logits_cache.values
+        draft_logits_row_mapping = draft_logits_cache.row_mapping
     assert draft_logits is None or (
         draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
     )
@@ -1209,6 +1236,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_row_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
@@ -1241,6 +1269,7 @@ def rejection_sample(
             draft_logits,
             draft_logits_stride_0,
             draft_logits_stride_1,
+            draft_logits_row_mapping,
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
@@ -1275,6 +1304,7 @@ def rejection_sample(
                 draft_logits,
                 draft_logits_stride_0,
                 draft_logits_stride_1,
+                draft_logits_row_mapping,
                 draft_local_max,
                 draft_local_max.stride(0),
                 draft_local_sumexp,
@@ -1321,6 +1351,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_row_mapping,
         draft_local_max,
         draft_local_max.stride(0),
         draft_local_sumexp,
@@ -1368,6 +1399,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,
