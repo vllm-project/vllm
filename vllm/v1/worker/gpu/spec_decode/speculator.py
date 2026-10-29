@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -11,14 +12,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     create_speculative_draft_watermarker,
@@ -39,11 +40,12 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
-    from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 logger = init_logger(__name__)
 
@@ -188,12 +190,10 @@ class DraftModelSpeculator(BaseSpeculator):
 
         # Pre-temperature logits, cached from the previous decode step.
         # Allocated in load_model. See _init_draft_logits.
-        self.draft_logits: torch.Tensor | None = None
+        self.draft_logits: DraftLogitsCache | None = None
         self.use_draft_logits = (
             self.speculative_config.draft_sample_method == "probabilistic"
         )
-        self.draft_logits_num_shards = 1
-        self.draft_logits_shard_idx = 0
 
         self.draft_watermarker: DraftWatermarker | None = None
         watermark_config = getattr(vllm_config, "watermark_config", None)
@@ -274,7 +274,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors
-        draft_logits_num_shards and draft_logits_shard_idx."""
+        DraftLogitsCache.row_mapping."""
         return False
 
     def _init_draft_logits(self, target_model: nn.Module) -> None:
@@ -282,31 +282,25 @@ class DraftModelSpeculator(BaseSpeculator):
 
         Under batch-sharded sampling, the rank that verifies a request is the
         only one that reads its draft logits, so each TP rank keeps just the
-        rows of the requests it owns, at row
-        req_state_idx // draft_logits_num_shards.
+        rows of the requests it owns. See DraftLogitsCache.
         """
         parallel_config = self.vllm_config.parallel_config
-        if (
-            batch_sharded_sampling_enabled(self.vllm_config, target_model)
-            # PCPManager.sync_drafts indexes the draft logits by request state,
-            # so it must see every request's logits.
-            and parallel_config.prefill_context_parallel_size == 1
-            and self.draft_watermarker is None
-            and self.supports_batch_sharded_draft_logits()
-        ):
-            tp_group = get_tp_group()
-            self.draft_logits_num_shards = tp_group.world_size
-            self.draft_logits_shard_idx = tp_group.rank_in_group
         dtype, fill = self.draft_logits_spec(self.vllm_config)
-        self.draft_logits = torch.full(
-            (
-                cdiv(self.max_num_reqs, self.draft_logits_num_shards),
-                self.num_speculative_steps,
-                self.vocab_size,
-            ),
-            fill,
+        self.draft_logits = DraftLogitsCache(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.vocab_size,
             dtype=dtype,
+            fill=fill,
             device=self.device,
+            sharded=(
+                batch_sharded_sampling_enabled(self.vllm_config, target_model)
+                # PCPManager.sync_drafts indexes the draft logits by request
+                # state, so it must see every request's logits.
+                and parallel_config.prefill_context_parallel_size == 1
+                and self.draft_watermarker is None
+                and self.supports_batch_sharded_draft_logits()
+            ),
         )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -325,7 +319,16 @@ class DraftModelSpeculator(BaseSpeculator):
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
         speculators whose attention mode differs from the target's."""
-        return self.vllm_config
+        # Shallow copies instead of apply_draft_overrides: its replace()
+        # rebuilds each sub-config and drops engine-resolved init=False state
+        # such as cache_config.kv_cache_layout.
+        config = copy.copy(self.vllm_config)
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self.speculative_config, src)) is not None:
+                sub_config = copy.copy(getattr(config, config_name))
+                setattr(sub_config, dst, value)
+                setattr(config, config_name, sub_config)
+        return config
 
     def set_attn(
         self,
@@ -527,7 +530,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
+        draft_logits: DraftLogitsCache | None,
         spec_step_idx: int = 0,
         num_steps: int = 1,
     ) -> torch.Tensor:
@@ -544,7 +547,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 sample_src_positions,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=draft_logits,
+                logits_cache=draft_logits.values,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
                 num_steps=num_steps,
@@ -558,11 +561,10 @@ class DraftModelSpeculator(BaseSpeculator):
                 sample_src_positions,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=draft_logits,
+                logits_cache=draft_logits.values,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
-                logits_cache_num_shards=self.draft_logits_num_shards,
-                logits_cache_shard_idx=self.draft_logits_shard_idx,
+                logits_cache_row_mapping=draft_logits.row_mapping,
             )
         else:
             sampled = logits.argmax(dim=-1)
@@ -597,7 +599,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def prepare_watermarking(
         self,
-        sampler: "GPUWatermarkSampler",
+        sampler: GPUWatermarkSampler,
         idx_mapping: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
@@ -609,6 +611,24 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler.req_states.prompt_len.gpu,
             sampler.req_states.total_len.gpu,
         )
+
+    def prepare_propose(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        sampler: "Sampler",
+    ) -> None:
+        """Per-step work between verifying the last drafts and the next
+        `propose`."""
+        self.observe_verification(input_batch.idx_mapping, num_sampled, num_rejected)
+        if isinstance(sampler, GPUWatermarkSampler):
+            self.prepare_watermarking(sampler, input_batch.idx_mapping)
+        if self.draft_logits is not None:
+            # Verification read the previous step's draft logits.
+            self.draft_logits.assign(
+                input_batch.idx_mapping, input_batch.idx_mapping_np
+            )
 
     def _copy_request_inputs(
         self,
