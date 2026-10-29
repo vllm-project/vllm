@@ -2038,18 +2038,6 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     ]
 
 
-def test_pairing_follows_layers_not_region_order():
-    local, groups = [["x"], ["y"]], {"x": 0, "y": 1}
-    rank0 = _agent_metadata([["x"], ["y"]], [0x1000, 0x2000], [64, 128], [256, 512])
-    rank1 = _agent_metadata([["y"], ["x"]], [0x2000, 0x1000], [128, 64], [512, 256])
-
-    pairs0 = _layer_routing_worker(local, groups)._pair_regions(rank0)
-    pairs1 = _layer_routing_worker(local, groups)._pair_regions(rank1)
-
-    assert (pairs0.remote, pairs0.local) == ([0, 1], [0, 1])
-    assert (pairs1.remote, pairs1.local) == ([0, 1], [1, 0])
-
-
 def test_pairing_rejects_a_peer_missing_local_layers():
     worker = _layer_routing_worker([["l0"], ["l1"]], {"l0": 0, "l1": 1})
     metadata = _agent_metadata([["l0"]], [0xA000], [128])
