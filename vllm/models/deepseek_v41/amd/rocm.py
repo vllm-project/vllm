@@ -3,11 +3,12 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -19,6 +20,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dyna
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
+)
+from vllm.models.deepseek_v4.amd.rocm import (
+    _plain_fp8_sparse_mla,
+    _register_plain_fp8_kv_scales,
 )
 from vllm.models.deepseek_v41.amd.ops.sparse_indexer import Gfx942SparseAttnIndexer
 from vllm.models.deepseek_v41.attention import (
@@ -524,6 +529,13 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    # fp8_e4m3 selects plain per-tensor fp8 KV rows (GLM-5's format) instead
+    # of the UE8M0 block-scaled fp8_ds_mla record; aiter sparse MLA only.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        *DeepseekV4SparseMLABackend.supported_kv_cache_dtypes,
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -594,6 +606,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "are not supported."
                 )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
+        if self._plain_fp8_kv:
+            _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -601,6 +616,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def _uses_fp8_ds_mla_layout(self) -> bool:
+        return get_current_vllm_config().cache_config.cache_dtype != "fp8_e4m3"
 
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -973,8 +991,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             assert output.shape == q.shape, (
                 f"output buffer shape {output.shape} must match q shape {q.shape}"
             )
-            assert output.dtype == q.dtype, (
-                f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
+            # A per-tensor fp8 cache comes with an fp8 q; the output stays bf16.
+            expected_dtype = (
+                torch.bfloat16 if q.dtype == torch.float8_e4m3fn else q.dtype
+            )
+            assert output.dtype == expected_dtype, (
+                f"output buffer dtype {output.dtype} must be {expected_dtype} "
+                f"for q dtype {q.dtype}"
             )
 
         forward_context = get_forward_context()
@@ -1482,6 +1505,45 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm._aiter_ops import rocm_aiter_ops
 
         assert (output is None) != (output_mxfp8 is None)
+        if self._plain_fp8_kv:
+            # aiter's store epilogue (inverse RoPE, MXFP8) only reads the
+            # packed record, so the rows go through the standalone passes.
+            rows = output
+            if output_mxfp8 is not None:
+                rows = torch.empty(
+                    (q.shape[0], self.n_local_heads, self.head_dim),
+                    dtype=torch.bfloat16,
+                    device=q.device,
+                )
+            _plain_fp8_sparse_mla(
+                self,
+                q,
+                rows,
+                swa_k_cache,
+                swa_indices,
+                swa_indptr,
+                compressed_k_cache,
+                topk_indices,
+                topk_indptr,
+            )
+            if output_mxfp8 is not None:
+                assert positions is not None
+                rocm_inverse_rope_mxfp8_rows(
+                    rows,
+                    positions,
+                    self.rotary_emb.cos_sin_cache,
+                    self.rope_head_dim,
+                    output_mxfp8[0],
+                    output_mxfp8[1],
+                )
+            elif positions is not None:
+                rocm_inverse_rope_rows_(
+                    rows[:, : self.n_local_heads, :],
+                    positions,
+                    self.rotary_emb.cos_sin_cache,
+                    self.rope_head_dim,
+                )
+            return
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the
         # store applies the inverse RoPE; output_mxfp8 replaces output.

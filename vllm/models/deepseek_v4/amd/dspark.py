@@ -271,10 +271,8 @@ def _insert_context_kv(
             block_size,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # NOTE(rocm): unreachable on ROCm/aiter, where the SWA cache dtype is
-        # uint8 (fp8_ds_mla) or bfloat16. This branch relies on FlashInfer-only
-        # attributes (``_flashinfer_fp8_*``) that the aiter attention layer does
-        # not define; kept for parity with the nvidia path.
+        # --kv-cache-dtype fp8_e4m3; the aiter layer registers the same
+        # ``_flashinfer_fp8_*`` scales as FlashInfer.
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
