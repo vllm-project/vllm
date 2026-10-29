@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
@@ -14,6 +15,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -38,6 +40,69 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_adaptive_indexer_uses_configured_max_decode_len():
+    """GLM adaptive verification may replay wider rows than capture dummy rows."""
+    device = torch.device("cuda")
+    num_speculative_tokens = 5
+    configured_max_decode_len = num_speculative_tokens + 1
+
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    vllm_config = create_vllm_config(
+        model_name="hmellor/tiny-random-LlamaForCausalLM",
+        max_model_len=1024,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=num_speculative_tokens,
+        enable_adaptive_verification=True,
+    )
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=device,
+        block_table_width=block_table_width,
+    )
+
+    # The dummy capture rows are at most two tokens wide, but adaptive
+    # verification may assign all k+1 tokens to one request during replay.
+    query_lens = torch.tensor([2, 2, 2, 2, 1, 1, 1, 1], dtype=torch.int32)
+    query_start_loc_cpu = torch.cat(
+        (torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0))
+    )
+    query_start_loc = query_start_loc_cpu.to(device)
+    seq_lens = (query_lens + 100).to(device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        num_reqs=8,
+        num_actual_tokens=12,
+        max_query_len=2,
+        max_seq_len=102,
+        block_table_tensor=torch.ones(
+            (8, block_table_width), dtype=torch.int32, device=device
+        ),
+        slot_mapping=torch.arange(12, dtype=torch.int64, device=device),
+        causal=True,
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.decode is not None
+    assert metadata.decode.write_max_decode_len == configured_max_decode_len
+    assert not metadata.decode.decode_is_uniform
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -113,10 +178,17 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         num_reqs, 4
     )
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    # SM100's paged MQA logits only take varlen rows.
+    indices = (
+        torch.arange(num_reqs, dtype=torch.int32, device=device)
+        if mqa_logits_use_mx_scales()
+        else None
+    )
     schedule_metadata = indexer_module.get_paged_mqa_logits_metadata(
         torch.div(seq_lens, 16, rounding_mode="floor").unsqueeze(1),
         64,
         num_sms,
+        indices=indices,
     ).clone()
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
@@ -139,7 +211,9 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             decode_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
             requires_padding=False,
             schedule_metadata=schedule_metadata,
+            indices=indices,
         ),
+        block_table=block_table,
     )
 
     builder.update_draft_decode_metadata(metadata)
@@ -156,7 +230,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(
         schedule_metadata,
         indexer_module.get_paged_mqa_logits_metadata(
-            expected_decode_seq_lens.unsqueeze(1), 64, num_sms
+            expected_decode_seq_lens.unsqueeze(1), 64, num_sms, indices=indices
         ),
     )
     assert metadata.decode is not None
@@ -165,6 +239,58 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         [1, 2, 4], dtype=torch.int64, device=device
     )
     torch.testing.assert_close(metadata.slot_mapping, expected_slot_mapping)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ratio):
+    """Without a prior build(), the refresh must not keep the last batch's state."""
+    monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: False)
+    device = torch.device("cuda")
+    num_reqs, width = 3, 8
+
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.dcp_world_size = 1
+    builder.compress_ratio = compress_ratio
+    builder.arange_buffer = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+    builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
+
+    def stale(*shape: int) -> torch.Tensor:
+        return torch.full(shape, -7, dtype=torch.int32, device=device)
+
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=stale(num_reqs, width),
+        seq_lens=stale(num_reqs, 1),
+        decode_lens=stale(num_reqs),
+        requires_padding=False,
+        schedule_metadata=stale(1),
+        indices=stale(num_reqs),
+        per_req_decode_lens=stale(num_reqs),
+    )
+    request_block_table = torch.randint(
+        0, 1000, (num_reqs, width), dtype=torch.int32, device=device
+    )
+    seq_lens = torch.tensor([17, 33, 65], dtype=torch.int32, device=device)
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=128,
+        slot_mapping=torch.zeros(num_reqs, dtype=torch.int64, device=device),
+        num_decodes=num_reqs,
+        num_decode_tokens=num_reqs,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+        block_table=request_block_table,
+    )
+
+    builder.update_draft_decode_metadata(metadata)
+
+    torch.testing.assert_close(decode.block_table, request_block_table)
+    torch.testing.assert_close(decode.indices, builder.arange_buffer[:num_reqs])
+    assert torch.all(decode.per_req_decode_lens == 1)
+    assert torch.all(decode.decode_lens == 1)
+    expected_seq_lens = torch.div(seq_lens, compress_ratio, rounding_mode="floor")
+    torch.testing.assert_close(decode.seq_lens.flatten(), expected_seq_lens)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -226,7 +352,9 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
 def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
     """Packed MLA/indexer groups must retain 64 compressed rows per page."""
     kernel_block_size = select_common_block_size(
-        256, [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend]
+        256,
+        # indexer backend has no impl class
+        [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend],  # type: ignore[type-abstract]
     )
     spec = MLAAttentionSpec(
         block_size=256,
@@ -249,7 +377,9 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
     assert isinstance(block_size, int)
     assert (
         select_common_block_size(
-            block_size, [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend]
+            block_size,
+            # indexer backend has no impl class
+            [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend],  # type: ignore[type-abstract]
         )
         == block_size
     )
@@ -315,6 +445,9 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=32)),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, cp_kv_cache_interleave_size=1
+        ),
     )
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
@@ -343,8 +476,44 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
     assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
+    """Under DCP each rank writes only the states it owns, at the state's
+    rank-local position."""
+    device = torch.device("cuda")
+    dcp, interleave, ratio, block_size = 2, 4, 2, 4
+    num_tokens = 32
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[5, 7]], dtype=torch.int32, device=device)
+    pos = torch.arange(num_tokens)
+    for rank in range(dcp):
+        owned = (pos // interleave) % dcp == rank
+        slot_mapping = torch.where(owned, 0, -1).to(torch.int64).to(device)
+        compressed = get_compressed_slot_mapping(
+            num_tokens,
+            slot_mapping,
+            query_start_loc,
+            seq_lens,
+            block_table,
+            block_size=block_size,
+            compress_ratio=ratio,
+            dcp_world_size=dcp,
+            cp_interleave=interleave,
+        )
+        local_pos = pos // (interleave * dcp) * interleave + pos % interleave
+        state = local_pos // ratio
+        expected = torch.where(
+            owned & ((pos + 1) % ratio == 0),
+            block_table[0].cpu()[state // block_size] * block_size + state % block_size,
+            -1,
+        )
+        assert compressed.tolist() == expected.tolist()
+
+
 def test_index_conversion_warmup_uses_physical_block_stride():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(
             max_model_len=1024,
@@ -370,7 +539,8 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     builder.use_pcp = True
     builder.pcp_world_size = 4
     builder.pcp_rank = 0
-    builder.kernel_block_size = None
+    builder.dcp_world_size = 1
+    builder.cp_kv_cache_interleave_size = 1
     builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
     builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
 
@@ -383,8 +553,11 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
         block_size,
         compress_ratio,
         out,
+        dcp_world_size,
+        cp_interleave,
     ):
         assert num_tokens == 0
+        assert dcp_world_size == 1
         assert block_size == 64
         assert compress_ratio == 4
         out.fill_(-1)
@@ -559,3 +732,29 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     assert len(chunks) > 1
     for req_slice, _ in chunks:
         assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows
+
+
+def test_indexer_expanded_block_table_sized_by_decode_tokens():
+    """Allocated after the memory profile, so it must not scale with the token
+    budget: only decode tokens (one per request without drafts) are expanded."""
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    vllm_config = create_vllm_config(
+        max_model_len=1024, max_num_seqs=8, max_num_batched_tokens=8192
+    )
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        block_table_width=block_table_width,
+    )
+
+    assert builder.expanded_block_table_buffer.shape == (8, block_table_width)

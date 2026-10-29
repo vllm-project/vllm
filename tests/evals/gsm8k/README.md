@@ -8,7 +8,7 @@ This directory contains a replacement for the lm-eval-harness GSM8K evaluation, 
 
 ```bash
 pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt
+    --config-list-file=configs/models-small.yaml
 ```
 
 ### Run standalone evaluation script
@@ -20,6 +20,22 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8000
 # Run evaluation
 python tests/evals/gsm8k/gsm8k_eval.py --port 8000
 ```
+
+For chat-only models, send the prompts through `/v1/chat/completions`:
+
+```bash
+python tests/evals/gsm8k/gsm8k_eval.py --port 8000 \
+    --use-chat-completions --max-tokens 1024 \
+    --chat-template-kwargs '{"enable_thinking": false}'
+```
+
+The server applies the chat template and uses its served model, so `--model` is
+optional. In chat mode, `temperature` is sent only when `--temperature` is given,
+so the server's default sampling applies otherwise; completions mode keeps the
+default of 0. Chat mode sends no stop strings; completions mode keeps them.
+`--reasoning-effort`, `--top-p`, and `--top-k` set the matching request fields
+when given. With a reasoning parser, only the final answer `content` is scored.
+`--save-results` records the request settings used.
 
 ## Configuration Format
 
