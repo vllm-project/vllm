@@ -836,6 +836,9 @@ def fp8_scaled_mm_is_batch_invariant(
     kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
+    # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
+    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+        return True
     if not isinstance(
         kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
     ):
@@ -1319,8 +1322,8 @@ def register_linear_kernel(
     Args:
         kernel_class (type): The kernel class to register.
         platform (PlatformEnum): The platform for which this kernel is applicable.
-        kernel_type (str): The type of the kernel, either "mp", "int8", or "fp8".
-            Defaults to "mp".
+        kernel_type (str): The type of the kernel, either "mp", "int8", "fp8",
+            "fp8_block", "mxfp8", "nvfp4", "mxfp4" or "mxfp6". Defaults to "mp".
 
     Raises:
         ValueError: If the kernel_type is not recognized.
@@ -1338,6 +1341,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8_block":
+        if platform not in _POSSIBLE_FP8_BLOCK_KERNELS:
+            _POSSIBLE_FP8_BLOCK_KERNELS[platform] = []
+        _POSSIBLE_FP8_BLOCK_KERNELS[platform].append(kernel_class)
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []

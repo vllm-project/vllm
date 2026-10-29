@@ -87,6 +87,7 @@ class TransferJobStatus:
     is_store: bool
     # Unlike an async load, store jobs may be created next to it.
     is_sync_load: bool = False
+    failed: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -374,6 +375,9 @@ class RequestOffloadState:
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # A load for this request failed; all its later lookups, including after
+    # preemption, skip the offloaded cache so a faulting load is not retried.
+    load_failed: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -537,18 +541,58 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
-def _create_req_context(req: Request) -> ReqContext:
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
+@dataclass
+class _VllmReqContext(ReqContext):
+    _scheduler: "OffloadingConnectorScheduler" = field(
+        kw_only=True, repr=False, compare=False
+    )
+
+    @property
+    def _request_tokens(self) -> Request | _RequestTokens:
+        tokens = self.get_state(_RequestTokens)
+        if tokens is not None:
+            return tokens
+        return self._scheduler._req_status[self.req_id].req
+
+    @property
+    def num_computed_tokens(self) -> int:
+        return self._request_tokens.num_computed_tokens
+
+    @property
+    def num_in_flight_tokens(self) -> int:
+        return self._request_tokens.num_in_flight_tokens
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self._request_tokens.num_prompt_tokens
+
+    @property
+    def num_tokens(self) -> int:
+        return self._request_tokens.num_tokens
+
+
+def _create_req_context(
+    req: Request, scheduler: "OffloadingConnectorScheduler"
+) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
             load_filter = _parse_tier_filter(raw)
-    return ReqContext(
+    return _VllmReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
+        _scheduler=scheduler,
     )
 
 
@@ -1196,16 +1240,20 @@ class OffloadingConnectorScheduler:
 
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request)
-        with self._manager_locked():
-            offloading_context = self.manager.on_new_request(req_context)
+        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
             req_context=req_context,
-            offloading_context=offloading_context,
+            offloading_context=RequestOffloadingContext(),
         )
         self._req_status[request.request_id] = req_status
+        try:
+            with self._manager_locked():
+                req_status.offloading_context = self.manager.on_new_request(req_context)
+        except Exception:
+            del self._req_status[request.request_id]
+            raise
 
     def get_num_new_matched_tokens(
         self,
@@ -1255,7 +1303,7 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv or req_status.load_failed:
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -2281,6 +2329,8 @@ class OffloadingConnectorScheduler:
                 )
                 continue
             job_status = self._jobs[job_id]
+            if job_id in meta.failed_jobs:
+                job_status.failed = True
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
@@ -2288,8 +2338,27 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload store job %d failed; dropping %d chunk(s) "
+                        "from the CPU cache rather than publishing them.",
+                        job_id,
+                        len(job_status.keys),
+                    )
+                self.manager.complete_store(
+                    job_status.keys,
+                    req_status.req_context,
+                    success=not job_status.failed,
+                )
             else:
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload load job %d failed; request %s will not "
+                        "load from the offloaded cache again.",
+                        job_id,
+                        job_status.req_id,
+                    )
+                    req_status.load_failed = True
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
@@ -2348,11 +2417,24 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request, self)
+        )
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_context.set_state(
+            _RequestTokens(
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+                request.num_tokens,
+            )
+        )
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
             with self._manager_locked():
                 self.manager.on_new_request(req_context)
                 self.manager.on_request_finished(req_context)
