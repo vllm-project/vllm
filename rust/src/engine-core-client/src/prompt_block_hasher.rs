@@ -350,6 +350,10 @@ fn write_cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use serde::Deserialize;
+
     use super::*;
     use crate::protocol::lora::LoraRequest;
 
@@ -357,9 +361,6 @@ mod tests {
         "066b1e8987e027138e98701c46128929378935f9b6cd1549105ae6b4f0d71198";
     const SHA256_CBOR_NONE_HASH: &str =
         "9bd96a485ad84efdafb72ee48a1d7a69bcead0f8f0433173941b276b9581eef0";
-
-    /// Token ids at every encoding-width boundary of both formats.
-    const EDGE_TOKENS: [u32; 10] = [0, 1, 23, 24, 255, 256, 65535, 65536, 151_645, 0x7fff_ffff];
 
     fn hasher(hash_algo: &str, block_size: u64, lookahead: u64) -> PromptBlockHasher {
         let none_hash = match hash_algo {
@@ -393,337 +394,59 @@ mod tests {
         }
     }
 
-    /// First and last hash and the count, as hex.
-    fn summary(hashes: &[BlockHash]) -> (String, String, usize) {
-        (
-            hex::encode(&hashes[0].0),
-            hex::encode(&hashes.last().unwrap().0),
-            hashes.len(),
-        )
+    /// Prompt block hashes from the Python engine, kept current by
+    /// `tests/v1/core/test_prompt_block_hash_vectors.py` in the repo root, which
+    /// fails if the engine's hashing changes.
+    const PYTHON_VECTORS: &str = include_str!("tests/prompt_block_hash_vectors.json");
+
+    #[derive(Deserialize)]
+    struct Vectors {
+        none_hashes: HashMap<String, String>,
+        cases: Vec<VectorCase>,
     }
 
-    /// Plain prompts at several block sizes, against `hash_block_tokens`
-    /// chained from the default-seed `NONE_HASH` with the real `sha256` and
-    /// `sha256_cbor`.
-    #[test]
-    fn plain_prompts_match_python_engine() {
-        let cases: [(u64, Vec<u32>); 5] = [
-            (16, [EDGE_TOKENS.repeat(3), vec![7, 8]].concat()),
-            (1, vec![0, 300, 70000]),
-            (3, EDGE_TOKENS.to_vec()),
-            (24, (100..150).collect()),
-            (300, (0..650).map(|i| i * 7919 % 200_003).collect()),
-        ];
-        let expected = [
-            (
-                "sha256",
-                [
-                    (
-                        "00e88e4087ec88315eb29afe9c001411b274ead7ffbc56e35b824d2c8817b280",
-                        "70de07ec6eed1e78ee32aa5f2c17e7eddda8068507c29e9562b43e0f0a872fe0",
-                        2,
-                    ),
-                    (
-                        "1876a790824e1c62cc68ce0472a1542ccc7bf2d1d5c9e53827fc516bb9f88601",
-                        "e4b0a447a032eac68f97ed77776d9f506446b12d46ec513801b12717ecaf3c8c",
-                        3,
-                    ),
-                    (
-                        "588c1268ece56d895e2730c39f59ae5f370f7ea121e4fdaa9569c7bca0ea6a00",
-                        "bcfc515ddd274ab841f7c2a32d5b90a6dc4efb881d1c237b89437edafaedb691",
-                        3,
-                    ),
-                    (
-                        "160d21b10f24f083b8b07babc68f413df4dbedaaf45c1c171057b12b5f6599c7",
-                        "823d4823d3b4dcc76fe5735ec2cf07ab4d3030d095050db13e783bfb69d7a742",
-                        2,
-                    ),
-                    (
-                        "60fc9719c922de9484e11daebe846969dde25dbbfc8975ad9d5a5f52f5be7cd2",
-                        "a4fb5f1cf7802dcd1ed08aa20ff6f20ce522547ed9931aca73bd94fcb5f2aa2f",
-                        2,
-                    ),
-                ],
-            ),
-            (
-                "sha256_cbor",
-                [
-                    (
-                        "b4e3d7f45cf989fa34b8f87e41e8da20296ed03ac04537e363d47ede8f6910aa",
-                        "ab9339ba27613a3dbdd8ad445cd43a3f8175baca60c547911cc500c3ec5b409d",
-                        2,
-                    ),
-                    (
-                        "493f37dcda994a276ed9f9f27341b870a0da995cb22a36dc0e43fbf55d0cd662",
-                        "5b6d403bb7875016220be9de56c3271affb85e0a77f6e4b6ac442523277bad78",
-                        3,
-                    ),
-                    (
-                        "a8419a131ade760fe7db6f193dd8ea7b0d898acd29aa35ab89176221482e24ac",
-                        "ddc37216453bcfcd78ceb2903a6a2fe1e9694b11892ecff48cdad33f9a3aeccd",
-                        3,
-                    ),
-                    (
-                        "4100327c81de908bc85378ee3ed53eb3a25961ff3cad70b6f45a8a2973426f63",
-                        "4962a3803c42d379a6976da0ccf67f1f0e17e9cc72d57c5080804866e5e6c2e1",
-                        2,
-                    ),
-                    (
-                        "f8d904340e7699f0e56074debe137e5c25c91fae8e2c20b77d0a34f9dd0aee23",
-                        "5c579410ecd94807db1dd87e335a1c9467b20bafbbc50f5d981e8abd9bfc1eaf",
-                        2,
-                    ),
-                ],
-            ),
-        ];
-        for (hash_algo, expected) in expected {
-            for ((block_size, tokens), (first, last, count)) in cases.iter().zip(expected) {
-                let hashes = hasher(hash_algo, *block_size, 0)
-                    .hash_request(&request(tokens.clone()))
-                    .unwrap();
-                assert_eq!(
-                    summary(&hashes),
-                    (first.to_string(), last.to_string(), count),
-                    "{hash_algo} block_size={block_size}"
-                );
-            }
-        }
+    #[derive(Deserialize)]
+    struct VectorCase {
+        name: String,
+        hash_algo: String,
+        block_size: u64,
+        num_lookahead_tokens: u64,
+        lora: Option<VectorLora>,
+        cache_salt: Option<String>,
+        prompt_token_ids: Vec<u32>,
+        block_hashes: Vec<String>,
     }
 
-    /// LoRA, cache-salt and lookahead requests, against `Request.block_hashes`
-    /// from the real `get_request_block_hasher` with block size 5 and a
-    /// 32-token prompt. The last case has non-ASCII LoRA strings and a salt
-    /// long enough for pickle's 4-byte string length.
+    #[derive(Deserialize)]
+    struct VectorLora {
+        name: String,
+        path: String,
+    }
+
+    /// Plain, LoRA, cache-salt and lookahead requests at several block sizes,
+    /// against `Request.block_hashes` from the real `get_request_block_hasher`
+    /// with `sha256` and `sha256_cbor`.
     #[test]
-    fn extra_keys_match_python_engine() {
-        let prompt = [EDGE_TOKENS.repeat(3), vec![7, 8]].concat();
-        let long_salt = "s".repeat(300);
-        let requests: [(&str, EngineCoreRequest); 4] = [
-            ("plain", request(prompt.clone())),
-            (
-                "lora",
-                EngineCoreRequest {
-                    lora_request: Some(lora_request("adapter-a", "/models/adapter-a")),
-                    ..request(prompt.clone())
-                },
-            ),
-            (
-                "salt",
-                EngineCoreRequest {
-                    cache_salt: Some("tenant-1".to_string()),
-                    ..request(prompt.clone())
-                },
-            ),
-            (
-                "lora_salt",
-                EngineCoreRequest {
-                    lora_request: Some(lora_request("adapter-é", "/m/é")),
-                    cache_salt: Some(long_salt),
-                    ..request(prompt.clone())
-                },
-            ),
-        ];
-        let expected = [
-            (
-                "sha256",
-                0,
-                "plain",
-                6,
-                "56b141f4a969e34bcc1da4ad6cb476ebcb2b7ae507e856a475f0b53f87859e20",
-                "975f6dfd455769cfba2621b0645c8ba660460ceba9162c2cb5a14bf0d25e3e02",
-            ),
-            (
-                "sha256",
-                0,
-                "lora",
-                6,
-                "354f46da231d7fbbe8387f35c2d3b314d827e063c365ebdcd5366d621de464e1",
-                "82aa728271e8aaf4228f737222281aefc7e8bb96dfe2507f760295cc646b4a92",
-            ),
-            (
-                "sha256",
-                0,
-                "salt",
-                6,
-                "06241d30c0c0700c890353e7487fbad2355e3a3f4fc34c8bb54d75e8e3005a7f",
-                "f46b061b047585f338cc8ea37c19f3fe634ea9b23d35985d759ba143ff19bc91",
-            ),
-            (
-                "sha256",
-                0,
-                "lora_salt",
-                6,
-                "a4c783bc6d449adcdafdbfd6d59b15f9c23b92eaac1efad5abe94e6f48f97dd5",
-                "d94930748344c58edfd4a63ebff6c2515a93dd9a952f6ed8d0f0e210e8652093",
-            ),
-            (
-                "sha256",
-                1,
-                "plain",
-                6,
-                "3c7c5bb68aa46add1384d9ea79ddb81fc222eada29c779ff6a3a50485fc44e28",
-                "158d6ea13b7352c92eb0cd1fc2ce1683b2b3ab280351d2901a4f500ee4c032e8",
-            ),
-            (
-                "sha256",
-                1,
-                "lora",
-                6,
-                "462d89fbe1de8e64755b339cd9b1f28d6d8fe37fd46f2c7cb500e55b967439f8",
-                "1809ea41c760099ad91a5b028e2fd78bce9207f882df3a8e52616ab247db4baf",
-            ),
-            (
-                "sha256",
-                1,
-                "salt",
-                6,
-                "b75ac67378c80b6c465aa2a1a8819d594035819511971dedf5f3edfb5347d4e9",
-                "e4fa8639fc4ed687dbca1b7b398621403d4945efb58802f1bcb49825d339cd53",
-            ),
-            (
-                "sha256",
-                1,
-                "lora_salt",
-                6,
-                "281a977700036131e70708dc04067eb00031476da6fc270eeb91ef3bec4af9fd",
-                "3109559a165cba4f5adda0d5d9f54c4472ca23df2a354d19fe687df14d6c9be7",
-            ),
-            (
-                "sha256",
-                3,
-                "plain",
-                5,
-                "befa92d3904be5c3845960b68edee89434b3f3bd4098c3ec2a40f320203e94cc",
-                "158e0f4eb727ddc8eded92a45b77e328220b892f296fe8c6d304b3bd3cadb67b",
-            ),
-            (
-                "sha256",
-                3,
-                "lora",
-                5,
-                "51725f059c14065470452d9f3027f992f601bbf622fa83864c78a0efbd063ba2",
-                "e644ef52f092cc1f4b27d340e1a114df1d9d65ebd54be016303b61f6d6c65df4",
-            ),
-            (
-                "sha256",
-                3,
-                "salt",
-                5,
-                "070f8fe284fa36a9dbe70492aa9ee5f8bbfcf185de439f3826f0f59a06d221fc",
-                "08d9d549413cdfe0a3f552adddb1ca025928b2ec4eca1d76365d872370506ea0",
-            ),
-            (
-                "sha256",
-                3,
-                "lora_salt",
-                5,
-                "d8ee74ffd008d0c7065a877ad2455f910511261a79be770ca9bb444c856126c0",
-                "db3c933bf37e992760e0ce1083e9944ea25e218491bf06a75c2dd284e541fe3c",
-            ),
-            (
-                "sha256_cbor",
-                0,
-                "plain",
-                6,
-                "339f6de80342500080b21b7e3c61c46e5efdecfe290287e0bd565a9d42fdbcbd",
-                "f60a875b5ea76b5d48f036138ee14ecd08c723e23756794bd57295cb229fe5a8",
-            ),
-            (
-                "sha256_cbor",
-                0,
-                "lora",
-                6,
-                "613539868e6bca2d39892c001f93b6883795c683f171e7108e1044215318a23a",
-                "5663159167f01a066ce2482a2155247542adaebe7eab0ed01f29d71317176693",
-            ),
-            (
-                "sha256_cbor",
-                0,
-                "salt",
-                6,
-                "f578cca646674a49a675fe07f79f5126c7cf9f103e9e2676b484e5ce8ea6e48f",
-                "7acf3ac9e258df746a17015fc5b8aeac00511f599028d2b670fe20b2b92eaaa7",
-            ),
-            (
-                "sha256_cbor",
-                0,
-                "lora_salt",
-                6,
-                "5d8fc62a8373282ad491aa6c56943ed885da3f29e5fff16640f797f013ad0746",
-                "a01f56a47079cb79fa8d8edf9acf11aafbea3f417baf708b0fd06d5c64b75da9",
-            ),
-            (
-                "sha256_cbor",
-                1,
-                "plain",
-                6,
-                "2cd1c535592d7e8f81d1153412b0c7fb319d247d1c27098daee7261bd53392c1",
-                "a7f254fe782288d4a742c4fb9057e94edb970e8584c3e3b958baae0b259614ad",
-            ),
-            (
-                "sha256_cbor",
-                1,
-                "lora",
-                6,
-                "05788a34017c1104e7f55f0ea41670eb8011d0aa1e5884f86462382adc7c3c1f",
-                "1f4d67a4d69c9d6b9ba2f374c6a84db0a81893195fdf527d9e7715c4b073aebf",
-            ),
-            (
-                "sha256_cbor",
-                1,
-                "salt",
-                6,
-                "d0932ff71fb9dd44ee41671687167b8c0fdc842cc9c32805fe30fdc2423c7418",
-                "d172f715798145183e406ab09bb7aaaaa484aec2099653e192cc6ed94d14dbeb",
-            ),
-            (
-                "sha256_cbor",
-                1,
-                "lora_salt",
-                6,
-                "5322c6f9418a576fbb8888cc4b19bf0c1364e70f819e94b9e68d979f3c837568",
-                "43ec7a88990016de65d464768e3265259c41c550b5af2a56360413db52e1894b",
-            ),
-            (
-                "sha256_cbor",
-                3,
-                "plain",
-                5,
-                "a108c7ac9e75b566b45c0fbc271641e9796a1c4d519594e4a7eb6956903ffbba",
-                "d5d56edf84af5784f508a9157f1979425c3e491f1c1824abf0a9986c4307041e",
-            ),
-            (
-                "sha256_cbor",
-                3,
-                "lora",
-                5,
-                "41ad34e840c0acd2077d256363a6bc6be245458955ab89587911ced23931cc2b",
-                "9d5d87932ca2c41207ecadc63d39c9335d48b84e6be33a64aa02453768624cb5",
-            ),
-            (
-                "sha256_cbor",
-                3,
-                "salt",
-                5,
-                "ec7caf3a4a17c4680fa13870361419627219bf4b90f6c678370584de10016ec8",
-                "798b35d9c87d9e14182d410b87757a5c90fd3b3054204af3b0a0e014646deb01",
-            ),
-            (
-                "sha256_cbor",
-                3,
-                "lora_salt",
-                5,
-                "8e7c16de0fa89e4d029c9cf08f9d1924298da3e483afc2d7e1ef584b707db4ab",
-                "04ef0e5cc97bb4382dba452903f6af733972ff16582a1e6ca446269b52122d14",
-            ),
-        ];
-        for (hash_algo, lookahead, name, count, first, last) in expected {
-            let request = &requests.iter().find(|(case, _)| *case == name).unwrap().1;
-            let hashes = hasher(hash_algo, 5, lookahead).hash_request(request).unwrap();
+    fn prompt_block_hashes_match_python_engine() {
+        let vectors: Vectors = serde_json::from_str(PYTHON_VECTORS).unwrap();
+        // The vectors chain from the engine's default-seed `NONE_HASH`.
+        assert_eq!(vectors.none_hashes["sha256"], SHA256_NONE_HASH);
+        assert_eq!(vectors.none_hashes["sha256_cbor"], SHA256_CBOR_NONE_HASH);
+        assert!(!vectors.cases.is_empty());
+        for case in vectors.cases {
+            let request = EngineCoreRequest {
+                lora_request: case.lora.map(|lora| lora_request(&lora.name, &lora.path)),
+                cache_salt: case.cache_salt,
+                ..request(case.prompt_token_ids)
+            };
+            let hashes = hasher(&case.hash_algo, case.block_size, case.num_lookahead_tokens)
+                .hash_request(&request)
+                .unwrap_or_else(|| panic!("{} {}: not hashed", case.hash_algo, case.name));
+            let hashes: Vec<_> = hashes.iter().map(|hash| hex::encode(&hash.0)).collect();
             assert_eq!(
-                summary(&hashes),
-                (first.to_string(), last.to_string(), count),
-                "{hash_algo} lookahead={lookahead} {name}"
+                hashes, case.block_hashes,
+                "{} {}",
+                case.hash_algo, case.name
             );
         }
     }
