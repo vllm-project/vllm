@@ -809,6 +809,11 @@ _PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
 _PADDING_K_PADDED_MXFP4 = 1280  # +256
 # hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
 _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 = 256
+# Same formula as _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16, undoubled:
+# W4A4's SiLU path already doubles the intermediate pad inside AITER, so
+# aiter_moe_pads() must pass it through undoubled to avoid double-masking
+# live rows.
+_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 # {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)
 _PADDING_MODES: dict[str, tuple[bool, bool]] = {
@@ -819,7 +824,8 @@ _PADDING_MODES: dict[str, tuple[bool, bool]] = {
 }
 
 # unquantized + the 4 fp8 configs AiterExperts supports (excludes MXFP4,
-# stubbed below pending MI350/gfx950, and MK_QUANT_CONFIGS[1], unsupported).
+# covered separately by _PADDING_MXFP4_QUANT_CONFIGS below, and
+# MK_QUANT_CONFIGS[1], unsupported).
 _PADDING_QUANT_CONFIGS = [
     MK_QUANT_CONFIGS[0],  # unquantized
     MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token activations
@@ -939,6 +945,38 @@ def _slice_unpadded_rank_tensors(
     )
 
 
+def _check_mxfp4_accuracy(
+    ref_out: torch.Tensor, mk_out: torch.Tensor, fe_name: str
+) -> None:
+    """Shared mxfp4 accuracy check for _aiter_padding_matrix_worker and
+    _aiter_token_padding_worker; callers pre-slice both tensors to the real
+    (unpadded / non-garbage-row) region.
+
+    Cosine similarity catches a sign-flipped mk_out that a magnitude guard
+    can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but it's
+    scale-invariant and check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference
+    signal -- so the magnitude guard below still runs too, to catch a
+    uniform-scale error like rank_worker's documented ~5x-small
+    AITER_MXFP4_BF16 bug.
+    """
+    cos_sim = torch.nn.functional.cosine_similarity(
+        mk_out.flatten().float(), ref_out.flatten().float(), dim=0
+    )
+    assert cos_sim > 0.5, (
+        f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
+        "degenerate/decorrelated, not just numerically imprecise."
+    )
+    ref_scale = ref_out.abs().mean()
+    mk_scale = mk_out.abs().mean()
+    assert mk_scale > 0.5 * ref_scale, (
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    )
+    # Looser tolerance than the fp8/unquantized case: matches rank_worker's
+    # main mxfp4 sweep's atol/rtol.
+    check_accuracy(ref_out, mk_out, atol=1e-1, rtol=1e-1, percent=0.9)
+
+
 def _aiter_padding_matrix_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -1024,28 +1062,7 @@ def _aiter_padding_matrix_worker(
         return
 
     if is_mxfp4:
-        # Cosine similarity catches a sign-flipped mk_out that a magnitude
-        # guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but
-        # it's scale-invariant and check_accuracy's atol=1e-1 dwarfs the
-        # ~1e-2 reference signal -- so the magnitude guard below still runs
-        # too, to catch a uniform-scale error like rank_worker's documented
-        # ~5x-small AITER_MXFP4_BF16 bug.
-        cos_sim = torch.nn.functional.cosine_similarity(
-            mk_out.flatten().float(), ref_out.flatten().float(), dim=0
-        )
-        assert cos_sim > 0.5, (
-            f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
-            "degenerate/decorrelated, not just numerically imprecise."
-        )
-        ref_scale = ref_out.abs().mean()
-        mk_scale = mk_out.abs().mean()
-        assert mk_scale > 0.5 * ref_scale, (
-            f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
-            f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
-        )
-        # Looser tolerance than the fp8/unquantized case below: matches
-        # rank_worker's main mxfp4 sweep's atol/rtol.
-        check_accuracy(ref_out, mk_out, atol=1e-1, rtol=1e-1, percent=0.9)
+        _check_mxfp4_accuracy(ref_out, mk_out, fe_name)
         return
 
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
@@ -1169,12 +1186,6 @@ _PADDING_MXFP4_QUANT_IDS = [
     "mxfp4_w4a4" if c.quant_dtype == "mxfp4" else "mxfp4_w4a16"
     for c in _PADDING_MXFP4_QUANT_CONFIGS
 ]
-
-# Same formula as _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16, undoubled:
-# W4A4's SiLU path already doubles the intermediate pad inside AITER, so
-# aiter_moe_pads() must pass it through undoubled to avoid double-masking
-# live rows.
-_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 
 def _slice_unpadded_mxfp4_weights(
@@ -1353,32 +1364,7 @@ def _aiter_token_padding_worker(
         return
 
     if config.weight_dtype == "mxfp4":
-        # Cosine similarity catches a sign-flipped mk_out that a magnitude
-        # guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but
-        # it's scale-invariant and check_accuracy's atol=1e-1 dwarfs the
-        # ~1e-2 reference signal -- so the magnitude guard below still runs
-        # too, to catch a uniform-scale error like rank_worker's documented
-        # ~5x-small AITER_MXFP4_BF16 bug.
-        cos_sim = torch.nn.functional.cosine_similarity(
-            mk_out[real_rows].flatten().float(),
-            ref_out[real_rows].flatten().float(),
-            dim=0,
-        )
-        assert cos_sim > 0.5, (
-            f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
-            "degenerate/decorrelated, not just numerically imprecise."
-        )
-        ref_scale = ref_out[real_rows].abs().mean()
-        mk_scale = mk_out[real_rows].abs().mean()
-        assert mk_scale > 0.5 * ref_scale, (
-            f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
-            f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
-        )
-        # Looser tolerance than the fp8/unquantized case below: matches
-        # rank_worker's main mxfp4 sweep's atol/rtol.
-        check_accuracy(
-            ref_out[real_rows], mk_out[real_rows], atol=1e-1, rtol=1e-1, percent=0.9
-        )
+        _check_mxfp4_accuracy(ref_out[real_rows], mk_out[real_rows], fe_name)
         return
 
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
