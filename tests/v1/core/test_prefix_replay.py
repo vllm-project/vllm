@@ -34,7 +34,7 @@ FULL, SWA = 0, 1
 def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
-    use_kv_connector: MockKVConfig | None = None,
+    use_kv_connector: MockKVConfig | str | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -245,6 +245,46 @@ def test_remote_kv_hit_is_taken_in_whole_blocks():
     swa_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[SWA]
     swa_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[SWA]
     assert swa_blocks[new_req.replay_start // BLOCK_SIZE] is not swa_manager._null_block
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("matched", [WINDOW, 4 * BLOCK_SIZE - 1])
+def test_kv_load_carrying_window_does_not_replay(is_async, matched):
+    """A load of the request's own blocks (P/D) restores every transfer group,
+    window included, so the hit is taken as is: no replay, no cut to whole
+    blocks, and a hit no longer than the window is kept."""
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=is_async)
+    )
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    if is_async:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler.update_from_output(
+            out, create_model_runner_output([], finished_recving={request.request_id})
+        )
+        out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    assert new_req.num_computed_tokens == matched
+    assert new_req.replay_start == 0
+    assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
+
+
+def test_decode_bench_fill_does_not_replay():
+    """DecodeBenchConnector fills every group like a P/D transfer, so a filled
+    request starts with a one-token decode step, not a replay."""
+    scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    assert _new_req_data(out, request).replay_start == 0
+    assert out.num_scheduled_tokens[request.request_id] == 1
 
 
 @pytest.mark.parametrize("via_connector", [False, True])

@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.platforms.rocm import on_gfx1250
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -28,7 +28,13 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    get_kv_quant_mode,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -82,6 +88,12 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return head_size >= 32
 
     @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        # The cache is split with `split(head_size)` over a 2*head_size page, so
+        # V can be narrower than K but not wider.
+        return head_size_v <= head_size
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         # Not implemented
         return False
@@ -128,10 +140,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
             # Connectors like MoRI assume contiguous blocks
             return (KVCacheLayout.LBHNC,)
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @staticmethod
     def get_builder_cls() -> type["RocmAiterUnifiedAttentionMetadataBuilder"]:
@@ -190,11 +198,33 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         # RDNA3 has no low precision MMA, preserve query precision
         self.supports_quant_query_input = not on_gfx11()
 
+        # Layout flag: must mirror get_kv_cache_shape, which is attn_type
+        # agnostic because the allocation is shared across layers.
+        self._shuffle_kv_layout = (
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled() and on_gfx1250()
+        )
+        # Kernel flag: the shuffled reader/writer is causal decoder only.
+        self._use_shuffle_kv = (
+            self._shuffle_kv_layout and self.attn_type != AttentionType.ENCODER_DECODER
+        )
+
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._shuffle_kv_layout:
+            # (2, B, N, H, hs) -> ((B, N, H, hs), (B, N, H, hs))
+            return kv_cache.unbind(0)
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
+    def _shuffle_kv_views(
+        self, key_cache: torch.Tensor, value_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        nb, bs, nkv, hd = key_cache.shape
+        x = 16 // key_cache.element_size()
+        kc = key_cache.reshape(nb, nkv, hd // x, bs, x)
+        vc = value_cache.reshape(nb, nkv, bs // x, hd, x)
+        return kc, vc
 
     def forward(
         self,
@@ -237,8 +267,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
-        assert attn_metadata.use_cascade is False
-
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
         # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
@@ -270,6 +298,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 
+        if self._use_shuffle_kv:
+            key_cache, value_cache = self._shuffle_kv_views(key_cache, value_cache)
+
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -297,6 +328,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 v_descale=layer._v_scale,
                 sinks=self.sinks,
                 output_scale=output_scale,
+                shuffled_kv_cache=self._use_shuffle_kv,
             )
         else:
             # The aiter kernel is causal-only. Non-causal cross-attention
@@ -345,6 +377,27 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             return
         key_cache, value_cache = self._split_kv_cache(kv_cache)
 
+        if self._use_shuffle_kv:
+            from vllm.v1.attention.backends.rocm_aiter_fa import (
+                reshape_and_cache_shuffle_triton,
+            )
+
+            if get_kv_quant_mode(self.kv_cache_dtype) == KVQuantMode.FP8_PER_TENSOR:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            _dummy = torch.empty(1, dtype=torch.float32, device=key.device)
+            reshape_and_cache_shuffle_triton(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                _dummy,
+                _dummy,
+            )
+            return
+
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
             key,
@@ -365,6 +418,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND
+
+    def set_interleaved_v_cache(self):
+        # No-op override of RocmAttentionImpl: this backend
+        # decodes with the AITER triton unified-attention kernel
+        pass
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -401,7 +459,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=False,
+            use_shuffle_layout=self._use_shuffle_kv,
+            return_kv=False,
         )
 
     def do_qk_norm_mrope_kvcache_update(
@@ -462,12 +521,15 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         key_cache, value_cache = self._split_kv_cache(kv_cache)
-        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+
+        if self._use_shuffle_kv:
+            key_cache, value_cache = self._shuffle_kv_views(key_cache, value_cache)
+        flash_layout = not self._use_shuffle_kv
 
         rocm_aiter_ops.triton_rope_and_cache(
             query,

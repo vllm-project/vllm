@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared Dockerfile selection for the normal AMD CI build chain.
 # CI_ROCM_DOCKERFILE_BASE and CI_ROCM_DOCKERFILE accept repository-relative paths.
-# For Rock, set CI_ROCM_DOCKERFILE_BASE=docker/Dockerfile.rock_base and
-# CI_ROCM_DOCKERFILE=docker/Dockerfile.rock.
+# For the legacy ROCm 7.2 stack, set CI_ROCM_DOCKERFILE_BASE=docker/Dockerfile.rocm_72_base
+# and CI_ROCM_DOCKERFILE=docker/Dockerfile.rocm_72.
 # Custom recipes must preserve the CI targets and artifact layout. Additional
 # COPY inputs also need the corresponding *_CONTENT_FILES overrides.
 

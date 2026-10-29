@@ -128,15 +128,12 @@ def _can_use_flashinfer_cutedsl_bf16(
     if (
         k <= 0
         or n <= 0
+        or x.numel() == 0
         or weight.shape[1] != k
         or k % 128 != 0
         or x.data_ptr() % 32 != 0
         or weight.data_ptr() % 32 != 0
     ):
-        return False
-
-    m = x.numel() // k
-    if not 1 <= m <= 32:
         return False
     return bias is None or (
         bias.is_cuda
@@ -228,6 +225,8 @@ direct_register_custom_op(
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
+    from vllm.platforms.rocm import on_gfx1250
+
     if (
         not rocm_aiter_ops.is_triton_gemm_enabled()
         # MI300's - fp8nuz=True
@@ -235,6 +234,9 @@ def use_aiter_triton_gemm(n, m, k, dtype):
         or dtype not in [torch.float16, torch.bfloat16]
     ):
         return False
+
+    if on_gfx1250():
+        return True
 
     # use hipblaslt for the larger GEMMs
     if n > 2048 and m > 512:
@@ -288,10 +290,153 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     return chunkk, fits
 
 
+# On gfx11 a weight row stride that is a multiple of 2048 B makes the multi-row global
+# loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by one
+# 128 B cache line dodges the collision and keeps each row cache-line aligned.
+def cache_aliasing_pad_elems(k: int, element_size: int) -> int:
+    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing on gfx11,
+    or 0 when the stride does not alias.
+
+    Args:
+        k: Number of elements per weight row.
+        element_size: Size of one element in bytes.
+
+    Returns:
+        The number of elements to add to the row stride.
+
+    """
+    if (k * element_size) % 2048 != 0:
+        return 0
+    return 128 // element_size
+
+
+def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
+    """Offset a dense weight's row stride so it stops aliasing.
+
+    Returns a view with the original shape whose row stride is one cache line
+    wider, or ``weight`` unchanged when the pad does not apply.
+    """
+    from vllm.platforms.rocm import on_gfx11
+
+    if not (current_platform.is_rocm() and on_gfx11()):
+        return weight
+    if weight.dim() != 2 or not weight.is_contiguous():
+        return weight
+    pad = cache_aliasing_pad_elems(weight.shape[1], weight.element_size())
+    if pad == 0:
+        return weight
+    return torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
+
+
+_skinny_guard_warned: set[tuple[tuple[int, ...], int]] = set()
+
+# Cap used when the L3 size cannot be read: the MI355X value, the part
+# this guard was measured on (see envs.py for the cap).
+_SKINNY_GEMM_FALLBACK_WEIGHT_BYTES = 256 * 1024 * 1024
+
+
+def _amd_l3_cache_bytes(cache_info: list | None = None) -> int | None:
+    """The GPU's L3 (memory-side) cache size in bytes, or None.
+
+    The skinny-GEMM weight cap tracks this cache: past it a weight cannot
+    stay resident, and the skinny kernel's cost at n activation rows (~n
+    weight passes) pays HBM round trips instead. The device-properties
+    API exposes only the far smaller L2 (4 MiB on gfx950), so query the
+    L3 through AMD's amdsmi library: 256 MiB on MI355X, 128 MiB on
+    MI300X-class parts. `cache_info` (an amdsmi cache list) lets tests
+    drive the parse; the default queries the library.
+    """
+    if cache_info is None:
+        try:
+            import amdsmi
+
+            amdsmi.amdsmi_init()
+            try:
+                handles = amdsmi.amdsmi_get_processor_handles()
+                cache_info = amdsmi.amdsmi_get_gpu_cache_info(handles[0])["cache"]
+            finally:
+                amdsmi.amdsmi_shut_down()
+        except Exception:  # noqa: BLE001 -- optional lib, any failure -> fallback
+            return None
+    for cache in cache_info:
+        if cache.get("cache_level") == 3 and "DATA_CACHE" in cache.get(
+            "cache_properties", []
+        ):
+            return cache["cache_size"] * 1024  # amdsmi reports KB
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _skinny_gemm_max_weight_bytes() -> int:
+    """Effective skinny-GEMM weight cap in bytes, evaluated once.
+
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES > 0 overrides; 0 (the default)
+    derives the cap from the hardware L3 (memory-side) cache size,
+    falling back to _SKINNY_GEMM_FALLBACK_WEIGHT_BYTES where that cannot
+    be read. lmhead_skinny_guard_permits runs per decode step, so this is
+    computed on the first call only (env access in hot paths: #17067).
+    Tests that change the env var or mock the hardware read must call
+    cache_clear().
+    """
+    env_bytes = envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
+    if env_bytes > 0:
+        return env_bytes
+    return _amd_l3_cache_bytes() or _SKINNY_GEMM_FALLBACK_WEIGHT_BYTES
+
+
+def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
+    """Should this weight still take the wvSplitK skinny path at n?
+
+    wvSplitK_hf_sml's cost at n activation rows scales as ~n passes over
+    the weight (MI355X measurements in the PR description), so past the
+    last-level (memory-side) cache its effective bandwidth collapses:
+    every pass beyond the first is an HBM round trip. Weights above
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default: the memory-side cache
+    size, read from the hardware once at first use, 256 MiB on MI355X;
+    see envs.py for what the cap controls and how to tune it) therefore
+    skip the skinny path at 1 < n <= 5 and fall through to the generic
+    GEMM.
+
+    n == 1 always keeps wvSplitK: the n=1 kernel variant shows no
+    pathology on large weights, and its fall-through would be a numerics
+    change with no speed win, so single-row calls stay on the stock path.
+
+    Returns True (keep wvSplitK) when n <= 1 or the weight is under the
+    cap; otherwise returns False after emitting a census WARNING (once per
+    (shape, n) per process) naming the redirected site.
+    """
+    if n <= 1:
+        return True
+    max_bytes = _skinny_gemm_max_weight_bytes()
+    if weight.nbytes <= max_bytes:
+        return True
+    key = (tuple(weight.shape), n)
+    if key not in _skinny_guard_warned:
+        _skinny_guard_warned.add(key)
+        logger.warning(
+            "lm_head skinny-GEMM guard engaged: weight %s (%d bytes) exceeds "
+            "the weight cap %d (VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES, or the "
+            "hardware memory-side cache size when unset) at n=%d; skipping "
+            "wvSplitK for the generic GEMM fall-through",
+            tuple(weight.shape),
+            weight.nbytes,
+            max_bytes,
+            n,
+        )
+    return False
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    if envs.VLLM_BATCH_INVARIANT:
+        from vllm.model_executor.determinism.batch_invariant import (
+            linear_batch_invariant,
+        )
+
+        return linear_batch_invariant(x, weight, bias)
+
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -324,38 +469,55 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1)).contiguous()
         return ops.wvSplitKrc(x_view, weight, cu_count, bias)
 
-    # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
-    # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
-    # partial last tile). Some whitelisted shapes have K=2880 (e.g. gpt-oss-120b
-    # hidden), so skip aiter there and fall back to the torch GEMM path below.
-    if use_aiter_triton_gemm(n, m, k, x.dtype) and not (on_gfx1250() and k % 256 != 0):
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
 
-    use_skinny = (
+    skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
         # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and skinny_operands_compatible
     )
 
-    if use_skinny:
+    # wvSplitK allows row strides. Perf impact is only validated on gfx11.
+    weight_ok_for_wvsplitk = weight.is_contiguous() or (
+        on_gfx11() and weight.stride(1) == 1
+    )
+
+    use_wvsplitk = (
+        skinny_gemm_enabled
+        and weight_ok_for_wvsplitk
+        and (bias is None or bias.is_contiguous())
+        and (m == 1 or m > 8)
+        and 0 < n <= 5
+        and lmhead_skinny_guard_permits(weight, n)
+    )
+
+    use_llmm1 = (
+        skinny_gemm_enabled
+        and weight.is_contiguous()
+        and bias is None
+        and m % 4 == 0
+        and n == 1
+        and k <= 8192
+    )
+
+    if use_wvsplitk:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         # Note: Only build that view inside the branches that consume it.
-        if (m == 1 or m > 8) and 0 < n <= 5:
-            x_view = x.reshape(-1, x.size(-1)).contiguous()
-            cu_count = num_compute_units()
-            out = ops.wvSplitK(weight, x_view, cu_count, bias)
-            return out.reshape(*x.shape[:-1], weight.shape[0])
-        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-            x_view = x.reshape(-1, x.size(-1)).contiguous()
-            out = ops.LLMM1(weight, x_view, 4)
-            return out.reshape(*x.shape[:-1], weight.shape[0])
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.wvSplitK(weight, x_view, cu_count, bias)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
+
+    if use_llmm1:
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.LLMM1(weight, x_view, 4)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
 
     if rocm_aiter_ops.is_tgemm_enabled():
         from aiter.tuned_gemm import tgemm
