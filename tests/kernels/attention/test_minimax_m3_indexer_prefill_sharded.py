@@ -96,7 +96,8 @@ def test_fmha_prefill_shard_scores(
             ),
             workspace=torch.empty(32 << 20, device="cuda", dtype=torch.uint8),
         )
-    score_cols = blocks if total_q == 1 else (blocks + 15) // 16 * 16
+    local_blocks = (blocks + 1) // 2 if page_size == 256 else blocks
+    score_cols = local_blocks if total_q == 1 else (local_blocks + 15) // 16 * 16
     storage = torch.empty((total_q, heads, score_cols + 1), device="cuda")
     scores = storage[..., :score_cols]
     for iteration in range(2):
@@ -128,6 +129,7 @@ def test_fmha_prefill_shard_scores(
                 max_score=scores,
                 sm_scale=1.0,
                 initialize=initialize,
+                compact=page_size == 256,
             )
             assert torch.isnan(storage[..., -1]).all()
             reference = torch.full_like(scores, -float("inf"))
@@ -146,9 +148,10 @@ def test_fmha_prefill_shard_scores(
                         key_positions[None, None, :] > positions[:, None, None],
                         -float("inf"),
                     )
-                    reference[start : start + qlen, :, block] = dots.amax(-1)
+                    column = block // 2 if page_size == 256 else block
+                    reference[start : start + qlen, :, column] = dots.amax(-1)
                 start += qlen
-            if initialize or page_size == 256:
+            if initialize or (page_size == 256 and tp == 4):
                 torch.testing.assert_close(scores, reference, rtol=0, atol=0)
             else:
                 positions = torch.cat(
@@ -158,6 +161,13 @@ def test_fmha_prefill_shard_scores(
                     ]
                 )
                 valid = positions // 128 + 1
+                if page_size == 256:
+                    owned_offset = rank * 2 // tp
+                    valid = torch.where(
+                        valid > owned_offset,
+                        (valid - 1 - owned_offset) // 2 + 1,
+                        0,
+                    )
                 columns = torch.arange(scores.shape[-1], device="cuda")
                 mask = (columns[None, :] < valid[:, None])[:, None, :].expand_as(scores)
                 torch.testing.assert_close(
@@ -183,6 +193,8 @@ def test_fmha_prefill_shard_scores(
                         carrier,
                         force_begin_blocks=1,
                         force_end_blocks=2,
+                        index_scale=2 if page_size == 256 else 1,
+                        index_offset=rank * 2 // tp if page_size == 256 else 0,
                     )
                 torch.testing.assert_close(
                     actual[..., :16].view(torch.float32).sort(-1).values,
@@ -194,10 +206,18 @@ def test_fmha_prefill_shard_scores(
                 live = ids >= 0
                 assert torch.all((ids < valid[None, :, None]) | ~live)
                 assert torch.all((ids[..., 1:] > ids[..., :-1]) | ~live[..., 1:])
-                assert torch.all((ids == 0).any(-1))
+                owned_offset = rank * 2 // tp if page_size == 256 else 0
+                if owned_offset == 0:
+                    assert torch.all((ids == 0).any(-1))
                 for offset in (1, 2):
                     forced = (valid - offset).clamp_min(0)
-                    assert torch.all((ids == forced[None, :, None]).any(-1))
+                    owned = (
+                        torch.ones_like(forced, dtype=torch.bool)
+                        if page_size == 128
+                        else forced % 2 == owned_offset
+                    )
+                    present = (ids == forced[None, :, None]).any(-1)
+                    assert torch.all(present[:, owned])
                 assert torch.all(actual[..., 32] == 1)
 
 

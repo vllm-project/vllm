@@ -2188,7 +2188,10 @@ def test_sharded_decode_index_score_matches_reference(
     pdl_mode,
 ):
     pytest.importorskip("cutlass")
-    from vllm.third_party.fmha_sm100.api import sparse_topk_select
+    from vllm.third_party.fmha_sm100.api import (
+        sparse_topk_select,
+        sparse_topk_select_prefill,
+    )
 
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_decode_score_sharded_cutedsl,
@@ -2196,8 +2199,11 @@ def test_sharded_decode_index_score_matches_reference(
         minimax_m3_index_select_publish_candidates,
     )
 
-    score_columns = (
+    global_score_columns = (
         (score_columns + page_size // 32 - 1) // (page_size // 32) * (page_size // 32)
+    )
+    score_columns = (
+        (global_score_columns + 1) // 2 if page_size == 256 else global_score_columns
     )
     torch.manual_seed(0)
     heads, head_dim = 4, HEAD_DIM
@@ -2225,7 +2231,9 @@ def test_sharded_decode_index_score_matches_reference(
     bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
     errors = torch.zeros(1, device="cuda", dtype=torch.int32)
     scores = torch.full((total_q, heads, score_columns), -float("inf"), device="cuda")
-    all_scores = torch.empty_like(scores)
+    all_scores = torch.empty(
+        total_q, heads, global_score_columns, device="cuda", dtype=torch.float32
+    )
     local_ids = torch.empty((total_q, heads, 16), dtype=torch.int32, device="cuda")
     actual = torch.empty_like(local_ids)
     positions = (
@@ -2234,7 +2242,12 @@ def test_sharded_decode_index_score_matches_reference(
         + torch.arange(total_q, device="cuda") % decode_query_len
     )
     valid = (positions // BLOCK_SIZE + 1).clamp_min(0).int()
-    expected = torch.full_like(scores.transpose(0, 1), -float("inf"))
+    expected = torch.full(
+        (heads, total_q, global_score_columns),
+        -float("inf"),
+        device="cuda",
+        dtype=torch.float32,
+    )
     active_q = 3 * decode_query_len
     expected[:, :active_q] = _reference_decode_index_score(
         q[:active_q],
@@ -2242,13 +2255,14 @@ def test_sharded_decode_index_score_matches_reference(
         logical_table[:3],
         seq_lens[:3],
         decode_query_len,
-        score_columns,
+        global_score_columns,
     )
     # Consecutive calls reuse the same slot, including the single-layer case.
-    for _ in range(2):
+    column_ids = torch.arange(score_columns, device="cuda")
+    for reuse in range(2):
         all_scores.fill_(-float("inf"))
         for rank in range(world):
-            scores.fill_(-float("inf"))
+            scores.fill_(1.0e9 + reuse)
             minimax_m3_index_decode_score_sharded_cutedsl(
                 q,
                 (
@@ -2271,7 +2285,24 @@ def test_sharded_decode_index_score_matches_reference(
                 use_pdl=pdl_mode != "off",
                 prefetch_history=pdl_mode == "prefetch",
             )
-            torch.maximum(all_scores, scores, out=all_scores)
+            index_scale = 2 if page_size == 256 else 1
+            index_offset = rank * index_scale // world
+            local_valid = torch.where(
+                valid <= index_offset,
+                0,
+                (valid - 1 - index_offset) // index_scale + 1,
+            )
+            masked_scores = scores.masked_fill(
+                column_ids[None, None, :] >= local_valid[:, None, None],
+                -float("inf"),
+            )
+            if page_size == 256:
+                columns = all_scores[..., index_offset::2]
+                torch.maximum(
+                    columns, masked_scores[..., : columns.shape[-1]], out=columns
+                )
+            else:
+                torch.maximum(all_scores, masked_scores, out=all_scores)
             if candidate_source == "native_publish":
                 minimax_m3_index_select_publish_candidates(
                     scores,
@@ -2287,7 +2318,25 @@ def test_sharded_decode_index_score_matches_reference(
                     local_blocks=1,
                     spin_limit=1 << 20,
                     use_pdl=pdl_mode != "off",
+                    index_scale=index_scale,
+                    index_offset=index_offset,
                 )
+            elif page_size == 256:
+                carrier = torch.empty(
+                    (heads, total_q, 33), device="cuda", dtype=torch.int32
+                )
+                sparse_topk_select_prefill(
+                    scores,
+                    valid,
+                    carrier,
+                    force_begin_blocks=1,
+                    force_end_blocks=1,
+                    index_scale=index_scale,
+                    index_offset=index_offset,
+                )
+                for owner, destination in enumerate(recv):
+                    head = owner * heads_per_rank
+                    destination[1, rank].copy_(carrier[head : head + heads_per_rank])
             else:
                 sparse_topk_select(
                     scores,
@@ -2393,7 +2442,8 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world, page_size):
         MAX_K_TILES,
     )
     if page_size == 256:
-        expected[..., ::2] = -float("inf")
+        index_offset = rank * 2 // world
+        expected = expected[..., index_offset::2]
     kernel = IndexDecodeScoreShardedKernel.compile(
         heads,
         8,
@@ -2405,8 +2455,7 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world, page_size):
     )
 
     def launch():
-        # The P256 wrapper fills scores. Move that fence before the producer so
-        # it cannot hide an unsafe prefetch in the actual compiled scorer.
+        # Clear scratch before the producer so it cannot hide an unsafe prefetch.
         scores.fill_(-float("inf"))
         q.zero_()
         current_keys.zero_()
@@ -2422,8 +2471,9 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world, page_size):
         launch()
     for _ in range(4):
         graph.replay()
+        columns = pages if page_size == 256 else blocks
         torch.testing.assert_close(
-            scores.transpose(0, 1)[..., :blocks], expected[..., :blocks]
+            scores.transpose(0, 1)[..., :columns], expected[..., :columns]
         )
 
 

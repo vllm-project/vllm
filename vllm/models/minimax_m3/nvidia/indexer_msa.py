@@ -222,9 +222,10 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             score_elements = PREFILL_FMHA_SCRATCH_BYTES // 5
             max_seq_len = vllm_config.model_config.max_model_len
-            max_score_cols = (
-                ((max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE + 15) // 16 * 16
-            )
+            max_score_cols = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+            if self.page_size == 256:
+                max_score_cols = (max_score_cols + 1) // 2
+            max_score_cols = (max_score_cols + 15) // 16 * 16
             self.prefill_scores_buffer = torch.empty(
                 min(max_tokens * heads * max_score_cols, score_elements),
                 dtype=torch.float32,
@@ -430,6 +431,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 heads = self.num_index_heads * self.index_k_tp
                 max_seq_len = common_attn_metadata.max_seq_len
                 blocks = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+                if self.page_size == 256:
+                    blocks = (blocks + 1) // 2
                 score_cols = (blocks + 15) // 16 * 16
                 from vllm.third_party.fmha_sm100.api import (
                     fmha_index_score_sharded_plan_device,
@@ -610,6 +613,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     and md.prefill_msa is None
                 )
                 scores = comm.scores[:nd]
+                index_scale = 2 if page_size == 256 else 1
+                index_offset = comm.rank * index_scale // comm.world
                 sharded_score.minimax_m3_index_decode_score_sharded_cutedsl(
                     index_q[:nd],
                     kv,
@@ -639,6 +644,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     spin_limit=SPIN_LIMIT,
                     use_pdl=True,
                     generations=comm.publish_generations if tagged else None,
+                    index_scale=index_scale,
+                    index_offset=index_offset,
                 )
                 sharded_score.minimax_m3_index_merge_candidates(
                     (comm.tagged_recv if tagged else comm.recv)[slot_set],
@@ -763,6 +770,9 @@ def prefill_local_score(
     assert metadata.local_chunks is not None and metadata.local_scores is not None
     assert metadata.candidate_buffers is not None
     total_tokens = index_q.shape[0]
+    page_size = kv.shape[1] * comm.world
+    index_scale = 2 if page_size == 256 else 1
+    index_offset = comm.rank * index_scale // comm.world
     send, received = metadata.candidate_buffers.unbind(0)
     for chunk in metadata.local_chunks:
         query = index_q[chunk.start : chunk.end]
@@ -781,6 +791,7 @@ def prefill_local_score(
             max_score=scores,
             sm_scale=1.0,
             initialize=False,
+            compact=index_scale == 2,
         )
         chunk_send = send[:, chunk.start : chunk.end]
         valid_pages = num_valid_pages[chunk.start : chunk.end]
@@ -790,6 +801,8 @@ def prefill_local_score(
             chunk_send,
             force_begin_blocks=init_blocks,
             force_end_blocks=local_blocks,
+            index_scale=index_scale,
+            index_offset=index_offset,
         )
     send = send.view(comm.world, comm.hpr, total_tokens, 2 * TOPK + 1)
     received = received.view_as(send)
@@ -1025,8 +1038,7 @@ class IndexKShardComm:
             page_size = vllm_config.cache_config.block_size or PAGE_SIZE
             score_cols = min(
                 MAX_K_TILES,
-                cdiv(vllm_config.model_config.max_model_len, 4 * page_size)
-                * (4 * page_size // PAGE_SIZE),
+                cdiv(vllm_config.model_config.max_model_len, 4 * page_size) * 4,
             )
             self.scores = torch.empty(
                 (self.max_decode_tokens, total_index_heads, score_cols),

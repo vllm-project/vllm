@@ -409,8 +409,6 @@ class IndexDecodeScoreShardedKernel:
                             t = batch_id * decode_query_len + q_local_pos
                             for p in cutlass.range_constexpr(PAGES):
                                 block_id = super_id * PAGES + p
-                                if cutlass.const_expr(self.page_size == 256):
-                                    block_id = block_id * 2 + rank // (TP // 2)
                                 scores[t, head_id, block_id] = epi_buffer[lane_id, p]
 
                     tma_stage = (tma_stage + 1) % self.num_stages
@@ -505,9 +503,7 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     assert score_out.ndim == 3 and score_out.shape[:2] == (total_tokens, num_heads)
     score_columns = score_out.shape[-1]
     assert 0 < score_columns <= MAX_K_TILES
-    assert (
-        score_columns % (IndexDecodeScoreShardedKernel.PAGES * page_size // BLOCK) == 0
-    )
+    assert score_columns % IndexDecodeScoreShardedKernel.PAGES == 0
     assert score_out.dtype == torch.float32 and score_out.is_contiguous()
     kernel = IndexDecodeScoreShardedKernel.compile(
         num_heads,
@@ -520,8 +516,6 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
         prefetch_history,
         score_columns,
     )
-    if page_size == 256:
-        score_out.fill_(float("-inf"))
     kernel(idx_q, index_kv_shard, block_table, score_out, seq_lens, rank)
 
 
@@ -717,6 +711,8 @@ def minimax_m3_index_select_publish_candidates(
     spin_limit: int = 1 << 26,
     use_pdl: bool = False,
     generations: torch.Tensor | None = None,
+    index_scale: int = 1,
+    index_offset: int = 0,
 ) -> None:
     """Select local Top16 directly into each head owner's receive slot."""
     from vllm.third_party.fmha_sm100.jit import get_sparse_topk_module
@@ -736,6 +732,8 @@ def minimax_m3_index_select_publish_candidates(
         spin_limit,
         use_pdl,
         generations,
+        index_scale,
+        index_offset,
         torch.cuda.current_stream().cuda_stream,
     )
 
