@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
 import contextlib
-import importlib.metadata
 import os
 import random
 import sys
@@ -12,13 +12,17 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 import torch
-from packaging import version
-from packaging.version import Version
 from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_version import (  # noqa: F401
+    _is_torch_equal,
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+    is_torch_equal_or_newer,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -54,6 +58,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "octave_k3v4": torch.uint8,
+    "octave_k3v3": torch.uint8,
+    "octave_k3v3_compact": torch.uint8,
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
@@ -64,9 +71,20 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.uint8: np.uint8,
+    torch.uint16: np.uint16,
+    torch.uint32: np.uint32,
+    torch.uint64: np.uint64,
+    torch.int8: np.int8,
+    torch.int16: np.int16,
     torch.int32: np.int32,
     torch.int64: np.int64,
+    torch.bool: np.bool_,
 }
+
+# array.array typecodes with the same item layout as the torch dtype.
+TORCH_DTYPE_TO_ARRAY_TYPECODE = {torch.int32: "i", torch.int64: "q", torch.float32: "f"}
+for _dtype, _typecode in TORCH_DTYPE_TO_ARRAY_TYPECODE.items():
+    assert array.array(_typecode).itemsize == _dtype.itemsize
 
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
@@ -75,17 +93,6 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
-
-
-if TYPE_CHECKING:
-    PIN_MEMORY: bool
-
-
-def __getattr__(name: str) -> Any:
-    # Lazy so that importing this module does not resolve current_platform.
-    if name == "PIN_MEMORY":
-        return is_pin_memory_available()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -717,15 +724,13 @@ def async_tensor_h2d(
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
         t = data
-        if is_pin_memory_available() and not t.is_pinned():
+        if PIN_MEMORY and not t.is_pinned():
             # Stage in pinned, contiguous buffer to ensure fully async copy.
             t = torch.empty(
                 t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
             ).copy_(t)
     else:
-        t = torch.tensor(
-            data, dtype=dtype, pin_memory=is_pin_memory_available(), device="cpu"
-        )
+        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
 
     if out is not None:
@@ -737,7 +742,7 @@ def async_tensor_h2d(
 
 def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     t = torch.from_numpy(array)
-    return t.pin_memory() if is_pin_memory_available() else t
+    return t.pin_memory() if PIN_MEMORY else t
 
 
 def make_ndarray_with_pad(
@@ -888,14 +893,17 @@ def weak_ref_tensors(
     | IntermediateTensors,
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    for single tensor, possibly nested list/tuple of tensors, or
+    IntermediateTensors. Ints and LayerNames are returned as is.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
+        return tuple(weak_ref_tensors(t) for t in tensors)
+    if isinstance(tensors, (int, LayerName)):
+        return tensors
 
     # For IntermediateTensors used in pipeline parallelism
     from vllm.sequence import IntermediateTensors
@@ -905,7 +913,7 @@ def weak_ref_tensors(
             {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}
         )
         return ret
-    raise ValueError("Invalid type for tensors")
+    raise ValueError(f"Invalid type for tensors: {type(tensors)}")
 
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
@@ -935,56 +943,6 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
             f"`get_accelerator_view_from_cpu_tensor` is currently "
             f"not supported in: {current_platform.device_name}"
         )
-
-
-# Helper function used in testing.
-def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    return version.parse(torch_version) >= version.parse(target)
-
-
-def is_torch_equal_or_newer(target: str) -> bool:
-    """Check if the installed torch version is >= the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-
-    """
-    try:
-        return _is_torch_equal_or_newer(str(torch.__version__), target)
-    except Exception:
-        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
-        return Version(importlib.metadata.version("torch")) >= Version(target)
-
-
-def _is_torch_equal(target: str) -> bool:
-    assert target.count(".") == 2
-    torch_version = str(torch.__version__)
-    torch_version = version.parse(torch_version)
-    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
-    # or "2.6.0+cu128" but never "2.6.0.1"
-    return (
-        torch_version >= version.parse(target)
-        and version.parse(target + ".1") > torch_version
-    )
-
-
-def is_torch_equal(target: str) -> bool:
-    """Check if the installed torch version is == the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-
-    """
-    try:
-        return _is_torch_equal(target)
-    except Exception:
-        return Version(importlib.metadata.version("torch")) == Version(target)
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
@@ -1094,3 +1052,9 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+# Keep this at the end of the module: it resolves current_platform, which can
+# load platform plugins that import from this (then partially initialized)
+# module, so everything else here must already be defined.
+PIN_MEMORY = is_pin_memory_available()

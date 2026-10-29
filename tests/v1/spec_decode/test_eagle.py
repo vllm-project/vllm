@@ -34,6 +34,7 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import extend_all_queries_by_N
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -1002,6 +1003,124 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="uses FLASH_ATTN")
+def test_propose_refreshes_layout_caches_each_draft_step():
+    """Builders called inside the draft loop must see token_to_req_indices()
+    and compute_num_computed_tokens() for the current layout, not values
+    cached during the ragged first pass or an earlier draft step."""
+    device = torch.device(DEVICE_TYPE)
+    num_speculative_tokens = 3
+    seq_lens = [5, 3]
+    batch_size, total_tokens, vocab_size = len(seq_lens), sum(seq_lens), 100
+
+    proposer = _create_proposer(
+        "eagle", num_speculative_tokens, attention_backend="FLASH_ATTN"
+    )
+    hidden_size = proposer.hidden_size
+    model_mock = mock.MagicMock()
+    model_mock.side_effect = [
+        (torch.zeros(n, hidden_size, device=device),) * 2
+        for n in [total_tokens] + [batch_size] * (num_speculative_tokens - 1)
+    ]
+    model_mock.compute_logits.side_effect = [
+        torch.zeros(batch_size, vocab_size, device=device)
+    ] * num_speculative_tokens
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    builder_cls, _ = try_get_attention_backend(AttentionBackendEnum.FLASH_ATTN)
+    builder = builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=["layer.0"],
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+    req_index_buffer = torch.zeros(64, dtype=torch.int32, device=device)
+    observed = []
+
+    def build_for_drafting(common_attn_metadata, draft_index):
+        query_lens = common_attn_metadata.query_start_loc.diff()
+        observed.append(
+            (
+                common_attn_metadata.token_to_req_indices(req_index_buffer).tolist(),
+                torch.repeat_interleave(
+                    torch.arange(len(query_lens), device=device), query_lens
+                ).tolist(),
+                common_attn_metadata.compute_num_computed_tokens().tolist(),
+                (common_attn_metadata.seq_lens - query_lens).tolist(),
+            )
+        )
+        return builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=draft_index
+        )
+
+    attn_group = mock.MagicMock()
+    attn_group.get_metadata_builder.return_value = builder
+    attn_group.build_metadata_for_drafting = build_for_drafting
+    attn_group.layer_names = ["layer.0"]
+    attn_group.kv_cache_spec = builder.kv_cache_spec
+    proposer.draft_attn_groups = [attn_group]
+
+    proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat([torch.arange(n, device=device) for n in seq_lens]),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
+        token_indices_to_sample=None,
+        common_attn_metadata=create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=seq_lens),
+            block_size=BLOCK_SIZE,
+            device=device,
+        ),
+        sampling_metadata=mock.MagicMock(),
+    )
+
+    assert len(observed) == num_speculative_tokens
+    for step, (req, want_req, computed, want_computed) in enumerate(observed):
+        assert req == want_req, f"draft step {step}"
+        assert computed == want_computed, f"draft step {step}"
+
+
+def test_extend_all_queries_by_n_refreshes_token_to_req_indices():
+    """The extended layout must not reuse the token->request mapping cached
+    for the layout it was extended from."""
+    device = torch.device(DEVICE_TYPE)
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[8, 4, 4], query_lens=[3, 1, 1]),
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+    req_index_buffer = torch.zeros(16, dtype=torch.int32, device=device)
+    assert common_attn_metadata.token_to_req_indices(req_index_buffer).tolist() == [
+        0,
+        0,
+        0,
+        1,
+        2,
+    ]
+
+    extended = extend_all_queries_by_N(
+        common_attn_metadata,
+        N=1,
+        arange=torch.arange(8, dtype=torch.int32, device=device),
+        new_slot_mapping=torch.zeros(8, dtype=torch.int64, device=device),
+    )
+
+    assert extended.token_to_req_indices(req_index_buffer).tolist() == [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+    ]
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,8 @@ Every output of each is compared against the unfused path the AMD layer falls
 back to, with the argument layout the layer itself uses.
 """
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -335,7 +337,11 @@ def test_fused_kda_decode_skips_null_block_padding() -> None:
 
 
 @requires_hip_kernel_arch
-def test_decode_weights_staged_after_loading(dist_init) -> None:
+@pytest.mark.parametrize("state_dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("aiter_available", [False, True])
+def test_decode_weights_staged_after_loading(
+    dist_init, monkeypatch, state_dtype: str, aiter_available: bool
+) -> None:
     """The fused-decode weight copies must not depend on the weight loaders.
 
     Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
@@ -344,11 +350,20 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
     """
     _requires_kernel()
     from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.models.kimi_k3.amd.ops.kda_chunk import is_fused_kda_chunk_supported
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_kda_gluon_decode_available", lambda: aiter_available
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_kda_gluon_prefill_available", lambda: aiter_available
+    )
     config = KimiLinearConfig(
         hidden_size=256,
         linear_attn_config={
@@ -362,10 +377,26 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
         },
     )
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", dtype=DTYPE)
+    vllm_config.cache_config.mamba_ssm_cache_dtype = state_dtype
     with set_current_vllm_config(vllm_config), torch.device("cuda"):
         layer = KimiK3DeltaAttention(
             config, vllm_config, prefix="model.layers.0.self_attn"
         )
+    use_aiter = aiter_available and state_dtype == "float32"
+    assert layer.use_aiter_decode == use_aiter
+    expected_prefill = (
+        "gluon"
+        if use_aiter
+        else "fused"
+        if is_fused_kda_chunk_supported()
+        else "triton"
+    )
+    assert layer.kda_prefill_backend == expected_prefill
+    if state_dtype == "bfloat16":
+        # Neither FP32-only decode backend may stage weights or take its fast path.
+        assert layer.decode_conv1d_weight is None
+        assert layer.decode_norm_weight is None
+        return
     assert layer.decode_conv1d_weight is not None
     # The AITER Gluon decode path takes o_norm.weight directly, so only the HIP
     # kernel gets an fp32 norm copy.
@@ -623,6 +654,32 @@ def _run_aiter_spec(
         out=core_attn_out[:, :n_spec],
     )
     return core_attn_out, conv_state, recurrent_state
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@torch.inference_mode()
+def test_triton_decode_with_bf16_recurrent_state(num_spec: int) -> None:
+    """BF16 fallback reads rounded states and preserves paged writeback semantics."""
+    if num_spec:
+        batch = SpecBatch([4, 2, 1], [1, 2, 4], 12, num_spec, seed=5)
+        inp = batch.inp
+        run = partial(_run_spec_triton_chain, batch)
+    else:
+        inp = KdaDecodeInputs(3, 12, num_slots=8, seed=5)
+        run = partial(_run_triton_chain, inp)
+
+    initial_state = inp.recurrent_state.bfloat16()
+    inp.recurrent_state = initial_state.float()
+    expected_out, expected_conv, expected_state = run()
+    inp.recurrent_state = initial_state
+    actual_out, actual_conv, actual_state = run()
+
+    assert actual_state.dtype == torch.bfloat16
+    torch.testing.assert_close(actual_out, expected_out, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(
+        actual_state, expected_state.bfloat16(), atol=2e-3, rtol=3e-2
+    )
 
 
 @requires_aiter_gluon_kda
