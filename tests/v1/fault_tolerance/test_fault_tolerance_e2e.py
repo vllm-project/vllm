@@ -21,7 +21,7 @@ from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
 from vllm.utils.network_utils import get_open_port
 
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B-Instruct-2507")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
 
 # Fault-detection timeout budget:
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
