@@ -1164,6 +1164,10 @@ class RoutedExperts(PluggableLayer):
         See `build_expert_params_mapping` for the returned tuple format.
         """
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
+        has_w4afp8_input_scales = any(
+            getattr(param, "is_w4afp8_input_scale", False)
+            for _, param in model.named_parameters()
+        )
         prefix = "base_layer." if has_base_layer else ""
         # These loaders index ``params_dict[full_name]``, so both sides get it.
         return RoutedExperts.build_expert_params_mapping(
@@ -1175,6 +1179,7 @@ class RoutedExperts(PluggableLayer):
             routed_experts_prefix,
             lora_base_layer_prefix=prefix,
             lora_base_layer_prefix_on_param_name=prefix,
+            add_w4afp8_input_scale_mapping=has_w4afp8_input_scales,
         )
 
     @staticmethod
@@ -1189,6 +1194,7 @@ class RoutedExperts(PluggableLayer):
         lora_base_layer_prefix_on_param_name: str = "",
         include_fused: bool = False,
         is_gated: bool = True,
+        add_w4afp8_input_scale_mapping: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         """Create expert parameter mapping for weight loading with redundant experts.
 
@@ -1213,6 +1219,8 @@ class RoutedExperts(PluggableLayer):
             is_gated: Whether w13 holds gate and up (gated activation) or a
                 single up projection. Selects the fused checkpoint layout.
             routed_experts_prefix: Prefix of the routed experts submodule
+            add_w4afp8_input_scale_mapping: Also map the per-expert
+                ``w{1,2,3}.input_scale`` tensors of ``w4afp8`` checkpoints
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -1306,6 +1314,22 @@ class RoutedExperts(PluggableLayer):
             ]
             if weight_name is not None
         ]
+
+        if add_w4afp8_input_scale_mapping:
+            # PhalaCloud w4afp8 checkpoints store per-expert activation
+            # scales as ``experts.N.w{1,2,3}.input_scale``; only the parameter
+            # names have to line up, since the values are dropped after
+            # loading (the W4A8 FP8 kernels use dynamic activations).
+            per_expert_mapping += [
+                (
+                    w13 if shard_id in ("w1", "w3") else w2,
+                    f"experts.{physical_to_logical_map[expert_id]}.{shard_id}.{lora_base_layer_prefix}",
+                    expert_id,
+                    shard_id,
+                )
+                for expert_id in range(num_physical_experts)
+                for shard_id in ("w1", "w2", "w3")
+            ]
 
         return fused_mapping + per_expert_mapping
 

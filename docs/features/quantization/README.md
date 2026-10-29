@@ -11,6 +11,7 @@ The following are the supported quantization formats for vLLM:
 - [BitsAndBytes](bnb.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
+- [W4AFP8](w4afp8.md)
 - [LLM Compressor](llm_compressor/README.md)
     - [FP8 W8A8](llm_compressor/fp8.md)
     - [INT4 W4A16](llm_compressor/int4.md)
