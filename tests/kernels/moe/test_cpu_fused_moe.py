@@ -754,12 +754,8 @@ def test_cpu_fused_moe_expert_map(
     )[:batch_size, :topk_num].contiguous()
     original_ids, original_weights = topk_ids.clone(), topk_weights.clone()
 
-    ref_output = (
-        ref_fused_moe(input, w13, w2, w13_bias, w2_bias, topk_weights, topk_ids, act)
-        if batch_size
-        else torch.empty_like(input)
-    )
-    ep_output = torch.zeros_like(ref_output)
+    ep_output = torch.zeros_like(input)
+    ep_reference = torch.zeros_like(input)
 
     for ep_rank, local_expert_num in enumerate(local_expert_counts):
         local_start = sum(local_expert_counts[:ep_rank])
@@ -852,11 +848,13 @@ def test_cpu_fused_moe_expert_map(
             rtol=get_default_rtol(rank_output),
         )
         ep_output += rank_output
+        # Each rank rounds its partial to the activation dtype before SUM.
+        ep_reference += rank_reference
 
     torch.testing.assert_close(topk_ids, original_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights, original_weights, atol=0, rtol=0)
     atol, rtol = get_default_atol(ep_output), get_default_rtol(ep_output)
-    torch.testing.assert_close(ep_output, ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(ep_output, ep_reference, atol=atol, rtol=rtol)
 
 
 def test_cpu_fused_moe_input_weighting_preserves_router_weights(default_vllm_config):
