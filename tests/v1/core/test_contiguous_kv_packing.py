@@ -819,7 +819,7 @@ class TestSWABoundedReplayGrouping:
         assert sorted(
             (g.kv_cache_spec.prefix_cacheable, g.kv_cache_spec.prefix_replay_tokens)
             for g in groups
-        ) == [(False, 128)] * (len(groups) - 1) + [(True, 0)]
+        ) == [(False, 128)] * 2 + [(True, 0)]
         kv_cache_config = get_kv_cache_config_from_groups(
             config,
             groups,
