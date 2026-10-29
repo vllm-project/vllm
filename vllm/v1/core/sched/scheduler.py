@@ -3770,17 +3770,26 @@ class Scheduler(SchedulerInterface):
         ]
         for victim in victims:
             groups.extend(self.kv_cache_manager.get_blocks(victim.request_id).blocks)
+        block_pool = self.kv_cache_manager.block_pool
+        # Each holder of a block holds one reference to it: a block with one is
+        # released where it is seen, and only a shared block's holders are
+        # counted.
+        num_blocks = 0
         for group in groups:
             for block in group:
-                holders[id(block)] += 1
-                blocks[id(block)] = block
-        block_pool = self.kv_cache_manager.block_pool
-        num_blocks = sum(
-            holders[key] == block.ref_cnt
-            and key not in hit_blocks
-            and block.pool is block_pool
-            and not block.is_null
-            for key, block in blocks.items()
+                if (
+                    block.pool is not block_pool
+                    or block.is_null
+                    or (hit_blocks and id(block) in hit_blocks)
+                ):
+                    continue
+                if block.ref_cnt == 1:
+                    num_blocks += 1
+                else:
+                    holders[id(block)] += 1
+                    blocks[id(block)] = block
+        num_blocks += sum(
+            holders[key] == block.ref_cnt for key, block in blocks.items()
         )
         return num_blocks + sum(
             self._request_remaining_blocks(req)
