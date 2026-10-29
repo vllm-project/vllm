@@ -924,6 +924,23 @@ def test_packed_compressed_group_gets_kernel_block_table():
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
 
 
+def test_packed_group_kernel_blocks_with_unaligned_block_stride():
+    """Packed blocks need not be whole kernel pages apart: kernel blocks are
+    numbered in units dividing both the block and page strides."""
+    row, stride_rows = 132, 5 * 64 + 16
+    group = _packed_group(4, row, [128, 256])
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    manager = backing.view(3, 1, stride_rows, row)[:, :, :256]
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+    table = group.build_metadata(metadata)
+    assert table.tolist() == [[0, 4, 8, 12, 42, 46, 50, 54]]
+    assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
+
+
 def test_split_group_maps_manager_block_table():
     """Groups split in a dense layout keep manager block tables; builders get
     b * blocks_per_kv_block + j against the view allocated in kernel blocks."""
