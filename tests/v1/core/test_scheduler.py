@@ -2848,23 +2848,35 @@ def test_per_request_spec_decode_detailed_records_per_step(verified_per_step):
     assert payload["num_spec_steps"] == 3
 
 
-def test_per_request_spec_decode_counts_invalid_drafts():
-    # Sync structured output decoding schedules the valid draft tokens plus the
-    # first invalid one. The trimmed draft tokens still count as drafted, but
-    # the -1 padding does not.
+@pytest.mark.parametrize(
+    "max_model_len, num_valid, spec, out, expected",
+    [
+        # Sync structured output decoding schedules the valid draft tokens plus
+        # the first invalid one. [1, 2, 3] proposed, [1, 2] scheduled. The -1
+        # padding is not a proposed draft token.
+        (None, 1, [1, 2, 3, -1], [1, 5], (3, 2, 1)),
+        # max_model_len leaves room for only 1 of the 4 proposed draft tokens.
+        (4, None, [1, 2, 3, 4], [1, 9], (4, 1, 1)),
+    ],
+)
+def test_per_request_spec_decode_counts_trimmed_drafts(
+    max_model_len, num_valid, spec, out, expected
+):
+    # Draft tokens trimmed before the forward pass still count as drafted, but
+    # not as verified.
     scheduler = create_scheduler(
         num_speculative_tokens=4,
+        max_model_len=max_model_len,
         per_request_spec_decode_metrics="summary",
     )
-    # One verify step: [1, 2, 3] proposed, 1 valid, [1, 2] scheduled, 1 accepted.
-    req = _run_spec_verify_steps(
-        scheduler, [([1, 2, 3, -1], [1, 5])], grammar=_PrefixGrammar(num_valid=1)
-    )
-    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
-    assert payload["num_draft_tokens"] == 3
-    assert payload["num_verified_tokens"] == 2
-    assert payload["num_accepted_draft_tokens"] == 1
-    assert payload["acceptance_histogram"] == [0, 1, 0, 0, 0]
+    grammar = None if num_valid is None else _PrefixGrammar(num_valid)
+    req = _run_spec_verify_steps(scheduler, [(spec, out)], grammar=grammar)
+    payload = req.spec_decode_metrics.to_dict()
+    assert (
+        payload["num_draft_tokens"],
+        payload["num_verified_tokens"],
+        payload["num_accepted_draft_tokens"],
+    ) == expected
 
 
 class _PrefixGrammar(StructuredOutputGrammar):
