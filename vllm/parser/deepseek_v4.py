@@ -64,16 +64,37 @@ def _param_patterns(
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
+    The trailing-partial regex captures the open value up to the end of the
+    text; ``_match_open_param`` holds back an unfinished next parameter tag
+    so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     return (
         re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
-        re.compile(rf"{head}(.*)$", re.DOTALL),
+        re.compile(rf"{head}(.*)\Z", re.DOTALL),
     )
 
 
 _PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+
+
+def _match_open_param(
+    raw_args: str, pos: int, partial_param_re: re.Pattern, param_start: str
+) -> tuple[str, str | None, str, bool] | None:
+    """Return (name, is_str, value, held_back) for the trailing open param.
+
+    An unfinished next parameter tag (``param_start`` with no ``>`` after it)
+    is cut from the value; ``held_back`` reports whether that happened.
+    """
+    pm = partial_param_re.search(raw_args, pos)
+    if pm is None:
+        return None
+    value = pm.group(3)
+    cut = value.find(param_start, value.rfind(">") + 1)
+    if cut >= 0:
+        return pm.group(1), pm.group(2), value[:cut], True
+    return pm.group(1), pm.group(2), value, False
 
 
 def _dsml_arg_converter(
@@ -82,6 +103,7 @@ def _dsml_arg_converter(
     *,
     param_re: re.Pattern = _PARAM_RE,
     partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+    param_start: str = DSML_PARAM_START,
 ) -> str:
     params: dict[str, object] = {}
 
@@ -100,14 +122,25 @@ def _dsml_arg_converter(
         last_end = m.end()
 
     if partial:
-        pm = partial_param_re.search(raw_args, last_end)
-        if pm:
-            name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
+        open_param = _match_open_param(
+            raw_args, last_end, partial_param_re, param_start
+        )
+        if open_param:
+            name, is_str, value, _ = open_param
             if is_str == "true":
-                params[name] = value
-            else:
+                params.setdefault(name, value)
+            elif name not in params:
                 with contextlib.suppress(json.JSONDecodeError, ValueError):
                     params[name] = json.loads(value)
+    elif open_param := _match_open_param(
+        raw_args, last_end, partial_param_re, param_start
+    ):
+        name, is_str, value, _ = open_param
+        if name not in params:
+            if is_str != "true":
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
+                    value = json.loads(value)
+            params[name] = value
 
     return json.dumps(params, ensure_ascii=False)
 
