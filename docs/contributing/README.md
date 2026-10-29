@@ -106,6 +106,13 @@ integration, use the configuration files in `tools/pre_commit/`:
     pre-commit run -a  # runs on all files (short for --all-files)
     ```
 
+    Hook revisions in `.pre-commit-config.yaml` are pinned to commit SHAs. To bump them, use:
+
+    ```bash
+    pre-commit autoupdate --freeze               # bumps all hooks
+    pre-commit autoupdate --freeze --repo <url>  # bumps one hook
+    ```
+
 ### Documentation
 
 MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, [mkdocs.yaml](../../mkdocs.yaml).
