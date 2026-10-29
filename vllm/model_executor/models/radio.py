@@ -475,8 +475,8 @@ class RadioLayerScale(nn.Module):
 
 
 @support_torch_compile(
-    # Tokens pack into dim 1 and cu_seqlens grows with the image count.
-    dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
+    # Batch is always 1 here; the packed tokens in dim 1 and cu_seqlens are what vary.
+    dynamic_arg_dims={"hidden_states": 1, "cu_seqlens": 0},
     enable_if=should_torch_compile_mm_encoder,
     is_encoder=True,
 )
@@ -558,6 +558,8 @@ class RadioVisionEncoder(nn.Module):
         inputs_embeds: torch.Tensor,
         mask_meta: MaskMetadata | None = None,
     ):
+        # Metadata implies a packed batch, and the compiled graph bakes that dim 0 == 1.
+        assert mask_meta is None or inputs_embeds.shape[0] == 1
         hidden_states = inputs_embeds
         cu_seqlens = mask_meta.cu_seqlens if mask_meta is not None else None
         max_seqlen = mask_meta.max_seqlen if mask_meta is not None else None
