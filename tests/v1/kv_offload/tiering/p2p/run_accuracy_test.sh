@@ -46,6 +46,11 @@
 #   CHECK_TRANSFER              default 1; 0 skips p2p_transfer_check.py
 #   EXPECT_TRANSFER             default 1; 0 asserts no KV moved (safe fallback)
 #   VLLM_SERVE_EXTRA_ARGS       comma-separated extra args for vllm serve
+#   FAULT_CASE                  stall | kill | remove: instead of the proxy and
+#                               gsm8k, run p2p_fault_check.py, which pulls from
+#                               two prefillers straight into the decoder (p2p
+#                               mode) and faults prefiller 0. Needs
+#                               NUM_PREFILL_INSTANCES=2, NUM_DECODE_INSTANCES=1.
 #   PYTHON_BIN / VLLM_BIN       override interpreter / vllm entrypoint
 #   --decoder-first             toggle decoder-first proxy mode
 #   --attention-backend <name>  pass --attention-backend to every instance
@@ -124,6 +129,22 @@ ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 CANONICAL_LAYOUT=${CANONICAL_LAYOUT:-0}
 CHECK_TRANSFER=${CHECK_TRANSFER:-1}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+FAULT_CASE=${FAULT_CASE:-}
+
+if [[ -n "$FAULT_CASE" ]]; then
+  if [[ "$FAULT_CASE" != "stall" && "$FAULT_CASE" != "kill" && "$FAULT_CASE" != "remove" ]]; then
+    echo "FAULT_CASE must be 'stall', 'kill' or 'remove', got '${FAULT_CASE}'"
+    exit 1
+  fi
+  if (( NUM_PREFILL_INSTANCES != 2 || NUM_DECODE_INSTANCES != 1 || PREFILLER_DP_SIZE != 1 )); then
+    echo "FAULT_CASE needs NUM_PREFILL_INSTANCES=2, NUM_DECODE_INSTANCES=1, PREFILLER_DP_SIZE=1"
+    exit 1
+  fi
+  # The fault check pulls with remote_kv_source and reads each pull's
+  # cached_tokens.
+  P2P_MODE=p2p
+  VLLM_SERVE_EXTRA_ARGS="${VLLM_SERVE_EXTRA_ARGS:+${VLLM_SERVE_EXTRA_ARGS},}--enable-prompt-tokens-details"
+fi
 
 if [[ "$P2P_MODE" != "pd" && "$P2P_MODE" != "p2p" ]]; then
   echo "P2P_MODE must be 'pd' or 'p2p', got '${P2P_MODE}'"
@@ -211,6 +232,11 @@ start_in_session() {
 
 cleanup_instances() {
   echo "Cleaning up this run's vLLM / proxy instances..."
+  # p2p_fault_check.py records the session of a prefiller it restarted.
+  if [[ -s "$FAULT_SID_FILE" ]]; then
+    mapfile -t -O "${#SESSION_IDS[@]}" SESSION_IDS < "$FAULT_SID_FILE"
+  fi
+  rm -f "$FAULT_SID_FILE"
   if (( ${#SESSION_IDS[@]} > 0 )); then
     local sids
     sids=$(IFS=,; echo "${SESSION_IDS[*]}")
@@ -240,6 +266,7 @@ cleanup_instances() {
 # instance's engine_id.
 SESSION_IDS=()
 RUN_ID="p2p_e2e_$$"
+FAULT_SID_FILE="${TMPDIR:-/tmp}/${RUN_ID}_fault_sids"
 trap 'cleanup_instances || true' SIGINT SIGTERM EXIT
 
 get_num_gpus() {
@@ -326,6 +353,8 @@ run_tests_for_model() {
   PREFILL_HOSTS=()
   PREFILL_PORTS=()
   PREFILL_PD_PORTS=()
+  PREFILL_CMDS=()
+  PREFILL_SIDS=()
   DECODE_HOSTS=()
   DECODE_PORTS=()
 
@@ -381,6 +410,8 @@ run_tests_for_model() {
     PREFILL_HOSTS+=("${P2P_HOST}")
     PREFILL_PORTS+=("${http_port}")
     PREFILL_PD_PORTS+=("${pd_port}")
+    PREFILL_CMDS+=("${BASE_CMD}")
+    PREFILL_SIDS+=("${SESSION_IDS[-1]}")
   done
 
   # ---- Decoders ----
@@ -443,6 +474,31 @@ run_tests_for_model() {
     wait_for_server "$port"
     warmup_ranks "$port" "$DECODER_DP_SIZE" "$model_name"
   done
+
+  # ---- Fault slice: pull straight into the decoder, fault prefiller 0 ----
+  if [[ -n "$FAULT_CASE" ]]; then
+    # Prefiller i: http port, p2p host/port, session id, and the command
+    # that restarts it on the same ports.
+    local sources
+    sources=$("${PYTHON_BIN}" -c 'import json, sys
+a = sys.argv[1:]
+print(json.dumps([
+    {"http": f"http://localhost:{a[i]}", "host": a[i + 2], "port": int(a[i + 4]),
+     "sid": int(a[i + 6]), "cmd": a[i + 8]}
+    for i in (0, 1)
+]))' "${PREFILL_PORTS[@]}" "${PREFILL_HOSTS[@]}" "${PREFILL_PD_PORTS[@]}" \
+      "${PREFILL_SIDS[@]}" "${PREFILL_CMDS[@]}")
+    echo "Running fault case ${FAULT_CASE} for $model_name"
+    TEST_MODEL=$model_name \
+    FAULT_CASE=${FAULT_CASE} \
+    DECODE_URL="http://localhost:${DECODE_PORTS[0]}" \
+    FAULT_SOURCES="${sources}" \
+    FAULT_SID_FILE="${FAULT_SID_FILE}" \
+      "${PYTHON_BIN}" -m pytest -s -x "${SCRIPT_DIR}/p2p_fault_check.py"
+    cleanup_instances
+    sleep 3
+    return
+  fi
 
   # ---- Proxy ----
   # Each prefiller instance advertises its own PD base port; the proxy adds
