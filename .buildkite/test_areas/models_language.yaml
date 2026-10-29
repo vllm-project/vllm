@@ -186,6 +186,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/model_executor/models/qwen2.py

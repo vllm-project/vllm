@@ -397,6 +397,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
+  - tests/models/test_qwen3_5.py
   - tests/models/test_dory.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
@@ -419,6 +420,7 @@ steps:
       models/test_vision.py
       models/test_adapters.py
       models/test_qwen3_5_mtp_config.py
+      models/test_qwen3_5.py
       models/transformers/fusers/
       models/transformers/test_dynamic_rope.py
       model_executor/layers/test_activation.py

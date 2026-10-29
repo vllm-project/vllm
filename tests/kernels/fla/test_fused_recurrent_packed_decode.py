@@ -186,3 +186,57 @@ def test_packed_decode_supports_large_batch_head_grid():
     )
 
     assert torch.count_nonzero(out).item() == 0
+
+
+@pytest.mark.parametrize("num_tokens", [1, 9])
+@torch.inference_mode()
+def test_packed_decode_strided_ba_bitwise(num_tokens: int) -> None:
+    """Packed b/a chunk views (row stride 2*HV) must match contiguous inputs
+    bitwise."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device(DEVICE)
+    H, HV, K, V = 2, 4, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+
+    qkvz = torch.randn(num_tokens, qkv_dim + HV * V, dtype=dtype, device=device)
+    mixed_qkv = qkvz[:, :qkv_dim]
+    ba = torch.randn(num_tokens, 2 * HV, dtype=dtype, device=device)
+    b_view, a_view = ba.chunk(2, dim=-1)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
+    state = torch.randn(num_tokens + 1, HV, V, K, dtype=torch.float32, device=device)
+    indices = torch.arange(1, num_tokens + 1, dtype=torch.int32, device=device)
+
+    out_strided = torch.empty(num_tokens, 1, HV, V, dtype=dtype, device=device)
+    state_strided = state.clone()
+    fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv,
+        a=a_view,
+        b=b_view,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=K**-0.5,
+        initial_state=state_strided,
+        out=out_strided,
+        ssm_state_indices=indices,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    out_contig = torch.empty(num_tokens, 1, HV, V, dtype=dtype, device=device)
+    state_contig = state.clone()
+    fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv.contiguous(),
+        a=a_view.contiguous(),
+        b=b_view.contiguous(),
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=K**-0.5,
+        initial_state=state_contig,
+        out=out_contig,
+        ssm_state_indices=indices,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    torch.testing.assert_close(out_strided, out_contig, rtol=0, atol=0)
+    torch.testing.assert_close(state_strided, state_contig, rtol=0, atol=0)
