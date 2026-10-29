@@ -310,12 +310,6 @@ def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
 
-def _fake_engine(executor, **attrs):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(model_executor=executor, **attrs)
-
-
 def _fake_executor(vllm_config, collective_rpc):
     from types import MethodType, SimpleNamespace
 
@@ -332,8 +326,6 @@ def _fake_executor(vllm_config, collective_rpc):
 
 @requires_cuda
 def test_extensible_kv_cache_falls_back_when_driver_unsupported():
-    from vllm.v1.engine.core import EngineCore
-
     calls: list[str] = []
 
     def collective_rpc(method: str):
@@ -348,7 +340,8 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
     specs = [{"layer": object()}]
     fake = _fake_executor(vllm_config, collective_rpc)
-    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), specs)
+    assert fake.extensible_kv_cache_unsupported_reason(specs) == "no VMM support"
+    fake.disable_extensible_kv_cache("no VMM support")
     assert not vllm_config.cache_config.enable_extensible_kv_cache
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
     assert calls == [
@@ -358,12 +351,10 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
 
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     fake = _fake_executor(vllm_config, lambda method: [None, None])
-    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), specs)
-    assert vllm_config.cache_config.enable_extensible_kv_cache
+    assert fake.extensible_kv_cache_unsupported_reason(specs) is None
 
     # No KV cache at all: nothing to size, so the feature is turned off.
-    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), [{}])
-    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
 
 
 def test_all_reduce_int(monkeypatch):
