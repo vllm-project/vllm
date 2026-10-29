@@ -43,16 +43,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$script = Join-Path $PSScriptRoot 'embedding_liveness_guard.py'
+$source = Join-Path $PSScriptRoot 'embedding_liveness_guard.py'
+$runtime = 'D:\Production\Embeddings\bin\embedding_liveness_guard.py'
 $envf   = 'D:\Production\Embeddings\compose\.env'
+
+# The task MUST NOT run the script out of the git worktree. It did, and a plain
+# `git checkout main` deleted the file from disk at 2026-10-29 19:38Z - the task
+# then failed every 5 minutes with LastTaskResult=2 while Get-ScheduledTask still
+# said Ready, for about four hours, silently. A repository is a source, not a
+# runtime location: install a copy outside it and point the task there.
 
 Write-Output "=== Pre-checks ==="
 $ok = $true
 
-if (Test-Path $script) {
-    Write-Output "  script           : OK  $script"
+if (Test-Path $source) {
+    Write-Output "  source           : OK  $source"
 } else {
-    Write-Output "  script           : MISSING  $script"; $ok = $false
+    Write-Output "  source           : MISSING  $source"; $ok = $false
 }
 
 if (Test-Path $envf) {
@@ -82,7 +89,9 @@ if (-not $ok) {
     exit 2
 }
 
-$cmd = 'schtasks /create /tn "{0}" /tr "\"{1}\" \"{2}\" --once" /sc minute /mo {3} /it /f' -f $TaskName, $python, $script, $IntervalMinutes
+Write-Output "  runtime target   : $runtime"
+
+$cmd = 'schtasks /create /tn "{0}" /tr "\"{1}\" \"{2}\" --once" /sc minute /mo {3} /it /f' -f $TaskName, $python, $runtime, $IntervalMinutes
 
 Write-Output ""
 Write-Output "=== Command ==="
@@ -95,8 +104,10 @@ if ($existing -and -not $Force) {
 }
 
 if ($WhatIf) {
-    Write-Output "DRY-RUN (-WhatIf): command above NOT executed, no task created or modified."
+    Write-Output "DRY-RUN (-WhatIf): nothing executed - no copy installed, no task created or modified."
     Write-Output ""
+    Write-Output "Would first install: $source"
+    Write-Output "               ->     $runtime"
     Write-Output "What the task would do every $IntervalMinutes min:"
     Write-Output "  - POST /v1/embeddings on :8004 (fleet path) with the key, require dims 2560"
     Write-Output "  - POST /v1/embeddings on :8005 (engine) only to localise a fault"
@@ -105,7 +116,24 @@ if ($WhatIf) {
     exit 0
 }
 
-& schtasks /create /tn "$TaskName" /tr "`"$python`" `"$script`" --once" /sc minute /mo $IntervalMinutes /it /f
+Write-Output ""
+Write-Output "=== Install ==="
+$binDir = Split-Path -Parent $runtime
+if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+Copy-Item -Path $source -Destination $runtime -Force
+if (-not (Test-Path $runtime)) {
+    Write-Output "  copy                 : FAILED - nothing registered"
+    exit 1
+}
+$srcHash = (Get-FileHash $source -Algorithm SHA256).Hash
+$runHash = (Get-FileHash $runtime -Algorithm SHA256).Hash
+if ($srcHash -ne $runHash) {
+    Write-Output "  copy                 : HASH MISMATCH - nothing registered"
+    exit 1
+}
+Write-Output "  copy                 : OK  sha256=$($srcHash.Substring(0,12))"
+
+& schtasks /create /tn "$TaskName" /tr "`"$python`" `"$runtime`" --once" /sc minute /mo $IntervalMinutes /it /f
 if ($LASTEXITCODE -ne 0) {
     Write-Output "schtasks failed with exit $LASTEXITCODE"
     exit 1
