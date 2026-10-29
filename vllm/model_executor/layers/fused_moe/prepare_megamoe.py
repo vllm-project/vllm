@@ -300,52 +300,75 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
     hidden_size: tl.constexpr,
     top_k: tl.constexpr,
     num_local_experts: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
     BLOCK_E: tl.constexpr,
     SHARED_BLOCK_M: tl.constexpr,
     SHARED_MXFP8: tl.constexpr,
 ) -> None:
+    # Grid (token, split): each program quantizes the BLOCK_K chunks split,
+    # split + NUM_SPLITS, ... of one token's row.
+    token = tl.program_id(0)
+    split = tl.program_id(1)
     if l2_alpha is not None:
         experts = tl.arange(0, BLOCK_E)
-        expert_mask = (experts < num_local_experts) & (tl.program_id(0) == 0)
+        expert_mask = (experts < num_local_experts) & (token == 0) & (split == 0)
         alpha = tl.load(w2_global_scale + experts, mask=expert_mask)
         tl.store(l2_alpha + experts, alpha * l2_activation_scale, mask=expert_mask)
+    if token >= num_tokens:
+        return
 
-    token_id = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    token_mask = token_id < num_tokens
-    k_offsets = tl.arange(0, BLOCK_K)
-    hidden_ptrs = hidden_states + token_id[:, None] * hidden_stride_m
-
-    amax = tl.zeros((BLOCK_M,), tl.float32)
-    for k_block_id in range(hidden_size // BLOCK_K):
-        hidden = tl.load(
-            hidden_ptrs + (k_block_id * BLOCK_K + k_offsets[None, :]) * hidden_stride_k,
-            mask=token_mask[:, None],
-            other=0.0,
-        ).to(tl.float32)
-        amax = tl.maximum(amax, tl.max(tl.abs(hidden), axis=1))
-    x_scale = tl.maximum(amax, 1.0e-12) * _INV_NVFP4_MAX
-    tl.store(x_scales + token_id, x_scale, mask=token_mask)
-
-    for k_block_id in range(hidden_size // BLOCK_K):
-        k_ids = k_block_id * BLOCK_K + k_offsets
-        hidden = tl.load(
-            hidden_ptrs + k_ids[None, :] * hidden_stride_k,
-            mask=token_mask[:, None],
-            other=0.0,
+    if split == 0:
+        token_ids = token + tl.zeros([1], dtype=tl.int32)
+        _store_topk(
+            token_ids,
+            token_ids < num_tokens,
+            topk_ids,
+            topk_weights,
+            is_padding,
+            topk_idx_out,
+            topk_weights_out,
+            topk_ids_stride_m,
+            topk_ids_stride_k,
+            topk_weights_stride_m,
+            topk_weights_stride_k,
+            is_padding_stride_m,
+            topk_idx_stride_m,
+            topk_idx_stride_k,
+            topk_weights_out_stride_m,
+            topk_weights_out_stride_k,
+            top_k,
+            1,
+            BLOCK_TOPK,
         )
+
+    # Every program reads the whole row for the token scale.
+    row = hidden_states + token.to(tl.int64) * hidden_stride_m
+    cols = tl.arange(0, BLOCK_H)
+    hidden_row = tl.load(
+        row + cols * hidden_stride_k, mask=cols < hidden_size, other=0.0
+    )
+    amax = tl.max(tl.abs(hidden_row.to(tl.float32)), axis=0)
+    x_scale = tl.maximum(amax, 1.0e-12) * _INV_NVFP4_MAX
+    if split == 0:
+        tl.store(x_scales + token, x_scale)
+
+    shared_sf_row = _shared_sf_row(token, SHARED_BLOCK_M)
+    for k0 in tl.range(split * BLOCK_K, hidden_size, NUM_SPLITS * BLOCK_K):
+        k_ids = k0 + tl.arange(0, BLOCK_K)
+        k_mask = k_ids < hidden_size
+        hidden = tl.load(row + k_ids * hidden_stride_k, mask=k_mask, other=0.0)
 
         # E2M1 values with one E4M3 scale per 16, relative to the token scale.
         values = tl.reshape(
-            tl.div_rn(hidden.to(tl.float32), x_scale[:, None]),
-            [BLOCK_M, BLOCK_K // 16, 16],
+            tl.div_rn(hidden.to(tl.float32), x_scale), [BLOCK_K // 16, 16]
         )
-        block_scale = tl.max(tl.abs(values), axis=2) * (1.0 / 6.0)
+        block_scale = tl.max(tl.abs(values), axis=1) * (1.0 / 6.0)
         block_scale = tl.minimum(tl.maximum(block_scale, 2.0**-9), 448.0)
         block_scale = block_scale.to(tl.float8e4nv)
-        values = tl.div_rn(values, block_scale.to(tl.float32)[:, :, None])
+        values = tl.div_rn(values, block_scale.to(tl.float32)[:, None])
         magnitude = tl.abs(values)
         # Round to nearest even on the grid {0, 0.5, 1, 1.5, 2, 3, 4, 6}.
         code = (
@@ -358,61 +381,45 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
             + (magnitude > 5.0).to(tl.int32)
         )
         code = tl.where((values < 0) & (code != 0), code | 8, code)
-        low, high = tl.split(tl.reshape(code, [BLOCK_M, BLOCK_K // 2, 2]))
-        packed_offsets = k_block_id * (BLOCK_K // 2) + tl.arange(0, BLOCK_K // 2)
+        low, high = tl.split(tl.reshape(code, [BLOCK_K // 2, 2]))
+        packed_ids = k0 // 2 + tl.arange(0, BLOCK_K // 2)
         tl.store(
-            x_out + token_id[:, None] * x_stride_m + packed_offsets[None, :],
+            x_out + token * x_stride_m + packed_ids,
             (low | (high << 4)).to(tl.uint8),
-            mask=token_mask[:, None],
+            mask=packed_ids < hidden_size // 2,
         )
-        sf_offsets = k_block_id * (BLOCK_K // 64) + tl.arange(0, BLOCK_K // 64)
+        # Four E4M3 scales per little-endian int32 word, one word per 64 values.
+        sf_ids = k0 // 64 + tl.arange(0, BLOCK_K // 64)
         sf_bytes = tl.reshape(
-            block_scale.to(tl.uint8, bitcast=True), [BLOCK_M, BLOCK_K // 64, 4]
+            block_scale.to(tl.uint8, bitcast=True), [BLOCK_K // 64, 4]
         )
         tl.store(
-            x_sf + token_id[:, None] * x_sf_stride_m + sf_offsets[None, :],
+            x_sf + token * x_sf_stride_m + sf_ids,
             _pack_bytes(sf_bytes, 4),
-            mask=token_mask[:, None],
+            mask=sf_ids < hidden_size // 64,
         )
 
         if shared_x is not None:
-            shared_ptrs = shared_x + token_id[:, None] * shared_x_stride_m
+            shared_ptrs = shared_x + token * shared_x_stride_m + k_ids
             if SHARED_MXFP8:
                 fp8, _, scale_exp = _quantize_fp8_groups(
-                    hidden.to(tl.float32), BLOCK_M, BLOCK_K, 32, True
+                    tl.reshape(hidden.to(tl.float32), (1, BLOCK_K)),
+                    1,
+                    BLOCK_K,
+                    32,
+                    True,
                 )
-                tl.store(shared_ptrs + k_ids[None, :], fp8, mask=token_mask[:, None])
+                tl.store(shared_ptrs, tl.reshape(fp8, [BLOCK_K]), mask=k_mask)
+                word_ids = k0 // 128 + tl.arange(0, BLOCK_K // 128)
                 tl.store(
                     shared_x_sf
-                    + _shared_sf_row(token_id, SHARED_BLOCK_M) * shared_x_sf_stride_m
-                    + k_block_id * shared_x_sf_stride_k,
-                    _pack_bytes(scale_exp, BLOCK_K // 32),
-                    mask=token_mask,
+                    + shared_sf_row * shared_x_sf_stride_m
+                    + word_ids * shared_x_sf_stride_k,
+                    _pack_bytes(tl.reshape(scale_exp, [BLOCK_K // 128, 4]), 4),
+                    mask=word_ids < hidden_size // 128,
                 )
             else:
-                tl.store(shared_ptrs + k_ids[None, :], hidden, mask=token_mask[:, None])
-
-    _store_topk(
-        token_id,
-        token_mask,
-        topk_ids,
-        topk_weights,
-        is_padding,
-        topk_idx_out,
-        topk_weights_out,
-        topk_ids_stride_m,
-        topk_ids_stride_k,
-        topk_weights_stride_m,
-        topk_weights_stride_k,
-        is_padding_stride_m,
-        topk_idx_stride_m,
-        topk_idx_stride_k,
-        topk_weights_out_stride_m,
-        topk_weights_out_stride_k,
-        top_k,
-        BLOCK_M,
-        BLOCK_TOPK,
-    )
+                tl.store(shared_ptrs, hidden, mask=k_mask)
 
 
 def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bool]:
@@ -632,11 +639,19 @@ def prepare_megamoe_nvfp4_inputs(
         if tensor is not None and tensor.stride(-1) != 1:
             raise ValueError(f"MegaMoE NVFP4 staging requires a row-major {name}.")
 
-    block_m = 8 if num_tokens >= 64 else 1
     top_k = topk_ids.shape[1]
     num_local_experts = 0 if l2_alpha is None else l2_alpha.numel()
+    # Up to 512 tokens each row is split over programs; larger batches fill the
+    # GPU with one program per row looping over wider chunks.
+    block_h = triton.next_power_of_2(hidden_size)
+    if num_tokens <= 512:
+        block_k = min(1024, block_h)
+        num_splits = triton.cdiv(hidden_size, block_k)
+    else:
+        block_k = min(2048, block_h)
+        num_splits = 1
     # One program even without tokens, to write l2_alpha.
-    grid = (max(triton.cdiv(num_tokens, block_m), 1),)
+    grid = (max(num_tokens, 1), num_splits)
     _prepare_megamoe_nvfp4_inputs_kernel[grid](
         hidden_states,
         x.view(torch.uint8),
@@ -672,8 +687,9 @@ def prepare_megamoe_nvfp4_inputs(
         hidden_size,
         top_k,
         num_local_experts,
-        BLOCK_M=block_m,
-        BLOCK_K=128,
+        BLOCK_H=block_h,
+        BLOCK_K=block_k,
+        NUM_SPLITS=num_splits,
         BLOCK_TOPK=triton.next_power_of_2(top_k),
         BLOCK_E=triton.next_power_of_2(max(num_local_experts, 1)),
         SHARED_BLOCK_M=shared_block_m or 1,
