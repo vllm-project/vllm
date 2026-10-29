@@ -19,8 +19,15 @@ Heads follow vLLM's sharding: with ``tp_size <= num_kv_heads`` rank ``i`` holds
 heads ``[i * n, (i + 1) * n)`` with ``n = num_kv_heads // tp_size``; with more
 ranks than heads every rank holds the single head ``i * num_kv_heads //
 tp_size``.
+
+A consumer with decode context parallelism (DCP) shards the tokens of its MLA
+latent instead. With ``cp_kv_cache_interleave_size == block_size``, block ``j``
+of the producer, which is not DCP-sharded, lives whole on DCP rank
+``j % dcp_size`` (``tp_rank % dcp_size``) in that rank's block ``j // dcp_size``,
+so each block is one write (``dcp_write_block_pairs``).
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
 
@@ -212,3 +219,52 @@ def compute_write_tp_mapping(
             )
         ),
     )
+
+
+def validate_write_dcp_topology(
+    consumer_dcp_size: int,
+    consumer_interleave_size: int,
+    block_size: int,
+    is_mla: bool,
+    has_mamba: bool,
+) -> None:
+    if consumer_dcp_size <= 1:
+        return
+    if not is_mla or has_mamba:
+        raise ValueError(
+            "MoRIIO WRITE into a decode instance with decode context parallelism "
+            f"(decode_context_parallel_size={consumer_dcp_size}) supports MLA "
+            "models without recurrent state only"
+        )
+    if consumer_interleave_size != block_size:
+        raise ValueError(
+            "MoRIIO WRITE into a decode instance with decode context parallelism "
+            f"(decode_context_parallel_size={consumer_dcp_size}) writes whole "
+            "blocks, so it needs cp_kv_cache_interleave_size == block_size; got "
+            f"cp_kv_cache_interleave_size={consumer_interleave_size}, "
+            f"block_size={block_size}. Leave --cp-kv-cache-interleave-size unset "
+            f"or set it to {block_size}"
+        )
+
+
+def dcp_write_block_pairs(
+    local_block_ids: Sequence[int],
+    remote_block_ids: Sequence[int],
+    dcp_size: int,
+    dcp_rank: int,
+) -> tuple[list[int], list[int]]:
+    """Producer blocks that consumer DCP rank ``dcp_rank`` holds, paired with
+    that rank's block ids.
+
+    A rank that holds none of them (a prompt shorter than ``dcp_size`` blocks)
+    gets two empty lists and must still be sent write_done.
+    """
+    local = list(local_block_ids[dcp_rank::dcp_size])
+    remote = list(remote_block_ids[: len(local)])
+    if len(remote) < len(local):
+        raise ValueError(
+            f"DCP rank {dcp_rank}/{dcp_size} of the consumer needs {len(local)} "
+            f"blocks for {len(local_block_ids)} producer blocks, but it allocated "
+            f"{len(remote_block_ids)}"
+        )
+    return local, remote

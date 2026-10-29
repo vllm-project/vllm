@@ -40,6 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     pod_index,
     zmq_ctx,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    dcp_write_block_pairs,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -382,6 +385,7 @@ class MoRIIOWriter:
 
         is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
+        bytes_written = 0
         for target in self._write_targets(task):
             if target is not None and not is_mamba and not target.num_heads:
                 # Another producer rank writes this attention copy.
@@ -409,8 +413,10 @@ class MoRIIOWriter:
                 ]
             for plan in plans:
                 transfer_statuses.extend(self._do_layer_write(plan, sessions))
+                bytes_written += sum(plan.transfer_sizes)
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
+            request_info.bytes_written += bytes_written
 
         # Finalize if all layers complete
         self._mark_write_done(task.transfer_id, request_info)
@@ -452,6 +458,12 @@ class MoRIIOWriter:
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
+            dcp_size = remote_moriio_meta.dcp_size
+            if dcp_size > 1 and self.worker.layer_to_spec[task.layer_name].dcp_sharded:
+                tp_rank = self.worker.tp_rank if target is None else target.tp_rank
+                local_blocks, remote_blocks = dcp_write_block_pairs(
+                    local_blocks, remote_blocks, dcp_size, tp_rank % dcp_size
+                )
             if (
                 target is None
                 or task.tp_mapping is None
@@ -617,6 +629,7 @@ class MoRIIOWriter:
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
             request_info.completion_notified = True
+            bytes_written = request_info.bytes_written
 
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
@@ -648,9 +661,11 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
         logger.debug(
-            "Completed transfer for (request, transfer) %s, %s, notified %s",
+            "Completed transfer for (request, transfer) %s, %s, wrote %d bytes, "
+            "notified %s",
             request_id,
             transfer_id,
+            bytes_written,
             notify_targets,
         )
 

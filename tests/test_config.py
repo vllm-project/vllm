@@ -396,6 +396,10 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             kv_role="kv_both",
         ),
         KVTransferConfig(
+            kv_connector="MoRIIOConnector",
+            kv_role="kv_consumer",
+        ),
+        KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
             kv_connector_extra_config={

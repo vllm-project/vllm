@@ -89,6 +89,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
+    validate_write_dcp_topology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -1953,6 +1954,16 @@ class MoRIIOConnectorWorker:
 
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.cp_kv_cache_interleave_size = (
+            vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
+        if self.dcp_size > 1 and (self.is_producer or self.mode == MoRIIOMode.READ):
+            raise NotImplementedError(
+                "MoRIIO supports decode context parallelism "
+                f"(decode_context_parallel_size={self.dcp_size}) only on the "
+                "decode instance in WRITE mode"
+            )
         # Hybrid (mamba/KDA) recurrent-state transfer. Populated in
         # register_kv_caches when the model has a MambaSpec kv_cache group.
         self._has_mamba = False
@@ -2225,6 +2236,19 @@ class MoRIIOConnectorWorker:
             metadata_bytes = received_frame[1]
             decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
+            if self.is_producer and self.mode == MoRIIOMode.WRITE:
+                try:
+                    validate_write_dcp_topology(
+                        metadata.dcp_size,
+                        metadata.cp_kv_cache_interleave_size,
+                        self.block_size,
+                        self.use_mla,
+                        self._has_mamba,
+                    )
+                except ValueError as e:
+                    raise HandshakeError(
+                        f"Cannot write into {expected_engine_id}: {e}"
+                    ) from e
             got_metadata_time = time.perf_counter()
             logger.info(
                 "MoRIIO handshake: get metadata took: %s",
@@ -2571,6 +2595,15 @@ class MoRIIOConnectorWorker:
         self.block_shape = block_shape
         self.kv_element_size = kv_elem_size
 
+        if self.dcp_size > 1:
+            validate_write_dcp_topology(
+                self.dcp_size,
+                self.cp_kv_cache_interleave_size,
+                self.block_size,
+                self.use_mla,
+                self._has_mamba,
+            )
+
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         kv_caches_base_addr = []
         caches_data = []
@@ -2760,6 +2793,8 @@ class MoRIIOConnectorWorker:
                 for name, layout in self.mamba_state_layouts.items()
             },
             attention_block_sizes=self.attention_block_sizes,
+            dcp_size=self.dcp_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(

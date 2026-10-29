@@ -114,6 +114,7 @@ class RemoteAllocInfo:
     # producer whose copy another producer writes still has to finish).
     completion_targets_resolved: bool = False
     completion_notified: bool = False
+    bytes_written: int = 0
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
         TransferOffsetsKey,
@@ -146,6 +147,9 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # The defaults also stand for older peers that do not send these fields.
+    dcp_size: int = 1
+    cp_kv_cache_interleave_size: int = 1
 
 
 class RoleManager:
