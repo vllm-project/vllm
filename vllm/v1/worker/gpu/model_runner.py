@@ -2281,10 +2281,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            num_drafted_tokens_per_req=(
+                self.req_states.num_drafted_tokens[input_batch.idx_mapping_np]
+                if input_batch.num_draft_tokens_per_req is not None
+                else None
+            ),
             num_verified_tokens_per_req=(
                 input_batch.cu_num_logits.diff()
                 - self.model_state.num_new_sampled_tokens_per_step
-                if self.adaptive_verification is not None
+                if input_batch.num_draft_tokens_per_req is not None
                 else None
             ),
         )
@@ -2374,6 +2379,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
+            )
+            self.req_states.num_drafted_tokens[input_batch.idx_mapping_np] = (
+                num_spec_tokens
             )
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(

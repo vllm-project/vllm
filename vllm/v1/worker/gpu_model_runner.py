@@ -890,6 +890,9 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        # Draft tokens per request that came out of the drafter in its latest
+        # proposal.
+        self._num_drafted_tokens: dict[str, int] = {}
         self._draft_probs: torch.Tensor | None = None
         self._draft_prob_req_ids: list[str] | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
@@ -1323,12 +1326,14 @@ class GPUModelRunner(
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            update_scheduler_for_invalid_drafts(
+            num_valid_draft_tokens = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
                 self.input_batch.req_id_to_index,
             )
+            # The -1 padding of ngram_gpu drafts is not a drafted token.
+            self._num_drafted_tokens.update(num_valid_draft_tokens)
         if self.use_async_spec_decode:
             self.prev_num_draft_tokens.np.fill(0)
 
@@ -4318,6 +4323,10 @@ class GPUModelRunner(
                     sampler_output.sampled_token_ids
                 )
 
+        # Read before the drafter proposes for the next step.
+        num_drafted_tokens, num_verified_tokens = self._get_num_draft_tokens_per_req(
+            scheduler_output
+        )
         self._draft_token_ids = None
         self._draft_probs = None
         self._draft_prob_req_ids = None
@@ -4339,6 +4348,7 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
+                self._num_drafted_tokens = self._count_drafted_tokens()
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
@@ -4426,6 +4436,7 @@ class GPUModelRunner(
                 self._draft_token_ids = torch.zeros(
                     1, device=self.device, dtype=torch.int32
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                self._num_drafted_tokens = self._count_drafted_tokens()
                 self._draft_probs = None
                 self._draft_prob_req_ids = None
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
@@ -4494,6 +4505,8 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                num_drafted_tokens_per_req=num_drafted_tokens,
+                num_verified_tokens_per_req=num_verified_tokens,
             )
 
         if not self.use_async_scheduling:
@@ -4595,6 +4608,29 @@ class GPUModelRunner(
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)
+
+    def _get_num_draft_tokens_per_req(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> tuple[list[int] | None, list[int] | None]:
+        """Drafted and verified draft tokens per request, in req_ids order."""
+        if self.speculative_config is None:
+            return None, None
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        req_ids = self.input_batch.req_ids
+        drafted = [self._num_drafted_tokens.get(req_id, 0) for req_id in req_ids]
+        verified = [
+            min(len(spec_tokens.get(req_id, ())), num_drafted)
+            for req_id, num_drafted in zip(req_ids, drafted)
+        ]
+        return drafted, verified
+
+    def _count_drafted_tokens(self) -> dict[str, int]:
+        draft_token_ids = self._draft_token_ids
+        req_ids = self.input_batch.req_ids
+        if isinstance(draft_token_ids, list):
+            return {req_id: len(t) for req_id, t in zip(req_ids, draft_token_ids)}
+        assert draft_token_ids is not None
+        return dict.fromkeys(req_ids, draft_token_ids.shape[1])
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False

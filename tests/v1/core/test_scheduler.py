@@ -79,7 +79,6 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
-from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
@@ -2779,15 +2778,14 @@ def test_schedule_spec_decoding_stats(
 
 
 def _run_spec_verify_steps(
-    scheduler, rounds, grammar=None, num_verified_per_round=None
+    scheduler, rounds, num_drafted_per_round=None, num_verified_per_round=None
 ):
     """Drive prefill + one draft/verify step per round for a single request.
 
     ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
-    step each. ``grammar`` optionally makes the request use structured outputs
-    after prefill, so the scheduler trims draft tokens with it.
-    ``num_verified_per_round`` optionally sets the verified draft count the
-    model runner reports with adaptive verification.
+    step each. ``num_drafted_per_round`` and ``num_verified_per_round``
+    optionally set the drafted and verified draft counts the model runner
+    reports.
     Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
@@ -2795,7 +2793,7 @@ def _run_spec_verify_steps(
     rid = req.request_id
     req_to_index = {rid: 0}
 
-    def _mk_output(sampled, num_verified=None):
+    def _mk_output(sampled, num_drafted=None, num_verified=None):
         return ModelRunnerOutput(
             req_ids=[rid],
             req_id_to_index=req_to_index,
@@ -2803,6 +2801,7 @@ def _run_spec_verify_steps(
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            num_drafted_tokens_per_req=None if num_drafted is None else [num_drafted],
             num_verified_tokens_per_req=(
                 None if num_verified is None else [num_verified]
             ),
@@ -2810,28 +2809,30 @@ def _run_spec_verify_steps(
 
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
-    if grammar is not None:
-        req.structured_output_request = StructuredOutputRequest(
-            params=StructuredOutputsParams(regex="[0-9]+"), reasoning_ended=True
-        )
-        req.structured_output_request.grammar = grammar
+    drafted = num_drafted_per_round or [None] * len(rounds)
     verified = num_verified_per_round or [None] * len(rounds)
-    for (spec, out), num_verified in zip(rounds, verified):
+    for (spec, out), num_drafted, num_verified in zip(rounds, drafted, verified):
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
         output = scheduler.schedule()
-        scheduler.update_from_output(output, _mk_output([out], num_verified))
+        model_output = _mk_output([out], num_drafted, num_verified)
+        scheduler.update_from_output(output, model_output)
     return req
 
 
-@pytest.mark.parametrize("verified_per_step", [None, [3, 2, 1]])
-def test_per_request_spec_decode_detailed_records_per_step(verified_per_step):
+@pytest.mark.parametrize(
+    "drafted_per_step, verified_per_step", [(None, None), ([3, 3, 2], [3, 2, 1])]
+)
+def test_per_request_spec_decode_detailed_records_per_step(
+    drafted_per_step, verified_per_step
+):
     scheduler = create_scheduler(
         num_speculative_tokens=3,
         per_request_spec_decode_metrics="detailed",
     )
     # Three verify steps for one request; num_accepted = len(output) - 1, so the
-    # outputs below accept 3, 1, then 0 drafts across the steps. With adaptive
-    # verification, the model runner reports how many drafts it verified.
+    # outputs below accept 3, 1, then 0 drafts across the steps. The model
+    # runner reports how many draft tokens the drafter proposed and how many
+    # of them it verified.
     req = _run_spec_verify_steps(
         scheduler,
         [
@@ -2839,74 +2840,19 @@ def test_per_request_spec_decode_detailed_records_per_step(verified_per_step):
             ([5, 6, 7], [5, 8]),  # accept 1
             ([9, 10, 11], [12]),  # accept 0
         ],
+        num_drafted_per_round=drafted_per_step,
         num_verified_per_round=verified_per_step,
     )
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
-    assert payload["per_step_drafted"] == [3, 3, 3]
+    assert payload["per_step_drafted"] == (drafted_per_step or [3, 3, 3])
     assert payload["per_step_verified"] == (verified_per_step or [3, 3, 3])
     assert payload["num_spec_steps"] == 3
 
 
-@pytest.mark.parametrize(
-    "max_model_len, num_valid, spec, out, expected",
-    [
-        # Sync structured output decoding schedules the valid draft tokens plus
-        # the first invalid one. [1, 2, 3] proposed, [1, 2] scheduled. The -1
-        # padding is not a proposed draft token.
-        (None, 1, [1, 2, 3, -1], [1, 5], (3, 2, 1)),
-        # max_model_len leaves room for only 1 of the 4 proposed draft tokens.
-        (4, None, [1, 2, 3, 4], [1, 9], (4, 1, 1)),
-    ],
-)
-def test_per_request_spec_decode_counts_trimmed_drafts(
-    max_model_len, num_valid, spec, out, expected
-):
-    # Draft tokens trimmed before the forward pass still count as drafted, but
-    # not as verified.
-    scheduler = create_scheduler(
-        num_speculative_tokens=4,
-        max_model_len=max_model_len,
-        per_request_spec_decode_metrics="summary",
-    )
-    grammar = None if num_valid is None else _PrefixGrammar(num_valid)
-    req = _run_spec_verify_steps(scheduler, [(spec, out)], grammar=grammar)
-    payload = req.spec_decode_metrics.to_dict()
-    assert (
-        payload["num_draft_tokens"],
-        payload["num_verified_tokens"],
-        payload["num_accepted_draft_tokens"],
-    ) == expected
-
-
-class _PrefixGrammar(StructuredOutputGrammar):
-    """Grammar that accepts only the first ``num_valid`` draft tokens."""
-
-    def __init__(self, num_valid: int) -> None:
-        self.num_valid = num_valid
-
-    def validate_tokens(self, tokens: list[int]) -> list[int]:
-        return tokens[: self.num_valid]
-
-    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
-        return True
-
-    def is_terminated(self) -> bool:
-        return False
-
-    def rollback(self, num_tokens: int) -> None:
-        raise NotImplementedError
-
-    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
-        raise NotImplementedError
-
-    def reset(self) -> None:
-        raise NotImplementedError
-
-
-def test_spec_decode_stats_keep_batch_after_all_padding_draft():
-    # An async request whose draft slots are all padding proposes no draft
-    # tokens. It must not reset the stats of other requests in the batch.
+def test_spec_decode_stats_keep_batch_after_empty_draft():
+    # A request whose drafter proposed no draft tokens (e.g. ngram_gpu without
+    # a match) must not reset the stats of other requests in the batch.
     scheduler = create_scheduler(
         async_scheduling=True, num_speculative_tokens=2, speculative_method="ngram_gpu"
     )
@@ -2916,16 +2862,20 @@ def test_spec_decode_stats_keep_batch_after_all_padding_draft():
     for req in requests:
         scheduler.add_request(req)
 
-    def _mk_output(sampled):
+    def _mk_output(sampled, num_drafted=None):
         return ModelRunnerOutput(
-            req_ids=req_ids, req_id_to_index=req_id_to_index, sampled_token_ids=sampled
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled,
+            num_drafted_tokens_per_req=num_drafted,
+            num_verified_tokens_per_req=num_drafted,
         )
 
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
     # Async scheduling schedules placeholder draft slots for both requests.
     output = scheduler.schedule()
-    output.num_async_padding_slots = {req_ids[1]: 2}
-    engine_outputs = scheduler.update_from_output(output, _mk_output([[1, 9], [5]]))
+    model_output = _mk_output([[1, 9], [5]], num_drafted=[2, 0])
+    engine_outputs = scheduler.update_from_output(output, model_output)
 
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
     assert stats.num_drafts == 2

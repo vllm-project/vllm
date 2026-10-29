@@ -181,9 +181,6 @@ class Request:
         self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
-        # Draft tokens proposed by the drafter, before any trimming (sync
-        # scheduling).
-        self.num_proposed_spec_tokens = 0
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 

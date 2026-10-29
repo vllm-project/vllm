@@ -474,7 +474,7 @@ def update_scheduler_for_invalid_drafts(
     num_valid_draft_tokens_cpu: torch.Tensor,
     scheduler_output: "SchedulerOutput",
     req_id_to_index: dict[str, int],
-) -> None:
+) -> dict[str, int]:
     """Trim invalid speculative slots using per-request valid draft counts.
 
     Args:
@@ -483,9 +483,13 @@ def update_scheduler_for_invalid_drafts(
         scheduler_output: Scheduler metadata to update in-place.
         req_id_to_index: Request-id to batch-index mapping.
 
+    Returns:
+        Valid draft counts of the requests with scheduled draft tokens.
+
     """
     req_data = scheduler_output.scheduled_cached_reqs
     num_valid_draft_tokens_event.synchronize()
+    num_valid_draft_tokens: dict[str, int] = {}
 
     for req_id in req_data.req_ids:
         req_index = req_id_to_index.get(req_id)
@@ -499,6 +503,7 @@ def update_scheduler_for_invalid_drafts(
         scheduled_k = len(spec_token_ids)
 
         valid_k = int(num_valid_draft_tokens_cpu[req_index].item())
+        num_valid_draft_tokens[req_id] = valid_k
         valid_k = max(0, min(valid_k, scheduled_k))
 
         tokens_to_trim = scheduled_k - valid_k
@@ -511,6 +516,7 @@ def update_scheduler_for_invalid_drafts(
             scheduler_output.scheduled_spec_decode_tokens[req_id] = spec_token_ids[
                 :valid_k
             ]
+    return num_valid_draft_tokens
 
 
 def update_ngram_gpu_tensors_incremental(

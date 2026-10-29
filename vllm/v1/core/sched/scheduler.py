@@ -2243,6 +2243,7 @@ class Scheduler(SchedulerInterface):
             model_runner_output.prompt_token_id_logprobs_dict
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        num_drafted_tokens_per_req = model_runner_output.num_drafted_tokens_per_req
         num_verified_tokens_per_req = model_runner_output.num_verified_tokens_per_req
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
@@ -2338,26 +2339,20 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
-                # Verified draft tokens exclude async padding slots. Sync
-                # scheduling records the drafter's proposal before trimming,
-                # async scheduling only sees the scheduled slots.
-                num_verified = num_draft_tokens
-                if scheduler_output.num_async_padding_slots:
-                    num_verified -= scheduler_output.num_async_padding_slots.get(
-                        req_id, 0
-                    )
-                num_proposed = max(num_verified, request.num_proposed_spec_tokens)
-                if num_verified_tokens_per_req is not None:
+                num_drafted = num_verified = num_draft_tokens
+                if num_drafted_tokens_per_req is not None:
+                    assert num_verified_tokens_per_req is not None
+                    num_drafted = num_drafted_tokens_per_req[req_index]
                     num_verified = num_verified_tokens_per_req[req_index]
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=num_proposed,
+                    num_draft_tokens=num_drafted,
                     num_accepted_tokens=num_accepted,
                     num_verified_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
                     request.spec_decode_metrics.observe(
-                        num_draft_tokens=num_proposed,
+                        num_draft_tokens=num_drafted,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
                         num_verified_tokens=num_verified,
@@ -2854,10 +2849,6 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
-            if request.use_structured_output:
-                # The grammar drops -1 padding, which is not a proposed draft.
-                spec_token_ids = strip_speculative_padding(spec_token_ids)
-            request.num_proposed_spec_tokens = len(spec_token_ids)
             # Add newly generated spec token ids to the request.
             request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
@@ -2866,8 +2857,6 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_async_padding_slots: dict[str, int] = {}
-
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -2888,14 +2877,9 @@ class Scheduler(SchedulerInterface):
             del spec_token_ids[orig_num_spec_tokens:]
             # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
-            num_padding_slots = orig_num_spec_tokens - len(spec_token_ids)
-            if num_padding_slots:
-                spec_token_ids.extend([-1] * num_padding_slots)
-                num_async_padding_slots[req_id] = num_padding_slots
+            spec_token_ids.extend([-1] * (orig_num_spec_tokens - len(spec_token_ids)))
 
             sched_spec_tokens[req_id] = spec_token_ids
-
-        scheduler_output.num_async_padding_slots = num_async_padding_slots
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

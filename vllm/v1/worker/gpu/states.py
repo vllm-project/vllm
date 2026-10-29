@@ -79,6 +79,8 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+        # Draft tokens that came out of the drafter in its latest proposal.
+        self.num_drafted_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         self.next_prefill_tokens = torch.zeros(
             num_prefill_lookahead, self.max_num_reqs, dtype=torch.int32, device=device
@@ -116,6 +118,7 @@ class RequestState:
 
         if self.num_speculative_steps > 0:
             self.draft_tokens[req_idx].zero_()
+            self.num_drafted_tokens[req_idx] = 0
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()

@@ -123,6 +123,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        num_drafted_tokens_per_req: np.ndarray | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
@@ -132,6 +133,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.num_drafted_tokens_per_req = num_drafted_tokens_per_req
         self.num_verified_tokens_per_req = num_verified_tokens_per_req
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
@@ -190,10 +192,16 @@ class AsyncOutput(AsyncModelRunnerOutput):
         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
-        if self.num_verified_tokens_per_req_np is not None:
-            self.model_runner_output.num_verified_tokens_per_req = (
-                self.num_verified_tokens_per_req_np.tolist()
+        if self.num_drafted_tokens_per_req is not None:
+            assert self.num_verified_tokens_per_req_np is not None
+            # Draft slots beyond the drafter's proposal hold no draft token.
+            num_verified = np.minimum(
+                self.num_verified_tokens_per_req_np, self.num_drafted_tokens_per_req
             )
+            self.model_runner_output.num_drafted_tokens_per_req = (
+                self.num_drafted_tokens_per_req.tolist()
+            )
+            self.model_runner_output.num_verified_tokens_per_req = num_verified.tolist()
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
