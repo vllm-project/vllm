@@ -1227,7 +1227,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers @ git+https://github.com/huggingface/transformers.git@f836f689bd1e173cb56824fbf0e80e08806c0fce
+transformers==5.21.1
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
