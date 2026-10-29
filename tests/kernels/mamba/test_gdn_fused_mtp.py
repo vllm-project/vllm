@@ -128,6 +128,7 @@ def _build_layer(
     )
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
@@ -200,6 +201,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
     layer = types.SimpleNamespace(
         prefix=PREFIX,
         enable_fused_gdn_spec_decode=True,
+        _ba_stream=None,
         norm=types.SimpleNamespace(
             weight=torch.empty(V, dtype=torch.bfloat16, device=device)
         ),

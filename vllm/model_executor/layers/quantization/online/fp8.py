@@ -26,6 +26,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+    HummingFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -270,6 +273,8 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
+        # Transposed to (K, N); the param keeps its checkpoint dims.
+        layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -457,13 +462,17 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
-        # PTPC requires per-token activation FP8; MarlinFP8 is W8A16 and
-        # would silently produce a weight-only fp8 model.
-        if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
+        # PTPC requires per-token activation FP8; Marlin and Humming FP8 are
+        # W8A16 and would silently produce a weight-only fp8 model.
+        if isinstance(
+            self.fp8_linear,
+            (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
+        ):
             raise ValueError(
                 "FP8 PTPC online quant requires a kernel that honors "
-                "per-token activation quantization; MarlinFP8 is W8A16 "
-                "weight-only. Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
+                "per-token activation quantization; "
+                f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
+                "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
                 "for rowwise scaled_mm."
             )
 
