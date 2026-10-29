@@ -152,7 +152,7 @@ def _make_block32_layer(n: int, k: int, device: str) -> torch.nn.Module:
 
 
 @pytest.mark.parametrize("name,n,k", V41_BLOCK32_SHAPES, ids=lambda v: str(v))
-@pytest.mark.parametrize("num_tokens", [1, 7, 32, 33, 192, 1024])
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 33, 96, 192, 300, 1024, 2100])
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_block32_matches_dequant_reference(name, n, k, num_tokens):
     """32x32 block scales stay compact and the block-scaled GEMM is exact.

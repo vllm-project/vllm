@@ -1548,9 +1548,21 @@ def test_rocm_mxfp8_wo_a_bmm(
 @requires_gfx950
 @pytest.mark.parametrize(
     "num_tokens, n_groups, o_lora_rank",
-    # A tile narrower than an MX block (separate quant), then fused epilogues
-    # on the G = 4 and G = 8 tiers, including the 256-wide G = 8 tile.
-    [(1, 4, 128), (77, 4, 128), (300, 8, 128), (1100, 8, 128), (1600, 8, 256)],
+    # A tile narrower than an MX block (separate quant), then each of the nine
+    # tiles with a fused epilogue: the work tiers at G = 4 and 8, the G = 8
+    # tiers past 256 tokens and the 256-wide G = 8 tile.
+    [
+        (1, 4, 128),
+        (77, 4, 128),
+        (600, 4, 128),
+        (900, 4, 128),
+        (24, 8, 128),
+        (100, 8, 128),
+        (224, 8, 128),
+        (300, 8, 128),
+        (800, 8, 128),
+        (1600, 8, 256),
+    ],
 )
 @pytest.mark.parametrize("block_scales", [False, True])
 @torch.inference_mode()
@@ -1592,6 +1604,62 @@ def test_rocm_mxfp8_wo_a_bmm_mxfp8_matches_quantized_bmm(
     )
     assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
     assert torch.equal(q_scale, ref_scale)
+
+
+@pytest.mark.parametrize(
+    "case, expected",
+    [
+        ("block32_gemm", True),
+        ("reduce_at_tp1", True),
+        ("other_mxfp8_kernel", False),
+        ("per_row_scale", False),
+        ("bf16_weight", False),
+        ("bias", False),
+        ("tp_reduce", False),
+        ("bpreshuffled_scale", False),
+    ],
+)
+def test_wo_b_takes_wo_a_mxfp8_gate(case: str, expected: bool) -> None:
+    """wo_a hands wo_b its MXFP8 output only when wo_b's linear is the block32
+    MXFP8 GEMM on a 32x32 block-scaled e4m3 weight, without a bias or a
+    tensor-parallel reduce. Another kernel that keeps the same weight dtypes
+    and shapes does not get the fused input."""
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+
+    class OtherMxfp8Kernel(RocmDotScaledMxfp8LinearKernel):
+        pass
+
+    n, k = 64, 128
+    wo_b = SimpleNamespace(
+        quant_method=SimpleNamespace(
+            kernel=object.__new__(RocmDotScaledMxfp8LinearKernel)
+        ),
+        weight=torch.zeros(n, k, dtype=torch.float8_e4m3fn),
+        weight_scale=torch.zeros(n // 32, k // 32, dtype=torch.uint8),
+        bias=None,
+        reduce_results=False,
+        tp_size=1,
+    )
+    attn = SimpleNamespace(_wo_b_scale=None, wo_b=wo_b)
+    if case == "reduce_at_tp1":
+        wo_b.reduce_results = True
+    elif case == "other_mxfp8_kernel":
+        wo_b.quant_method.kernel = object.__new__(OtherMxfp8Kernel)
+    elif case == "per_row_scale":
+        wo_b.weight_scale = torch.zeros(n, k // 32, dtype=torch.uint8)
+    elif case == "bf16_weight":
+        wo_b.weight = torch.zeros(n, k, dtype=torch.bfloat16)
+    elif case == "bias":
+        wo_b.bias = torch.zeros(n, dtype=torch.bfloat16)
+    elif case == "tp_reduce":
+        wo_b.reduce_results, wo_b.tp_size = True, 2
+    elif case == "bpreshuffled_scale":
+        attn._wo_b_scale = torch.ones(1)
+
+    assert DeepseekV41ROCMAiterMLAAttention._wo_b_takes_wo_a_mxfp8(attn) == expected
 
 
 @requires_gfx950

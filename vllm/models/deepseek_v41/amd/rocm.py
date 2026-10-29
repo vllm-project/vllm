@@ -979,10 +979,19 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         32x32 block-scaled e4m3 weight, no bias, no tensor-parallel reduce."""
         if self._wo_b_scale is not None:
             return False
+        from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+            RocmDotScaledMxfp8LinearKernel,
+        )
+
+        # The kernel owns wo_b's weight layout: a kernel that relays out an
+        # e4m3 [N, K] weight with uint8 [N/32, K/32] scales passes every
+        # dtype and shape check below.
+        kernel = getattr(getattr(self.wo_b, "quant_method", None), "kernel", None)
         w = getattr(self.wo_b, "weight", None)
         ws = getattr(self.wo_b, "weight_scale", None)
         return (
-            w is not None
+            type(kernel) is RocmDotScaledMxfp8LinearKernel
+            and w is not None
             and ws is not None
             and w.dtype == torch.float8_e4m3fn
             and ws.dtype == torch.uint8
