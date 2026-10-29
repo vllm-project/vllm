@@ -12,7 +12,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, MambaStateSplit
 
 
 class MambaBase(AttentionLayerBase):
@@ -69,6 +69,10 @@ class MambaBase(AttentionLayerBase):
         """
         return None
 
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        """How TP shards the leading states of ``get_state_shape``, if known."""
+        return None
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
@@ -80,6 +84,7 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
+            state_splits=self.get_state_splits(),
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
             # ReplaySSM verifies the whole window off one checkpoint, so it
             # never writes the baseline's per-draft-token state slots.

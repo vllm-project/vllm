@@ -30,6 +30,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 
 # --8<-- [start:short_conv]
@@ -354,6 +355,11 @@ class ShortConv(MambaBase, PluggableLayer):
             intermediate_size=self.conv_dim,
             conv_kernel=self.L_cache,
             num_spec=self.num_spec,
+        )
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.short_conv_state_splits(
+            get_tensor_model_parallel_world_size(), self.conv_dim
         )
 
     @property

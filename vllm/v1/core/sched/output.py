@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumScheduled
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 else:
     AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
+    KVChecksumScheduled = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
     LoRARequest = object
@@ -293,6 +295,9 @@ class SchedulerOutput:
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
+    # KV blocks the workers checksum this step, when KV checksums are enabled.
+    kv_checksum_scheduled: KVChecksumScheduled | None = None
+
     # Execution-auxiliary output control metadata consumed by the worker connector.
     aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
 
@@ -310,6 +315,10 @@ class SchedulerOutput:
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
+
+    # KV checksums of producer requests finished since the last step, for
+    # connectors that send them in their own messages. Scheduler-local.
+    kv_checksums_to_send: dict[str, bytes] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.

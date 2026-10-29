@@ -336,6 +336,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if self._newly_finished_push_blocks:
             meta.push_finished_blocks = dict(self._newly_finished_push_blocks)
             self._newly_finished_push_blocks.clear()
+            # Their KV checksums, sent with the WRITE's completion notif.
+            meta.push_finished_kv_checksums = (
+                scheduler_output.kv_checksums_to_send or {}
+            )
 
         return meta
 

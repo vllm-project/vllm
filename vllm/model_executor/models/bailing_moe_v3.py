@@ -88,6 +88,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
@@ -657,6 +658,11 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_speculative_tokens,
+        )
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.kda_state_splits(
+            self.tp_size, self.num_heads, self.head_dim
         )
 
     def __init__(

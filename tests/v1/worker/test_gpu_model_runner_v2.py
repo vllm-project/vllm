@@ -49,7 +49,10 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     )
     postprocess_state = Mock()
     runner.model_state = SimpleNamespace(postprocess_state=postprocess_state)
-    runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
+    runner.kv_connector = SimpleNamespace(
+        post_forward=Mock(return_value=None),
+        add_kv_checksums=lambda output: output,
+    )
     runner.eplb = SimpleNamespace(step=Mock())
     runner.execute_model_state = ExecuteModelState(
         input_batch=local_batch,

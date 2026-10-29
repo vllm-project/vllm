@@ -14,9 +14,11 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
@@ -55,4 +57,18 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        if hasattr(self, "num_k_heads"):
+            return MambaStateShapeCalculator.gated_delta_net_state_splits(
+                self.tp_size,
+                self.num_k_heads,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+        # KDA layers, with as many key as value heads.
+        return MambaStateShapeCalculator.kda_state_splits(
+            self.tp_size, self.num_heads, self.head_dim
         )
