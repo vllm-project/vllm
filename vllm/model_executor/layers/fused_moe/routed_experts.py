@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.model_executor.utils import kernel_parameters
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -1347,7 +1348,14 @@ class RoutedExperts(PluggableLayer):
                 torch.transpose(p.data, 1, 2), requires_grad=False
             )
 
-        weights = list(self.named_parameters())
+        # Kernel views of the params: live ones only, under their runtime names
+        # (an aliased checkpoint name such as `w13_weight_packed` is reported as
+        # `w13_weight`, which the name filters below expect).
+        weights = [
+            (f"{prefix}.{name}" if prefix else name, p)
+            for prefix, module in self.named_modules()
+            for name, p in kernel_parameters(module).items()
+        ]
 
         # EPLB must use shards when original weight storage has been released.
         # Use explicit metadata: some tensor subclasses lack untyped_storage().
