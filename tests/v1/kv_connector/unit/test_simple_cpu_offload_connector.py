@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -97,12 +98,12 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
             "kv_connector_extra_config": {"num_cpu_blocks": 8},
         },
         {
-            "kv_connector": "SimpleCPUOffloadConnector"
-            if supported
-            else "ExampleConnector",
+            "kv_connector": "SimpleCPUOffloadConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"num_cpu_blocks": 8},
-        },
+        }
+        if supported
+        else _lookahead_connector_config(False),
     ]
     if nested:
         children[0] = {

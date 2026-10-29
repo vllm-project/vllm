@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, SpeculativeConfig, set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
@@ -1417,11 +1418,11 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
             "connectors": [
                 {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
                 {
-                    "kv_connector": "MooncakeStoreConnector"
-                    if all_supported
-                    else "ExampleConnector",
+                    "kv_connector": "MooncakeStoreConnector",
                     "kv_role": "kv_both",
-                },
+                }
+                if all_supported
+                else _lookahead_connector_config(False),
             ]
         },
     )

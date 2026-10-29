@@ -198,14 +198,12 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports lookahead block hashes.
+        """Whether the connector is compatible with core lookahead hashing.
 
-        A capable connector transfers request-local KV or limits cache stores
-        and lookups to blocks covered by ``request.block_hashes``. These hashes
-        include the required lookahead tokens, so no extra EAGLE trailing-block
-        drop is needed. Defaults to False.
+        Defaults to True; MoRI and UMBP currently opt out.
+        TODO: Remove this gate once both support core lookahead hashing.
         """
-        return False
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:

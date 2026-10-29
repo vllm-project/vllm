@@ -1135,7 +1135,7 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"kv_connector": True}, 1, id="kv-connector"),
     ],
 )
 def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
