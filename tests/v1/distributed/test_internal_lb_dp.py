@@ -5,16 +5,26 @@ import os
 import threading
 import time
 import traceback
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
+import torch
 
-from tests.utils import RemoteOpenAIServer
-from tests.v1.utils import check_request_balancing
+from tests.models.utils import check_logprobs_close
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
+from tests.v1.e2e.general.accuracy_utils import AccuracyTolerance, check_accuracy_budget
+from tests.v1.utils import (
+    check_request_balancing,
+    get_engine_request_counts,
+    get_prometheus_metrics,
+)
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.cpu_worker import CPUWorker
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
@@ -725,3 +735,333 @@ async def test_api_only_multinode_dp_completion_streaming(
     # Check request balancing via Prometheus metrics
     api_server = api_only_servers[0][0]
     check_request_balancing(api_server, DP_SIZE)
+
+
+class CpuEpInspection:
+    """Read loaded expert ownership through the supported worker extension API."""
+
+    def cpu_ep_expert_shards(self):
+        import torch.distributed as dist
+
+        from vllm.distributed import get_ep_group
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+        from vllm.triton_utils import HAS_TRITON
+
+        worker = cast("CPUWorker", self)
+        model = worker.get_model()
+        layers = []
+        for layer in model.modules():
+            if isinstance(layer, RoutedExperts):
+                expert_map = layer.expert_map
+                assert expert_map is not None
+                layers.append(
+                    {
+                        "global": layer.global_num_experts,
+                        "local": layer.local_num_experts,
+                        "weights": layer.w13_weight.shape[0],
+                        "map": expert_map.tolist(),
+                    }
+                )
+        group = get_ep_group()
+        local = {
+            "rank": group.rank_in_group,
+            "runner": (
+                f"{type(worker.model_runner).__module__}."
+                f"{type(worker.model_runner).__qualname__}"
+            ),
+            "use_v2_model_runner": worker.use_v2_model_runner,
+            "has_triton": HAS_TRITON,
+            "group": group.unique_name,
+            "compile_mode": worker.compilation_config.mode.name,
+            "compile_backend": worker.compilation_config.backend,
+            "cache_dir": worker.compilation_config.local_cache_dir,
+            "aot_cache_loaded": any(
+                getattr(layer, "was_aot_compile_fn_loaded_from_disk", False)
+                for layer in model.modules()
+            ),
+            "layers": layers,
+        }
+        shards = [None] * group.world_size
+        dist.all_gather_object(shards, local, group=group.cpu_group)
+        return shards
+
+
+async def _cpu_ep_completion(client, model, prompt, max_tokens, started=None):
+    response = await client.completions.create(
+        model=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0,
+        logprobs=5,
+        stream=started is not None,
+        extra_body={"ignore_eos": True},
+    )
+    if started is None:
+        choice = response.choices[0]
+        assert choice.logprobs is not None
+        assert len(choice.logprobs.tokens) == max_tokens
+        return choice.logprobs.tokens, choice.text, choice.logprobs.top_logprobs
+    tokens, text, logprobs = [], [], []
+    async for chunk in response:
+        choice = chunk.choices[0]
+        text.append(choice.text)
+        if choice.logprobs is not None:
+            tokens.extend(choice.logprobs.tokens)
+            logprobs.extend(choice.logprobs.top_logprobs)
+            if choice.logprobs.tokens:
+                started.set()
+    assert len(tokens) == max_tokens
+    return tokens, "".join(text), logprobs
+
+
+async def _wait_cpu_ep_request_state(server, *, active):
+    async with asyncio.timeout(30):
+        while True:
+            metrics = await asyncio.to_thread(get_prometheus_metrics, server)
+            running = list(metrics.get("vllm:num_requests_running", {}).values())
+            waiting = list(metrics.get("vllm:num_requests_waiting", {}).values())
+            expected = [0, 1] if active else [0, 0]
+            if sorted(running) == expected and len(waiting) == 2 and not any(waiting):
+                return
+            await asyncio.sleep(0.05)
+
+
+async def _cpu_ep_score_prefix(client, model, prefix):
+    response = await client.completions.create(
+        model=model,
+        prompt=prefix,
+        max_tokens=0,
+        echo=True,
+        logprobs=5,
+        temperature=0,
+    )
+    logprobs = response.choices[0].logprobs
+    assert logprobs is not None
+    assert len(logprobs.tokens) == len(logprobs.token_logprobs) > 1
+    assert logprobs.token_logprobs[0] is None
+    assert all(value is not None for value in logprobs.token_logprobs[1:])
+    values = torch.tensor(logprobs.token_logprobs[1:], dtype=torch.float32)
+    assert torch.isfinite(values).all()
+    return logprobs.tokens[1:], values
+
+
+def _check_cpu_ep_scores(reference, actual, label):
+    tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
+    assert len(reference) == len(actual)
+    for index, ((reference_tokens, expected), (tokens, values)) in enumerate(
+        zip(reference, actual)
+    ):
+        assert tokens == reference_tokens
+        delta = (values - expected).abs()
+        bound = tolerance.logprob_error(expected)
+        print(
+            "CPU_EP_LOGPROB_DELTA",
+            {
+                "phase": label,
+                "prefix": index,
+                "tokens": len(tokens),
+                "absolute_bound": tolerance.logprob_atol,
+                "mean_bound": tolerance.logprob_mean_atol,
+                "max_abs_delta": delta.max().item(),
+                "mean_abs_delta": delta.mean().item(),
+                "max_tolerance_ratio": (delta / bound).max().item(),
+            },
+            flush=True,
+        )
+        assert (delta <= bound).all(), f"{label}, prefix={index}: {delta}"
+        check_accuracy_budget([delta], [], tolerance, f"{label}, prefix={index}")
+
+
+def _check_cpu_ep_generated_prefix(reference, actual, label):
+    for baseline, output in zip(reference, actual):
+        shared = 0
+        for expected_token, token in zip(baseline[0], output[0]):
+            if expected_token != token:
+                break
+            shared += 1
+        if shared:
+            tokens = baseline[0][:shared]
+            expected = torch.tensor(
+                [scores[token] for token, scores in zip(tokens, baseline[2][:shared])]
+            )
+            values = torch.tensor(
+                [scores[token] for token, scores in zip(tokens, output[2][:shared])]
+            )
+            _check_cpu_ep_scores([(tokens, expected)], [(tokens, values)], label)
+
+
+async def _cpu_ep_inspect(server):
+    response = await asyncio.to_thread(
+        requests.post,
+        server.url_for("collective_rpc"),
+        json={"method": "cpu_ep_expert_shards", "timeout": 30},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["results"][0]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU serving required")
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "compiled"])
+async def test_cpu_ep_internal_lb_matches_reference_after_idle(
+    monkeypatch, tmp_path, enforce_eager
+):
+    """Loaded EP shards match the full model across idle ranks, waves and restart."""
+    model = "axolotl-ai-co/tiny-mixtral-30m"
+    revision = "99512191d2561cb631b0d3176e59ade2d76b287b"
+    args = [
+        "--revision",
+        revision,
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "256",
+        "--max-num-seqs",
+        "4",
+        "--kv-cache-memory-bytes",
+        "67108864",
+        "--host",
+        "127.0.0.1",
+        "--api-server-count",
+        "1",
+        "--distributed-executor-backend",
+        "mp",
+        "--shutdown-timeout",
+        "5",
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    env = {
+        "OMP_NUM_THREADS": "1",
+        "VLLM_CPU_OMP_THREADS_BIND": "nobind",
+        "VLLM_HOST_IP": "127.0.0.1",
+        "VLLM_LOG_STATS_INTERVAL": "0.1",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+        "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+        ),
+    }
+    monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    monkeypatch.delenv("VLLM_CPU_CI_ENV", raising=False)
+    long_prompt = "Describe a tiny robot exploring a forest. " * 8
+    short_prompt = "Hello, my name is"
+    workloads = [
+        (long_prompt, 128),
+        (short_prompt, 4),
+        (long_prompt, 8),
+        (short_prompt, 16),
+    ]
+    with RemoteOpenAIServer(model, args, env_dict=env) as reference_server:
+        async with reference_server.get_async_client(timeout=90) as client:
+            reference = [
+                await _cpu_ep_completion(client, model, *work) for work in workloads
+            ]
+            prefixes = [
+                work[0] + output[1] for work, output in zip(workloads, reference)
+            ]
+            reference_scores = [
+                await _cpu_ep_score_prefix(client, model, prefix) for prefix in prefixes
+            ]
+
+    ep_args = args + [
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "2",
+        "--data-parallel-backend",
+        "mp",
+        "--enable-expert-parallel",
+        "--all2all-backend",
+        "allgather_reducescatter",
+        "--worker-extension-cls",
+        f"{__name__}.CpuEpInspection",
+    ]
+    with RemoteOpenAIServer(model, ep_args, env_dict=env) as server:
+        shards = await _cpu_ep_inspect(server)
+        print("CPU_EP_EXECUTION", shards, flush=True)
+        assert len(shards) == 2
+        if not enforce_eager:
+            assert all(shard["cache_dir"] for shard in shards)
+            assert len({shard["cache_dir"] for shard in shards}) == 2
+        for shard in shards:
+            if enforce_eager:
+                assert shard["compile_mode"] == "NONE"
+            else:
+                assert shard["compile_mode"] != "NONE"
+                assert shard["compile_backend"] == "inductor"
+            assert shard["layers"]
+            for layer in shard["layers"]:
+                assert (layer["global"], layer["local"], layer["weights"]) == (8, 4, 4)
+                owned = [idx for idx, local in enumerate(layer["map"]) if local >= 0]
+                assert owned == list(range(shard["rank"] * 4, (shard["rank"] + 1) * 4))
+                assert [layer["map"][idx] for idx in owned] == [0, 1, 2, 3]
+        async with server.get_async_client(timeout=90) as client:
+            started = asyncio.Event()
+            async with asyncio.timeout(90), asyncio.TaskGroup() as tasks:
+                long_request = tasks.create_task(
+                    _cpu_ep_completion(client, model, *workloads[0], started=started)
+                )
+                await started.wait()
+                short_output = await _cpu_ep_completion(client, model, *workloads[1])
+                await _wait_cpu_ep_request_state(server, active=True)
+                assert not long_request.done()
+                outputs = [await long_request, short_output]
+            await _wait_cpu_ep_request_state(server, active=False)
+            check_logprobs_close(
+                outputs_0_lst=reference[:2],
+                outputs_1_lst=outputs,
+                name_0="CPU full model",
+                name_1="CPU DP2 EP2 asymmetric",
+                always_check_logprobs=True,
+            )
+            _check_cpu_ep_generated_prefix(reference[:2], outputs, "asymmetric decode")
+            async with asyncio.timeout(90):
+                outputs = await asyncio.gather(
+                    *[
+                        _cpu_ep_completion(client, model, *work)
+                        for work in workloads[2:]
+                    ]
+                )
+            await _wait_cpu_ep_request_state(server, active=False)
+            check_logprobs_close(
+                outputs_0_lst=reference[2:],
+                outputs_1_lst=outputs,
+                name_0="CPU full model",
+                name_1="CPU DP2 EP2 later wave",
+                always_check_logprobs=True,
+            )
+            _check_cpu_ep_generated_prefix(reference[2:], outputs, "later wave decode")
+            scores = await asyncio.gather(
+                *[_cpu_ep_score_prefix(client, model, prefix) for prefix in prefixes]
+            )
+            _check_cpu_ep_scores(reference_scores, scores, "after idle waves")
+            await _wait_cpu_ep_request_state(server, active=False)
+        engine_counts = get_engine_request_counts(get_prometheus_metrics(server))
+        assert set(engine_counts) == {"0", "1"}
+        assert all(count > 0 for count in engine_counts.values())
+    with RemoteOpenAIServer(model, ep_args, env_dict=env) as restarted:
+        restarted_shards = await _cpu_ep_inspect(restarted)
+        print("CPU_EP_RESTARTED", restarted_shards, flush=True)
+        if not enforce_eager:
+            assert {
+                shard["rank"]: shard["cache_dir"] for shard in restarted_shards
+            } == {shard["rank"]: shard["cache_dir"] for shard in shards}
+            assert all(shard["aot_cache_loaded"] for shard in restarted_shards)
+        async with restarted.get_async_client(timeout=90) as client:
+            output = await _cpu_ep_completion(client, model, *workloads[1])
+            scores = await _cpu_ep_score_prefix(client, model, prefixes[1])
+            _check_cpu_ep_scores(reference_scores[1:2], [scores], "restarted")
+        check_logprobs_close(
+            outputs_0_lst=reference[1:2],
+            outputs_1_lst=[output],
+            name_0="CPU full model",
+            name_1="CPU DP2 EP2 restarted",
+            always_check_logprobs=True,
+        )
+        _check_cpu_ep_generated_prefix(reference[1:2], [output], "restarted decode")
