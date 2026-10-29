@@ -59,6 +59,35 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 All fields are `null` if the underlying timing data is not available for that
 request.
 
+### Reasoning Models
+
+For models with a response parser, the first generated token may be reasoning
+output rather than final-answer content. In that case,
+`time_to_first_content_token_ms` can be greater than
+`time_to_first_token_ms`.
+
+For example, start Qwen3 with its reasoning parser:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
+  --enable-per-request-metrics
+```
+
+The relevant response metrics may look like:
+
+```json
+{
+  "metrics": {
+    "time_to_first_token_ms": 108.2,
+    "time_to_first_content_token_ms": 268.2
+  }
+}
+```
+
+Here, the model began generating output after 108.2 ms, while final-answer
+content was first emitted after 268.2 ms.
+
 !!! note
     Timing metrics describe a single generation stream, so they are only
     returned when the request maps to exactly one. They are suppressed (the
