@@ -4,13 +4,12 @@
 
 Several DeepSeek-V3-architecture checkpoints route with ``use_grouped_topk=True``
 but ``num_expert_group=1`` and ``topk_group=1``, so the group stage selects
-nothing: Moonlight-16B-A3B (64 experts, top-6), Kimi-K2 (384 experts, top-8) and
-Kimi-K3 (896 experts, top-16), all ``scoring_func="sigmoid"`` with a
-``noaux_tc`` correction bias.  On ROCm this lands in
-``aiter.biased_grouped_topk_hip`` (``grouped_topk_kernel<..., NUM_GRP=1>``),
-which keeps the biased scores in LDS and runs 16 serial rounds of
-``LDS scan -> shuffle argmax -> LDS invalidate -> LDS read of the pre-bias
-sigmoid``.  At decode (6-48 tokens) that is ~11 us per MoE layer.
+nothing: Moonlight-16B-A3B (64 experts, top-6) and Kimi-K2 (384 experts, top-8),
+both ``scoring_func="sigmoid"`` with a ``noaux_tc`` correction bias.  On ROCm this
+lands in ``aiter.biased_grouped_topk_hip`` (``grouped_topk_kernel<...,
+NUM_GRP=1>``), which keeps the biased scores in LDS and runs one serial round
+per selected expert of ``LDS scan -> shuffle argmax -> LDS invalidate -> LDS
+read of the pre-bias sigmoid``.
 
 With a single group the group-selection stage is the identity, so the op is
 exactly "sigmoid(logits) + bias -> top-k -> weights = sigmoid at the chosen
@@ -28,14 +27,16 @@ from vllm.triton_utils import tl, triton
 # Shape bounds, not model bounds: no checkpoint is assumed. _MAX_TOKENS keeps
 # this to decode / spec-verify batches, where one wave per token wins; larger
 # (prefill) batches keep the AITER kernel, which has more parallelism per
-# launch. _MAX_EXPERTS and _MAX_TOPK bound the register file the kernel holds a
-# row in -- BLOCK_E is next_power_of_2(num_experts) -- and are set above the
-# widest router in this family (Kimi-K3: 896 experts, top-16) so that routers
-# narrower than that, such as Moonlight-16B-A3B (64, top-6) and Kimi-K2
-# (384, top-8), are covered without a per-model table.
+# launch. _MAX_EXPERTS and _MAX_TOPK are where this kernel stops beating AITER
+# on MI355X (gfx950), measured under CUDA graph replay with bf16 router logits:
+# up to 512 experts and top-8 it averages 1.16-1.57x per shape, and no launch
+# falls below 0.92x even with a forced score tie. At top-16 one row with an
+# exactly tied score sends the launch through the fallback path at 0.62-0.78x
+# (512, 896 and 1024 experts), and from 896 experts tie-free launches gain at
+# most 1.09x, so those routers keep AITER.
 _MAX_TOKENS = 128
-_MAX_EXPERTS = 1024
-_MAX_TOPK = 32
+_MAX_EXPERTS = 512
+_MAX_TOPK = 8
 # One wave per token: every round's max is a pure in-wave reduction (no LDS
 # round trip / barrier), which is what bounds latency at decode batch sizes.
 _NUM_WARPS = 1
@@ -74,7 +75,7 @@ def _sigmoid_bias_flat_topk_kernel(
     w_row = topk_weights_ptr + pid.to(tl.int64) * stride_wm
     i_row = topk_ids_ptr + pid.to(tl.int64) * stride_im
 
-    # Fast path: 16 rounds of fp32 max (DPP-fused v_max) that also record the
+    # Fast path: TOPK rounds of fp32 max (DPP-fused v_max) that also record the
     # round in which each expert was taken. With no exact score ties exactly
     # TOPK experts are taken, round k == output slot k (descending, as AITER),
     # and the weights come straight from registers.

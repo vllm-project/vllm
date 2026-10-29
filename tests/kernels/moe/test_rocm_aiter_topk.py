@@ -472,7 +472,7 @@ def _assert_matches_aiter(
         (6, 64, 6),  # Moonlight-16B-A3B / Kimi-VL-A3B
         (3, 257, 8),  # prime expert count, one past a power of two
         (7, 131, 5),  # prime experts, prime topk, odd token count
-        (13, 1021, 31),  # largest prime under the expert bound, odd topk
+        (13, 509, 7),  # largest prime under the expert bound, odd topk
         (1, 2, 1),  # degenerate minimum
         (5, 65, 3),  # one past a power of two, odd topk
     ],
