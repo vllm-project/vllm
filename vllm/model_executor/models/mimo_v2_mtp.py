@@ -379,14 +379,6 @@ class MiMoV2MTP(nn.Module):
                 continue
 
             param = params_dict[name]
-            # sinks are head-parallel; slice by tp
-            if name.endswith(".sinks"):
-                total_heads = loaded_weight.shape[0]
-                heads_per_rank = total_heads // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-
             direct_weight_loader = getattr(
                 param, "weight_loader", default_weight_loader
             )

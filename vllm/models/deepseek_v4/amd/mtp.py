@@ -19,10 +19,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -43,11 +39,12 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     _FUSED_MTP_INPUT_RMSNORM_KERNEL,
     _MTP_SHARED_HEAD_RMSNORM_KERNEL,
 )
+from vllm.models.deepseek_v4.quant_config import align_mtp_quant_config
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .mega_moe import finalize_mega_moe_weights
-from .model import DeepseekV4DecoderLayer
+from .model import DeepseekV4DecoderLayer, DeepseekV4ForCausalLM
 
 logger = init_logger(__name__)
 
@@ -294,13 +291,30 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
 
 
 class DeepSeekV4MTP(nn.Module):
+    # The draft head reuses DeepseekV4DecoderLayer, so its fused linears must
+    # unfold to the same checkpoint shards for per-layer quant config lookup.
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        align_mtp_quant_config(self.quant_config, self.config)
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                layer.mtp_block.mlp,
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers.values()
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4 MTP fused shared experts are not supported yet; "
+                "please open an issue."
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -384,14 +398,6 @@ class DeepSeekV4MTP(nn.Module):
             # param, or it is genuinely unknown and should surface the normal
             # KeyError downstream rather than be silently rewritten.
             return name
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
@@ -490,12 +496,6 @@ class DeepSeekV4MTP(nn.Module):
                             name = name_mapped
                             loaded_params.add(name_mapped)
                             break
-                    continue
-                elif name.endswith(".sinks"):
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     name = _resolve_scale_name(name)

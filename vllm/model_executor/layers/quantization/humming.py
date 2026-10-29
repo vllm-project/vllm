@@ -41,6 +41,11 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     select_humming_moe_experts,
     weight_schema_to_quant_key,
 )
+from vllm.model_executor.layers.quantization.utils.humming.linear import (
+    get_live_param,
+    kernel_parameters,
+    replace_layer_parameters,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -545,21 +550,14 @@ class HummingLinearMethod(LinearMethodBase):
                 param_dtype=layer.param_dtype,
             )
             tensors.update(input_tensors)
-
-            for name, _ in list(layer.named_parameters()):
-                delattr(layer, name)
-
-            for name, tensor in tensors.items():
-                param = torch.nn.Parameter(tensor, requires_grad=False)
-                setattr(layer, name, param)
-
+            replace_layer_parameters(layer, tensors, list(layer._parameters))
             del tensors
 
         # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
         assert isinstance(self.weight_schema, _hm.HummingWeightSchema)
         force_requant = self.force_weight_schema is not None
         if force_requant and self.weight_schema != self.force_weight_schema:
-            source_tensors = layer.state_dict()
+            source_tensors = kernel_parameters(layer)
             tensors = self.weight_schema.requant_tensors(
                 tensors=source_tensors,
                 target_weight_schema=self.force_weight_schema,
@@ -571,14 +569,8 @@ class HummingLinearMethod(LinearMethodBase):
 
             self.weight_schema = self.force_weight_schema
 
-            for name, _ in list(layer.named_parameters()):
-                if name != "bias":
-                    delattr(layer, name)
-
-            for name, tensor in tensors.items():
-                param = torch.nn.Parameter(tensor, requires_grad=False)
-                setattr(layer, name, param)
-
+            names = [name for name in layer._parameters if name != "bias"]
+            replace_layer_parameters(layer, tensors, names)
             del tensors
 
         self.input_schema = check_and_fallback_input_schema(
@@ -587,7 +579,9 @@ class HummingLinearMethod(LinearMethodBase):
             param_dtype=layer.param_dtype,
             allow_fallback=self.quant_config.allow_input_schema_fallback,
         )
-        self.layer_config = _hm.prepare_layer_config(
+        source_tensors = kernel_parameters(layer)
+        self.layer_config, tensors = _hm.prepare_and_transform_humming_tensors(
+            tensors=source_tensors,
             shape_n=layer.output_partition_sizes_sum,
             shape_k=layer.input_size_per_partition,
             weight_schema=self.weight_schema,
@@ -598,22 +592,16 @@ class HummingLinearMethod(LinearMethodBase):
             torch_dtype=layer.param_dtype,
             device=layer.weight.device,
         )
-        source_tensors = dict(layer.named_parameters())
-        tensors = _hm.transform_humming_tensors(self.layer_config, source_tensors)
         name = self.input_schema.static_tensor_scale_name
         if name is not None:
             tensors[name] = source_tensors[name]
         if "bias" in tensors:
             zero_bias = torch.zeros_like(tensors["bias"])
             layer.register_buffer("zero_bias", zero_bias)
-        for name, _ in list(layer.named_parameters()):
-            delattr(layer, name)
-        for name, tensor in tensors.items():
-            param = torch.nn.Parameter(tensor, requires_grad=False)
-            setattr(layer, name, param)
+        replace_layer_parameters(layer, tensors, list(layer._parameters))
 
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = _hm.create_humming_locks(layer.weight.device)
 
     def apply(
         self,
@@ -626,12 +614,12 @@ class HummingLinearMethod(LinearMethodBase):
             self.layer_config,
             inputs=flatten_inputs,
             weight=layer.weight,
-            weight_scale=getattr(layer, "weight_scale", None),
-            zero_point=getattr(layer, "zero_point", None),
-            bias=getattr(layer, "bias" if bias is not None else "zero_bias", None),
-            weight_scale_2=getattr(layer, "weight_scale_2", None),
-            input_scale=getattr(layer, "input_scale", None),
-            input_scale_2=getattr(layer, "input_scale_2", None),
+            weight_scale=get_live_param(layer, "weight_scale"),
+            zero_point=get_live_param(layer, "zero_point"),
+            bias=get_live_param(layer, "bias" if bias is not None else "zero_bias"),
+            weight_scale_2=get_live_param(layer, "weight_scale_2"),
+            input_scale=get_live_param(layer, "input_scale"),
+            input_scale_2=get_live_param(layer, "input_scale_2"),
             hadamard_block_size=self.weight_schema.hadamard_block_size,
             locks=self.locks,
             compute_config=self.compute_config,

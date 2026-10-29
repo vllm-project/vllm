@@ -21,10 +21,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -387,14 +383,6 @@ class DeepSeekV4MTP(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
         if first_layer.mtp_block.mlp.use_native_mega_moe:
@@ -438,6 +426,13 @@ class DeepSeekV4MTP(nn.Module):
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts." in name:
+                experts = self.model.layers[str(spec_layer)].mtp_block.mlp.experts
+                if getattr(experts, "has_fused_shared_experts", False):
+                    loaded_params.add(
+                        experts.load_shared_expert_weight(name, loaded_weight)
+                    )
+                    continue
             if self.pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
@@ -490,12 +485,6 @@ class DeepSeekV4MTP(nn.Module):
                             loaded_params.add(name_mapped)
                             break
                     continue
-                elif name.endswith(".sinks"):
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
-                    continue
                 else:
                     param = params_dict[name]
                     weight_loader = getattr(
@@ -522,16 +511,8 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.process_weights_after_loading()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.model.layers.values():
-            layer.mtp_block.mlp.finalize_mega_moe_weights()
-
-    def process_weights_after_loading(self) -> None:
-        self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

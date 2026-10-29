@@ -19,10 +19,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -336,14 +332,6 @@ class DeepSeekV4MTP(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
         if first_layer.mtp_block.mlp.use_mega_moe:
@@ -442,12 +430,6 @@ class DeepSeekV4MTP(nn.Module):
                             name = name_mapped
                             loaded_params.add(name_mapped)
                             break
-                    continue
-                elif name.endswith(".sinks"):
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     param = params_dict[name]

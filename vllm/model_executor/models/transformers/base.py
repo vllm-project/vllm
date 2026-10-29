@@ -30,6 +30,7 @@ import transformers
 from packaging.version import Version
 from torch import nn
 from transformers import AutoModel, PreTrainedConfig
+from transformers.conversion_mapping import WeightRenaming, WeightTransform
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -61,6 +62,7 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
+    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -170,13 +172,14 @@ class Base(
             self._mark_model_components(vllm_config),
             init_on_device_without_buffers("meta"),
         ):
-            from_config_kwargs = self._from_config_kwargs
-            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+            self.model: PreTrainedModel = self._create_model()
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
+        # Skip the device sync of dynamic rope where it can never rescale
+        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -219,6 +222,10 @@ class Base(
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    def _create_model(self) -> "PreTrainedModel":
+        """Create the Transformers model that `self.model` wraps."""
+        return AutoModel.from_config(**self._from_config_kwargs)
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -277,6 +284,7 @@ class Base(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
             is_encoder=is_encoder,
+            use_aot_compile=False,
         )(cls)
 
     def _decorate_for_torch_compile(self):
@@ -299,11 +307,19 @@ class Base(
 
         This handles:
 
+        - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
+        orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
+
+        for mapping in self._weight_conversions():
+            # Handle weights which have been renamed in Transformers
+            if isinstance(mapping, WeightRenaming):
+                orig_to_new_renaming.append(mapping)
+            # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -333,10 +349,21 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
-        self.hf_to_vllm_mapper = WeightsMapper(orig_to_new_regex=orig_to_new_regex)
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_renaming=orig_to_new_renaming,
+            orig_to_new_regex=orig_to_new_regex,
+        )
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
+
+    def _weight_conversions(self) -> list[WeightTransform]:
+        """Transformers weight conversions not already applied by the model loader."""
+        return []
+
+    def _tp_plan(self) -> dict:
+        """The tensor parallel plan of `self.model`, relative to `self.model`."""
+        return self.model.tp_plan or {}
 
     def _get_tie_word_embeddings(self):
         """Check if the model has tied word embeddings."""
@@ -396,11 +423,7 @@ class Base(
             attrsetter(name)(module, PPMissingLayer())
 
         # Module list
-        start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers,
-            self.pp_group.rank_in_group,
-            self.pp_group.world_size,
-        )
+        start_layer, end_layer = self._pp_indices()
         layers_name = names[module_list_idx]
         # attrgetter in case the module is nested (e.g. "text_model.layers")
         layers = attrgetter(layers_name)(module)
@@ -454,7 +477,7 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
-        tp_plan = self.model.tp_plan or {}
+        tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
@@ -521,7 +544,7 @@ class Base(
                         "num_nextn_predict_layers",  # Most models
                         "mtp_num_hidden_layers",  # Qwen 3.5
                     )
-                    n_predict = getattr_iter(self.text_config, names, 0)
+                    n_predict = getattr_iter(self.text_config, names, 0) or 0
                     for i in range(num_hidden_layers, num_hidden_layers + n_predict):
                         mtp_prefix = f"{prefix}.{i}."
                         if mtp_prefix not in self.ignore_unexpected_prefixes:
@@ -564,6 +587,14 @@ class Base(
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
+    def _pp_indices(self) -> tuple[int, int]:
+        """The range of decoder layers on this pipeline parallel rank."""
+        return get_pp_indices(
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
+
     def _create_attention_instances(self, prefix: str = ""):
         """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
@@ -583,9 +614,7 @@ class Base(
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
         layer_types = getattr(text_config, "layer_types", None)
 
-        pp_rank = self.pp_group.rank_in_group
-        pp_size = self.pp_group.world_size
-        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+        start, end = self._pp_indices()
 
         for i in range(start, end):
             if i not in self.attention_fusers:

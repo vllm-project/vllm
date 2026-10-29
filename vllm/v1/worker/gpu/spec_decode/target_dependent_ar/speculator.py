@@ -10,18 +10,15 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
-from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
 
@@ -51,7 +48,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.use_fused_multi_step_decode = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -83,44 +79,12 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         """
         return True
 
-    def set_attn(
-        self,
-        model_state: ModelState,
-        kv_cache_config: KVCacheConfig,
-        block_tables: BlockTables,
-        target_input_buffers: InputBuffers,
-        target_attn_groups: list[list[AttentionGroup]],
-    ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
-        self._configure_fused_multi_step_decode()
-
-    def _configure_fused_multi_step_decode(self) -> None:
+    def _configure_decode_metadata_update(self) -> None:
+        # With one speculative step there are no draft decode steps to update.
         if self.num_speculative_steps == 1:
-            self.use_fused_multi_step_decode = False
+            self.supports_decode_metadata_update = False
             return
-
-        unsupported_backends = sorted(
-            {
-                attn_group.backend.get_name()
-                for attn_groups in self.attn_groups
-                for attn_group in attn_groups
-                if not attn_group.supports_draft_decode_metadata_update
-            }
-        )
-        self.use_fused_multi_step_decode = not unsupported_backends
-        if unsupported_backends:
-            logger.info_once(
-                "Fused multi-step draft decode is not supported by attention "
-                "backend(s) %s; falling back to rebuilding attention metadata "
-                "between draft steps.",
-                ", ".join(unsupported_backends),
-            )
+        super()._configure_decode_metadata_update()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
@@ -129,6 +93,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
+            # Draft prefill shares the target's padded attention metadata.
+            varlen_decode=self.enable_adaptive_verification,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -167,7 +133,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.target_attn_groups
+            if self.can_reuse_target_attn_metadata
+            else self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -181,7 +149,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         assert self.decode_cudagraph_manager is not None
         decode_fn = (
             self._generate_fused_drafts
-            if self.use_fused_multi_step_decode
+            if self.supports_decode_metadata_update
             else self._generate_draft
         )
         self.decode_cudagraph_manager.capture(
@@ -192,10 +160,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
-            specialize_spec_tokens=self.use_fused_multi_step_decode
+            specialize_spec_tokens=self.supports_decode_metadata_update
             and self.speculative_config.uses_dynamic_speculative_decoding(),
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
 
     @torch.inference_mode()
     def propose(
@@ -219,7 +191,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -298,8 +270,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            max_query_len=None if input_batch.has_prefill else int(max_query_len),
             need_eager=is_profile,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
         )
         num_tokens_across_dp = (
             prefill_batch_sync.num_tokens_across_dp
@@ -308,6 +281,16 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         self._prepare_eplb_forward(num_tokens)
+
+        if not skip_attn_for_dummy_run:
+            attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                prefill_batch_desc.cg_mode,
+                for_capture=dummy_run
+                and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
+            )
 
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -326,6 +309,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
+                skip_sample=num_speculative_tokens == 0,
             )
         self.on_prefill_end(num_reqs)
 
@@ -338,6 +322,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.block_tables.gather_block_tables(
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
+
+        # Prefill must keep the target batch shape; only decode can shrink it.
+        if dummy_run and dp_sync_state is not None:
+            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
 
         # Prepare the inputs for the decode steps.
         prepare_decode_inputs(
@@ -352,8 +340,12 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         decode_batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, num_query_per_req=1)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(
+                dp_sync_state,
+                num_reqs,
+                num_query_per_req=1,
+            )
+            if dp_sync_state is not None
             else (None, num_reqs)
         )
         # Each request produces exactly 1 token per draft generation step,
@@ -366,7 +358,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=decode_batch_sync,
+            dp_sync_state=decode_batch_sync,
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
@@ -382,7 +374,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         decode_fn = (
             self._fused_multi_step_decode
-            if self.use_fused_multi_step_decode
+            if self.supports_decode_metadata_update
             else self._multi_step_decode
         )
         decode_fn(
@@ -410,8 +402,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
         if self.pcp_manager is not None:
-            input_buffers = self.pcp_manager.get_draft_input_buffers(self.input_buffers)
-            is_padding = input_buffers.is_padding[:num_tokens]
+            input_buffers, is_padding = self.pcp_manager.get_draft_input_buffers(
+                self.input_buffers, num_tokens
+            )
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -472,6 +465,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_sample: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -493,6 +487,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
                 last_hidden_states, hidden_states
             )
+        if skip_sample:
+            # No drafts are needed; this pass only keeps the drafter KV in sync.
+            return
 
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
@@ -577,6 +574,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         idx_mapping = self.idx_mapping[:num_reqs]
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            for groups in self.attn_groups:
+                for group in groups:
+                    group.map_to_kernel_block_table(
+                        self.block_tables.input_block_tables[group.kv_cache_group_id]
+                    )
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return

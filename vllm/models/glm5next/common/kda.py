@@ -21,6 +21,9 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    _make_fused_conv1d_weight_loader,
+)
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
     kda_prefill_checkpoint_alignment,
@@ -198,6 +201,36 @@ class Glm5NextForgetGate(nn.Module):
         set_weight_attrs(self.A_log, {"weight_loader": _a_log_weight_loader})
 
 
+def _fused_qkv_conv1d(
+    conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
+) -> ColumnParallelLinear:
+    """The q|k|v short convs as one ``[3 * C_local, 1, K]`` parameter.
+
+    Checkpoint ``q/k/v_conv1d`` weights load as shards 0/1/2 (see
+    ``stacked_params_mapping``). The conv kernels read this parameter directly,
+    so every weight write (load, refit, offload, IPC cache) lands in it and its
+    address stays fixed for cudagraphs (#55087).
+    """
+    conv1d = ColumnParallelLinear(
+        input_size=conv_size,
+        output_size=3 * projection_size,
+        bias=False,
+        params_dtype=torch.float32,
+        prefix=prefix,
+    )
+    conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
+    delattr(conv1d.weight, "weight_loader")
+    set_weight_attrs(
+        conv1d.weight,
+        {
+            "weight_loader": _make_fused_conv1d_weight_loader(
+                [projection_size] * 3, tp_size, tp_rank
+            )
+        },
+    )
+    return conv1d
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
@@ -219,7 +252,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(
@@ -297,37 +332,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.forget_gate",
         )
 
-        self.q_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.q_conv1d",
+        self.conv1d = _fused_qkv_conv1d(
+            self.conv_size,
+            projection_size,
+            self.tp_size,
+            self.tp_rank,
+            prefix=f"{prefix}.conv1d",
         )
-        self.k_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.k_conv1d",
-        )
-        self.v_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.v_conv1d",
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
 
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -570,20 +581,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
-        conv_weights = self._merged_conv_weight
-        conv_bias = self.q_conv1d.bias
+        # three calls. conv_state is already stored as the merged q|k|v state.
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(-1)
+        )
+        conv_bias = self.conv1d.bias
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry

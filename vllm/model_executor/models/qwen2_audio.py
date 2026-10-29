@@ -430,9 +430,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         # Create mask
         padding_mask = seq_range >= lengths_expand
 
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
+        audio_attention_mask_ = padding_mask[:, None, None, :]
         audio_attention_mask = audio_attention_mask_.to(
             dtype=self.audio_tower.conv1.weight.dtype,
             device=self.audio_tower.conv1.weight.device,
