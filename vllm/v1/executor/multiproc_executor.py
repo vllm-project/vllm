@@ -20,7 +20,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 import torch
@@ -69,6 +69,11 @@ from vllm.utils.torch_utils import (
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.early_kv_recv import (
+    EarlyKVOutputAggregator,
+    EarlyKVRecvReceiver,
+    EarlyKVRecvSender,
+)
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -77,6 +82,9 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -127,6 +135,7 @@ class MultiprocExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
         self.monitor_workers = monitor_workers
+        self.early_kv_recv: EarlyKVRecvReceiver | None = None
         super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
@@ -148,6 +157,10 @@ class MultiprocExecutor(Executor):
             1, self.parallel_config.data_parallel_size_local
         )
         set_multiprocessing_worker_envs(num_local_procs)
+
+        kv_config = self.vllm_config.kv_transfer_config
+        if kv_config and kv_config.enable_early_recv:
+            self.early_kv_recv = EarlyKVRecvReceiver()
 
         if aiter_requires_tcp_store():
             distributed_init_method = get_distributed_init_method(
@@ -216,6 +229,9 @@ class MultiprocExecutor(Executor):
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=self._is_driver_worker(global_rank),
                         inherited_fds=inherited_fds,
+                        early_kv_recv_path=(
+                            self.early_kv_recv.path if self.early_kv_recv else None
+                        ),
                     )
 
             if self._can_start_workers_concurrently(inherited_fds):
@@ -429,6 +445,24 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
+    def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
+        if self.early_kv_recv is None:
+            super().init_kv_output_aggregator(connector)
+        else:
+            self.kv_output_aggregator = EarlyKVOutputAggregator.from_connector(
+                connector, self.parallel_config.world_size
+            )
+
+    def take_early_finished_recving(self) -> set[str] | None:
+        if self.early_kv_recv is None:
+            return None
+        aggregator = self.kv_output_aggregator
+        assert isinstance(aggregator, EarlyKVOutputAggregator)
+        finished: set[str] = set()
+        for notification in self.early_kv_recv.drain():
+            finished |= aggregator.add_finished_recving(notification)
+        return finished
+
     def execute_dummy_batch(self) -> None:
         self.collective_rpc(
             "execute_dummy_batch",
@@ -639,6 +673,9 @@ class MultiprocExecutor(Executor):
             for mq in response_mqs:
                 mq.shutdown()
             self.response_mqs = []
+        if early_kv_recv := getattr(self, "early_kv_recv", None):
+            early_kv_recv.close()
+            self.early_kv_recv = None
 
         logger.debug_once("[shutdown] Executor: complete")
 
@@ -711,6 +748,7 @@ class WorkerProc:
     READY_STR = "READY"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
+    early_kv_recv: EarlyKVRecvSender | None = None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -754,6 +792,7 @@ class WorkerProc:
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
         is_driver_worker: bool,
+        early_kv_recv_path: str | None = None,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
@@ -805,6 +844,10 @@ class WorkerProc:
         # (nnodes_within_dp > 1) require distributed groups to be initialized
         self._init_message_queues(input_shm_handle, vllm_config)
 
+        self.early_kv_recv = (
+            EarlyKVRecvSender(early_kv_recv_path) if early_kv_recv_path else None
+        )
+
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
@@ -819,6 +862,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
         inherited_fds: list[int] | None = None,
+        early_kv_recv_path: str | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
@@ -840,6 +884,7 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
             "inherited_fds": inherited_fds if inherited_fds is not None else [],
+            "early_kv_recv_path": early_kv_recv_path,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -926,6 +971,8 @@ class WorkerProc:
             self.rpc_broadcast_mq.shutdown()
         if self.worker_response_mq is not None:
             self.worker_response_mq.shutdown()
+        if self.early_kv_recv is not None:
+            self.early_kv_recv.close()
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
@@ -1112,6 +1159,15 @@ class WorkerProc:
                 else:
                     output = e
 
+        if (
+            self.early_kv_recv is not None
+            and not self.use_async_scheduling
+            and isinstance(output, ModelRunnerOutput)
+        ):
+            # The engine schedules as soon as it has this output, which is
+            # complete only now: report the step's receives ahead of it.
+            self.early_kv_recv.poll()
+
         if isinstance(output, ExceptionWithKVConnectorOutput):
             result: tuple[WorkerProc.ResponseStatus, Any] = (
                 WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
@@ -1154,10 +1210,28 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
+        early_kv_recv = self.early_kv_recv
         while True:
+            while early_kv_recv is not None and early_kv_recv.wait_for_poll(
+                self.rpc_broadcast_mq
+            ):
+                get_watch_dog().feed()
+                early_kv_recv.poll()
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
             self._execute_worker_rpc(rpc_request)
+            if early_kv_recv is not None and rpc_request[0] in (
+                "execute_model",
+                "sample_tokens",
+            ):
+                # Other RPCs, e.g. sleep after a pause, keep the worker idle.
+                early_kv_recv.step_rpc_done()
+                output_rank = rpc_request[3]
+                if self.use_async_scheduling or output_rank not in (None, self.rank):
+                    # Receives found during the step go out now rather than
+                    # with its output, ready only once the GPU finishes it.
+                    # A synchronous replying worker polls in enqueue_output().
+                    early_kv_recv.poll()
             del rpc_request
 
     def _execute_worker_rpc(

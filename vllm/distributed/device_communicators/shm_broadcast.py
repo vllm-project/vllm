@@ -977,6 +977,16 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
+    def readable(self) -> bool:
+        """Whether the next local ring slot is ready (overflow data may follow)."""
+        assert self._is_local_reader, "Only local readers can check readability"
+        with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+            memory_fence()
+            return (
+                bool(metadata_buffer[0])
+                and not metadata_buffer[self.local_reader_rank + 1]
+            )
+
     def dequeue(
         self,
         timeout: float | None = None,

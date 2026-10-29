@@ -241,11 +241,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
         assert ktcs is not None
         ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
+        enable_early_recv = vllm_config.kv_transfer_config.enable_early_recv
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
             engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
+            # Children follow the engine-level early receive setting.
             temp_config.kv_transfer_config = KVTransferConfig(
-                **ktc, engine_id=engine_id
+                **{**ktc, "enable_early_recv": enable_early_recv},
+                engine_id=engine_id,
             )
             ret.append(
                 (
@@ -391,6 +394,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     else:
                         self._extra_async_saves[req_id] = extra_pending - 1
         return results
+
+    def has_pending_recving(self) -> bool:
+        return any(c.has_pending_recving() for c in self._connectors)
+
+    def poll_finished_recving(self) -> set[str]:
+        finished_recving: set[str] = set()
+        for c in self._connectors:
+            finished_recving |= c.poll_finished_recving()
+        return finished_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()

@@ -36,7 +36,8 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
-def test_basic_lifecycle():
+@pytest.mark.parametrize("early_recv", [False, True])
+def test_basic_lifecycle(early_recv):
     """Test lifecycle of a remote prefill."""
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
@@ -108,6 +109,9 @@ def test_basic_lifecycle():
     model_runner_output.kv_connector_output = KVConnectorOutput(
         finished_recving={request_id}
     )
+    if early_recv:
+        scheduler.add_finished_recving({request_id})
+        model_runner_output.kv_connector_output = None
 
     # (2c): update_from_output():
     engine_core_outputs = scheduler.update_from_output(
@@ -611,6 +615,10 @@ def test_kv_fetch_stages_cleared_on_abort():
 
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert _kv_fetch_stages(scheduler) == (0, 0, 0)
+    assert request.request_id in scheduler.requests
+    scheduler.add_finished_recving({request.request_id})
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
 
 
 @patch(
