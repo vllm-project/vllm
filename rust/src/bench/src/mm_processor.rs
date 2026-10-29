@@ -215,14 +215,15 @@ async fn run_mm_processor_with_engine(
     }
 
     // Connect to the engine over the same transport the serving frontend uses.
+    let engine_count =
+        args.engine.data_parallel_size_local.unwrap_or(args.engine.data_parallel_size);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: format!("tcp://{}:{}", args.engine.handshake_host, handshake_port),
             advertised_host: args.engine.handshake_host.clone(),
-            engine_count: args
-                .engine
-                .data_parallel_size_local
-                .unwrap_or(args.engine.data_parallel_size),
+            engine_start_index: 0,
+            engine_count,
+            data_parallel_size: engine_count,
             ready_timeout: ENGINE_READY_TIMEOUT,
             local_input_address: None,
             local_output_address: None,

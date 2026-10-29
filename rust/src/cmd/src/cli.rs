@@ -814,7 +814,9 @@ impl SharedRuntimeArgs {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
+                engine_start_index: 0,
                 engine_count,
+                data_parallel_size: engine_count,
                 ready_timeout,
                 local_input_address,
                 local_output_address,

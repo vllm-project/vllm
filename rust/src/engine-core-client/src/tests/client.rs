@@ -22,6 +22,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::metrics::SchedulerStatsRecorder;
+use crate::mock_engine::MockEngineConfig;
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, ReadyMessage,
 };
@@ -42,8 +43,8 @@ use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
-    setup_mock_engine_with_init, spawn_mock_engine_task,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
+    setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -322,7 +323,9 @@ fn handshake_test_config(
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address,
             advertised_host: "127.0.0.1".to_string(),
+            engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -1026,6 +1029,300 @@ async fn coordinator_publishes_wave_state_to_frontend_subscribers() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     client.shutdown().await.unwrap();
+}
+
+/// Override the DP ranks a handshake-owned test config connects to.
+fn with_engine_range(
+    mut config: EngineCoreClientConfig,
+    start_index: u32,
+    dp_size: usize,
+) -> EngineCoreClientConfig {
+    let TransportMode::HandshakeOwner {
+        engine_start_index,
+        data_parallel_size,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("expected handshake-owned transport")
+    };
+    *engine_start_index = start_index;
+    *data_parallel_size = dp_size;
+    config
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_lb_frontends_split_ranks_and_follow_rank_zero_coordinator() {
+    init_tracing();
+    let head_ipc = IpcNamespace::new().unwrap();
+    let node_ipc = IpcNamespace::new().unwrap();
+
+    // Engine 0 runs on the rank-0 node and joins only that node's frontend.
+    let (wave_done_tx, wave_done_rx) = oneshot::channel();
+    let (head_shutdown_tx, head_shutdown_rx) = oneshot::channel();
+    let engine0_task = tokio::spawn({
+        let head_handshake = head_ipc.handshake_endpoint();
+        async move {
+            let mut engine = setup_mock_engine_sockets(head_handshake, &[0x00, 0x00]).await;
+            let mut coordinator =
+                engine.coordinator.take().expect("coordinator sockets should be present");
+
+            // Woken by the wave that engine 1 starts, engine 0 later ends it.
+            assert_eq!(
+                recv_start_dp_wave(&mut coordinator.input_sub).await,
+                (0, Some(1))
+            );
+            send_outputs(
+                &mut coordinator.output_push,
+                DpControlOutput {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    control: DpControlMessage::WaveComplete(0),
+                }
+                .into(),
+            )
+            .await;
+            let _ = wave_done_tx.send(());
+            let _ = head_shutdown_rx.await;
+        }
+    });
+
+    // Engine 1 runs on the other node and joins both frontends.
+    let (init1_tx, init1_rx) = oneshot::channel();
+    let (wave_tx, mut wave_rx) = mpsc::unbounded_channel();
+    let (node_shutdown_tx, mut node_shutdown_rx) = oneshot::channel();
+    let engine1_task = tokio::spawn({
+        let head_handshake = head_ipc.handshake_endpoint();
+        let node_handshake = node_ipc.handshake_endpoint();
+        async move {
+            let mut engine =
+                setup_hybrid_mock_engine_sockets(head_handshake, node_handshake, &[0x01, 0x00])
+                    .await;
+            let _ = init1_tx.send(engine.init.clone());
+            let mut coordinator =
+                engine.coordinator.take().expect("coordinator sockets should be present");
+            send_start_wave(&mut coordinator.output_push, 1, 0).await;
+            assert_eq!(
+                recv_start_dp_wave(&mut coordinator.input_sub).await,
+                (0, Some(1))
+            );
+
+            // Report the wave stamped on every request until shutdown.
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
+            loop {
+                tokio::select! {
+                    message = recv_engine_message(&mut data_socket.dealer) => {
+                        if message[0].as_ref() == [0x00] {
+                            let request: EngineCoreRequest =
+                                rmp_serde::from_slice(&message[1]).unwrap();
+                            let _ = wave_tx.send(request.current_wave);
+                        }
+                    }
+                    _ = &mut node_shutdown_rx => break,
+                }
+            }
+        }
+    });
+
+    let head_config = with_engine_range(
+        handshake_test_config(
+            head_ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
+        0,
+        2,
+    );
+    let node_config = with_engine_range(
+        handshake_test_config(
+            node_ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        1,
+        2,
+    );
+    let (head, node) = tokio::join!(
+        connect_client_with_ipc(head_config, &head_ipc),
+        connect_client_with_ipc(node_config, &node_ipc),
+    );
+
+    // Rank 0 handshakes with both engines but connects only to its own.
+    assert_eq!(head.engine_identities(), vec![[0x00, 0x00].as_slice()]);
+    assert_eq!(node.engine_identities(), vec![[0x01, 0x00].as_slice()]);
+    assert_eq!(
+        (head.data_parallel_size(), node.data_parallel_size()),
+        (2, 2)
+    );
+
+    // Engine 1 takes its I/O from its own frontend and the DP rendezvous from
+    // rank 0.
+    let init1 = init1_rx.await.unwrap();
+    assert_eq!(init1.addresses.inputs, vec![node_ipc.input_endpoint()]);
+    assert_eq!(
+        init1
+            .parallel_config
+            .data_parallel_rendezvous
+            .map(|rendezvous| rendezvous.data_parallel_size),
+        Some(2)
+    );
+
+    // The rank-1 frontend comes to stamp its requests with the wave that rank
+    // 0's coordinator advanced to.
+    wave_done_rx.await.unwrap();
+    let mut streams = Vec::new();
+    timeout(Duration::from_secs(2), async {
+        for i in 0.. {
+            streams.push(node.call(sample_request_with_id(&format!("req-{i}"))).await.unwrap());
+            if wave_rx.recv().await.unwrap() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the rank-1 frontend should follow the rank-0 wave");
+    drop(streams);
+
+    let _ = head_shutdown_tx.send(());
+    let _ = node_shutdown_tx.send(());
+    engine0_task.await.unwrap();
+    engine1_task.await.unwrap();
+    head.shutdown().await.unwrap();
+    node.shutdown().await.unwrap();
+}
+
+/// Connect a rank-0 frontend serving DP ranks [0, 1) of 2 while the given
+/// engines join it, and return the startup error.
+async fn rank_zero_startup_error(engines: Vec<([u8; 2], MockEngineConfig)>) -> String {
+    let ipc = IpcNamespace::new().unwrap();
+    let engine_tasks = engines
+        .into_iter()
+        .map(|(engine_id, config)| {
+            tokio::spawn(crate::mock_engine::connect_to_frontend(
+                ipc.handshake_endpoint(),
+                EngineId::from(&engine_id),
+                config,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let config = with_engine_range(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        0,
+        2,
+    );
+    let Err(error) = EngineCoreClient::connect(config.with_local_input_output_addresses(
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    ))
+    .await
+    else {
+        panic!("rank-0 startup should fail");
+    };
+    for task in engine_tasks {
+        task.abort();
+    }
+    error.to_report_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partitioned_handshake_rejects_unexpected_ranks_and_headless_remote_engines() {
+    init_tracing();
+    let headless = MockEngineConfig::default();
+    let hybrid = MockEngineConfig {
+        headless: false,
+        ..MockEngineConfig::default()
+    };
+
+    expect_test::expect!["unexpected startup handshake message: engine EngineId(0500) is not one of the expected DP ranks 0..2"].assert_eq(
+        &rank_zero_startup_error(vec![
+            ([0x00, 0x00], headless.clone()),
+            ([0x05, 0x00], hybrid),
+        ])
+        .await,
+    );
+    expect_test::expect!["unexpected startup handshake message: the engine of DP rank 1 joined headless; in hybrid or external DP LB every node runs its own frontend"].assert_eq(
+        &rank_zero_startup_error(vec![
+            ([0x00, 0x00], headless.clone()),
+            ([0x01, 0x00], headless),
+        ])
+        .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_checks_parallel_config_hashes_only_for_coordinated_dp() {
+    init_tracing();
+
+    async fn connect_engines_with_different_hashes(
+        ipc: &IpcNamespace,
+        coordinator_mode: Option<CoordinatorMode>,
+    ) -> crate::Result<EngineCoreClient> {
+        let engine_tasks = ["a", "b"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, hash)| {
+                tokio::spawn(crate::mock_engine::connect_to_frontend(
+                    ipc.handshake_endpoint(),
+                    EngineId::from(&[index as u8, 0x00]),
+                    MockEngineConfig {
+                        parallel_config_hash: Some(hash.to_string()),
+                        ..MockEngineConfig::default()
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        let result = EngineCoreClient::connect(
+            handshake_test_config(
+                ipc.handshake_endpoint(),
+                2,
+                "test-model",
+                Duration::from_secs(2),
+                0,
+                coordinator_mode,
+            )
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+        )
+        .await;
+        for task in engine_tasks {
+            task.abort();
+        }
+        result
+    }
+
+    // Dense DP ranks share no collectives, so their configs may differ.
+    let ipc = IpcNamespace::new().unwrap();
+    let client = connect_engines_with_different_hashes(&ipc, None).await.unwrap();
+    client.shutdown().await.unwrap();
+
+    let ipc = IpcNamespace::new().unwrap();
+    let Err(error) =
+        connect_engines_with_different_hashes(&ipc, Some(CoordinatorMode::InProc)).await
+    else {
+        panic!("coordinated DP startup should fail");
+    };
+    assert!(
+        error
+            .to_report_string()
+            .contains("launch every DP rank with the same parallel config"),
+        "{}",
+        error.to_report_string()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

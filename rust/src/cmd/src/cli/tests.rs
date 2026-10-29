@@ -2556,7 +2556,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let TransportMode::HandshakeOwner {
         handshake_address,
         advertised_host,
+        engine_start_index,
         engine_count,
+        data_parallel_size,
         ready_timeout,
         local_input_address,
         local_output_address,
@@ -2567,7 +2569,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
     assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
     assert_eq!(advertised_host, "10.99.48.128");
+    assert_eq!(*engine_start_index, 0);
     assert_eq!(*engine_count, 4);
+    assert_eq!(*data_parallel_size, 4);
     assert!(
         local_input_address
             .as_deref()
@@ -2585,7 +2589,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
+                engine_start_index: 0,
                 engine_count: 4,
+                data_parallel_size: 4,
                 ready_timeout: 600s,
                 local_input_address: Some(
                     "<ipc input>",
@@ -2669,7 +2675,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: handshake_address.clone(),
             advertised_host: advertised_host.clone(),
+            engine_start_index: 0,
             engine_count: *engine_count,
+            data_parallel_size: *engine_count,
             ready_timeout: *ready_timeout,
             local_input_address: Some("<ipc input>".to_string()),
             local_output_address: Some("<ipc output>".to_string()),
@@ -2703,7 +2711,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
+                engine_start_index: 0,
                 engine_count: 4,
+                data_parallel_size: 4,
                 ready_timeout: 600s,
                 local_input_address: None,
                 local_output_address: None,

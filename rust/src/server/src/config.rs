@@ -424,7 +424,13 @@ impl Config {
         match &self.coordinator_mode {
             CoordinatorMode::None => None,
             CoordinatorMode::MaybeInProc => {
-                if model_is_moe && self.engine_count() > 1 {
+                // Coordinated DP runs one coordinator, hosted by the frontend
+                // owning rank 0; other frontends learn its address from their
+                // engines' READY `dp_stats_address`.
+                if model_is_moe
+                    && self.transport_mode.data_parallel_size() > 1
+                    && self.transport_mode.engine_start_index() == 0
+                {
                     Some(EngineCoreCoordinatorMode::InProc)
                 } else {
                     None

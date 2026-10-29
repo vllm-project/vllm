@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::time::Duration;
@@ -144,9 +144,18 @@ enum EngineStartupState {
 
 /// Connect to one or more engines through the startup handshake protocol,
 /// returning the shared data-plane transport plus the registered engines.
+///
+/// The frontend connects to the engines of DP ranks `[engine_start_index,
+/// engine_start_index + engine_count)`. The frontend whose range starts at
+/// rank 0 handshakes with all `data_parallel_size` engines: in hybrid or external DP LB, engines of other
+/// ranks fetch the coordinator addresses and the DP rendezvous here and take
+/// their input/output addresses from their own frontend. Other frontends
+/// handshake only with their own engines.
 pub async fn connect_handshake(
     handshake_address: &str,
+    engine_start_index: u32,
     engine_count: usize,
+    data_parallel_size: usize,
     local_host: &str,
     local_input_address: Option<&str>,
     local_output_address: Option<&str>,
@@ -156,10 +165,15 @@ pub async fn connect_handshake(
     if engine_count == 0 {
         bail_unexpected_handshake_message!("expected engine_count >= 1");
     }
+    let handshake_count = if engine_start_index == 0 {
+        data_parallel_size
+    } else {
+        engine_count
+    };
 
     info!(
-        engine_count,
-        handshake_address, "waiting for engines to connect"
+        engine_start_index,
+        engine_count, handshake_count, handshake_address, "waiting for engines to connect"
     );
 
     // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
@@ -183,7 +197,7 @@ pub async fn connect_handshake(
     // rendezvous; the in-process coordinator runs exactly in that case.
     let parallel_config = HandshakeParallelConfig {
         data_parallel_rendezvous: enable_inproc_coordinator
-            .then(|| DataParallelRendezvous::allocate(local_host, engine_count))
+            .then(|| DataParallelRendezvous::allocate(local_host, data_parallel_size))
             .transpose()?,
     };
 
@@ -193,14 +207,22 @@ pub async fn connect_handshake(
     handshake_socket.bind(handshake_address).await?;
 
     let mut engines = BTreeMap::new();
+    // A frontend serving a subset of the DP ranks knows which engines may join:
+    // every rank for rank 0, its own ranks otherwise.
+    let own_ranks = engine_start_index..engine_start_index + engine_count as u32;
+    let handshake_ranks = if engine_start_index == 0 {
+        0..data_parallel_size as u32
+    } else {
+        own_ranks.clone()
+    };
 
     // 3. Receive HELLO from every engine and send a matching INIT. When coordinator mode is
     //    enabled, the engines will not emit READY until the coordinator barrier below completes.
-    while engines.len() < engine_count {
+    while engines.len() < handshake_count {
         debug!(
             handshake_address,
             connected = engines.len(),
-            waiting_for = engine_count,
+            waiting_for = handshake_count,
             "waiting for engine HELLO"
         );
         let message = timeout(ready_timeout, handshake_socket.recv()).await.map_err(|_| {
@@ -218,6 +240,14 @@ pub async fn connect_handshake(
                     );
                 }
                 debug!(handshake_address, ?engine_id, "received HELLO from engine");
+                if engine_count < data_parallel_size {
+                    validate_partitioned_engine(
+                        &engine_id,
+                        &handshake_message,
+                        &handshake_ranks,
+                        &own_ranks,
+                    )?;
+                }
 
                 send_init_message(
                     &mut handshake_socket,
@@ -262,16 +292,18 @@ pub async fn connect_handshake(
 
     // 4. Optional coordinator startup gate. Without coordinator there is nothing to do.
     if let Some(coordinator) = coordinator.as_mut() {
-        coordinator.wait_for_startup_gate(engine_count, ready_timeout).await?;
+        coordinator.wait_for_startup_gate(handshake_count, ready_timeout).await?;
     }
 
-    // 5. After the optional gate has opened, every engine may now send READY.
+    // 5. After the optional gate has opened, every engine may now send READY. Only coordinated
+    //    (MoE) DP ranks share collectives, so only they must agree on the parallel config.
+    let mut parallel_config_hash = None;
     while engines.values().any(|state| !state.is_ready_received()) {
         debug!(
             handshake_address,
             connected = engines.len(),
             ready = engines.values().filter(|state| state.is_ready_received()).count(),
-            waiting_for = engine_count,
+            waiting_for = handshake_count,
             "waiting for engine READY"
         );
         let message = timeout(ready_timeout, handshake_socket.recv()).await.map_err(|_| {
@@ -297,6 +329,13 @@ pub async fn connect_handshake(
                     ?handshake_message,
                     "received READY from engine"
                 );
+                if enable_inproc_coordinator {
+                    check_parallel_config_hash(
+                        &mut parallel_config_hash,
+                        &engine_id,
+                        &handshake_message,
+                    )?;
+                }
                 *state = EngineStartupState::ReadyReceived;
             }
             Some("HELLO") => {
@@ -310,9 +349,26 @@ pub async fn connect_handshake(
         }
     }
 
-    // 6. Wait for every engine to connect to the shared input socket and register itself.
+    // 6. Wait for this frontend's engines to connect to the shared input socket and register
+    //    themselves. A frontend owning a subset of the DP ranks selects them by engine index.
+    let engine_ids: Vec<_> = if engine_count == data_parallel_size {
+        engines.into_keys().collect()
+    } else {
+        let engine_range = engine_start_index..engine_start_index + engine_count as u32;
+        let engine_ids: Vec<_> = engines
+            .into_keys()
+            .filter(|engine_id| engine_id.engine_index().is_some_and(|i| engine_range.contains(&i)))
+            .collect();
+        if engine_ids.len() != engine_count {
+            bail_unexpected_handshake_message!(
+                "expected {engine_count} engines of DP ranks {engine_range:?} to handshake, got {}",
+                engine_ids.len()
+            );
+        }
+        engine_ids
+    };
     let engines =
-        wait_for_input_registrations(&mut input_socket, engines.into_keys(), ready_timeout).await?;
+        wait_for_input_registrations(&mut input_socket, engine_ids, ready_timeout).await?;
     debug!(
         engine_count = engines.len(),
         "all engines registered on shared input socket"
@@ -477,6 +533,50 @@ fn decode_handshake_message(
 
     let handshake_message: ReadyMessage = decode_msgpack(&frames[1])?;
     Ok((actual_id, handshake_message))
+}
+
+/// Check that an engine joining a frontend that serves a subset of the DP ranks
+/// is one of the expected ranks, and that an engine of another node's rank
+/// joins through its own frontend, not headless, as hybrid and external DP LB
+/// require.
+fn validate_partitioned_engine(
+    engine_id: &EngineId,
+    hello: &ReadyMessage,
+    handshake_ranks: &Range<u32>,
+    own_ranks: &Range<u32>,
+) -> Result<()> {
+    let Some(rank) = engine_id.engine_index().filter(|rank| handshake_ranks.contains(rank)) else {
+        bail_unexpected_handshake_message!(
+            "engine {engine_id:?} is not one of the expected DP ranks {handshake_ranks:?}"
+        );
+    };
+    if !own_ranks.contains(&rank) && hello.headless == Some(true) {
+        bail_unexpected_handshake_message!(
+            "the engine of DP rank {rank} joined headless; in hybrid or external DP LB every node runs its own frontend"
+        );
+    }
+    Ok(())
+}
+
+/// Check that every engine reports the same `parallel_config_hash`. Engines
+/// from launchers that disagree would otherwise pass startup and hang in a
+/// cross-rank collective.
+fn check_parallel_config_hash(
+    expected: &mut Option<String>,
+    engine_id: &EngineId,
+    ready: &ReadyMessage,
+) -> Result<()> {
+    let Some(hash) = &ready.parallel_config_hash else {
+        return Ok(());
+    };
+    match expected {
+        None => *expected = Some(hash.clone()),
+        Some(expected) if expected != hash => bail_unexpected_handshake_message!(
+            "engine {engine_id:?} reports parallel config hash {hash}, but other engines report {expected}; launch every DP rank with the same parallel config"
+        ),
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 /// Send an INIT message to the engine with the local socket addresses for the

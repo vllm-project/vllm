@@ -28,6 +28,8 @@ pub struct MockEngineConfig {
     pub local: bool,
     /// Whether the engine should advertise itself as headless.
     pub headless: bool,
+    /// `parallel_config_hash` reported in handshake READY.
+    pub parallel_config_hash: Option<String>,
     /// Engine-ready payload reported after INIT, including max model length,
     /// KV block count, and dtype.
     pub ready_response: EngineCoreReadyResponse,
@@ -40,6 +42,7 @@ impl Default for MockEngineConfig {
         Self {
             local: false,
             headless: true,
+            parallel_config_hash: None,
             ready_response: default_ready_response(),
             connect_timeout: Duration::from_secs(5),
         }
@@ -120,7 +123,7 @@ fn ready_message(status: &str, config: &MockEngineConfig) -> ReadyMessage {
         status: Some(status.to_string()),
         local: Some(config.local),
         headless: Some(config.headless),
-        parallel_config_hash: None,
+        parallel_config_hash: config.parallel_config_hash.clone(),
     }
 }
 
@@ -181,6 +184,48 @@ pub async fn connect_to_frontend(
     let data_sockets = connect_data_sockets(&init, &peer_identity, &config).await?;
     let coordinator = connect_coordinator(&init).await?;
     send_handshake_ready(&mut handshake, &config).await?;
+
+    Ok(MockEngineSockets {
+        init,
+        data_sockets,
+        coordinator,
+    })
+}
+
+/// Join a frontend owning DP rank 0 and this engine's own frontend, as a Python
+/// engine does on a node in hybrid or external DP LB: take the coordinator
+/// addresses and DP rendezvous from the rank-0 INIT and the input/output
+/// addresses from the own frontend's INIT, then send READY to both.
+pub async fn connect_to_hybrid_frontends(
+    head_handshake: impl AsRef<str>,
+    client_handshake: impl AsRef<str>,
+    engine_id: impl Into<EngineId>,
+    mut config: MockEngineConfig,
+) -> Result<MockEngineSockets> {
+    let peer_identity = peer_identity(engine_id)?;
+    // Neither handshake is headless, and only the own frontend sees the engine
+    // as local.
+    let head_config = MockEngineConfig {
+        local: false,
+        headless: false,
+        ..config.clone()
+    };
+    config.local = true;
+    config.headless = false;
+    let (mut head, mut init) =
+        start_handshake(head_handshake.as_ref(), &peer_identity, &head_config).await?;
+    let (mut client, client_init) =
+        start_handshake(client_handshake.as_ref(), &peer_identity, &config).await?;
+    init.addresses.inputs = client_init.addresses.inputs;
+    init.addresses.outputs = client_init.addresses.outputs;
+    // The engine reports the rank-0 coordinator to its own frontend.
+    config.ready_response.dp_stats_address = init.addresses.frontend_stats_publish_address.clone();
+
+    let data_sockets = connect_data_sockets(&init, &peer_identity, &config).await?;
+    let coordinator = connect_coordinator(&init).await?;
+    // The engine sends READY to its own frontend first.
+    send_handshake_ready(&mut client, &config).await?;
+    send_handshake_ready(&mut head, &head_config).await?;
 
     Ok(MockEngineSockets {
         init,
