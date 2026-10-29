@@ -100,7 +100,7 @@ def _vllm_config(**over) -> SimpleNamespace:
 
 @pytest.fixture
 def on_mi355x(monkeypatch):
-    monkeypatch.setattr(runtime, "platform_reasons", lambda: [])
+    monkeypatch.setattr(runtime, "platform_reasons", lambda _: [])
 
 
 @pytest.mark.parametrize("k, want", [(7, (8,)), (3, (4, 8)), (1, (2, 4, 6, 8))])
@@ -258,9 +258,7 @@ def test_refusals(on_mi355x, over, reason):
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch):
-    monkeypatch.setattr(
-        runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]
-    )
+    monkeypatch.setattr(runtime, "platform_reasons", lambda _: ["this GPU"])
     cfg = _vllm_config(
         **{"parallel_config.tensor_parallel_size": 4, "use_v2_model_runner": False}
     )
@@ -268,6 +266,48 @@ def test_every_refusal_is_reported_at_once(monkeypatch):
         specialized_decode_config(cfg)
     for reason in ("TP 4", "V1 model runner", "this GPU", "decode_backend=auto"):
         assert reason in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "arch, cus, int4, env_arch, reason",
+    [
+        ("gfx950", 256, False, None, None),
+        ("gfx942", 304, True, None, None),
+        ("gfx942", 304, True, "gfx942:xnack-", None),
+        ("gfx942", 304, False, None, "gfx942 without packed-int4 routed experts"),
+        ("gfx942", 80, True, None, "80 CUs (a partitioned GPU"),
+        ("gfx942", 304, True, "gfx950", "ARCH=gfx950"),
+        ("gfx950", 256, False, "gfx942", "ARCH=gfx942"),
+        ("gfx90a", 104, True, None, "this GPU"),
+    ],
+)
+def test_gpu_refusals(monkeypatch, arch, cus, int4, env_arch, reason):
+    """gfx942 has no MXFP4 MFMA: its kernels read vLLM's packed-int4 requant of
+    the routed experts. Every CTA needs a CU of its own. FlyDSL builds for
+    $ARCH, while the refusals and vLLM's MoE follow the GPU."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+    )
+    from vllm.platforms import current_platform, rocm
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: arch == "gfx950")
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: arch == "gfx942")
+    props = SimpleNamespace(
+        multi_processor_count=cus, gcnArchName=f"{arch}:sramecc+:xnack-"
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda *_: props)
+    if env_arch is None:
+        monkeypatch.delenv("ARCH", raising=False)
+    else:
+        monkeypatch.setenv("ARCH", env_arch)
+    moe = SimpleNamespace(weight=kInt4Static32 if int4 else None)
+    cfg = _vllm_config(**{"model_config.quantization_config": SimpleNamespace(moe=moe)})
+    reasons = runtime.unsupported(cfg)
+    if reason is None:
+        assert not reasons, reasons
+    else:
+        assert len(reasons) == 1 and reason in reasons[0], reasons
 
 
 def test_piecewise_graphs_only_warn(on_mi355x):

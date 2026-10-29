@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 specialized decode on MI355X (layer mode), enabled by
+"""Kimi-K3 specialized decode on MI355X and MI325X (layer mode), enabled by
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
 ``specialized_decode_config`` runs in the model's ``__init__``, before the weights
@@ -9,6 +9,7 @@ load. It returns None for the stock decode, and raises with every reason from
 serve. Checks that need the loaded weights run when the executor is built
 (``decode.SpecializedDecode``), those that need the KV cache in ``prepare_kv``."""
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -169,7 +170,7 @@ def unsupported(vllm_config) -> list[str]:
         )
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
-    return reasons + platform_reasons()
+    return reasons + platform_reasons(vllm_config)
 
 
 def text_shapes(text) -> tuple:
@@ -183,22 +184,49 @@ def text_shapes(text) -> tuple:
     )
 
 
-def platform_reasons() -> list[str]:
+def platform_reasons(vllm_config) -> list[str]:
+    """The GPU's reasons: gfx950, or gfx942 with the routed experts requantized
+    to packed int4 (it has no MXFP4 MFMA), a CU for every CTA, and no ``ARCH``
+    that makes FlyDSL build the kernels for another GPU."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         return ["this platform (ROCm only)"]
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    if not on_gfx950():
-        return ["this GPU (gfx950 / MI355X only)"]
+    if not (on_gfx950() or on_gfx942()):
+        return ["this GPU (gfx950 / MI355X and gfx942 / MI325X only)"]
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import BLOCKS
 
-    cus = torch.cuda.get_device_properties().multi_processor_count
-    if cus != BLOCKS:
+    reasons = []
+    props = torch.cuda.get_device_properties()
+    cus = props.multi_processor_count
+    if cus < BLOCKS:
         # every CTA of a launch must be resident: a partitioned GPU deadlocks
-        return [f"{cus} CUs (a partitioned GPU; the kernels need {BLOCKS})"]
-    return []
+        reasons.append(f"{cus} CUs (a partitioned GPU; the kernels need {BLOCKS})")
+    # FlyDSL builds for $ARCH (``mono.common.arch``); these checks and vLLM's MoE
+    # follow the GPU
+    arch, gpu = os.environ.get("ARCH"), props.gcnArchName.split(":")[0].lower()
+    if arch and arch.lower().split(":")[0] != gpu:
+        reasons.append(
+            f"ARCH={arch} (FlyDSL would build the kernels for it, not {gpu})"
+        )
+    if on_gfx942() and not int4_experts(vllm_config):
+        reasons.append(
+            "gfx942 without packed-int4 routed experts (--quantization-config "
+            '\'{"moe": {"weight": "int4_per_group_32"}}\')'
+        )
+    return reasons
+
+
+def int4_experts(vllm_config) -> bool:
+    """The routed experts are requantized to packed int4 (gfx942's MoE kernels)."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+    )
+
+    quant = getattr(vllm_config.model_config, "quantization_config", None)
+    return getattr(getattr(quant, "moe", None), "weight", None) == kInt4Static32
 
 
 def piecewise_graphs_only(vllm_config) -> bool:

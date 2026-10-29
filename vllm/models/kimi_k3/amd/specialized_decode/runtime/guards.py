@@ -48,12 +48,18 @@ def weight_reasons(model) -> list[str]:
             reasons.append(f"{p}: routed_scaling_factor {m.routed_scaling_factor}")
         ex = getattr(m.experts, "routed_experts", m.experts)
         qm = getattr(ex, "quant_method", None)
+        situ, experts = (
+            ("is_k3_situ_int4_gfx942", "packed-int4")
+            if moe.GFX942
+            else ("is_k3_situ_aiter", "MXFP4")
+        )
         if getattr(
             qm, "mxfp4_backend", None
-        ) != Mxfp4MoeBackend.AITER_MXFP4_BF16 or not getattr(
-            qm, "is_k3_situ_aiter", False
-        ):
-            reasons.append(f"{p}: MoE backend must be AITER_MXFP4_BF16 (K3 SiTU)")
+        ) != Mxfp4MoeBackend.AITER_MXFP4_BF16 or not getattr(qm, situ, False):
+            reasons.append(
+                f"{p}: MoE backend must be AITER_MXFP4_BF16 (K3 SiTU, {experts}"
+                " experts)"
+            )
             continue
         H, LAT, E = moe.HIDDEN, moe.LAT, moe.E
         need(f"{p} gate", m.gate.weight, (E, H), bf)
@@ -69,6 +75,8 @@ def weight_reasons(model) -> list[str]:
         for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
             if getattr(ex, name, None) is None:
                 reasons.append(f"{p}: experts have no {name}")
+        if moe.GFX942:
+            reasons += _int4_expert_reasons(p, ex)
         need(f"{p} mlp_res_norm", layer.mlp_res_norm.weight, (H,), bf)
         need(f"{p} mlp_res_proj", layer.mlp_res_proj.weight, (1, H), bf)
         need(f"{p} post_attention_layernorm", layer.post_attention_layernorm.weight,
@@ -91,6 +99,43 @@ def weight_reasons(model) -> list[str]:
              (H,), bf)  # fmt: skip
         need(f"{p} self_attention_res_proj", layer.self_attention_res_proj.weight,
              (1, H), bf)  # fmt: skip
+    return reasons
+
+
+def _int4_expert_reasons(p: str, ex) -> list[str]:
+    """gfx942: the routed experts as vLLM's int4 requant leaves them (i4x2
+    [E, N, K / 2] shuffled 16 x 16, flat bf16 group scales), as K2 reads them."""
+    from aiter import dtypes
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common import i4
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
+
+    E, LAT, RI = moe.E, moe.LAT, moe.RI
+    reasons = []
+    for name, n, k in (("w13", 2 * RI, LAT), ("w2", LAT, RI)):
+        w = getattr(ex, f"{name}_weight", None)
+        s = getattr(ex, f"{name}_weight_scale", None)
+        if w is None or s is None:
+            continue
+        if (
+            tuple(w.shape) != (E, n, k // 2)
+            or w.dtype != dtypes.i4x2
+            or not w.is_contiguous()
+            or not getattr(w, "is_shuffled", False)
+        ):
+            reasons.append(
+                f"{p}: {name} {tuple(w.shape)} {w.dtype}, kernel reads contiguous"
+                f" shuffled {(E, n, k // 2)} {dtypes.i4x2}"
+            )
+        if (
+            s.numel() != E * n * (k // i4.GROUP)
+            or s.dtype != torch.bfloat16
+            or not s.is_contiguous()
+        ):
+            reasons.append(
+                f"{p}: {name} scales {s.numel()} {s.dtype}, kernel reads"
+                f" contiguous {E * n * (k // i4.GROUP)} {torch.bfloat16}"
+            )
     return reasons
 
 
