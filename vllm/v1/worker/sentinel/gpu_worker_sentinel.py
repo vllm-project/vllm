@@ -124,7 +124,8 @@ class WorkerSentinel:
         if timeout_seconds is None:
             return
         timeout = timedelta(seconds=timeout_seconds)
-        groups = [get_dp_group(), get_tp_group()]
+        # Restore PP CPU timeout: metadata receives must detect stalled stages.
+        groups = [get_dp_group(), get_tp_group(), get_pp_group()]
         if parallel_config.enable_expert_parallel:
             groups.append(get_ep_group())
         if parallel_config.enable_eplb:
