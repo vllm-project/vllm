@@ -180,6 +180,22 @@ def test_current_stream_multithread():
     _test_stream_thread(main_dedicated_stream)
 
 
+def test_current_stream_follows_accelerator_set_stream():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    s1, s2, s3 = (torch.cuda.Stream() for _ in range(3))
+    with torch.cuda.stream(s1):
+        assert current_stream() == s1
+        torch.accelerator.set_stream(s2)
+        assert current_stream() == s2
+        assert torch.accelerator.current_stream().stream_id == s2.stream_id
+        with torch.cuda.stream(s3):
+            assert current_stream() == s3
+        assert current_stream() == s2
+    assert current_stream().stream_id == torch.accelerator.current_stream().stream_id
+
+
 @pytest.fixture
 def restore_torch_threads(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)

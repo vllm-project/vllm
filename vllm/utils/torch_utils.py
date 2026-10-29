@@ -794,6 +794,7 @@ def make_tensor_with_pad(
 
 
 prev_set_stream = torch.cuda.set_stream
+prev_accelerator_set_stream = torch.accelerator.set_stream
 
 _current_stream_tls = threading.local()
 
@@ -803,7 +804,13 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
     prev_set_stream(stream)
 
 
+def _patched_accelerator_set_stream(stream: torch.Stream) -> None:
+    _current_stream_tls.value = stream
+    prev_accelerator_set_stream(stream)
+
+
 torch.cuda.set_stream = _patched_set_stream
+torch.accelerator.set_stream = _patched_accelerator_set_stream
 
 
 class _StreamPlaceholder:
@@ -815,11 +822,12 @@ def current_stream() -> torch.cuda.Stream:
     """Replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
     it turns out that `torch.cuda.current_stream()` is quite expensive,
     as it will construct a new stream object at each call.
-    here we patch `torch.cuda.set_stream` to keep track of the current stream
-    directly, so that we can avoid calling `torch.cuda.current_stream()`.
+    here we patch `torch.cuda.set_stream` and `torch.accelerator.set_stream`
+    to keep track of the current stream directly, so that we can avoid
+    calling `torch.cuda.current_stream()`.
 
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
-    from C/C++ code.
+    or `torch._C._accelerator_setStream` from C/C++ code.
     """
     from vllm.platforms import current_platform
 
@@ -837,8 +845,8 @@ def current_stream() -> torch.cuda.Stream:
             # Ensure new stream is ordered w.r.t. replaced stream's work.
             new_stream = torch.cuda.Stream()
             new_stream.wait_stream(torch.cuda.current_stream())
-            # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(new_stream)
+            # torch.accelerator.set_stream here is _patched_accelerator_set_stream
+            torch.accelerator.set_stream(new_stream)
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
