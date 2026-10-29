@@ -997,7 +997,9 @@ class NemotronH_Nano_VL_V2(
             )
 
             # Construct the vision projection.
-            vit_hidden_size = config.vit_hidden_size
+            vit_hidden_size = getattr(config, "vision_hidden_size", None)
+            if vit_hidden_size is None:
+                vit_hidden_size = config.vit_hidden_size
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
 
@@ -1620,7 +1622,11 @@ class NemotronH_Nano_VL_V2(
             return weight[0].startswith("mlp1")
 
         def is_vision_weights(name: str) -> bool:
-            return name.startswith("vision_model.radio_model.")
+            # The whole RADIO tower lives under ``vision_model.``: legacy
+            # remote-code checkpoints nest it as ``vision_model.radio_model.*``,
+            # native Transformers checkpoints as ``vision_model.embeddings.*`` /
+            # ``vision_model.encoder.*``. RadioModel.load_weights handles both.
+            return name.startswith("vision_model.")
 
         def is_sound_weights(name: str) -> bool:
             return name.startswith("sound")
@@ -1653,7 +1659,9 @@ class NemotronH_Nano_VL_V2(
                 elif is_vision_weights(name):
                     if not load_multimodal_weights:
                         continue
-                    # Convert: vision_model.radio_model.* → radio_model.*
+                    # Strip the ``vision_model.`` prefix; the remainder is the
+                    # RADIO key (legacy ``radio_model.*`` or native
+                    # ``embeddings.*``/``encoder.*``).
                     hf_key = name[len("vision_model.") :]
                     vision_weights.append((hf_key, w.detach().clone()))
                 elif is_sound_weights(name):
