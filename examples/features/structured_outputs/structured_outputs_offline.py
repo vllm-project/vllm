@@ -6,7 +6,7 @@ regex, json schema, and grammar to produce structured and formatted
 results based on specific prompts.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
@@ -39,7 +39,7 @@ prompt_regex = (
 
 
 # Structured outputs by JSON using Pydantic schema
-class CarType(str, Enum):
+class CarType(StrEnum):
     sedan = "sedan"
     suv = "SUV"
     truck = "Truck"

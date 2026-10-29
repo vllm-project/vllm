@@ -8,7 +8,7 @@ import math
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -180,7 +180,7 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
-class KVCacheSpecKind(str, Enum):
+class KVCacheSpecKind(StrEnum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
     SLIDING_WINDOW = "sliding_window"
@@ -193,7 +193,7 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class SparseCacheRole(str, Enum):
+class SparseCacheRole(StrEnum):
     SPARSE = "sparse"
     INDEXER = "indexer"
 
@@ -1495,7 +1495,7 @@ class KVCacheTensor:
     host_resident: bool = False
 
 
-class KVCacheGroupRole(str, Enum):
+class KVCacheGroupRole(StrEnum):
     DEFAULT = "default"
     HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"

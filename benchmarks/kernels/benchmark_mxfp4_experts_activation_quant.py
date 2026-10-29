@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 import torch
@@ -47,7 +47,7 @@ DEFAULT_TP_SIZE = 4
 DEFAULT_EXPERT_COUNTS = (16, 32, 64, 128, 256)
 
 
-class TimedRegion(str, Enum):
+class TimedRegion(StrEnum):
     QUANT = "quant"
     METADATA_AND_QUANT = "metadata_and_quant"
     BOTH = "both"

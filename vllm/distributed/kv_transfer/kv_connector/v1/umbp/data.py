@@ -14,7 +14,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any, NamedTuple, overload
 
 import torch
@@ -675,7 +675,7 @@ class RequestTracker:
         return complete_tokens
 
 
-class TransferJobStatus(str, Enum):
+class TransferJobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
