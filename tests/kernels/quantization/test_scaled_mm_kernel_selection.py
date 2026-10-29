@@ -31,6 +31,8 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.fused_moe.oracle import mxfp8 as mxfp8_oracle
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -422,3 +424,35 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize("sm12x", [True, False])
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.mxfp8.prioritize_humming",
+    side_effect=lambda backends: backends,
+)
+@patch("vllm.model_executor.layers.fused_moe.oracle.mxfp8.current_platform")
+def test_mxfp8_moe_prefers_humming_over_marlin_on_sm12x(
+    platform_mock, prioritize_mock, sm12x
+):
+    """SM12x has 99 KB of shared memory, where 8-bit Marlin MoE has no fitting
+    tile for some expert shapes; Humming must come first there and only there.
+    The shared Humming priority helper is mocked to a no-op so the test only
+    exercises the SM12x reorder and does not depend on the host GPU.
+    """
+    platform_mock.is_cuda.return_value = True
+    platform_mock.is_device_capability_family.side_effect = (
+        lambda capability: sm12x and capability == 120
+    )
+    original = list(mxfp8_oracle._SUPPORTED_BACKENDS)
+
+    backends = mxfp8_oracle._get_priority_backends()
+
+    humming = backends.index(Fp8MoeBackend.HUMMING)
+    marlin = backends.index(Fp8MoeBackend.MARLIN)
+    if sm12x:
+        assert humming == marlin - 1
+    else:
+        assert marlin < humming
+    backends.remove(Fp8MoeBackend.HUMMING)
+    assert backends == [b for b in original if b != Fp8MoeBackend.HUMMING]
