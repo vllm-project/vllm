@@ -164,7 +164,7 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             )
             if mode not in sampler.sharded.geom:
                 continue
-            sampler.sharded.mode = lambda rows, m=mode: m
+            sampler.sharded.mode = lambda rows, m=mode: m  # type: ignore[method-assign,misc]
             sp.model.sample_sequential = sampler
             # compile only, as ShardedMarkovSampler.__init__ does: the first
             # launch must then compile nothing (a rank compiling mid-call
