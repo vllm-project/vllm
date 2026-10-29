@@ -20,6 +20,7 @@ from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
@@ -210,6 +211,21 @@ def test_inkling_override_exposes_all_mtp_depths():
 def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
     hf_config.num_hidden_layers = 1
     return hf_config
+
+
+@pytest.mark.cpu_test
+def test_speculators_proposal_count_defaults_draft_tokens():
+    hf_config = SpeculatorsConfig.extract_transformers_pre_trained_config(
+        {
+            "speculators_model_type": "eagle3",
+            "transformer_layer_config": {"model_type": "llama", "vocab_size": 32},
+            "speculators_config": {"proposal_methods": [{"speculative_tokens": 3}]},
+        }
+    )
+    config = _make_speculative_config(
+        hf_config, "Eagle3LlamaForCausalLM", method="eagle3"
+    )
+    assert config.num_speculative_tokens == 3
 
 
 @pytest.mark.cpu_test
