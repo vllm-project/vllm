@@ -599,6 +599,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     "found on this rank; PP splits inside a v4.1 kv-sharing "
                     "group are not supported."
                 )
+            # Top-k and candidate blocks are per-forward state, not sent by PP.
+            index_sources = [self.index_source_layer_id]
+            if (
+                self.is_index_source
+                and candidate_block_buffer is not None
+                and 0 <= self.candidate_source_layer < layer_id
+            ):
+                index_sources.append(self.candidate_source_layer)
+            for source in index_sources:
+                source_prefix = _replace_layer_index(prefix, source)
+                if source_prefix not in self._static_forward_context:
+                    raise NotImplementedError(
+                        f"Index source {source_prefix} not found on this rank; "
+                        "PP splits inside a v4.1 index-sharing group are not "
+                        "supported."
+                    )
         else:
             self.compressed_cache_prefix = None
 

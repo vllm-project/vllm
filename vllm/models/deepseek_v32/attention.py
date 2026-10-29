@@ -8,9 +8,8 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -33,12 +32,12 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import (
+    compute_skip_topk_layers,
     extract_layer_index,
-    make_empty_intermediate_tensors_factory,
+    pp_splits_layer_sharing,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
@@ -52,49 +51,15 @@ if TYPE_CHECKING:
     )
 
 
-def reuses_previous_topk(
-    config: DeepseekV2Config | DeepseekV3Config, layer_id: int
-) -> bool:
-    """Whether a layer reuses the previous layer's top-k instead of indexing."""
-    index_topk_freq = getattr(config, "index_topk_freq", 1)
-    index_topk_pattern = getattr(config, "index_topk_pattern", None)
-    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-    if index_topk_pattern is None:
-        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-    if 0 <= layer_id < len(index_topk_pattern):
-        return index_topk_pattern[layer_id] == "S"
-    return False
-
-
-def pp_carries_topk(config: DeepseekV2Config | DeepseekV3Config) -> bool:
-    """Whether a later PP stage starts on a layer that reuses the previous top-k."""
-    pp_size = get_pp_group().world_size
-    return any(
-        reuses_previous_topk(
-            config, get_pp_indices(config.num_hidden_layers, rank, pp_size)[0]
-        )
-        for rank in range(1, pp_size)
-    )
-
-
-def make_dsa_intermediate_tensors_factory(
-    config: DeepseekV2Config | DeepseekV3Config, carries_topk: bool
-):
-    make_empty_hidden = make_empty_intermediate_tensors_factory(
-        ["hidden_states", "residual"], config.hidden_size
-    )
-
-    def make_empty_intermediate_tensors(
-        batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        tensors = make_empty_hidden(batch_size, dtype, device)
-        if carries_topk:
-            tensors["topk_indices"] = torch.zeros(
-                (batch_size, config.index_topk), dtype=torch.int32, device=device
-            )
-        return tensors
-
-    return make_empty_intermediate_tensors
+def pp_topk_buffers(
+    config: DeepseekV2Config | DeepseekV3Config, topk_indices_buffer: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """The shared top-k, if a later PP stage starts on a layer that reuses it."""
+    skip_layers = compute_skip_topk_layers(config)
+    producers = set(range(config.num_hidden_layers)) - skip_layers
+    if pp_splits_layer_sharing(config.num_hidden_layers, producers, skip_layers):
+        return {"topk_indices": topk_indices_buffer}
+    return {}
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -214,7 +179,7 @@ class DeepseekV32Attention(MLAAttention):
             scaling = scaling * mscale * mscale
 
         layer_id = extract_layer_index(prefix)
-        skip_topk = reuses_previous_topk(config, layer_id)
+        skip_topk = layer_id in compute_skip_topk_layers(config)
 
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers

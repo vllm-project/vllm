@@ -7,6 +7,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.distributed import parallel_state
+from vllm.model_executor.models import utils as model_utils
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.sequence import IntermediateTensors
@@ -15,48 +17,69 @@ from vllm.sequence import IntermediateTensors
 GLM5_TOPK = dict(index_topk_freq=4, index_skip_topk_offset=3)
 
 
-class TestPPCarriesTopk:
+def _set_pp_size(monkeypatch, pp_size: int) -> None:
+    monkeypatch.setattr(
+        parallel_state, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size)
+    )
+
+
+class TestPPSplitsLayerSharing:
     @pytest.mark.parametrize(
-        "config,pp_size,expected",
+        "num_layers,producers,consumers,pp_size,expected",
         [
-            (dict(num_hidden_layers=78, **GLM5_TOPK), 2, True),
-            (dict(num_hidden_layers=76, **GLM5_TOPK), 2, False),
-            (dict(num_hidden_layers=78, **GLM5_TOPK), 1, False),
-            (dict(num_hidden_layers=4, index_topk_pattern="FFSS"), 2, True),
-            (dict(num_hidden_layers=4, index_topk_pattern="FSFS"), 2, False),
-            (dict(num_hidden_layers=78), 2, False),
+            (8, {0, 4}, {1, 2, 3, 5, 6, 7}, 2, False),
+            (8, {0, 3}, {1, 2, 4, 5, 6, 7}, 2, True),
+            (8, {0, 3}, {1, 2, 4, 5, 6, 7}, 1, False),
+            # Layers 4-5 neither produce nor consume, so stage 1 starts at 6.
+            (8, {0, 6}, {1, 2, 3, 7}, 2, False),
+            (8, {0}, {1, 2, 3, 6, 7}, 2, True),
+            (12, {0, 4, 8}, {1, 2, 3, 5, 6, 7, 9, 10, 11}, 3, False),
+            (12, {0, 5, 8}, {1, 2, 3, 4, 6, 7, 9, 10, 11}, 3, True),
         ],
         ids=[
-            "split-inside-group",
-            "split-on-group-start",
+            "split-on-producer",
+            "split-on-consumer",
             "no-pp",
-            "pattern-split-on-shared",
-            "pattern-split-on-full",
-            "no-topk-reuse",
+            "skip-unrelated-layers",
+            "unrelated-then-consumer",
+            "pp3-aligned",
+            "pp3-middle-split",
         ],
     )
-    def test_stage_boundaries(self, monkeypatch, config, pp_size, expected):
-        monkeypatch.setattr(
-            deepseek_v32_attention,
-            "get_pp_group",
-            lambda: SimpleNamespace(world_size=pp_size),
+    def test_stage_boundaries(
+        self, monkeypatch, num_layers, producers, consumers, pp_size, expected
+    ):
+        _set_pp_size(monkeypatch, pp_size)
+        assert (
+            model_utils.pp_splits_layer_sharing(num_layers, producers, consumers)
+            == expected
         )
-        config = SimpleNamespace(**config)
-        assert deepseek_v32_attention.pp_carries_topk(config) == expected
+
+    @pytest.mark.parametrize(
+        "num_layers,expected",
+        [(78, True), (76, False)],
+        ids=["glm5-default-split", "split-on-group-start"],
+    )
+    def test_dsa_topk_buffers(self, monkeypatch, num_layers, expected):
+        _set_pp_size(monkeypatch, 2)
+        config = SimpleNamespace(
+            num_hidden_layers=num_layers, index_topk=8, **GLM5_TOPK
+        )
+        buffer = torch.empty(4, 8, dtype=torch.int32)
+        buffers = deepseek_v32_attention.pp_topk_buffers(config, buffer)
+        assert buffers == ({"topk_indices": buffer} if expected else {})
 
 
-@pytest.mark.parametrize("carries_topk", [True, False], ids=["topk", "no-topk"])
-def test_empty_intermediate_tensors(carries_topk):
-    config = SimpleNamespace(hidden_size=4, index_topk=8)
-    make_empty = deepseek_v32_attention.make_dsa_intermediate_tensors_factory(
-        config, carries_topk
+def test_empty_intermediate_tensors_follow_buffers():
+    buffer = torch.empty(16, 8, dtype=torch.int32)
+    make_empty = model_utils.make_empty_intermediate_tensors_factory(
+        ["hidden_states", "residual"], 4, {"topk_indices": buffer}
     )
     tensors = make_empty(3, torch.bfloat16, torch.device("cpu"))
 
-    assert ("topk_indices" in tensors.tensors) == carries_topk
-    if carries_topk:
-        assert tensors["topk_indices"].shape == (3, 8)
-        assert tensors["topk_indices"].dtype == torch.int32
+    assert tensors["residual"].shape == (3, 4)
+    assert tensors["topk_indices"].shape == (3, 8)
+    assert tensors["topk_indices"].dtype == torch.int32
 
 
 class _TopkReusingLayer(nn.Module):
@@ -83,7 +106,7 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
     model.aux_hidden_state_layers = ()
-    model.pp_carries_topk = True
+    model.pp_buffers = {"topk_indices": model.topk_indices_buffer}
     monkeypatch.setattr(
         deepseek_v32_model,
         "get_pp_group",

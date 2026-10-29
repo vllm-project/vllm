@@ -42,13 +42,11 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    make_empty_intermediate_tensors_factory,
     make_layers,
     sequence_parallel_chunk,
 )
-from vllm.models.deepseek_v32.attention import (
-    make_dsa_intermediate_tensors_factory,
-    pp_carries_topk,
-)
+from vllm.models.deepseek_v32.attention import pp_topk_buffers
 from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32DecoderLayer,
     DeepseekV32ForCausalLM,
@@ -614,9 +612,9 @@ class Dots3NoteModel(DeepseekV32Model):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.pp_carries_topk = pp_carries_topk(config)
-        self.make_empty_intermediate_tensors = make_dsa_intermediate_tensors_factory(
-            config, self.pp_carries_topk
+        self.pp_buffers = pp_topk_buffers(config, self.topk_indices_buffer)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = (

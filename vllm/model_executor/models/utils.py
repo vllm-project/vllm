@@ -944,7 +944,100 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     )
 
 
-def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
+    """Return the backbone layers that reuse a previous layer's top-k indices.
+
+    A "shared" indexer layer performs sparse attention with the indices computed
+    by the closest preceding "full" indexer layer, so it does not build its own
+    indexer and its checkpoint indexer weights must be skipped.
+
+    Args:
+        config: The model config.
+
+    Returns:
+        The set of layer indices that share another layer's top-k indices.
+
+    Raises:
+        ValueError: If ``indexer_types`` has the wrong length or an unknown
+            entry, or if ``index_topk_freq`` is not a positive integer.
+
+    """
+    if not hasattr(config, "index_topk"):
+        return set()
+
+    num_hidden_layers = config.num_hidden_layers
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None:
+        if len(indexer_types) != num_hidden_layers:
+            raise ValueError(
+                "indexer_types must contain one entry per hidden layer: "
+                f"expected {num_hidden_layers}, got {len(indexer_types)}."
+            )
+        invalid_types = sorted(set(indexer_types) - {"full", "shared"})
+        if invalid_types:
+            raise ValueError(
+                f"indexer_types only supports 'full' and 'shared', got {invalid_types}."
+            )
+        return {
+            layer_idx
+            for layer_idx, indexer_type in enumerate(indexer_types)
+            if indexer_type == "shared"
+        }
+
+    freq = getattr(config, "index_topk_freq", 1)
+    if not isinstance(freq, int) or freq <= 0:
+        raise ValueError(f"index_topk_freq must be a positive integer, got {freq!r}.")
+    pattern = getattr(config, "index_topk_pattern", None)
+    offset = getattr(config, "index_skip_topk_offset", 2)
+    skip_layers: set[int] = set()
+    for layer_idx in range(num_hidden_layers):
+        if pattern is None:
+            if max(layer_idx - offset + 1, 0) % freq != 0:
+                skip_layers.add(layer_idx)
+        elif 0 <= layer_idx < len(pattern) and pattern[layer_idx] == "S":
+            skip_layers.add(layer_idx)
+    return skip_layers
+
+
+def pp_splits_layer_sharing(
+    num_hidden_layers: int, producers: Iterable[int], consumers: Iterable[int]
+) -> bool:
+    """Whether a later PP stage reads cross-layer state before writing it.
+
+    Each consumer layer reads state that the closest preceding producer layer
+    wrote in the same forward pass, so a stage whose first producer-or-consumer
+    layer is a consumer needs that state from an earlier stage.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+
+    consumers = set(consumers)
+    users = sorted(consumers.union(producers))
+    pp_size = get_pp_group().world_size
+    for rank in range(1, pp_size):
+        start, _ = get_pp_indices(num_hidden_layers, rank, pp_size)
+        if next((layer for layer in users if layer >= start), None) in consumers:
+            return True
+    return False
+
+
+def copy_pp_buffers(
+    intermediate_tensors: IntermediateTensors, buffers: Mapping[str, torch.Tensor]
+) -> None:
+    """Copy cross-layer state received from the previous PP stage into place."""
+    for key, buffer in buffers.items():
+        tensor = intermediate_tensors[key]
+        buffer[: tensor.shape[0]].copy_(tensor)
+
+
+def make_empty_intermediate_tensors_factory(
+    keys: list[str],
+    hidden_size: int,
+    buffers: Mapping[str, torch.Tensor] | None = None,
+):
+    """``buffers`` are token-major cross-layer state sent along with ``keys``."""
+    buffers = buffers or {}
+
     def make_empty_intermediate_tensors(
         batch_size: int,
         dtype: torch.dtype,
@@ -954,6 +1047,12 @@ def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
             {
                 key: torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
                 for key in keys
+            }
+            | {
+                key: torch.zeros(
+                    (batch_size, *buffer.shape[1:]), dtype=buffer.dtype, device=device
+                )
+                for key, buffer in buffers.items()
             }
         )
 
