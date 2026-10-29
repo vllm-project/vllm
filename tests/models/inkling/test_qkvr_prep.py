@@ -4,14 +4,14 @@
 import pytest
 import torch
 
+from vllm.models.inkling.amd.ops import qkvr_prep as amd_qkvr_prep
+from vllm.models.inkling.amd.ops import sconv as amd_sconv
+from vllm.models.inkling.nvidia.ops import qkvr_prep as nvidia_qkvr_prep
+from vllm.models.inkling.nvidia.ops import sconv as nvidia_sconv
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    import vllm.models.inkling.amd.ops.sconv as sconv
-    from vllm.models.inkling.amd.ops import qkvr_prep
-else:
-    import vllm.models.inkling.nvidia.ops.sconv as sconv
-    from vllm.models.inkling.nvidia.ops import qkvr_prep
+qkvr_prep = amd_qkvr_prep if current_platform.is_rocm() else nvidia_qkvr_prep
+sconv = amd_sconv if current_platform.is_rocm() else nvidia_sconv
 
 _cap = (
     current_platform.get_device_capability()
