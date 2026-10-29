@@ -751,6 +751,11 @@ class SamplingParams(
             )
 
     def _verify_extra_args(self) -> None:
+        # Fast path: `kv_transfer_params` is engine-generated for PD
+        # disaggregation and may carry very large block-id lists. Deep-walking
+        # it costs ~100s of ms inside the decode-loop dequeue path, so skip it.
+        if self.extra_args and set(self.extra_args.keys()) <= {"kv_transfer_params"}:
+            return
         # JSON accepts arbitrary integers, but the engine's MessagePack
         # transport only supports signed/unsigned 64-bit integers.
         pending: list[Any] = [self.extra_args]
