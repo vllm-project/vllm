@@ -49,8 +49,55 @@ steps:
       'cd tests &&
       pytest -v -s kernels/core/test_uva.py'
 
-- label: ":intel: (BMG) Qwen3.5 Shared Expert Decode"
+- label: ":intel: Qwen3.5 Native Shared Expert Decode / TP2 Reload"
   key: qwen35-shared-expert-decode
+  timeout_in_minutes: 120
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 64+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/models/qwen3_5/xpu/
+    - vllm/model_executor/layers/fused_moe/
+    - vllm/model_executor/models/qwen3_next.py
+    - vllm/v1/worker/xpu_worker.py
+    - tests/kernels/moe/test_moe.py
+    - tests/models/test_qwen3_5.py
+    - requirements/xpu.txt
+  commands:
+    # Build the pinned companion in this disposable test container only.
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'curl -fsSL
+      https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+      | gpg --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg &&
+      echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg]
+      https://apt.repos.intel.com/oneapi all main"
+      > /etc/apt/sources.list.d/oneAPI.list &&
+      apt-get update &&
+      apt-get install -y --no-install-recommends intel-oneapi-compiler-dpcpp-cpp-2026.0 &&
+      source /opt/intel/oneapi/setvars.sh &&
+      uv pip install "cmake>=3.26" ninja "setuptools>=77.0.3,<80.0.0"
+      setuptools-scm wheel packaging psutil build &&
+      BUILD_SYCL_TLA_KERNELS=ON MOE_KERNELS_ENABLED=ON
+      XPU_SPECIFIC_KERNELS_ENABLED=ON VLLM_XPU_ENABLE_XE2=ON MAX_JOBS=2
+      uv pip install --no-build-isolation --no-deps --force-reinstall
+      git+https://github.com/vllm-project/vllm-xpu-kernels.git@76f84ab8d2010334d107115089fd6b2b35008162 &&
+      cd tests &&
+      pytest -v -s
+      kernels/moe/test_moe.py
+      models/test_qwen3_5.py
+      -k "xpu_qwen3_5 and not missing_provider"'
+
+- label: ":intel: (BMG) Qwen3.5 Stock-Wheel Fallback"
+  key: qwen35-shared-expert-fallback
   timeout_in_minutes: 20
   device: intel_gpu
   agent_tags:
@@ -65,11 +112,10 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/models/qwen3_5/xpu/
-    - vllm/model_executor/layers/fused_moe/
-    - vllm/model_executor/models/qwen3_next.py
     - tests/kernels/moe/test_moe.py
+    - requirements/xpu.txt
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/moe/test_moe.py -k xpu_qwen3_5'
+      pytest -v -s kernels/moe/test_moe.py -k xpu_qwen3_5_missing_provider'
