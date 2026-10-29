@@ -72,12 +72,10 @@ capture works for dense models without enabling routed experts or prefix caching
 Routed-experts output keeps its own existing compatibility requirements and block
 storage; hidden capture does not use that storage.
 
-For a short correctness and performance comparison, run
-`benchmarks/benchmark_windowed_hidden_states.py --model /path/to/model --result result.json`.
-It compares full/window hidden values, generated tokens and raw logprobs, then
-measures capture off, full, window and an unreachable window. Use `--native-baseline`
-for an additional run with the connector disabled, and `--draft-model` to exercise
-EAGLE3. Keep the GPU exclusive during timing and compare identical configurations.
+For correctness validation, compare full/window hidden values, generated tokens
+and raw logprobs. For performance validation, measure capture off, full, window
+and an unreachable window. Keep the GPU exclusive during timing and compare
+identical configurations.
 For strict cross-run equality, set `VLLM_BATCH_INVARIANT=1` and record that setting
 with the results, since it can select different execution kernels.
 Rerun these measurements after changes to the connector or output delivery path;
