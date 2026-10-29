@@ -123,6 +123,8 @@ steps:
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/test_top_k_per_row.py

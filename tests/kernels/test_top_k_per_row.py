@@ -18,6 +18,73 @@ DATA_GENERATION = ["random", "10LSBits"]
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_sparse_topk_canonical_order_preserves_padding_and_buffer(
+    monkeypatch: pytest.MonkeyPatch, batch_invariant: bool
+) -> None:
+    """Equivalent selections get one order without touching unused buffer slots."""
+    from vllm.model_executor.layers.indexer_topk import canonicalize_topk_indices
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+    device = current_platform.device_type
+    backing = torch.full((4, 8), 99, dtype=torch.int32, device=device)
+    selections = torch.tensor(
+        [[7, 2, 5, -1], [5, 7, 2, -1], [-1, -1, -1, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    backing[:3, :4] = selections
+    expected = backing.clone()
+    if batch_invariant:
+        expected[:2, :4] = torch.tensor([2, 5, 7, -1], device=device)
+
+    canonicalize_topk_indices(backing[:3, :4])
+
+    assert torch.equal(backing, expected)
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_sparse_topk_canonical_order_after_native_selection(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """Native top-k preserves its selected set while fixing its output order."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.indexer_topk import canonicalize_topk_indices
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    device = current_platform.device_type
+    top_k, width = 512, 604
+    # Distinct scores avoid making a claim about cutoff tie-breaking.
+    logits = torch.arange(width, dtype=torch.float32, device=device)
+    logits = logits.repeat(2, 1)
+    ends = torch.tensor([300, width], dtype=torch.int32, device=device)
+    indices = torch.full((2, top_k), -1, dtype=torch.int32, device=device)
+    if phase == "prefill":
+        ops.top_k_per_row_prefill(
+            logits,
+            torch.zeros_like(ends),
+            ends,
+            indices,
+            2,
+            logits.stride(0),
+            logits.stride(1),
+            top_k,
+        )
+    else:
+        ops.top_k_per_row_decode(
+            logits, 1, ends, indices, 2, logits.stride(0), logits.stride(1), top_k
+        )
+    selected = indices.clone()
+
+    canonicalize_topk_indices(indices)
+
+    expected = torch.full_like(indices, -1)
+    expected[0, :300] = torch.arange(300, device=device)
+    expected[1] = torch.arange(width - top_k, width, device=device)
+    assert torch.equal(indices, expected)
+    assert torch.equal(indices.sort(dim=-1).values, selected.sort(dim=-1).values)
+
+
 def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 

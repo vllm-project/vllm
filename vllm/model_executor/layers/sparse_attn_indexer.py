@@ -33,6 +33,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
+    canonicalize_topk_indices,
     deep_select_topk,
     get_indexer_topk,
     is_deep_select_supported,
@@ -1008,6 +1009,9 @@ def sparse_attn_indexer(
                 topk_indices
             )
 
+    canonicalize_topk_indices(
+        topk_indices_buffer[: hidden_states.shape[0], :topk_tokens]
+    )
     return topk_indices_buffer
 
 
