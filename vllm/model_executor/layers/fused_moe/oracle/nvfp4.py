@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import move_parameter
 
 logger = init_logger(__name__)
 
@@ -209,6 +211,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+    AVAILABLE_BACKENDS = prioritize_humming(AVAILABLE_BACKENDS)
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,
@@ -332,6 +335,7 @@ def convert_to_nvfp4_moe_kernel_format(
     a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
     use_a16: bool = False,
+    trtllm_hidden_alignment: int = 256,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -417,6 +421,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
+            trtllm_hidden_alignment=trtllm_hidden_alignment,
         )
     elif nvfp4_backend == NvFp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
@@ -437,10 +442,10 @@ def convert_to_nvfp4_moe_kernel_format(
                 "strategy": "group",
                 "group_size": 16,
             }
-            # CT pack-quantized reads `weight_packed`; the method renamed it to
-            # `weight`. Re-alias (convert replaces all params anyway).
-            layer.w13_weight_packed = layer.w13_weight
-            layer.w2_weight_packed = layer.w2_weight
+            # CT pack-quantized reads `weight_packed`; the method aliased it as
+            # `weight`. Make the loaded `*_weight_packed` name the runtime one.
+            move_parameter(layer, "w13_weight", "w13_weight_packed")
+            move_parameter(layer, "w2_weight", "w2_weight_packed")
         else:
             quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
 

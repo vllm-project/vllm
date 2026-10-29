@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +18,100 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_v2_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
+)
+def test_cpu_worker_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(
+        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
+    )
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(
+            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
+        ),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner
+
+
+def test_sleep_preservation_restores_private_draft_not_shared_target():
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module()
+    draft.private = torch.nn.Linear(2, 2, bias=False)
+    draft.shared = target.weight
+    expected = draft.private.weight.detach().clone()
+    pointer = draft.private.weight.data_ptr()
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    assert set(worker._get_sleep_parameters(target)) == {
+        "weight",
+        "draft.private.weight",
+    }
+    worker._sleep_saved_parameters = {"draft.private.weight": expected}
+    with torch.no_grad():
+        target.weight.fill_(3.0)
+        draft.private.weight.zero_()
+    worker._restore_sleep_parameters(target)
+    torch.testing.assert_close(draft.private.weight, expected)
+    assert draft.private.weight.data_ptr() == pointer
+    assert torch.all(target.weight == 3.0)
+    assert worker._sleep_saved_parameters == {}
+
+
+@pytest.mark.parametrize("has_shared_draft", [False, True])
+def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
+    has_shared_draft,
+):
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module() if has_shared_draft else None
+    if draft is not None:
+        draft.shared = target.weight
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
+    worker._save_sleep_parameters(target)
+    assert worker._sleep_saved_parameters == {}
+    worker.model_config.sleep_preserve_parameter_names = ["missing"]
+    with pytest.raises(ValueError, match="No parameter matches sleep retention"):
+        worker._save_sleep_parameters(target)
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
@@ -152,6 +247,46 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
     set_settings.assert_not_called()
 
 
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
+def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_bytes):
+    """ROCm decode workspace uses max_num_seqs during startup profiling."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+
+    class Profiled(Exception):
+        pass
+
+    def profile_run(*, randomize_inputs=False):
+        assert randomize_inputs is True
+        # Without the config context, the helper falls back to all 32768
+        # batched tokens, which would reserve 128 GiB at 1M context.
+        assert _max_decode_logits_rows(32768) == 16 * (1 + 5)
+        raise Profiled
+
+    worker = SimpleNamespace(
+        vllm_config=config,
+        randomize_dummy_inputs=True,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
+        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        init_snapshot=SimpleNamespace(free_memory=2),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext()
+    )
+
+    assert get_current_vllm_config_or_none() is None
+    with pytest.raises(Profiled):
+        gpu_worker.Worker.determine_available_memory(worker)
+    assert get_current_vllm_config_or_none() is None
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
@@ -216,6 +351,23 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
+    """Ignore an old-schema budget even when the fingerprint matches."""
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 1024)
+    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    path = startup_plan._plan_path(fingerprint)
+    with open(path) as f:
+        plan = json.load(f)
+    plan["schema"] = 1
+    with open(path, "w") as f:
+        json.dump(plan, f)
+
+    maybe_apply_startup_plan(worker)
+
+    assert worker.cache_config.kv_cache_memory_bytes is None
 
 
 # Memory accounting of the profiling run (Worker.determine_available_memory).
@@ -338,15 +490,12 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                pass_config=SimpleNamespace(enable_sp=False)
-            ),
             parallel_config=SimpleNamespace(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )

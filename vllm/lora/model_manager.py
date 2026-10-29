@@ -12,12 +12,14 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
+    BaseClassificationHeadWithLoRA,
     BaseLayerWithLoRA,
     ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    TokenClassificationHeadWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import (
@@ -38,9 +40,9 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.pooler.tokwise import TokenPooler
 from vllm.model_executor.models import (
     SupportsLoRA,
-    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -58,9 +60,6 @@ DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
-
-
-class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -139,25 +138,22 @@ class LoRAModelManager:
 
         self.supported_modules_to_save = (
             {"score", "classifier"}
-            if self.is_pooling_model
-            and vllm_config.model_config.score_type == "cross-encoder"
+            if self._pooling_task in {"classify", "token_classify"}
             else set()
         )
 
-        # When the engine is started with enable_mixed_moe_lora_format=True
-        # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
-        # the model's 3D flag, so 2D and 3D adapters can coexist.
+        # Mixed-format and shared-outer adapters both use FusedMoEWithLoRA.
+        # FusedMoE3DWithLoRA only implements the fused gate/up PEFT pair.
         self._enable_mixed_moe_lora_format = (
             is_moe and lora_config.enable_mixed_moe_lora_format
         )
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self._is_3d_moe_model = (
             self._is_moe
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
+            and not self._enable_moe_shared_loras
         )
-        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
-        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
-        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
             self.model,
             force_2d_moe=self._enable_mixed_moe_lora_format,
@@ -170,12 +166,14 @@ class LoRAModelManager:
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
 
-        self._classification_head: tuple[str, ClassificationHeadWithLoRA] | None = None
+        self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
+            None
+        )
         if self.is_pooling_model:
             classification_heads = [
                 (module_name, module)
                 for module_name, module in self.modules.items()
-                if isinstance(module, ClassificationHeadWithLoRA)
+                if isinstance(module, BaseClassificationHeadWithLoRA)
             ]
             if classification_heads:
                 assert len(classification_heads) == 1, (
@@ -183,6 +181,11 @@ class LoRAModelManager:
                     f"{len(classification_heads)}."
                 )
                 self._classification_head = classification_heads[0]
+                _, classification_head = self._classification_head
+                if isinstance(classification_head, TokenClassificationHeadWithLoRA):
+                    self.model.pooler.pooling.output_sizes_fn = (
+                        classification_head.get_output_num_labels
+                    )
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
@@ -328,8 +331,8 @@ class LoRAModelManager:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
             else:
                 logger.warning_once(
-                    "Connector LoRA support disabled: model does not implement "
-                    "get_num_mm_connector_tokens(). This method is required to "
+                    "Connector LoRA support disabled: get_mm_lora_token_counts() "
+                    "returned no connector token counts, which are required to "
                     "determine the connector's token budget for LoRA operations."
                 )
 
@@ -367,15 +370,13 @@ class LoRAModelManager:
         if first_free_slot is None:
             raise ValueError("No free lora slots")
         index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
         lora_model = self._registered_adapters[lora_id]
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
-        self.lora_index_to_id[index] = lora_model.id
         num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
-            if isinstance(module, ClassificationHeadWithLoRA):
+            if isinstance(module, BaseClassificationHeadWithLoRA):
                 full_module = self._get_module_to_save_weights(lora_model, module_name)
                 if full_module is None:
                     module.reset_module_to_save(index)
@@ -406,6 +407,8 @@ class LoRAModelManager:
                 "This may be expected with pipeline or expert parallelism.",
                 lora_model.id,
             )
+        self._active_adapters[lora_id] = None
+        self.lora_index_to_id[index] = lora_model.id
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -416,6 +419,7 @@ class LoRAModelManager:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
+        self._validate_moe_lora_format(lora)
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
 
@@ -478,6 +482,9 @@ class LoRAModelManager:
             return module_name.rpartition(".")[0]
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+        # Layers that share a suffix with a LoRA layer but are not wrapped,
+        # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
+        self.unsupported_lora_modules: set[str] = set()
 
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -491,6 +498,11 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 ):
+                    if (
+                        module_name.rsplit(".", 1)[-1] in self.supported_lora_modules
+                        and self._get_punica_wrapper(module_name) is not None
+                    ):
+                        self.unsupported_lora_modules.add(module_name)
                     continue
             elif not self._match_target_modules(module_name) and not is_classifier_head:
                 # Full classification heads bypass the A/B LoRA target filter.
@@ -551,6 +563,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     self.model.config,
+                    is_token_level=isinstance(self.model.pooler, TokenPooler),
                 )
             else:
                 new_module = from_layer(
@@ -562,7 +575,9 @@ class LoRAModelManager:
                 )
             new_module = replace_submodule(self.model, module_name, new_module)
 
-            if is_classifier_head:
+            if is_classifier_head and isinstance(
+                new_module, ClassificationHeadWithLoRA
+            ):
                 self.model.pooler.replace_classifier(new_module)
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
@@ -689,13 +704,13 @@ class LoRAModelManager:
                     )
                     model.loras[module_name] = lora
                 elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
-                    # Case for 3D moe model
+                    # Case for 3D moe model, sized by global experts for EP
                     # w2
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         module.w2_input_size,
                         module.w2_output_size,
-                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w2_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -705,8 +720,7 @@ class LoRAModelManager:
                         module_name,
                         module.w13_input_size,
                         module.w13_output_size,
-                        rank
-                        * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w13_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -876,8 +890,7 @@ class LoRAModelManager:
                             module_name,
                         )
                     )
-                    for module in packed_module_names:
-                        lora_model.loras.pop(module, None)
+                    self._pop_lora_weights(lora_model, packed_module_names)
                     continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
@@ -896,8 +909,7 @@ class LoRAModelManager:
             # entries that were loaded but did not contribute to the
             # packed result. Without this they would keep extra CPU
             # memory alive after pack_moe.
-            for module in packed_module_names:
-                lora_model.loras.pop(module, None)
+            self._pop_lora_weights(lora_model, packed_module_names)
 
         for lora in lora_model.loras.values():
             lora.optimize()
@@ -920,7 +932,7 @@ class LoRAModelManager:
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
-            lora_device = next(iter(first_lora.lora_a))
+            lora_device = next(t for t in first_lora.lora_a if t is not None).device
         else:
             lora_device = first_lora.lora_a.device
         # Execute pin_memory after LoRA weight merging, mainly because:
@@ -1010,6 +1022,8 @@ class LoRAModelManager:
                     gate_up_proj_lora.lora_b,
                     down_proj_lora.lora_b,
                 ]
+                # Avoid pinning the gate_up tensors twice
+                lora_model.loras.pop(module_name + ".base_layer", None)
             else:
                 # Some 3D MoE models haven't added the `is_3d_moe_weight`
                 # attribute yet, so fallback here
@@ -1133,7 +1147,7 @@ class LoRAModelManager:
         down_proj_lora.lora_b = [w1_b, down_b, w3_b]
         # Drop the redundant base_layer entry to avoid double pin_memory
         # and to keep the activation path looking up only the wrapper key.
-        lora_model.loras.pop(module_name + ".base_layer", None)
+        self._pop_lora_weights(lora_model, [module_name + ".base_layer"])
 
     def _slice_moe_lora_ep(
         self,
@@ -1229,14 +1243,56 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.removeprefix("model.")
-            if lora_model.check_lora_name(module_name):
-                org_module_name = module_name
+            stripped_name = module_name.removeprefix("model.")
+            if lora_model.check_lora_name(stripped_name):
+                org_module_name = stripped_name
                 logger.info_once(
                     "For the pool model, successfully loaded the LoRA weights "
                     "after removing the prefix 'model.'."
                 )
+        if not lora_model.check_lora_name(org_module_name):
+            text_name = self._get_text_lora_name(lora_model, module_name)
+            if text_name is not None:
+                org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
+        for module in module_names:
+            lora_model.loras.pop(module, None)
+            if text_name := self._get_text_lora_name(lora_model, module):
+                lora_model.loras.pop(text_name)
+
+    def _get_text_lora_name(
+        self, lora_model: LoRAModel, module_name: str
+    ) -> str | None:
+        for name in self._get_text_lora_names(module_name):
+            if lora_model.check_lora_name(name):
+                logger.info_once(
+                    "Loaded text-only LoRA weights for the language model of a "
+                    "multimodal model."
+                )
+                return name
+        return None
+
+    def _get_text_lora_names(self, module_name: str) -> list[str]:
+        """Names a text-only adapter uses for a language-model module.
+
+        Adapters trained on the text-only `*ForCausalLM` (e.g. PEFT on
+        `Qwen3_5ForCausalLM`) name modules `model.layers.*` / `lm_head`, while
+        multimodal wrappers mount the language model under a prefix such as
+        `language_model.` or `llm.`. If the prefix holds a `*ForCausalLM`, the
+        text name is the remainder; if it holds a bare decoder, it is the
+        remainder under `model.`.
+        """
+        if not getattr(self, "supports_mm", False):
+            return []
+        lm_prefix = self.mm_mapping.language_model[0].rstrip(".") + "."
+        if not module_name.startswith(lm_prefix):
+            return []
+        name = module_name.removeprefix(lm_prefix)
+        if name.startswith(("model.", "lm_head")):
+            return [name]
+        return [f"model.{name}", name]
 
     def _get_module_to_save_weights(
         self, lora_model: LoRAModel, module_name: str
@@ -1254,18 +1310,56 @@ class LoRAModelManager:
             )
         return weights
 
-    def _validate_modules_to_save(self, lora_model: LoRAModel) -> None:
-        if not lora_model.modules_to_save:
+    def _validate_moe_lora_format(self, lora_model: LoRAModel) -> None:
+        if self._enable_mixed_moe_lora_format and getattr(
+            lora_model, "is_3d_lora_weight", False
+        ):
             return
-        saved_module_name = next(iter(lora_model.modules_to_save))
+        for module_name, module in self.modules.items():
+            if not isinstance(module, FusedMoEWithLoRA) or isinstance(
+                module, FusedMoE3DWithLoRA
+            ):
+                continue
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            if module_lora is not None and torch.is_tensor(module_lora.lora_a):
+                raise ValueError(
+                    f"LoRA adapter {lora_model.id} contains fused 3D MoE weights "
+                    f"for {module_name!r}, but the model uses a 2D MoE LoRA "
+                    "wrapper. Start the engine with "
+                    "enable_mixed_moe_lora_format=True "
+                    "(--enable-mixed-moe-lora-format) and set "
+                    "is_3d_lora_weight=True on the LoRA request."
+                )
+
+    def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
         if self._classification_head is None:
+            if not lora_model.modules_to_save:
+                return
+            saved_module_name = next(iter(lora_model.modules_to_save))
             raise ValueError(
                 f"Cannot load full module {saved_module_name!r}: the model does "
-                "not expose a unique ClassificationHeadWithLoRA."
+                "not expose a unique classification head."
             )
 
         module_name, wrapper = self._classification_head
         full_module = self._get_module_to_save_weights(lora_model, module_name)
+        head_lora = self._get_lora_layer_weights(lora_model, module_name)
+        has_head_weights = full_module is not None or head_lora is not None
+
+        # DispatchPooler does not replace the classifier in its token branch.
+        if (
+            self._pooling_task == "token_classify"
+            and isinstance(wrapper, ClassificationHeadWithLoRA)
+            and has_head_weights
+        ):
+            raise ValueError(
+                f"Classification head {module_name!r} uses request routing; "
+                "token_classify requires a token-routed classification head."
+            )
+
+        if not lora_model.modules_to_save:
+            return
+        saved_module_name = next(iter(lora_model.modules_to_save))
         if full_module is None:
             raise ValueError(
                 f"Full module {saved_module_name!r} does not match the model's "
@@ -1296,28 +1390,6 @@ class LoRAModelManager:
                 "an incompatible bias shape: expected "
                 f"{expected_bias_shape}, received {received_bias_shape}."
             )
-
-    def _validate_token_classification_lora(self, lora_model: LoRAModel) -> None:
-        if self._pooling_task != "token_classify":
-            return
-        if self._classification_head is None:
-            return
-
-        module_name, _ = self._classification_head
-        has_full_module = (
-            self._get_module_to_save_weights(lora_model, module_name) is not None
-        )
-        has_lora_weights = (
-            self._get_lora_layer_weights(lora_model, module_name) is not None
-        )
-        if not has_full_module and not has_lora_weights:
-            return
-
-        raise ValueError(
-            f"LoRA adapter {lora_model.id} contains weights for classification "
-            f"head {module_name!r}, but token_classify only supports LoRA on "
-            "the model backbone."
-        )
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:

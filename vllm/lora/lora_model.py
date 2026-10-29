@@ -15,7 +15,6 @@ from vllm.lora.utils import (
     is_base_embedding_weights,
     parse_fine_tuned_lora_name,
 )
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -151,8 +150,10 @@ class LoRAModel:
                 continue
 
             if module_name not in loras:
+                # rank/alpha patterns refer to the names before weights mapping
+                peft_module_name, _ = parse_fine_tuned_lora_name(tensor_name)
                 loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, peft_helper
+                    module_name, peft_helper, peft_module_name
                 )
 
             if is_lora_a:
@@ -204,9 +205,9 @@ class LoRAModel:
         dtype: torch.dtype | None = None,
         model_vocab_size: int | None = None,
         weights_mapper: WeightsMapper | None = None,
-        tensorizer_config_dict: dict | None = None,
         skip_prefixes: list[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        unsupported_lora_modules: set[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -223,8 +224,6 @@ class LoRAModel:
                 embedding deltas.
             weights_mapper: Optional mapper rewriting checkpoint weight names
                 to vLLM names.
-            tensorizer_config_dict: Optional tensorizer config used to load
-                the checkpoint via tensorizer instead of from disk.
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
@@ -233,6 +232,9 @@ class LoRAModel:
                 slicing metadata shared across all MoE layers. Non-local
                 expert weights are skipped at read time instead of being
                 loaded and discarded later.
+            unsupported_lora_modules: Full names of model layers that match
+                expected_lora_modules but are not wrapped by LoRA, such as
+                BERT's pooler.dense. LoRA weights on them are unexpected.
 
         Returns:
             Loaded LoRA Model.
@@ -272,6 +274,9 @@ class LoRAModel:
                 ):
                     unexpected_modules.append(module_name)
 
+                elif module_name in (unsupported_lora_modules or ()):
+                    unexpected_modules.append(f"{module_name} (not a LoRA layer)")
+
             if unexpected_modules:
                 raise ValueError(
                     f"While loading {lora_dir}, expected"
@@ -280,24 +285,7 @@ class LoRAModel:
                     f" Please verify that the loaded LoRA module is correct"
                 )
 
-        if tensorizer_config_dict:
-            from tensorizer import TensorDeserializer
-
-            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            tensorizer_dir = tensorizer_config.tensorizer_dir
-            if tensorizer_dir is None:
-                raise ValueError("tensorizer_dir must be set in tensorizer config.")
-            lora_tensor_path = os.path.join(tensorizer_dir, "adapter_model.tensors")
-            tensorizer_args = tensorizer_config._construct_tensorizer_args()
-            tensors = TensorDeserializer(
-                lora_tensor_path,
-                dtype=tensorizer_config.dtype,
-                device=device,
-                **tensorizer_args.deserialization_kwargs,
-            )
-            check_unexpected_modules(tensors)
-
-        elif os.path.isfile(lora_tensor_path):
+        if os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist

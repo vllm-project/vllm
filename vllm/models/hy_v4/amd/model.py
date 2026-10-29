@@ -36,8 +36,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -72,8 +70,13 @@ from ..nvidia.attention import (
     is_skip_topk_indexer_weight,
     sparse_layer_ids,
 )
-from ..nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer
 from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
+from .hc import (
+    HYV4HCHeadLayer,
+    HYV4HCLayer,
+    HYV4HCPreLayer,
+)
+from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
 
@@ -197,15 +200,35 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        attention_output = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
-
-        hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
-        hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        can_fuse_ihc_post_pre_rms_norm = (
+            triton_ihc_supported(attention_output)
+            and self.hc_attn_layer.hc_post.hpc_op is None
+            and self.hc_mlp_layer.hc_pre.hpc_op is None
+        )
+        if can_fuse_ihc_post_pre_rms_norm:
+            hidden_states, post_gates, residual = triton_ihc_post_pre_rms_norm(
+                attention_output,
+                residual,
+                post_gates,
+                self.hc_mlp_layer.hc_pre.hc_fn.weight,
+                self.hc_mlp_layer.hc_pre.hc_scale,
+                self.hc_mlp_layer.hc_pre.hc_base,
+                self.post_attention_layernorm.weight,
+                self.hc_mlp_layer.hc_pre.magnitude,
+                self.hc_mlp_layer.hc_pre.hc_eps,
+                self.hc_mlp_layer.hc_pre.layernorm_epsilon,
+            )
+        else:
+            hidden_states = self.hc_attn_layer.post(
+                attention_output, residual, post_gates
+            )
+            hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
+            hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
@@ -453,12 +476,6 @@ class HYV4Model(nn.Module):
         split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
 
-        # Sink weights are sharded like the q/k/v linears.
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
         base_layer = (
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
@@ -590,51 +607,48 @@ class HYV4Model(nn.Module):
                 if loaded_expert_param_names:
                     loaded_params.update(loaded_expert_param_names)
                     continue
-                if "learnable_sink_param" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                else:
-                    if is_expert_weight:
-                        # An expert weight that is not mapped to this rank.
-                        continue
-                    if "gate.e_score_correction_bias" in name:
-                        name = name.replace(
-                            "gate.e_score_correction_bias", "expert_bias"
-                        )
-                    if "router.gate." in name:
-                        name = name.replace("router.", "")
-                    if "hc_fn" in name:
-                        name = name.replace("hc_fn", "hc_fn.weight")
-                    if "hc_head_fn" in name:
-                        name = name.replace("hc_head_fn", "hc_head_fn.weight")
+                if is_expert_weight:
+                    # An expert weight that is not mapped to this rank.
+                    continue
+                if "gate.e_score_correction_bias" in name:
+                    name = name.replace("gate.e_score_correction_bias", "expert_bias")
+                if "router.gate." in name:
+                    name = name.replace("router.", "")
+                if "hc_fn" in name:
+                    name = name.replace("hc_fn", "hc_fn.weight")
+                if "hc_head_fn" in name:
+                    name = name.replace("hc_head_fn", "hc_head_fn.weight")
 
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    if name not in params_dict:
-                        if _should_skip_missing_param(name):
-                            continue
-                        logger.warning_once(
-                            "Skipping unknown checkpoint weight: %s",
-                            name,
-                        )
+                if name not in params_dict:
+                    if _should_skip_missing_param(name):
                         continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
+                    logger.warning_once(
+                        "Skipping unknown checkpoint weight: %s",
+                        name,
                     )
-                    if stacked_shard_id is None:
-                        weight_loader(param, loaded_weight)
-                    else:
-                        weight_loader(param, loaded_weight, stacked_shard_id)
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                if stacked_shard_id is None:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, stacked_shard_id)
             loaded_params.add(name)
 
         return loaded_params
+
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Make static iHC weights contiguous for the ROCm Triton kernels."""
+        for layer in self.modules():
+            if isinstance(layer, HYV4HCPreLayer):
+                layer.hc_fn.weight.data = layer.hc_fn.weight.data.contiguous()
+            elif isinstance(layer, HYV4HCHeadLayer):
+                layer.hc_head_fn.weight.data = layer.hc_head_fn.weight.data.contiguous()
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
@@ -731,6 +745,9 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         drop_mapper = WeightsMapper(orig_to_new_prefix=drop_prefixes)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.process_weights_after_loading()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
