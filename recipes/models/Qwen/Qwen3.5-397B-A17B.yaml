@@ -273,7 +273,7 @@ presets:
     variants: [nvfp4]
     workload: "Agentic coding (multi-turn trace, ~64k mean input, mean ITL under 20 ms)"
     description: "Two B200s serve the NVFP4 checkpoint as TP2 with expert parallelism: MTP with three draft tokens, FP8 KV cache, float16 Mamba SSM cache, async scheduling, 48 running sequences and 160 GiB of vLLM native CPU KV offload for multi-turn prefix reuse."
-    source: { label: "vLLM #XXXXX", href: "https://github.com/vllm-project/vllm/pull/XXXXX" }
+    source: { label: "vLLM #64607", href: "https://github.com/vllm-project/vllm/pull/64607" }
     image: "vllm/vllm-openai:v0.32.0"
     tp: 2
     select:
