@@ -547,6 +547,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 else (self.dst_region_num_blocks.get(dst_engine_id) or None)
             ),
             pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
+            ssm_regions=pairs.remote_ssm_regions,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,

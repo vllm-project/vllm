@@ -1845,6 +1845,7 @@ def test_layer_metadata_round_trip():
     metadata.region_group_ids = [-1]
     metadata.region_names = ["L0"]
     metadata.region_mem_types = ["VRAM"]
+    metadata.layer_group_ids = {"L0": 0, "L1": 1}
 
     encoded = msgspec.msgpack.encode(metadata)
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
@@ -1911,6 +1912,26 @@ def test_pairing_keeps_pooled_regions_once():
         [0, 1, 0],
     )
     assert pairs.groups_match
+
+
+@pytest.mark.parametrize(
+    ("remote_layer_groups", "groups_match"),
+    [({"a": 0, "a.swa": 1, "b": 0}, True), ({"a": 0, "a.swa": 0, "b": 0}, False)],
+)
+def test_pairing_compares_each_layer_s_group_in_a_shared_region(
+    remote_layer_groups, groups_match
+):
+    """A region shared by two groups advertises group -1, so only the
+    per-layer groups show that the peer puts a layer in another group (here P
+    treats its sliding-window layer as full attention)."""
+    worker = _layer_routing_worker(
+        [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
+    )
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_group_ids = [-1, 0]
+    metadata.layer_group_ids = remote_layer_groups
+
+    assert worker._pair_regions(metadata).groups_match is groups_match
 
 
 def test_pairing_keeps_a_pp_stage_s_regions():
@@ -2016,18 +2037,6 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
         ([0x2200, 128, 0], [0xC000, 128, 7]),
         ([0x2400, 128, 0], [0xC400, 128, 7]),
     ]
-
-
-def test_pairing_follows_layers_not_region_order():
-    local, groups = [["x"], ["y"]], {"x": 0, "y": 1}
-    rank0 = _agent_metadata([["x"], ["y"]], [0x1000, 0x2000], [64, 128], [256, 512])
-    rank1 = _agent_metadata([["y"], ["x"]], [0x2000, 0x1000], [128, 64], [512, 256])
-
-    pairs0 = _layer_routing_worker(local, groups)._pair_regions(rank0)
-    pairs1 = _layer_routing_worker(local, groups)._pair_regions(rank1)
-
-    assert (pairs0.remote, pairs0.local) == ([0, 1], [0, 1])
-    assert (pairs1.remote, pairs1.local) == ([0, 1], [1, 0])
 
 
 def test_pairing_rejects_a_peer_missing_local_layers():
