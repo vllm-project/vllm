@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import msgspec
+import numpy as np
 import pytest
 import torch
 import zmq.asyncio
@@ -39,7 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _block_ids_for_region,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
+    _contiguous_runs,
     _has_opaque_packed_row,
+    _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
@@ -1596,6 +1599,152 @@ def test_pull_completion_requires_local_blocks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "exception", "finish"])
+async def test_peer_failure_only_settles_its_pending_requests(terminal):
+    """Partial and duplicate replies must not release another peer's targets."""
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        metas = {
+            f"d-req-{i}": PullReqMeta(
+                d_req_id=f"d-req-{i}",
+                transfer_id=f"xfer-{i}",
+                local_block_ids=[[i]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            for i in range(1, 4)
+        }
+        requests = list(metas.values())
+        partial = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            ok_reqs=["d-req-1"],
+            err_reqs=["d-req-2"],
+            err_msg="one request failed",
+        )
+        end = (
+            RuntimeError("connection lost")
+            if terminal == "exception"
+            else worker._encoder.encode(
+                MooncakeXferResponse(
+                    status=(
+                        MooncakeXferResponseStatus.FINISH
+                        if terminal == "finish"
+                        else MooncakeXferResponseStatus.ERROR
+                    ),
+                    err_msg="peer finished",
+                )
+            )
+        )
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
+        assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
+        assert [meta.failed for meta in requests] == [False, True, True]
+        assert worker.finished_recving_reqs == set()
+        assert worker.get_block_ids_with_load_errors() == {2, 3}
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH, ok_reqs=list(metas)
+            ),
+            metas,
+        )
+        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert all(meta.pull_tasks_count == 0 for meta in requests)
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_peer_succeeds", [True, False])
+async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
+    """An expired peer's omitted result must not strand the decoder's blocks."""
+    config = _make_test_kv_cache_config()
+    with mooncake_register_worker(config, kv_role="kv_producer") as (producer, _):
+        try:
+            producer.kv_caches_base_addr = [0x1000]
+            producer.block_len_per_layer = [256]
+            producer.kv_block_len_per_layer = [256]
+            producer.registered_layer_names = ["model.layers.0.self_attn"]
+            producer.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter() - 1,
+            )
+            send_meta.ready.set()
+            producer.reqs_need_send[send_meta.transfer_id] = send_meta
+
+            async def expire_before_send():
+                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+
+            metadata = _xfer_meta(
+                [
+                    _region(
+                        0x2000,
+                        row_offset=-1,
+                        layer_name=producer.registered_layer_names[0],
+                    )
+                ],
+                {"d-req-1": (send_meta.transfer_id, [[100]])},
+            )
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(send_meta.ready, "wait", side_effect=expire_before_send),
+                patch.object(producer, "_send_blocks") as send,
+            ):
+                await producer.send_kv_to_decode(b"consumer", sock, metadata)
+                send.assert_not_called()
+            assert send_meta.transfer_id not in producer.reqs_need_send
+            sock.send_multipart.assert_awaited_once()
+            _, payload = sock.send_multipart.call_args.args[0]
+            response = producer._xfer_resp_decoder.decode(payload)
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert not response.ok_reqs
+            assert not response.err_reqs
+        finally:
+            producer.shutdown()
+            producer.is_kv_consumer = True
+
+    with mooncake_register_worker(config) as (worker, _):
+        try:
+            meta = PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[100]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            worker.process_pulling_result(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH,
+                    ok_reqs=[meta.d_req_id] if first_peer_succeeds else None,
+                    err_reqs=None if first_peer_succeeds else [meta.d_req_id],
+                ),
+                {meta.d_req_id: meta},
+            )
+            assert meta.pull_tasks_count == 1
+            assert worker.finished_recving_reqs == set()
+            sock = (
+                mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+            )
+            sock.recv.return_value = payload
+            await worker.receive_kv_from_single_worker(
+                "tcp://producer:1234", {meta.d_req_id: meta}
+            )
+            assert meta.pull_tasks_count == 0
+            assert meta.failed
+            assert worker.finished_recving_reqs == {meta.d_req_id}
+            assert worker.get_block_ids_with_load_errors() == {100}
+            stats = worker.get_kv_connector_stats()
+            assert stats is not None
+            assert stats.reduce()["Num failed recvs"] == 1
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 
@@ -2010,6 +2159,99 @@ async def test_build_transfer_params_sends_packed_region_once(
     assert src_ptrs == [0x1000 + 10 * block_len]
     assert dst_ptrs == [0xA000 + 20 * block_len]
     assert lengths == [n_blocks * block_len]
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "starts", "run_lens"),
+    [
+        ([], [], [], []),
+        ([3, 4, 5], [7, 8, 9], [0], [3]),
+        ([5, 4, 3], [9, 8, 7], [0, 1, 2], [1, 1, 1]),
+        ([1, 2, 7, 8, 9], [4, 5, 6, 10, 11], [0, 2, 3], [2, 1, 2]),
+    ],
+)
+def test_contiguous_runs(src, dst, starts, run_lens):
+    """A run breaks wherever either side does not step by +1."""
+    got_starts, got_lens = _contiguous_runs(
+        np.array(src, dtype=np.int64), np.array(dst, dtype=np.int64)
+    )
+    assert got_starts.tolist() == starts
+    assert got_lens.tolist() == run_lens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kv_block_len", [256, 128])
+async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
+    """Fragmented ids give one copy per contiguous run per layer, in layer order.
+
+    A kv_block_len shorter than the block row cannot be merged across blocks.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = False
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
+
+    block_len = 256
+    local_regions, remote_regions = (
+        [
+            _region(
+                base + layer * 0x10000,
+                block_len=block_len,
+                kv_block_len=kv_block_len,
+                row_offset=0,
+                layer_name=f"model.layers.{layer}.self_attn",
+                layer_index=layer,
+            )
+            for layer in range(2)
+        ]
+        for base in (0x100000, 0xA00000)
+    )
+    transfer_id = "xfer-fragmented"
+    send_meta = SendBlockMeta(
+        p_req_id="p-fragmented",
+        transfer_id=transfer_id,
+        local_block_ids=[[3, 4, 9, 6]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-fragmented": (transfer_id, [[7, 8, 2, 5]])}
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-fragmented", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    if kv_block_len == block_len:
+        local_ids, remote_ids, sizes = [3, 9, 6], [7, 2, 5], [512, 256, 256]
+    else:
+        local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        r.base_addr + b * block_len for r in local_regions for b in local_ids
+    ]
+    assert dst_ptrs == [
+        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
+    ]
+    assert lengths == sizes * len(local_regions)
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
@@ -2454,6 +2696,35 @@ def test_coalesce_keeps_a_run_inside_its_starting_row():
 
 def _layer_name(idx: int) -> str:
     return f"model.layers.{idx}.mla_attn"
+
+
+@pytest.mark.parametrize(
+    ("source", "destination", "expected_source", "expected_destination"),
+    [
+        ([2, 3, 4], [12, 13, 14], [2, 3, 4], [12, 13, 14]),
+        ([4, 3, 2], [14, 13, 12], [2, 3, 4], [12, 13, 14]),
+        (
+            [9, 8, 7, 20, 21, 30, 29],
+            [109, 108, 107, 120, 121, 130, 129],
+            [7, 8, 9, 20, 21, 29, 30],
+            [107, 108, 109, 120, 121, 129, 130],
+        ),
+        ([6, 4, 5], [106, 104, 105], [6, 4, 5], [106, 104, 105]),
+        ([3, 2, 1], [11, 12, 13], [3, 2, 1], [11, 12, 13]),
+        ([1, 2, 3], [13, 12, 11], [1, 2, 3], [13, 12, 11]),
+    ],
+)
+def test_normalize_paired_block_order(
+    source, destination, expected_source, expected_destination
+):
+    """Normalize joint descending runs without sorting or changing block pairs."""
+    original_source, original_destination = source.copy(), destination.copy()
+    src, dst = _normalize_paired_block_order(source, destination)
+    assert src == expected_source and dst == expected_destination
+    assert source == original_source and destination == original_destination
+    assert sorted(zip(src, dst)) == sorted(zip(source, destination))
+    if source == expected_source and destination == expected_destination:
+        assert src is source and dst is destination
 
 
 def _register_sliced_packed_mla(

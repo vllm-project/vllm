@@ -68,21 +68,53 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def _extent(t: torch.Tensor) -> int:
+    """Number of elements spanned by ``t`` in its storage."""
+    if t.numel() == 0:
+        return 0
+    return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
+
+
+def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
+    """``new`` copied into the bytes ``old`` spans if it fits, so the loaded
+    storage is kept (with its ``data_ptr``); else ``new`` itself. An equal-size
+    result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
+    then keeps the address captured CUDA graphs read."""
+    storage = old.untyped_storage()
+    offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    if (
+        new.numel() == 0
+        or old.device != new.device
+        or new.untyped_storage().data_ptr() == storage.data_ptr()
+        or _extent(new) != new.numel()  # overlapping or with gaps
+        or _extent(old) != old.numel()  # its gaps may hold another tensor's data
+        or offset % size
+        or new.numel() * size > _extent(old) * old.element_size()
+    ):
+        return new
+    view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
+    return view.copy_(new)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
     new_tensor: torch.Tensor | None,
-    prefer_copy: bool = False,
 ):
     """Replace a parameter of a layer while maintaining the ability to reload the
     weight. Called within implementations of the `process_weights_after_loading` method.
 
-    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
-    ``is_shuffled``) are carried over to the replacement parameter, except
-    ``weight_loader``, which is always taken from the existing parameter.
+    The existing parameter object is kept (and so its class and loader attributes
+    for weight reloading): ``new_tensor`` is copied into it when shape, stride,
+    dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
+    otherwise a smaller ``new_tensor`` is copied into the parameter's own storage
+    (so the loaded storage never shrinks), else ``.data`` is rebound to it. A new
+    parameter is registered only if none exists under ``param_name``, or if the
+    existing one is an online requantization source (released after conversion).
 
-    Attributes of the existing parameter are otherwise dropped when a new
-    parameter is registered, but kept when ``prefer_copy`` reuses it in place.
+    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
+    ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
+    which is always taken from the existing parameter.
 
     This function should not be called on weights which are tied/shared
 
@@ -91,12 +123,6 @@ def replace_parameter(
         param_name: Name of parameter to replace
         new_tensor: New data of the new parameter, or None to set the parameter
             to None
-        prefer_copy: If True and the existing parameter is compatible with
-            ``new_tensor`` (same shape, dtype, and device), copy ``new_tensor``
-            into the existing parameter in place rather than re-registering
-            a new parameter. This preserves the parameter's storage address
-            (``data_ptr``), which is required for captured CUDA graphs to
-            remain valid across weight updates (e.g. in RL training loops).
 
     """
     # should not be used on a tied/shared param
@@ -120,14 +146,24 @@ def replace_parameter(
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
 
+    # Keep the object, except online requantization sources (released later)
+    # and meta params (no storage; `.data` cannot be rebound to a real tensor).
     if (
-        prefer_copy
-        and old_param is not None
-        and old_param.shape == new_tensor.shape
-        and old_param.dtype == new_tensor.dtype
-        and old_param.device == new_tensor.device
+        isinstance(old_param, torch.nn.Parameter)
+        and not getattr(old_param, "requantization_source", False)
+        and not (old_param.is_meta and not new_tensor.is_meta)
     ):
-        old_param.copy_(new_tensor)
+        if (
+            old_param.shape == new_tensor.shape
+            and old_param.stride() == new_tensor.stride()
+            and old_param.dtype == new_tensor.dtype
+            and old_param.device == new_tensor.device
+        ):
+            old_param.data.copy_(new_tensor)
+        elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
+            old_param.data = new_tensor  # online quantization frees the source
+        else:
+            old_param.data = _in_own_storage(old_param, new_tensor)
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return
@@ -142,6 +178,74 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+
+
+def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:
+    """Register the ``src_name`` parameter object under ``dst_name`` as well.
+
+    Both names then refer to one object and so to one storage: the loader writes
+    through the checkpoint name, kernels read the runtime name, and a later
+    `replace_parameter` on either name updates both. ``dst_name`` becomes the
+    name `kernel_parameters` reports for the object."""
+    param = getattr(layer, src_name)
+    existing = layer._parameters.get(dst_name)
+    if existing is not None and existing is not param:
+        raise ValueError(f"{dst_name!r} is already registered as another parameter")
+    layer.register_parameter(dst_name, param)
+    param.runtime_name = dst_name
+
+
+def retire_parameter(layer: torch.nn.Module, name: str) -> None:
+    """Mark a loaded parameter that no kernel reads after post-processing.
+
+    It stays registered with its loaded data (so it can be loaded again);
+    `kernel_parameters` and `get_live_param` skip it."""
+    getattr(layer, name).retired = True
+
+
+def set_kernel_parameter(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """`replace_parameter`, for a tensor kernels read under ``name``: the parameter
+    is live even if it was retired before, and ``name`` becomes its runtime name
+    if it is registered under several names (see `move_parameter`)."""
+    replace_parameter(layer, name, tensor)
+    param = getattr(layer, name)
+    param.__dict__.pop("retired", None)
+    if hasattr(param, "runtime_name"):
+        param.runtime_name = name
+
+
+def _is_live(param: torch.Tensor | None) -> bool:
+    return (
+        param is not None and not getattr(param, "retired", False) and param.numel() > 0
+    )
+
+
+def get_live_param(layer: torch.nn.Module, name: str) -> torch.Tensor | None:
+    """``getattr(layer, name, None)``, treating retired or empty params as absent."""
+    tensor = getattr(layer, name, None)
+    if isinstance(tensor, torch.nn.Parameter) and not _is_live(tensor):
+        return None
+    return tensor
+
+
+def kernel_parameters(layer: torch.nn.Module) -> dict[str, torch.nn.Parameter]:
+    """The layer's own parameters as kernels see them: live parameters only, each
+    object once, under its runtime name (see `move_parameter`)."""
+    names: dict[int, str] = {}
+    params: dict[str, torch.nn.Parameter] = {}
+    for name, param in layer._parameters.items():
+        if not _is_live(param):
+            continue
+        first = names.setdefault(id(param), name)
+        if first == name:
+            params[name] = param
+        elif getattr(param, "runtime_name", None) == name:
+            del params[first]
+            params[name] = param
+            names[id(param)] = name
+    return params
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
