@@ -283,11 +283,7 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
 
 IS_ARGPARSE = any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-NEEDS_HELP = (
-    IS_ARGPARSE
-    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
-    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
-)
+NEEDS_HELP = IS_ARGPARSE or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
