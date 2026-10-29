@@ -1000,30 +1000,21 @@ def test_mla_hybrid_peer_with_other_region_order_pairs_by_layer():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("shared_regions_only", [False, True])
-def test_mla_hybrid_peer_with_other_cache_groups_is_refused(shared_regions_only):
+def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
     """A hybrid layer in another cache group on P would be read at the wrong
     group's blocks, and region-mapped reads cannot serve SSM state, so the
-    handshake refuses the peer before any transfer. When every region is
-    shared by several groups (-1), only the per-layer groups show it."""
+    handshake refuses the peer before any transfer."""
     worker = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
         num_logical_blocks=4,
-        kda_only_tensor=not shared_regions_only,
+        kda_only_tensor=True,
     )
     layer_groups = dict(worker.kv_cache_config.transfer_group_index_by_layer)
     remote_groups = list(worker.region_group_ids)
-    if shared_regions_only:
-        assert set(remote_groups) == {-1}
-        # P numbers the two KDA groups the other way round.
-        layer_groups = {
-            name: {1: 2, 2: 1}.get(g, g) for name, g in layer_groups.items()
-        }
-    else:
-        # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in 2.
-        remote_groups[remote_groups.index(1)] = 2
-        layer_groups["kda_a.2"] = 2
+    # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in 2.
+    remote_groups[remote_groups.index(1)] = 2
+    layer_groups["kda_a.2"] = 2
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=16,

@@ -1915,13 +1915,14 @@ def test_pairing_keeps_pooled_regions_once():
 
 @pytest.mark.parametrize(
     ("remote_layer_groups", "groups_match"),
-    [({"a": 0, "a.swa": 1, "b": 0}, True), ({"a": 1, "a.swa": 0, "b": 0}, False)],
+    [({"a": 0, "a.swa": 1, "b": 0}, True), ({"a": 0, "a.swa": 0, "b": 0}, False)],
 )
 def test_pairing_compares_each_layer_s_group_in_a_shared_region(
     remote_layer_groups, groups_match
 ):
     """A region shared by two groups advertises group -1, so only the
-    per-layer groups show that the peer numbers its groups differently."""
+    per-layer groups show that the peer puts a layer in another group (here P
+    treats its sliding-window layer as full attention)."""
     worker = _layer_routing_worker(
         [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
     )
