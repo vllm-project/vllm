@@ -472,6 +472,104 @@ def test_eagle_multimodal_sibling_retains_safe_checkpoint(
     assert hit == (2 if mm_tail == 0 else 3) * block_size
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("retention_interval", [None, 0])
+@pytest.mark.parametrize("lookahead_hashes", [False, True])
+def test_dcp_multimodal_sibling_retains_scheduled_checkpoint(
+    dcp_size: int, retention_interval: int | None, lookahead_hashes: bool
+):
+    """DCP's larger scheduler block must not separate saved and retained states."""
+    block_size = 544
+    model = os.getenv("VLLM_HYBRID_MM_TEST_MODEL", "Qwen/Qwen3.5-4B")
+    parallel = ParallelConfig(
+        tensor_parallel_size=8, decode_context_parallel_size=dcp_size
+    )
+    full_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    scheduler = create_scheduler(
+        model=model,
+        max_num_batched_tokens=32768,
+        max_model_len=32768,
+        block_size=block_size,
+        enable_prefix_caching=True,
+        parallel_config=parallel,
+        speculative_config=SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=NUM_SPEC,
+            disable_lookahead_block_hashes=not lookahead_hashes,
+            target_model_config=ModelConfig(model=model),
+            target_parallel_config=parallel,
+        ),
+        kv_cache_config=KVCacheConfig(
+            num_blocks=1000,
+            kv_cache_tensors=[],
+            prefix_cache_retention_interval=retention_interval,
+            kv_cache_groups=[
+                KVCacheGroupSpec(["full"], full_spec),
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1, 1),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                        num_speculative_blocks=NUM_SPEC,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["draft"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        dcp_sharded=False,
+                    ),
+                    is_eagle_group=True,
+                ),
+            ],
+        ),
+    )
+    scheduler.vllm_config.validate_block_size()
+    assert scheduler.block_size == dcp_size * block_size
+    manager = scheduler.kv_cache_manager
+    mm_end = 4 * block_size
+    lookahead = scheduler.num_hash_lookahead_tokens
+    producer, consumer = [
+        create_requests(
+            1,
+            num_tokens=(8 + appended) * block_size + 2,
+            block_size=block_size,
+            same_prompt=True,
+            mm_hashes_list=[["shared", "appended"] if appended else ["shared"]],
+            mm_positions=[
+                [PlaceholderRange(offset=0, length=mm_end)]
+                + (
+                    [PlaceholderRange(offset=mm_end, length=block_size)]
+                    if appended
+                    else []
+                )
+            ],
+            req_ids=["consumer" if appended else "producer"],
+            num_hash_lookahead_tokens=lookahead,
+        )[0]
+        for appended in (0, 1)
+    ]
+    while producer.num_computed_tokens < producer.num_tokens:
+        count = scheduler._mamba_block_aligned_split(
+            producer, producer.num_tokens - producer.num_computed_tokens
+        )
+        assert count > 0
+        assert manager.allocate_slots(producer, count, num_lookahead_tokens=NUM_SPEC)
+        producer.num_computed_tokens += count
+        manager.cache_blocks(producer, producer.num_computed_tokens)
+        manager.new_step_starts()
+    manager.free(producer)
+    _, hit, _ = manager.get_computed_blocks(consumer)
+    assert hit >= (4 - dcp_size) * block_size
+
+
 @pytest.mark.parametrize("skip_cache", [False, True])
 def test_appending_mm_item_preserves_shared_prefill_splits(skip_cache: bool) -> None:
     """Appending an item must not change the shared prefix's GEMM chunk sizes."""
