@@ -1593,6 +1593,26 @@ def test_cache_reset_without_in_flight_jobs_holds_nothing():
         scheduler.shutdown()
 
 
+def test_cache_reset_twice_before_a_step_still_flushes():
+    """A second reset before the engine steps must not assert: RL loops call
+    reset_prefix_cache(reset_connector=True) every iteration, and EngineCore
+    drains every queued utility call before it steps again."""
+    scheduler, _ = _make_tiering_engine_scheduler([])
+    try:
+        flushed = _store_in_flight(scheduler)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        output = scheduler.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert meta.jobs_to_flush == flushed
+        _report_jobs(scheduler, output, flushed)
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
 def test_cache_reset_fence_held_too_long_warns_on_idle_steps(monkeypatch):
     """The warning must fire on the empty steps an idle engine takes while the
     fence is held, since no lookup runs there."""
