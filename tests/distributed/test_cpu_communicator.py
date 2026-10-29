@@ -356,6 +356,13 @@ def _run_compiled_fastpath(rank, sizes, compiled):
         output,
         hidden * (2 * len(sizes)) + extra * len(sizes),
     )
+    return (
+        (gathered_hidden, expected_hidden),
+        (gathered_router, expected_router),
+        (gathered_extra, expected_extra),
+        (dispatched_ids, expected_ids),
+        (output, hidden * (2 * len(sizes)) + extra * len(sizes)),
+    )
 
 
 def _compile_fastpath_worker(
@@ -381,15 +388,148 @@ def _compile_fastpath_worker(
         assert dp_metadata is not None
         assert dp_metadata.local_sizes is None
         compiled = _compile_fastpath(dp_metadata, get_ep_group(), backend)
+        retained = []
         with torch._dynamo.config.patch(capture_dynamic_output_shape_ops=True):
             for sizes in size_patterns:
                 dp_metadata.num_tokens_across_dp_cpu.copy_(
                     torch.tensor(sizes, dtype=torch.int)
                 )
-                _run_compiled_fastpath(rank, sizes, compiled)
+                retained.extend(_run_compiled_fastpath(rank, sizes, compiled))
                 assert dp_metadata.local_sizes is None
+                for output, expected in retained:
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
     dist.barrier()
+
+
+def _compile_reinit_worker(
+    rank, world_size, tp_size, dp_size, port, dp_port, next_ports
+):
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        get_ep_group,
+    )
+
+    names = []
+    for init_port, data_port in ((port, dp_port), next_ports):
+        _compile_fastpath_worker(
+            rank,
+            world_size,
+            tp_size,
+            dp_size,
+            init_port,
+            data_port,
+            ("eager", [[3, 1], [1, 3]]),
+        )
+        names.append(get_ep_group().unique_name)
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    assert names[0] != names[1]
+
+
+def _manager_sizes_override_worker(
+    rank, world_size, tp_size, dp_size, port, dp_port, params
+):
+    os.environ["VLLM_DIST_IDENT"] = f"test_cpu_manager_sizes_{port}"
+    _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+    from vllm.distributed.parallel_state import get_ep_group
+    from vllm.forward_context import get_forward_context
+
+    communicator = get_ep_group().device_communicator
+    manager = communicator.all2all_manager
+    retained = []
+    with _make_forward_context(rank, dp_size, 2, [2, 2]):
+        metadata = get_forward_context().dp_metadata
+        assert metadata is not None
+        with metadata.sp_local_sizes(1) as ambient_sizes:
+            for invalid_sizes in ([2], [-1, 5], [2.0, 2], [True, 3]):
+                with pytest.raises(ValueError, match="sizes_override"):
+                    manager.dispatch_router_logits(
+                        _filled(2, HIDDEN_SIZE, 1),
+                        _filled(2, NUM_EXPERTS, 1),
+                        sizes_override=invalid_sizes,
+                    )
+                assert metadata.local_sizes is ambient_sizes
+            for sizes in ([3, 1], [1, 3], [0, 4], [4, 0]):
+                rows = sizes[rank]
+                hidden = _filled(rows, HIDDEN_SIZE, rank + 1)
+                router = _filled(rows, NUM_EXPERTS, (rank + 1) * 10)
+                weights = _filled(rows, TOPK, (rank + 1) * 100)
+                ids = torch.full((rows, TOPK), rank, dtype=torch.int64)
+                extras = [
+                    _filled(rows, 2, (rank + 1) * 4, torch.bfloat16),
+                    _filled(rows, 1, (rank + 1) * 8, torch.int32),
+                ]
+                expected_hidden = _concat_rank_values(sizes, HIDDEN_SIZE, 1)
+                for dispatch, inputs, expected in (
+                    (
+                        manager.dispatch_router_logits,
+                        (hidden, router),
+                        (expected_hidden, _concat_rank_values(sizes, NUM_EXPERTS, 10)),
+                    ),
+                    (
+                        manager.dispatch,
+                        (hidden, weights, ids),
+                        (
+                            expected_hidden,
+                            _concat_rank_values(sizes, TOPK, 100),
+                            _concat_rank_ids(sizes),
+                        ),
+                    ),
+                ):
+                    outputs = dispatch(
+                        *inputs, extra_tensors=extras, sizes_override=sizes
+                    )
+                    for actual, reference in zip(outputs[:-1], expected):
+                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                        retained.append((actual, reference))
+                    for actual, reference in zip(
+                        outputs[-1],
+                        (
+                            _concat_rank_values(sizes, 2, 4, torch.bfloat16),
+                            _concat_rank_values(sizes, 1, 8, torch.int32),
+                        ),
+                    ):
+                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                    assert metadata.local_sizes is ambient_sizes
+                    assert ambient_sizes == [2, 2]
+                contributions = (
+                    torch.arange(sum(sizes))
+                    .unsqueeze(1)
+                    .expand(sum(sizes), HIDDEN_SIZE)
+                    .float()
+                    + (rank + 1) * 1000
+                )
+                original = contributions.clone()
+                if sizes == [3, 1]:
+                    for operation, arguments in (
+                        (
+                            communicator._ep_dispatch_rl_op,
+                            (hidden, router, False, sizes, extras),
+                        ),
+                        (
+                            communicator._ep_dispatch_op,
+                            (hidden, weights, ids, False, sizes, extras),
+                        ),
+                        (communicator._ep_combine_op, (contributions, False, sizes)),
+                    ):
+                        torch.library.opcheck(
+                            operation,
+                            arguments,
+                            test_utils=("test_schema", "test_faketensor"),
+                        )
+                combined = manager.combine(contributions, sizes_override=sizes)
+                reference = _expected_combined(rank, sizes, HIDDEN_SIZE)
+                torch.testing.assert_close(combined, reference, rtol=0, atol=0)
+                torch.testing.assert_close(contributions, original, rtol=0, atol=0)
+                retained.append((combined, reference))
+                assert metadata.local_sizes is ambient_sizes
+                assert ambient_sizes == [2, 2]
+        assert metadata.local_sizes is None
+    for output, reference in retained:
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
 
 def _get_dp_gloo_communicator():
@@ -778,7 +918,7 @@ def test_cpu_ep_compile_ragged_fastpath():
         world_size=2,
         tp_size=1,
         dp_size=2,
-        params=("eager", [[2, 1], [0, 3]]),
+        params=("eager", [[2, 1], [0, 3], [3, 1], [1, 3], [0, 4], [4, 0]]),
     )
 
 
@@ -796,8 +936,40 @@ def test_cpu_ep_compile_ragged_fastpath_inductor():
         dp_size=3,
         params=(
             "inductor",
-            [[5, 5, 5], [5, 1, 3], [1, 3, 5], [3, 5, 1]],
+            [
+                [5, 5, 5],
+                [5, 1, 3],
+                [1, 3, 5],
+                [3, 5, 1],
+                [0, 4, 5],
+                [4, 0, 5],
+                [4, 5, 0],
+            ],
         ),
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_ep_compiled_exchange_survives_group_reinitialization():
+    """Recreated groups register distinct operations and still exchange correct rows."""
+    _spawn_workers(
+        _compile_reinit_worker,
+        world_size=2,
+        tp_size=1,
+        dp_size=2,
+        params=(get_open_port(), get_open_port()),
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_manager_uses_current_sizes_without_changing_metadata():
+    """Explicit invocation splits win over ambient metadata for every exchange."""
+    _spawn_workers(
+        _manager_sizes_override_worker,
+        world_size=2,
+        tp_size=1,
+        dp_size=2,
+        params=None,
     )
 
 

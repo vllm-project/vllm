@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
@@ -355,21 +354,6 @@ class CpuCommunicator(DeviceCommunicatorBase):
         # Fake shapes bind local rows to this rank; Inductor caches are shared.
         safe_name += f"_rank{self.rank_in_group}"
 
-        # Dynamo traces the runner's scope; restore its sizes at op execution.
-        @contextmanager
-        def _sizes_context(sizes: list[int]):
-            if mgr.dp_world_size == 1:
-                yield
-                return
-            dp_metadata = get_forward_context().dp_metadata
-            assert dp_metadata is not None
-            previous_sizes = dp_metadata.local_sizes
-            dp_metadata.local_sizes = sizes
-            try:
-                yield
-            finally:
-                dp_metadata.local_sizes = previous_sizes
-
         def _dispatch_rows(
             hidden_states: torch.Tensor,
             is_sequence_parallel: bool,
@@ -378,6 +362,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             group = mgr._get_comm_group(is_sequence_parallel)
             if not sizes:
                 return hidden_states.shape[0] * group.world_size
+            torch._check(len(sizes) == group.world_size)
             for size in sizes:
                 torch._check_is_size(size)
             torch._check(sizes[group.rank_in_group] == hidden_states.shape[0])
@@ -393,16 +378,16 @@ class CpuCommunicator(DeviceCommunicatorBase):
             sizes: list[int],
             extra_tensors: list[torch.Tensor],
         ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-            with _sizes_context(sizes):
-                return cast(
-                    tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]],
-                    mgr.dispatch_router_logits(
-                        hidden_states,
-                        router_logits,
-                        is_sequence_parallel,
-                        extra_tensors,
-                    ),
-                )
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]],
+                mgr.dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    is_sequence_parallel,
+                    extra_tensors,
+                    sizes_override=sizes or None,
+                ),
+            )
 
         @_dispatch_rl.register_fake
         def _(
@@ -428,17 +413,17 @@ class CpuCommunicator(DeviceCommunicatorBase):
             sizes: list[int],
             extra_tensors: list[torch.Tensor],
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-            with _sizes_context(sizes):
-                return cast(
-                    tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]],
-                    mgr.dispatch(
-                        hidden_states,
-                        topk_weights,
-                        topk_ids,
-                        is_sequence_parallel,
-                        extra_tensors,
-                    ),
-                )
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]],
+                mgr.dispatch(
+                    hidden_states,
+                    topk_weights,
+                    topk_ids,
+                    is_sequence_parallel,
+                    extra_tensors,
+                    sizes_override=sizes or None,
+                ),
+            )
 
         @_dispatch.register_fake
         def _(
@@ -461,8 +446,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
         def _combine(
             hidden_states: torch.Tensor, is_sequence_parallel: bool, sizes: list[int]
         ) -> torch.Tensor:
-            with _sizes_context(sizes):
-                return mgr.combine(hidden_states, is_sequence_parallel)
+            return mgr.combine(
+                hidden_states, is_sequence_parallel, sizes_override=sizes or None
+            )
 
         @_combine.register_fake
         def _(
@@ -470,6 +456,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         ) -> torch.Tensor:
             group = mgr._get_comm_group(is_sequence_parallel)
             if sizes:
+                torch._check(len(sizes) == group.world_size)
                 for size in sizes:
                     torch._check_is_size(size)
                 torch._check(hidden_states.shape[0] == sum(sizes))
