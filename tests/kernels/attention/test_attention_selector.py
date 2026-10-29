@@ -791,9 +791,7 @@ def blackwell_selection():
             return_value=DeviceCapability(10, 0),
         ),
         patch(
-            # get_flash_attn_version() imports this inside the call, so the
-            # patch has to land on the defining module, not on fa_utils.
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
+            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -809,9 +807,7 @@ def hopper_selection():
             return_value=DeviceCapability(9, 0),
         ),
         patch(
-            # get_flash_attn_version() imports this inside the call, so the
-            # patch has to land on the defining module, not on fa_utils.
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
+            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -821,9 +817,8 @@ def hopper_selection():
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
-@pytest.mark.parametrize("native_mm_prefix", [False, True])
 def test_hopper_mm_prefix_selects_triton_flash_attn(
-    use_mm_prefix, flash_attn_version, native_mm_prefix, hopper_selection
+    use_mm_prefix, flash_attn_version, hopper_selection
 ):
     """Hopper selects the composite when its causal route resolves FA3 or FA4."""
     from vllm.engine.arg_utils import EngineArgs
@@ -833,13 +828,7 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         dtype="bfloat16",
         attention_config=AttentionConfig(flash_attn_version=flash_attn_version),
     ).create_engine_config()
-    with (
-        patch(
-            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
-            return_value=object if native_mm_prefix else None,
-        ),
-        set_current_vllm_config(config),
-    ):
+    with set_current_vllm_config(config):
         backend = get_attn_backend(
             256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
         )
@@ -849,47 +838,55 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "nvfp4"])
-@pytest.mark.parametrize(
-    "wrapper",
-    [None, object, lambda v_sf_swizzled=False: None],
-    ids=["none", "plain", "v_sf_swizzled"],
-)
+@pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
 @pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, wrapper, selected, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, selected, blackwell_selection
 ):
     """The image-mask requirement must reach CUDA's automatic backend priority;
-    selecting FLASHINFER serves it natively, over an NVFP4 cache only when the
-    wrapper reads its swizzled V scales."""
+    selecting FLASHINFER serves it natively."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
         model="google/gemma-4-31B-it",
         dtype="bfloat16",
-        kv_cache_dtype=kv_cache_dtype,
         attention_config=AttentionConfig(backend=selected),
     ).create_engine_config()
-    if not use_mm_prefix:
-        expected = "FLASHINFER"
-    elif not selected:
-        expected = None if kv_cache_dtype == "nvfp4" else "TRITON_FLASHINFER"
-    elif wrapper is None or (kv_cache_dtype == "nvfp4" and wrapper is object):
-        expected = None
-    else:
-        expected = "FLASHINFER"
-    with (
-        patch(
-            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
-            return_value=wrapper,
-        ),
-        set_current_vllm_config(config),
-        pytest.raises(ValueError) if expected is None else nullcontext(),
-    ):
+    with set_current_vllm_config(config):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-        assert backend.get_name() == expected
+    composite = use_mm_prefix and selected is None
+    assert backend.get_name() == ("TRITON_FLASHINFER" if composite else "FLASHINFER")
+
+
+@blackwell_only
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_mm_prefix_nvfp4_needs_swizzled_flashinfer(
+    selected, swizzled, blackwell_selection
+):
+    """An NVFP4 cache serves mm-prefix only on an explicit FLASHINFER whose
+    wrapper reads the swizzled V scales."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype="nvfp4",
+        attention_config=AttentionConfig(backend=selected),
+    ).create_engine_config()
+    supported = selected is not None and swizzled
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._MM_PREFIX_READS_SWIZZLED_V_SF",
+            swizzled,
+        ),
+        set_current_vllm_config(config),
+        nullcontext() if supported else pytest.raises(ValueError),
+    ):
+        backend = get_attn_backend(256, torch.bfloat16, "nvfp4", use_mm_prefix=True)
+        assert backend.get_name() == "FLASHINFER"
 
 
 @blackwell_only

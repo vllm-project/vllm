@@ -13,6 +13,7 @@ import torch
 from flashinfer import (
     BatchAttentionWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
+    BatchPrefillWithCausalBidirectionalRangesWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
     get_seq_lens,
@@ -106,19 +107,15 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
-# FlashInfer's mm-prefix (PrefixLM) prefill wrapper evaluates causal OR
-# per-request bidirectional ranges on every KV tile from the (N, 2) rows of
+# The mm-prefix (PrefixLM) prefill wrapper evaluates causal OR per-request
+# bidirectional ranges on every KV tile from the (N, 2) rows of
 # fill_mm_prefix_query_ranges; no dense mask is materialized.
-MM_PREFIX_WRAPPER_NAME = "BatchPrefillWithCausalBidirectionalRangesWrapper"
-
-
-def _mm_prefix_wrapper_cls() -> type | None:
-    import flashinfer
-
-    return getattr(flashinfer, MM_PREFIX_WRAPPER_NAME, None)
-
-
 _MM_PREFIX_KV_DTYPES = (None, "auto", "float16", "bfloat16", "fp8", "fp8_e4m3", "nvfp4")
+# An SM100 NVFP4 cache keeps its V scales in the trtllm-gen swizzle.
+_MM_PREFIX_READS_SWIZZLED_V_SF = (
+    "v_sf_swizzled"
+    in inspect.signature(BatchPrefillWithCausalBidirectionalRangesWrapper).parameters
+)
 
 
 def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
@@ -126,23 +123,19 @@ def _native_mm_prefix(vllm_config: VllmConfig | None) -> bool:
     only when FLASHINFER is selected explicitly."""
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    if vllm_config is None or vllm_config.model_config is None:
+        return False
+    model_config = vllm_config.model_config
     return (
-        vllm_config is not None
-        and vllm_config.model_config is not None
-        and vllm_config.model_config.is_mm_prefix_lm
+        model_config.is_mm_prefix_lm
         # The DCP prefill's context/new-token split breaks the ranges.
         and vllm_config.parallel_config.decode_context_parallel_size == 1
-        # The ranges wrapper has no logits soft cap (e.g. Gemma 2 language models).
-        and not getattr(
-            vllm_config.model_config.hf_text_config, "attn_logit_softcapping", None
-        )
-        and vllm_config.cache_config.cache_dtype in _MM_PREFIX_KV_DTYPES
-        and (wrapper_cls := _mm_prefix_wrapper_cls()) is not None
+        # The wrapper has no logits soft cap (e.g. Gemma 2 language models).
+        and not getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
         and (
             not vllm_config.cache_config.cache_dtype.startswith("nvfp4")
             or _nvfp4_kv_on_fa2()
-            # An SM100 cache keeps its V scales in the trtllm-gen swizzle.
-            or "v_sf_swizzled" in inspect.signature(wrapper_cls).parameters
+            or _MM_PREFIX_READS_SWIZZLED_V_SF
         )
         and (
             not current_platform.is_device_capability_family(100)
@@ -895,7 +888,7 @@ class FlashInferMetadata:
     # full-attention groups at forward time, so forward() reads it there.
     mm_prefix_query_range_tensor: torch.Tensor | None = None
     # mm-prefix wrapper planned beside the causal prefill path.
-    mm_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+    mm_wrapper: BatchPrefillWithCausalBidirectionalRangesWrapper | None = None
     mm_prefill_ranges: torch.Tensor | None = None
 
 
@@ -922,7 +915,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._noncausal_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
             None  # Wrapper for non-causal prefill (DFlash)
         )
-        self._mm_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+        self._mm_prefill_wrapper: (
+            BatchPrefillWithCausalBidirectionalRangesWrapper | None
+        ) = None
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         if envs.VLLM_BATCH_INVARIANT:
@@ -1516,15 +1511,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
-    def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
+    def _get_mm_prefill_wrapper(
+        self,
+    ) -> BatchPrefillWithCausalBidirectionalRangesWrapper:
         if self._mm_prefill_wrapper is None:
             assert not self.use_dcp
             dtype = self.model_config.dtype
-            wrapper_cls = _mm_prefix_wrapper_cls()
-            assert wrapper_cls is not None, (
-                f"mm-prefix advertised without FlashInfer's {MM_PREFIX_WRAPPER_NAME}"
-            )
-            self._mm_prefill_wrapper = wrapper_cls(
+            self._mm_prefill_wrapper = BatchPrefillWithCausalBidirectionalRangesWrapper(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
                 q_data_type=dtype,
