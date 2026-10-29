@@ -431,6 +431,11 @@ def rocm_aiter_fused_experts(
 
                 gate_mode = GateMode.SEPARATED.value
                 q_dtype_a = dtypes.fp4x2
+                # AITER's a4w4 sort can fault on the -1 ids that skip-padding
+                # gives padded rows; send them to expert 0 with zero weight.
+                padded = topk_ids < 0
+                topk_ids = topk_ids.masked_fill(padded, 0)
+                topk_weights = topk_weights.masked_fill(padded, 0.0)
             else:
                 gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:

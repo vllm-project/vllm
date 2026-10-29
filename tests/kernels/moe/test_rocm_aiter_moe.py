@@ -774,6 +774,57 @@ def test_aiter_moe_a4w4_dsv4_rejects_unvalidated_model_type(
             )
 
 
+@pytest.mark.parametrize("a4w4", [True, False])
+def test_aiter_moe_a4w4_dsv4_routes_padded_rows_to_zero_weight(a4w4: bool):
+    """VLLM_MOE_SKIP_PADDING marks padded rows with topk_ids -1 and weight 0.
+    AITER's a4w4 sort can fault on -1 ids (a cudagraph warmup batch is all
+    padding), so the a4w4 path must hand AITER expert 0 with weight 0 instead.
+    Other paths keep -1, which their sorts skip."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    moe_config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+    moe_config.use_mxfp4_w4a4_dsv4 = a4w4
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.empty(0), w2_scale=torch.empty(0)
+    )
+    topk_ids = torch.tensor([[3, 5], [-1, -1], [7, -1]], dtype=torch.int32)
+    topk_weights = torch.tensor([[0.6, 0.4], [0.0, 0.0], [1.0, 0.0]])
+    hidden_states = torch.zeros(3, 256, dtype=torch.bfloat16)
+
+    with mock.patch.object(
+        rocm_aiter_ops, "fused_moe", return_value=hidden_states
+    ) as fused_moe_mock:
+        rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=torch.empty(0),
+            w2=torch.empty(0),
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+
+    passed_weights, passed_ids = fused_moe_mock.call_args.args[3:5]
+    expected_ids = [[3, 5], [0, 0], [7, 0]] if a4w4 else topk_ids.tolist()
+    assert passed_ids.tolist() == expected_ids
+    assert torch.equal(passed_weights, topk_weights)
+    assert topk_ids.tolist() == [[3, 5], [-1, -1], [7, -1]], "caller's ids mutated"
+
+
 # Dispatch-policy forwarding test ------------------------------------------
 
 
