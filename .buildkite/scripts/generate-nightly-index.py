@@ -470,8 +470,10 @@ if __name__ == "__main__":
         # upload-wheels.sh ensures no "dev" is in args.version
         wheel_files = list(
             filter(
-                lambda x: (version in x and "dev" not in x)
-                or (x.startswith("triton-") and "+xpu-" in x),
+                lambda x: (
+                    (version in x and "dev" not in x)
+                    or (x.startswith("triton-") and "+xpu-" in x)
+                ),
                 wheel_files,
             )
         )

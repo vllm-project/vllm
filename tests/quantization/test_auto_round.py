@@ -679,8 +679,9 @@ def test_wna16_cuda_low_bit_linear_routes_to_humming(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_linear_method",
-        lambda layer_config: captured.update({"layer_config": layer_config})
-        or expected_method,
+        lambda layer_config: (
+            captured.update({"layer_config": layer_config}) or expected_method
+        ),
     )
 
     layer_config = make_layer_config(bits=bits, packing_format=packing_format)
@@ -705,10 +706,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_moe_method",
-        lambda layer, layer_config: captured.update(
-            {"layer": layer, "layer_config": layer_config}
-        )
-        or expected_method,
+        lambda layer, layer_config: (
+            captured.update({"layer": layer, "layer_config": layer_config})
+            or expected_method
+        ),
     )
 
     layer = object.__new__(RoutedExperts)
@@ -1100,8 +1101,9 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
-        lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
-        or expected_quant_config,
+        lambda **kwargs: (
+            captured.update({"quant_config_kwargs": kwargs}) or expected_quant_config
+        ),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."

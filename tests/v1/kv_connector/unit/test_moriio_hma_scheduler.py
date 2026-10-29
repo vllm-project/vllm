@@ -1019,8 +1019,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = (
-        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
+        ready_event.set()
     )
     return worker
 
