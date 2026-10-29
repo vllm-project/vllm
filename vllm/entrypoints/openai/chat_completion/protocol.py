@@ -865,6 +865,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter="response_format",
                 )
             check_json_nesting(schema)
+            if "$schema" in schema and not isinstance(schema["$schema"], str):
+                raise VLLMValidationError(
+                    "Invalid JSON Schema: '$schema' must be a string.",
+                    parameter="response_format",
+                )
             try:
                 validator = validator_for(schema)
                 # Grammar backends support regex dialects that Python's

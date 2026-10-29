@@ -565,6 +565,11 @@ def test_json_schema_response_format_missing_schema():
         {"type": "array", "minItems": -1},
         {"type": "object", "required": "name"},
         {"properties": {"name": {"type": "not-a-json-type"}}},
+        {"$schema": 42},
+        {"$schema": None},
+        {"$schema": True},
+        {"$schema": []},
+        {"$schema": {}},
         None,
     ],
 )
@@ -598,7 +603,15 @@ def test_json_schema_nesting_is_bounded_before_meta_schema_validation():
 
 
 @pytest.mark.parametrize("as_model", [False, True])
-def test_json_schema_preserves_unicode_patterns_and_literals(as_model):
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        None,
+        "https://json-schema.org/draft/2020-12/schema",
+        "http://json-schema.org/draft-07/schema#",
+    ],
+)
+def test_json_schema_preserves_unicode_patterns_and_literals(as_model, dialect):
     from vllm.entrypoints.generate.base.protocol import JsonSchemaResponseFormat
 
     schema = {
@@ -607,6 +620,8 @@ def test_json_schema_preserves_unicode_patterns_and_literals(as_model):
         "required": ["name"],
         "additionalProperties": False,
     }
+    if dialect is not None:
+        schema["$schema"] = dialect
     inner = {"name": "test", "schema": schema}
     if as_model:
         inner = JsonSchemaResponseFormat(**inner)
@@ -622,7 +637,11 @@ def test_json_schema_preserves_unicode_patterns_and_literals(as_model):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_invalid_json_schema_returns_400_before_handler(stream):
+@pytest.mark.parametrize(
+    "schema",
+    [{"type": "string", "minLength": -1}, {"$schema": 42}, {"$schema": None}],
+)
+def test_invalid_json_schema_returns_400_before_handler(stream, schema):
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -643,7 +662,7 @@ def test_invalid_json_schema_returns_400_before_handler(stream):
         reached_handler = True
         return {"accepted": True}
 
-    with TestClient(app) as client:
+    with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -654,7 +673,7 @@ def test_invalid_json_schema_returns_400_before_handler(stream):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "test",
-                        "schema": {"type": "string", "minLength": -1},
+                        "schema": schema,
                     },
                 },
             },
