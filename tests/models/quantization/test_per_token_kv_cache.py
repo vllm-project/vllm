@@ -28,6 +28,7 @@ from ..utils import check_logprobs_close
             "meta-llama/Llama-3.2-1B-Instruct",
             "meta-llama/Llama-3.2-1B-Instruct",
         ),
+        ("ai21labs/Jamba-tiny-dev", "ai21labs/Jamba-tiny-dev"),
     ],
 )
 @pytest.mark.parametrize(
@@ -64,6 +65,7 @@ def test_per_token_head_kv_cache_accuracy(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
+            enable_chunked_prefill=True,
             kv_cache_dtype="auto",
             attention_config={"backend": backend},
         ) as vllm_model:
@@ -76,6 +78,7 @@ def test_per_token_head_kv_cache_accuracy(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
+            enable_chunked_prefill=True,
             kv_cache_dtype=kv_cache_dtype,
             attention_config={"backend": backend},
         ) as vllm_model:
