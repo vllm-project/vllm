@@ -493,6 +493,36 @@ def test_preferred_block_size_rejects_backends_with_no_common_size():
         Platform._preferred_block_size_for_backends(classes, 16, None)
 
 
+@pytest.mark.parametrize(
+    ("prefix_match_unit", "expected_block_size"),
+    [(None, 400), (80, 400), (256, 512)],
+)
+def test_hybrid_block_size_rounds_up_to_prefix_match_unit(
+    prefix_match_unit, expected_block_size
+):
+    """The block size derived from the mamba state (400 tokens for this model)
+    is rounded up to a multiple of prefix_match_unit instead of being rejected
+    later by the KV cache manager."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model="ibm-granite/granite-4.0-tiny-preview", dtype="bfloat16"
+        ),
+        cache_config=CacheConfig(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
+        ),
+    )
+
+    Platform._align_hybrid_block_size(vllm_config, FlashAttentionBackend)
+
+    cache_config = vllm_config.cache_config
+    assert cache_config.block_size == expected_block_size
+    assert cache_config.mamba_block_size == expected_block_size
+
+
 @pytest.mark.parametrize("cpu", [False, True])
 def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
     # Alignment that lands on a size an exact-size sibling rejects must fail
