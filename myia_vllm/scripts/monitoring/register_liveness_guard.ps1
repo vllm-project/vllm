@@ -1,0 +1,119 @@
+<#
+.SYNOPSIS
+    Register the po-2023 embeddings/STT liveness guard as a scheduled task.
+
+.DESCRIPTION
+    Runs myia_vllm/scripts/monitoring/embedding_liveness_guard.py every N minutes
+    and lets the guard restart only the container it implicates when the chain is
+    down (see the script's docstring for the escalation ladder and its rails).
+
+    WHY USER-LEVEL AND NOT SYSTEM:
+    the guard's only useful action is restarting containers, and Docker Desktop on
+    this host runs inside the interactive session. A SYSTEM task would fire while
+    Docker is not running and could only ever report red. So this task is created
+    with /IT (run only when the user is logged on) and needs NO elevation.
+
+    UAC / dry-run discipline (rule of 2026-08-27): registering a scheduled task is
+    a task-scheduler gesture, so a dry-run is mandatory and its output is posted
+    on the dashboard BEFORE the gesture. Use -WhatIf to print the exact command.
+
+.PARAMETER WhatIf
+    Print the command and the pre-checks, change nothing.
+
+.PARAMETER IntervalMinutes
+    Repetition interval. Default 5.
+
+.PARAMETER TaskName
+    Task name. Default 'Embeddings Liveness Guard'.
+
+.PARAMETER Force
+    Recreate the task if it already exists (default: report and exit).
+
+.EXAMPLE
+    .\register_liveness_guard.ps1 -WhatIf
+    .\register_liveness_guard.ps1
+#>
+[CmdletBinding()]
+param(
+    [switch]$WhatIf,
+    [int]$IntervalMinutes = 5,
+    [string]$TaskName = 'Embeddings Liveness Guard',
+    [switch]$Force
+)
+
+$ErrorActionPreference = 'Stop'
+
+$script = Join-Path $PSScriptRoot 'embedding_liveness_guard.py'
+$envf   = 'D:\Production\Embeddings\compose\.env'
+
+Write-Output "=== Pre-checks ==="
+$ok = $true
+
+if (Test-Path $script) {
+    Write-Output "  script           : OK  $script"
+} else {
+    Write-Output "  script           : MISSING  $script"; $ok = $false
+}
+
+if (Test-Path $envf) {
+    Write-Output "  env file         : OK  $envf"
+} else {
+    Write-Output "  env file         : MISSING  $envf"; $ok = $false
+}
+
+$python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+if ($python) {
+    Write-Output "  python           : OK  $python"
+} else {
+    Write-Output "  python           : MISSING from PATH"; $ok = $false
+}
+
+$existing = $null
+try { $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch { $existing = $null }
+if ($existing) {
+    Write-Output "  existing task    : PRESENT (State=$($existing.State))"
+} else {
+    Write-Output "  existing task    : absent"
+}
+
+if (-not $ok) {
+    Write-Output ""
+    Write-Output "ABORT: pre-checks failed, nothing registered."
+    exit 2
+}
+
+$cmd = 'schtasks /create /tn "{0}" /tr "\"{1}\" \"{2}\" --once" /sc minute /mo {3} /it /f' -f $TaskName, $python, $script, $IntervalMinutes
+
+Write-Output ""
+Write-Output "=== Command ==="
+Write-Output "  $cmd"
+Write-Output ""
+
+if ($existing -and -not $Force) {
+    Write-Output "Task already exists - re-run with -Force to recreate. Nothing changed."
+    exit 0
+}
+
+if ($WhatIf) {
+    Write-Output "DRY-RUN (-WhatIf): command above NOT executed, no task created or modified."
+    Write-Output ""
+    Write-Output "What the task would do every $IntervalMinutes min:"
+    Write-Output "  - POST /v1/embeddings on :8004 (fleet path) with the key, require dims 2560"
+    Write-Output "  - POST /v1/embeddings on :8005 (engine) only to localise a fault"
+    Write-Output "  - HTTP-level check of whisper-webui (:8190), no transcription (GPU 1 is another lane)"
+    Write-Output "  - on failure, restart only the implicated container (cap 2/h), then alert"
+    exit 0
+}
+
+& schtasks /create /tn "$TaskName" /tr "`"$python`" `"$script`" --once" /sc minute /mo $IntervalMinutes /it /f
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "schtasks failed with exit $LASTEXITCODE"
+    exit 1
+}
+
+Write-Output ""
+Write-Output "=== Verification ==="
+schtasks /query /tn "$TaskName" /fo LIST | Select-String -Pattern 'TaskName|Status|Next Run|Task To Run|Schedule Type|Repeat'
+
+Write-Output ""
+Write-Output "DONE - task '$TaskName' registered (user-level, /IT, no elevation)."
