@@ -142,7 +142,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         host_spec.page_size_bytes * cache_config.hisparse_host_num_blocks
     )
     assert host_group.kv_cache_spec.block_size == gpu_block_size
-    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size * (576 // 128)
     host_specs = host_group.kv_cache_spec.kv_cache_specs
     gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
     assert set(host_specs) == {"model.layers.0.self_attn"}
@@ -169,7 +169,8 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             kv_transfer_config=object(),
         ),
     )
-    assert scheduler_block_size == hash_block_size == gpu_block_size
+    assert scheduler_block_size == gpu_block_size * (576 // 128)
+    assert hash_block_size == gpu_block_size
 
 
 @pytest.mark.parametrize(

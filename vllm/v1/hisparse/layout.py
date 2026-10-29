@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
+_INDEXER_BLOCK_STRIDE_ALIGNMENT = 16
 
 
 @dataclass(frozen=True)
@@ -138,20 +139,10 @@ def _lay_out_hisparse_groups(
         gpu_block_size,
     )
     assert config is not None
-    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        cast(dict[str, KVCacheSpec], indexer_specs)
-    )
-    assert indexer_group_spec is not None
-    indexer_group = KVCacheGroupSpec(
-        list(indexer_specs),
-        indexer_group_spec,
-        enable_kv_transfer=True,
-        role=KVCacheGroupRole.HISPARSE_INDEXER,
-    )
-
+    indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
     hot_group_page_limit = max(
         [
-            sum(spec.page_size_bytes for spec in indexer_specs.values()),
+            indexer_page_bytes,
             *(_group_page_bytes(group) for group in regular_groups),
         ]
     )
@@ -211,6 +202,32 @@ def _lay_out_hisparse_groups(
         current_page += unit_page
     if current:
         append_hot_group(current)
+
+    # Fill the pool block the other device groups need with indexer pages.
+    pages_per_block = max(
+        max(
+            _group_page_bytes(group)
+            for group in [*resident_groups, *hot_groups, *regular_groups]
+        )
+        // indexer_page_bytes,
+        1,
+    )
+    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {
+            name: replace(
+                spec.copy_with_new_block_size(spec.block_size * pages_per_block),
+                block_stride_alignment=_INDEXER_BLOCK_STRIDE_ALIGNMENT,
+            )
+            for name, spec in indexer_specs.items()
+        }
+    )
+    assert indexer_group_spec is not None
+    indexer_group = KVCacheGroupSpec(
+        list(indexer_specs),
+        indexer_group_spec,
+        enable_kv_transfer=True,
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
 
     source_group_spec = UniformTypeKVCacheSpecs.from_specs(
         cast(dict[str, KVCacheSpec], source_specs)
