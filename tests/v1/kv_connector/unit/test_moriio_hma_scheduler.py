@@ -1044,6 +1044,33 @@ def test_register_kv_caches_allows_hybrid_divergent_block_len():
     assert worker.block_len == 9216
 
 
+def test_register_kv_caches_advertises_where_each_layer_starts():
+    """Peers holding other layers (pipeline stages) find a layer by name."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        name: Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False) for name in caches
+    }
+    worker = _make_register_worker(caches, geoms)
+    advertised = []
+
+    def _listener(metadata, ready_event, *_args, **_kwargs):
+        advertised.append(metadata)
+        ready_event.set()
+
+    worker._moriio_handshake_listener = _listener
+    worker.register_kv_caches(caches)
+
+    assert advertised[0].layer_base_addr_index == {"layer0": 0, "layer1": 1}
+    assert advertised[0].kv_caches_base_addr == [
+        caches["layer0"].data_ptr(),
+        caches["layer1"].data_ptr(),
+    ]
+
+
 def test_register_kv_caches_rejects_divergent_block_size():
     """Without HMA, block_size (tokens/page) must stay uniform."""
     Geom = moriio_layout.LayerTransferGeometry

@@ -1282,3 +1282,65 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
             kv_cache_config=_make_hybrid_kv_cache_config(),
         )
     assert worker.layer_to_group == {"full0": 0, "sw0": 1}
+
+
+def _pp_producer_config(pp_size: int, kv_cache_layout: str = "LBNHC") -> VllmConfig:
+    vllm_config = create_vllm_config(role="kv_producer")
+    vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    vllm_config.cache_config.kv_cache_layout = kv_cache_layout
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {"http_port": 12346, "handshake_port": 12347, "notify_port": 12348}
+    )
+    return vllm_config
+
+
+@pytest.mark.parametrize("pp_rank", [0, 2])
+def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_rank):
+    """Stages of a PP producer must not share ports or a MoRI engine name."""
+    vllm_config = _pp_producer_config(pp_size=4)
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common."
+            "get_pipeline_model_parallel_rank",
+            return_value=pp_rank,
+        ),
+    ):
+        worker = FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)
+
+    # One TP rank per stage, so stage s sits at offset s.
+    assert worker.side_channel_port == 12347 + pp_rank
+    assert worker.notify_port == 12348 + pp_rank
+    assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
+
+
+@pytest.mark.parametrize(
+    ("role", "read_mode"),
+    [("kv_consumer", False), ("kv_producer", True), ("kv_both", False)],
+)
+def test_pipeline_parallel_only_on_a_write_producer(role, read_mode):
+    vllm_config = create_vllm_config(role=role, read_mode=read_mode)
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="pipeline_parallel_size > 1"),
+    ):
+        MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+        )
+
+
+def test_pipeline_stage_rejects_block_outermost_kv_cache_layout(mock_parallel_groups):
+    """A stage's packed block is smaller than the decode's: offsets would drift."""
+    vllm_config = _pp_producer_config(pp_size=2, kv_cache_layout="BLHNC")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common."
+            "get_pipeline_model_parallel_rank",
+            return_value=1,
+        ),
+        pytest.raises(NotImplementedError, match="layer-outermost"),
+    ):
+        FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)

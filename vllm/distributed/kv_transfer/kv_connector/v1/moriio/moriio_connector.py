@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     fold_local_rank,
     get_moriio_mode,
+    get_peer_notify_ports,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
@@ -228,6 +229,16 @@ def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -
     return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
 
 
+def get_moriio_peer_pp_size(params: dict[str, Any] | None) -> int:
+    params = params or {}
+    return int(params.get("remote_pp_size") or params.get("pp_size") or 1)
+
+
+def get_moriio_peer_local_dp_size(params: dict[str, Any] | None) -> int:
+    params = params or {}
+    return int(params.get("remote_dp_size_local") or params.get("remote_dp_size") or 1)
+
+
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
     if producer_tp_size <= 0 or consumer_tp_size <= 0:
         raise ValueError("TP sizes must be positive")
@@ -302,6 +313,15 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
+        if vllm_config.parallel_config.pipeline_parallel_size > 1 and (
+            self.mode != MoRIIOMode.WRITE
+            or self.kv_transfer_config.kv_role != "kv_producer"
+        ):
+            raise NotImplementedError(
+                "MoRIIOConnector supports pipeline_parallel_size > 1 only on "
+                "the producer in WRITE mode, got kv_role="
+                f"{self.kv_transfer_config.kv_role!r} in {self.mode.value} mode"
+            )
         self._transfers_mamba_state = any(
             group.enable_kv_transfer and isinstance(group.kv_cache_spec, MambaSpec)
             for group in kv_cache_config.kv_cache_groups
@@ -979,9 +999,13 @@ class MoRIIOConnectorScheduler:
                 )
                 return
 
-        remote_notify_port = int(remote_notify_port)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+        for target_port in get_peer_notify_ports(
+            int(remote_notify_port),
+            remote_dp_rank,
+            get_moriio_peer_tp_size(params, self.tp_size),
+            get_moriio_peer_pp_size(params),
+            get_moriio_peer_local_dp_size(params),
+        ):
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1264,13 +1288,15 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    # Every prefill TP rank needs the allocation; ports past
-                    # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
-                        target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
-                        )
-
+                    # Every prefill (pp, tp) worker needs the allocation; ports
+                    # past the prefill sizes are not bound.
+                    for target_port in get_peer_notify_ports(
+                        remote_notify_port,
+                        _remote_dp_rank_for_port,
+                        get_moriio_peer_tp_size(_kvp, self.tp_size),
+                        get_moriio_peer_pp_size(_kvp),
+                        get_moriio_peer_local_dp_size(_kvp),
+                    ):
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
@@ -1783,6 +1809,20 @@ class MoRIIOConnectorWorker:
         self._local_rank = get_world_group().local_rank
         self.tp_rank = self.moriio_config.tp_rank
         self.dp_rank = self.moriio_config.dp_rank
+        self.pp_rank = self.moriio_config.pp_rank
+        self.pp_size = self.moriio_config.pp_size
+        cache_config = vllm_config.cache_config
+        if (
+            self.pp_size > 1
+            and cache_config.get_resolved_kv_cache_layout().is_block_outermost
+        ):
+            # A block-outermost block packs every layer this worker holds, so
+            # its stride differs from the decode's when a stage holds a subset.
+            raise NotImplementedError(
+                "MoRIIOConnector with pipeline_parallel_size > 1 requires a "
+                "layer-outermost KV cache layout, got "
+                f"{cache_config.kv_cache_layout}"
+            )
 
         self.local_ip = self.moriio_config.local_ip
         self.local_kv_port = self.moriio_config.local_kv_port
@@ -1820,6 +1860,9 @@ class MoRIIOConnectorWorker:
             f"{self.moriio_config.local_ip}:{self.moriio_config.handshake_port}:"
             f"tp{self.tp_rank}:dp{self.dp_rank}"
         )
+        if self.pp_size > 1:
+            # MoRI peers address engines by this key; stages need distinct keys.
+            engine_suffix += f":pp{self.pp_rank}"
         self.moriio_engine = IOEngine(
             f"{role}:{engine_suffix}",
             IOEngineConfig(
@@ -1885,8 +1928,7 @@ class MoRIIOConnectorWorker:
         self._remote_agents: dict[EngineId, set[str]] = {}
 
         self.side_channel_port: int = (
-            self.moriio_config.handshake_port
-            + get_port_offset(self.dp_rank, self.tp_rank)
+            self.moriio_config.handshake_port + self.moriio_config.port_offset
         )
         self.engine_id: EngineId = engine_id
 
@@ -2100,6 +2142,7 @@ class MoRIIOConnectorWorker:
             ),
             "dp_size": self.moriio_config.dp_size,
             "tp_size": self.moriio_config.tp_size,
+            "pp_size": self.moriio_config.pp_size,
             "transfer_mode": self.mode.name,
         }
         return MoRIIOHeartbeat(
@@ -2469,7 +2512,24 @@ class MoRIIOConnectorWorker:
     ) -> int:
         if not self.kv_layer_mr_offset or not remote_engine_id:
             return 0
-        idx = self.layer_base_addr_index[layer_name]
+        if remote_moriio_meta.layer_base_addr_index:
+            idx = remote_moriio_meta.layer_base_addr_index.get(layer_name)
+            if idx is None:
+                raise MoRIIOError(
+                    f"peer {remote_engine_id} registered no KV cache for layer "
+                    f"{layer_name}"
+                )
+        elif len(remote_moriio_meta.kv_caches_base_addr) == self.num_regions:
+            # Older peers send no index; equal region counts are taken to mean
+            # the same layers in the same order.
+            idx = self.layer_base_addr_index[layer_name]
+        else:
+            raise MoRIIOError(
+                f"peer {remote_engine_id} registered "
+                f"{len(remote_moriio_meta.kv_caches_base_addr)} KV cache regions, "
+                f"this worker {self.num_regions}, and does not advertise where "
+                "each layer starts; run the same vLLM version on both sides"
+            )
         metas = self.layer_name_to_remote_kv_cache_metadata.get(
             remote_engine_id, {}
         ).get(layer_name)
@@ -2760,6 +2820,7 @@ class MoRIIOConnectorWorker:
                 for name, layout in self.mamba_state_layouts.items()
             },
             attention_block_sizes=self.attention_block_sizes,
+            layer_base_addr_index=self.layer_base_addr_index,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
