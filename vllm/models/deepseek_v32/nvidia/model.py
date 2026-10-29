@@ -9,7 +9,6 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_norm,
@@ -35,7 +34,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
@@ -47,7 +45,8 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v32.attention import (
     DeepseekV32Attention,
-    reuses_previous_topk,
+    make_dsa_intermediate_tensors_factory,
+    pp_carries_topk,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
@@ -232,29 +231,10 @@ class DeepseekV32Model(torch.nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        make_empty_hidden = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.pp_carries_topk = pp_carries_topk(config)
+        self.make_empty_intermediate_tensors = make_dsa_intermediate_tensors_factory(
+            config, self.pp_carries_topk
         )
-        # A stage that starts by reusing top-k needs the previous stage's.
-        pp = get_pp_group()
-        self.pp_carries_topk = any(
-            reuses_previous_topk(
-                config, get_pp_indices(config.num_hidden_layers, rank, pp.world_size)[0]
-            )
-            for rank in range(1, pp.world_size)
-        )
-
-        def make_empty_intermediate_tensors(
-            batch_size: int, dtype: torch.dtype, device: torch.device
-        ) -> IntermediateTensors:
-            tensors = make_empty_hidden(batch_size, dtype, device)
-            if self.pp_carries_topk:
-                tensors["topk_indices"] = torch.zeros(
-                    (batch_size, config.index_topk), dtype=torch.int32, device=device
-                )
-            return tensors
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
 
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts

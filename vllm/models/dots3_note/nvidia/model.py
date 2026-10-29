@@ -42,9 +42,12 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     sequence_parallel_chunk,
+)
+from vllm.models.deepseek_v32.attention import (
+    make_dsa_intermediate_tensors_factory,
+    pp_carries_topk,
 )
 from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32DecoderLayer,
@@ -582,7 +585,7 @@ class Dots3NoteModel(DeepseekV32Model):
         self.use_sequence_parallel = False
         self.is_v32 = True
         self._weight_block_size = getattr(quant_config, "weight_block_size", None)
-        topk_indices_buffer = torch.empty(
+        self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
@@ -603,7 +606,7 @@ class Dots3NoteModel(DeepseekV32Model):
             lambda prefix: Dots3NoteDecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
+                topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -611,8 +614,9 @@ class Dots3NoteModel(DeepseekV32Model):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.pp_carries_topk = pp_carries_topk(config)
+        self.make_empty_intermediate_tensors = make_dsa_intermediate_tensors_factory(
+            config, self.pp_carries_topk
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = (

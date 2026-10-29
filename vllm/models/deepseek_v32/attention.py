@@ -8,8 +8,9 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -31,9 +32,13 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    make_empty_intermediate_tensors_factory,
+)
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
@@ -59,6 +64,37 @@ def reuses_previous_topk(
     if 0 <= layer_id < len(index_topk_pattern):
         return index_topk_pattern[layer_id] == "S"
     return False
+
+
+def pp_carries_topk(config: DeepseekV2Config | DeepseekV3Config) -> bool:
+    """Whether a later PP stage starts on a layer that reuses the previous top-k."""
+    pp_size = get_pp_group().world_size
+    return any(
+        reuses_previous_topk(
+            config, get_pp_indices(config.num_hidden_layers, rank, pp_size)[0]
+        )
+        for rank in range(1, pp_size)
+    )
+
+
+def make_dsa_intermediate_tensors_factory(
+    config: DeepseekV2Config | DeepseekV3Config, carries_topk: bool
+):
+    make_empty_hidden = make_empty_intermediate_tensors_factory(
+        ["hidden_states", "residual"], config.hidden_size
+    )
+
+    def make_empty_intermediate_tensors(
+        batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        tensors = make_empty_hidden(batch_size, dtype, device)
+        if carries_topk:
+            tensors["topk_indices"] = torch.zeros(
+                (batch_size, config.index_topk), dtype=torch.int32, device=device
+            )
+        return tensors
+
+    return make_empty_intermediate_tensors
 
 
 class DeepseekV32Indexer(nn.Module):
