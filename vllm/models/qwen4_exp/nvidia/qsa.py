@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
-from vllm.config.cache import CacheConfig, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -35,7 +35,6 @@ from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    extract_layer_index,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -55,7 +54,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
-from ..common.qsa_indexer import QSAIndexerMetadata
+from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
@@ -125,13 +124,6 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
                 yield name, weight
 
         return super().load_weights(remap_shards())
-
-
-def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
-    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
-    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
-        return "auto"
-    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
