@@ -19,6 +19,10 @@ def init_speculator(
     """Build the speculator for this config."""
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.use_remote_draft():
+        from vllm.v1.worker.gpu.spec_decode.remote import RemoteSpeculator
+
+        return RemoteSpeculator(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,
