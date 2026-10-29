@@ -520,8 +520,9 @@ def rocm_unquantized_gemm_impl(
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
     # AITER's gfx950 FlyDSL A16W16 kernel addresses C with int32 offsets and
-    # faults once M * N >= 2^31 (ROCm/aiter#6853).
-    if rocm_aiter_ops.is_tgemm_enabled() and not (on_gfx950() and n * m >= 1 << 31):
+    # reads A/B through 4 GiB buffer descriptors (ROCm/aiter#6853).
+    aiter_hgemm_unsafe = n * m >= 1 << 31 or max(n, m) * k * x.element_size() >= 1 << 32
+    if rocm_aiter_ops.is_tgemm_enabled() and not aiter_hgemm_unsafe:
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
