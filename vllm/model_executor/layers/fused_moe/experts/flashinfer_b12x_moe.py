@@ -343,10 +343,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         )
         if padded_num_tokens != num_tokens:
             pad = padded_num_tokens - num_tokens
-            # Padding rows route to expert 0 with zero weight, so they cost a
-            # little extra MoE work but contribute nothing to the output.
+            # Padding rows carry expert id -1, which FlashInfer's routing
+            # treats as unrouted, so they add no MoE work and no output.
             hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad))
-            topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad))
+            topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad), value=-1)
             topk_weights = torch.nn.functional.pad(topk_weights, (0, 0, 0, pad))
 
         wrapper_output = wrapper.run(
@@ -391,8 +391,8 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
                 hidden = torch.zeros(
                     (tokens, self.hidden_dim), dtype=output_dtype, device=w1.device
                 )
-                topk_ids = torch.zeros(
-                    (tokens, self.topk), dtype=torch.int32, device=w1.device
+                topk_ids = torch.full(
+                    (tokens, self.topk), -1, dtype=torch.int32, device=w1.device
                 )
                 topk_weights = torch.zeros(
                     (tokens, self.topk), dtype=torch.float32, device=w1.device
