@@ -1030,6 +1030,7 @@ def test_fse_online_quantization_bf16_routed_quantized_shared_raises(
 
 def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     default_vllm_config,
+    monkeypatch,
     single_rank_parallel_state,
 ) -> None:
     """Routed NVFP4 and shared MXFP8 weights land in their MXFP4 expert slots.
@@ -1107,7 +1108,9 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         ckpt_names = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
         weights = []
         for (expert, projection), (packed, scale, global_scale) in routed.items():
-            prefix = f"block_sparse_moe.experts.{expert}.{ckpt_names[projection]}"
+            prefix = (
+                f"layers.0.block_sparse_moe.experts.{expert}.{ckpt_names[projection]}"
+            )
             weights += [
                 (f"{prefix}.weight_packed", packed),
                 (f"{prefix}.weight_scale", scale),
@@ -1115,7 +1118,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
                 (f"{prefix}.input_global_scale", torch.ones(1)),
             ]
         for projection, (weight, scale) in shared.items():
-            prefix = f"block_sparse_moe.shared_experts.{projection}"
+            prefix = f"layers.0.block_sparse_moe.shared_experts.{projection}"
             weights += [
                 (f"{prefix}.weight", weight),
                 (f"{prefix}.weight_scale_inv", scale),
@@ -1130,10 +1133,21 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         model.config = SimpleNamespace(
             num_local_experts=num_routed_experts, n_shared_experts=1
         )
-        model.is_fused_shared_expert_enabled = True
-        model.block_sparse_moe = torch.nn.Module()
-        model.block_sparse_moe.experts = runner
-        model.load_weights(weights)
+        # Per-layer FSE: the shared expert of layer 0 is fused.
+        model.fused_shared_expert_layers = frozenset({0})
+        decoder_layer = torch.nn.Module()
+        decoder_layer.block_sparse_moe = torch.nn.Module()
+        decoder_layer.block_sparse_moe.experts = runner
+        model.layers = torch.nn.ModuleList([decoder_layer])
+        # `load_weights` only redirects the shared expert of the layers in
+        # `fused_shared_expert_layers` when AITER fused shared experts are
+        # enabled. Enable that gate only for loading, so the expert kernels
+        # selected above stay unchanged.
+        with monkeypatch.context() as m:
+            m.setattr(
+                rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: True
+            )
+            model.load_weights(weights)
         layer.quant_method.process_weights_after_loading(layer)
 
     def check_slot(slot: int, gate, up, down) -> None:
