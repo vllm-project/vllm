@@ -42,6 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -208,6 +209,12 @@ class HYV3MultiTokenPredictor(nn.Module):
 class HYV3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            vllm_config = vllm_config.with_hf_config(
+                speculative_config.draft_model_config.hf_config
+            )
+        self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = HYV3MultiTokenPredictor(
@@ -269,13 +276,13 @@ class HYV3MTP(nn.Module):
         v = v.reshape(-1, hidden_size)
         return torch.concat((q, k, v))
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.quant_config is not None and (
             cache_scale_mapper := self.quant_config.get_cache_scale_mapper()
         ):
             weights = cache_scale_mapper.apply(weights)
         cla_factor = _get_cla_factor(self.config)
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
@@ -319,6 +326,26 @@ class HYV3MTP(nn.Module):
             expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        strict = (
+            self.quant_config is None
+            and get_draft_load_config(self.vllm_config).model_loader_extra_config.get(
+                "enable_weights_track"
+            )
+            is not False
+        )
+        required_shards: dict[str, int] = {}
+        loaded_shards: dict[str, set[str | int | tuple[int, str]]] = {}
+        if strict:
+            for name, param in params_dict.items():
+                if name.endswith((".qkv_proj.weight", ".qkv_proj.bias")):
+                    required_shards[name] = 3
+                elif name.endswith((".gate_up_proj.weight", ".gate_up_proj.bias")):
+                    required_shards[name] = 2
+                elif name.endswith(".w13_weight"):
+                    required_shards[name] = 2 * param.shape[0]
+                elif name.endswith(".w2_weight"):
+                    required_shards[name] = param.shape[0]
 
         # V3 shared weights mapping:
         # - embed_tokens: from main model's model.embed_tokens.weight
@@ -326,22 +353,29 @@ class HYV3MTP(nn.Module):
         #   (HF infer_mtp uses head_weight=self.lm_head.weight, not the
         #    checkpoint's model.layers.<N>.shared_head.weight)
         # - No norm mapping (V3 MTP has no intermediate norm before lm_head)
-        mtp_start = self.config.num_hidden_layers
+        shared_heads = tuple(
+            f"model.layers.{idx}.shared_head.head.weight" for idx in self.model.layers
+        )
         v3_shared_weights = {
-            "model.embed_tokens.weight": "model.embed_tokens.weight",
-            "lm_head.weight": f"model.layers.{mtp_start}.shared_head.head.weight",
+            "model.embed_tokens.weight": ("model.embed_tokens.weight",),
+            "lm_head.weight": shared_heads,
         }
+        if self.config.tie_word_embeddings:
+            v3_shared_weights["model.embed_tokens.weight"] += shared_heads
+            v3_shared_weights["lm_head.weight"] = ()
 
         for name, loaded_weight in weights:
             # Intercept shared weights before any other processing
             if name in v3_shared_weights:
-                target_name = v3_shared_weights[name]
-                if target_name in params_dict:
+                for target_name in v3_shared_weights[name]:
+                    if target_name not in params_dict:
+                        continue
                     param = params_dict[target_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+                    loaded_params.add(target_name)
                 continue
 
             if "rotary_emb.inv_freq" in name:
@@ -389,10 +423,13 @@ class HYV3MTP(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                if strict:
+                    loaded_shards.setdefault(name, set()).add(shard_id)
 
                 is_found = True
                 break
             if is_found:
+                loaded_params.add(name)
                 continue
 
             for param_name, weight_name, den, split_param, func in split_params_mapping:
@@ -419,6 +456,8 @@ class HYV3MTP(nn.Module):
                         )
                     else:
                         weight_loader(param, loaded_weight[offset:new_offset], shard_id)
+                    if strict:
+                        loaded_shards.setdefault(name, set()).add(shard_id)
                     offset = new_offset
 
                 break
@@ -434,13 +473,16 @@ class HYV3MTP(nn.Module):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(
+                    success = weight_loader(
                         param,
                         loaded_weight,
                         name,
                         shard_id=shard_id,
                         expert_id=expert_id,
+                        return_success=True,
                     )
+                    if strict and success:
+                        loaded_shards.setdefault(name, set()).add((expert_id, shard_id))
                     break
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -457,6 +499,29 @@ class HYV3MTP(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        spec = self.vllm_config.speculative_config
+        if spec is not None and spec.method == "mtp":
+            # The native proposer installs these target-owned modules after load.
+            loaded_params.add("model.embed_tokens.weight")
+            loaded_params.update(shared_heads)
+        if strict:
+            missing = {
+                name
+                for name, param in params_dict.items()
+                if param.numel() and name not in loaded_params
+            }
+            missing.update(
+                name
+                for name, count in required_shards.items()
+                if len(loaded_shards.get(name, ())) != count
+            )
+            if missing:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {sorted(missing)}"
+                )
+        return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite spec layer weight names to match vLLM module structure."""

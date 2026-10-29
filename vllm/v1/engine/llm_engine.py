@@ -246,6 +246,7 @@ class LLMEngine:
 
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
+            self.input_processor.validate_resumable(prompt.resumable)
             logger.warning_once(
                 "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
                 "is deprecated and will be removed in the future. You should "
