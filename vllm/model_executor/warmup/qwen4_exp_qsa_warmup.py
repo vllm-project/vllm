@@ -10,6 +10,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -76,13 +77,30 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
 
     kv_cache = owner.kv_cache
     assert kv_cache.numel()
+    dcp_world_size = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_world_size
     attention_profiles = warmup_qsa_sparse_paged_attention(
         kv_cache,
         block_table_for(owner.layer_name),
         num_query_heads=owner.num_heads,
         selection_width=indexer.output_width,
+        dcp_world_size=dcp_world_size,
     )
     logger.info(
         "Warmed up Qwen4Exp QSA sparse attention kernels: %s.",
         attention_profiles,
     )
+
+    if dcp_world_size > 1:
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
+            warmup_qsa_localize_dcp_indices,
+        )
+
+        warmup_qsa_localize_dcp_indices(
+            selection_width=indexer.output_width,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_rank,
+            cp_kv_cache_interleave_size=cast(
+                "Qwen4ExpQSAFlashAttentionImpl", owner.impl
+            ).cp_kv_cache_interleave_size,
+        )
+        logger.info("Warmed up Qwen4Exp QSA DCP localization kernel.")
