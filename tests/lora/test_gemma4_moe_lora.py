@@ -140,7 +140,7 @@ def _build(root: Path, tokenizer_dir: Path, multimodal: bool) -> tuple[str, str,
 
 
 def _prompt_logprobs(
-    model: str, lora_path: str | None = None
+    model: str, lora_path: str | None = None, hf_overrides: dict | None = None
 ) -> list[list[list[float]]]:
     """Prompt logprobs without LoRA, then with `lora_path` if given."""
     llm = vllm.LLM(
@@ -153,6 +153,7 @@ def _prompt_logprobs(
         enable_lora=True,
         max_lora_rank=RANK,
         limit_mm_per_prompt={"image": 0},
+        hf_overrides=hf_overrides,
     )
     try:
         generator = torch.Generator().manual_seed(1)
@@ -192,14 +193,22 @@ def _mean_abs_diff(x: list[list[float]], y: list[list[float]]) -> float:
     return sum(diffs) / len(diffs)
 
 
-@pytest.mark.parametrize("multimodal", [True, False], ids=["mm", "text"])
+@pytest.mark.parametrize(
+    ("multimodal", "hf_overrides"),
+    [
+        (True, None),
+        (False, None),
+        (True, {"architectures": ["Gemma4ForCausalLM"]}),
+    ],
+    ids=["mm", "text", "mm-checkpoint-text-model"],
+)
 def test_gemma4_moe_3d_expert_lora_matches_merged(
-    tmp_path, gemma4_tokenizer_dir, multimodal
+    tmp_path, gemma4_tokenizer_dir, multimodal, hf_overrides
 ):
     base, merged, lora = _build(tmp_path, gemma4_tokenizer_dir, multimodal)
 
-    base_lp, lora_lp = _prompt_logprobs(base, lora)
-    (merged_lp,) = _prompt_logprobs(merged)
+    base_lp, lora_lp = _prompt_logprobs(base, lora, hf_overrides)
+    (merged_lp,) = _prompt_logprobs(merged, hf_overrides=hf_overrides)
 
     signal = _mean_abs_diff(merged_lp, base_lp)
     assert signal > 0.1
