@@ -227,6 +227,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 "mori_low_latency",
                 "mori",
             ):
+                if self.all2all_backend != "mori":
+                    logger.warning_once(
+                        "'%s' is deprecated and will be removed in a future release. "
+                        "Use 'mori', which picks the MoRI kernels automatically.",
+                        self.all2all_backend,
+                    )
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(
