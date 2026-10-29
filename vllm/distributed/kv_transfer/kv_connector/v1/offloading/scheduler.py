@@ -87,6 +87,7 @@ class TransferJobStatus:
     is_store: bool
     # Unlike an async load, store jobs may be created next to it.
     is_sync_load: bool = False
+    failed: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -374,6 +375,9 @@ class RequestOffloadState:
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # A load for this request failed; all its later lookups, including after
+    # preemption, skip the offloaded cache so a faulting load is not retried.
+    load_failed: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -1299,7 +1303,7 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_external_kv:
+        if request.skip_reading_external_kv or req_status.load_failed:
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -1877,7 +1881,12 @@ class OffloadingConnectorScheduler:
                 # Clamp to the GPU prefix cache's commit point. The final sampled
                 # token's slot is never committed (under spec decode it holds a
                 # rejected draft's KV), so a block ending there must not be stored.
-                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
+                # A request that finished before its prefill completed (e.g. an
+                # error) has computed only num_computed_tokens of its prompt.
+                num_tokens_after_batch = min(
+                    req.num_computed_tokens,
+                    max(req.num_prompt_tokens, req.num_tokens - 1),
+                )
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -2325,6 +2334,8 @@ class OffloadingConnectorScheduler:
                 )
                 continue
             job_status = self._jobs[job_id]
+            if job_id in meta.failed_jobs:
+                job_status.failed = True
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
@@ -2332,8 +2343,27 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload store job %d failed; dropping %d chunk(s) "
+                        "from the CPU cache rather than publishing them.",
+                        job_id,
+                        len(job_status.keys),
+                    )
+                self.manager.complete_store(
+                    job_status.keys,
+                    req_status.req_context,
+                    success=not job_status.failed,
+                )
             else:
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload load job %d failed; request %s will not "
+                        "load from the offloaded cache again.",
+                        job_id,
+                        job_status.req_id,
+                    )
+                    req_status.load_failed = True
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
