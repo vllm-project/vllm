@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from http import HTTPStatus
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.v1.engine import CheckpointState, PauseMode
 
 logger = init_logger(__name__)
 
@@ -17,9 +20,94 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+dev_router = APIRouter()
 
 
-@router.post("/suspend")
+class CheckpointStateResponse(BaseModel):
+    state: CheckpointState
+    error: str | None = None
+
+
+_STATE_RESPONSE = {"model": CheckpointStateResponse}
+
+
+def _state_response(
+    state: CheckpointState, error: str | None, status_code: HTTPStatus
+) -> JSONResponse:
+    content = CheckpointStateResponse(state=state, error=error)
+    return JSONResponse(
+        content=content.model_dump(mode="json", exclude_none=True),
+        status_code=status_code.value,
+    )
+
+
+@router.post(
+    "/checkpoint/prepare",
+    responses={
+        HTTPStatus.OK.value: _STATE_RESPONSE,
+        HTTPStatus.BAD_REQUEST.value: _STATE_RESPONSE,
+    },
+)
+async def checkpoint_prepare(raw_request: Request, mode: PauseMode = "wait"):
+    """Drain with `mode` and release what a checkpoint must not contain.
+    Returns once started; poll /checkpoint/status. Repeating is a no-op."""
+    client = engine_client(raw_request)
+    state, error = await client.checkpoint_state()
+    if state == CheckpointState.RUNNING:
+        if refusal := await client.checkpoint_prepare(mode):
+            return _state_response(state, refusal, HTTPStatus.BAD_REQUEST)
+        state, error = await client.checkpoint_state()
+    elif state in (CheckpointState.RESTORING, CheckpointState.FAILED):
+        return _state_response(state, error, HTTPStatus.BAD_REQUEST)
+    return _state_response(state, error, HTTPStatus.OK)
+
+
+@router.post(
+    "/checkpoint/restore",
+    responses={
+        HTTPStatus.OK.value: _STATE_RESPONSE,
+        HTTPStatus.BAD_REQUEST.value: _STATE_RESPONSE,
+    },
+)
+async def checkpoint_restore(raw_request: Request):
+    """Bring back what preparing released and serve. Orchestrators may
+    redeliver, so a restore in progress or done returns 200."""
+    client = engine_client(raw_request)
+    state, error = await client.checkpoint_state()
+    if state in (CheckpointState.PREPARING, CheckpointState.FAILED):
+        return _state_response(state, error, HTTPStatus.BAD_REQUEST)
+    if state == CheckpointState.PREPARED:
+        await client.checkpoint_restore()
+        state, error = await client.checkpoint_state()
+    return _state_response(state, error, HTTPStatus.OK)
+
+
+@router.get(
+    "/checkpoint/status",
+    responses={
+        HTTPStatus.OK.value: _STATE_RESPONSE,
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: _STATE_RESPONSE,
+        HTTPStatus.SERVICE_UNAVAILABLE.value: _STATE_RESPONSE,
+    },
+)
+async def checkpoint_status(raw_request: Request):
+    # Polled by orchestrators: 200 once prepared (safe to capture), 503 until
+    # then, 500 after a failure.
+    state, error = await engine_client(raw_request).checkpoint_state()
+    if state == CheckpointState.PREPARED:
+        status_code = HTTPStatus.OK
+    elif state == CheckpointState.FAILED:
+        status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+    else:
+        status_code = HTTPStatus.SERVICE_UNAVAILABLE
+    return _state_response(state, error, status_code)
+
+
+def attach_router(app: FastAPI):
+    app.include_router(router)
+
+
+@dev_router.post("/suspend")
 async def suspend(raw_request: Request):
     mode = raw_request.query_params.get("mode", "abort")
     if mode not in ("abort", "wait", "keep"):
@@ -35,21 +123,19 @@ async def suspend(raw_request: Request):
     return Response(status_code=200)
 
 
-@router.post("/resume")
+@dev_router.post("/resume")
 async def resume(raw_request: Request):
     logger.info("Resuming engine from checkpoint suspend.")
     await engine_client(raw_request).resume()
     return Response(status_code=200)
 
 
-@router.get("/is_suspended")
+@dev_router.get("/is_suspended")
 async def is_suspended(raw_request: Request):
     is_suspended = await engine_client(raw_request).is_checkpoint_suspended()
     return JSONResponse(content={"is_suspended": is_suspended})
 
 
-def attach_router(app: FastAPI):
-    if not envs.VLLM_SERVER_DEV_MODE:
-        return
-
-    app.include_router(router)
+def attach_dev_router(app: FastAPI):
+    if envs.VLLM_SERVER_DEV_MODE:
+        app.include_router(dev_router)

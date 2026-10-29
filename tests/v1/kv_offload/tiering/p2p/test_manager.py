@@ -16,10 +16,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
@@ -29,10 +31,15 @@ from vllm.v1.kv_offload.tiering.base import (
     TieringOffloadingMetrics,
     TransferJob,
 )
-from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
+    _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -99,12 +106,12 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 
 def _job_metadata(
     job_id: int,
-    keys: list[bytes] | None = None,
+    keys: list[OffloadKey] | None = None,
     chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
-        keys = [b"key1"]
+        keys = [OffloadKey(b"key1")]
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
     return TransferJob(
@@ -133,6 +140,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._reaped_stores = {}
     mgr._unbound_store_timeout_s = _UNBOUND_STORE_TIMEOUT_S
     mgr._failed_serve_ctxs = []
+    mgr._retained = {}
+    mgr._retained_force_released = 0
     return mgr
 
 
@@ -261,29 +270,29 @@ class TestLookup:
     def test_lookup_returns_miss_without_kv_params(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=None)
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_prefiller_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
         """No ``remote_prefiller`` sub-dict means the request was not routed for
@@ -291,7 +300,7 @@ class TestLookup:
         returns MISS even when a stale ``remote_decoder`` block is present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +371,7 @@ class TestServeExternalRequests:
         mgr._failed_serve_ctxs = [ctx]
         sess_a = _RecordingSession()
         sess_b = _RecordingSession()
-        mgr._sessions = {"a": sess_a, "b": sess_b}
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[dict-item]  # P2PSession stand-in
 
         parent = _RecordingParent()
         mgr.serve_external_requests(parent)
@@ -377,7 +386,7 @@ class TestServeExternalRequests:
     def test_no_failed_serves_still_serves_sessions(self):
         mgr = _make_manager()
         sess = _RecordingSession()
-        mgr._sessions = {"a": sess}
+        mgr._sessions = {"a": sess}  # type: ignore[dict-item]  # P2PSession stand-in
 
         parent = _RecordingParent()
         mgr.serve_external_requests(parent)
@@ -414,7 +423,7 @@ class TestSubmitStore:
         mgr = _make_manager()
         job = _job_metadata(
             job_id=1,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
@@ -445,7 +454,7 @@ class TestSubmitStore:
         # the kv_request_id → session fast path.
         job = _job_metadata(
             job_id=7,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
@@ -511,7 +520,7 @@ class TestSubmitLoad:
         mgr._sessions[peer_id] = existing
         job = _job_metadata(
             job_id=42,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
@@ -561,7 +570,7 @@ class TestPromotionLatency:
         )
         job = TransferJob(
             job_id=42,
-            keys=[b"key1"],
+            keys=[OffloadKey(b"key1")],
             chunk_ids=np.array([0]),
             is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
@@ -582,7 +591,7 @@ class TestPromotionLatency:
             reported_results.extend(results)
             return results
 
-        p2p_tier.get_finished_jobs = capture_finished_jobs
+        p2p_tier.get_finished_jobs = capture_finished_jobs  # type: ignore[method-assign]
         p2p_tier.submit_load(job)
         assert session.requests == [(42, "req-1")]
 
@@ -670,8 +679,8 @@ class TestOnRequestFinished:
 
         mgr = _make_manager()
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
@@ -721,6 +730,7 @@ class _FakeSession:
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
         last_activity_at: float | None = None,
+        close_retained: dict[int, frozenset[int]] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -735,6 +745,7 @@ class _FakeSession:
         self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
+        self._close_retained = close_retained or {}
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -782,6 +793,7 @@ class _FakeSession:
             failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
+            retained=self._close_retained,
         )
 
 
@@ -868,7 +880,7 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr._unbound_stores["req-fresh"] = [
-            _UnboundStoreBatch(job_id=99, keys=[b"k"], block_ids=[0])
+            _UnboundStoreBatch(job_id=99, keys=[OffloadKey(b"k")], block_ids=[0])
         ]
         list(mgr.get_finished_jobs())
         assert "req-fresh" in mgr._unbound_stores
@@ -880,12 +892,12 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
-        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0])
+        stale = _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0])
         # Backdate the submission so the head batch is past the deadline.
         stale.submitted_at = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S - 1.0
         mgr._unbound_stores["req-stale"] = [
             stale,
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         results = list(mgr.get_finished_jobs())
@@ -1265,7 +1277,7 @@ class TestBidirectionalManager:
         assert list(mgr_a.get_finished_jobs()) == []
         assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
         assert "B:2" not in mgr_a._sessions
-        assert "B:2" not in mgr_a._data._remote_peers
+        assert "B:2" not in mgr_a._data._remote_peers  # type: ignore[attr-defined]  # _FakeData
 
         # A replacement session must not restart the expired request's probes.
         mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
@@ -1290,7 +1302,7 @@ class TestBidirectionalManager:
                 mgr._data = _FakeData(mgr._local_id)
                 managers.append(mgr)
                 monitors.append(
-                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)
+                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)  # type: ignore[attr-defined]
                 )
             mgr_a, mgr_b = managers
             peer_a, peer_b = mgr_a._local_id, mgr_b._local_id
@@ -1379,7 +1391,7 @@ class TestBidirectionalManager:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=100,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
@@ -1387,7 +1399,7 @@ class TestBidirectionalManager:
         mgr_b.submit_store(
             _job_metadata(
                 job_id=200,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
@@ -1397,7 +1409,7 @@ class TestBidirectionalManager:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=101,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
@@ -1405,7 +1417,7 @@ class TestBidirectionalManager:
         mgr_b.submit_load(
             _job_metadata(
                 job_id=201,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
@@ -1429,15 +1441,17 @@ class TestBidirectionalManager:
         assert 201 in b_ok, f"B loads succeeded: {b_ok}"
         assert 200 in b_ok, f"B stores succeeded: {b_ok}"
 
-    def test_late_fetch_after_reap_fails_immediately(self):
+    def test_late_fetch_after_reap_fails_immediately(self, monkeypatch):
         """A fetch for a reaped kv_request_id fails in one round trip.
 
         The producer drops parked blocks once unbound_store_timeout_s
         expires. A consumer whose fetch arrives after that must learn on the
         next tick via TransferDoneMsg(success=False) — not stall for
-        _LOAD_TIMEOUT_S and then take the abort path.
+        _PD_LOAD_TIMEOUT_S and then take the abort path.
         """
-        from vllm.v1.kv_offload.tiering.p2p.session.client import _LOAD_TIMEOUT_S
+        from vllm.v1.kv_offload.tiering.p2p.session.client import (
+            _PD_LOAD_TIMEOUT_S,
+        )
 
         mgr_a, mgr_b = _build_paired_managers()
         kv_id = "req-late"
@@ -1445,20 +1459,22 @@ class TestBidirectionalManager:
         # Record every message type leaving the consumer, so the assertion
         # below can prove no abort was ever needed.
         sent_from_a: list[str] = []
-        drain = mgr_a._control._drain_outbound_to
+        ctrl_a = mgr_a._control
+        assert isinstance(ctrl_a, _LoopbackControl)
+        drain = ctrl_a._drain_outbound_to
 
         def recording_drain(peer_local_id: str):
             out = drain(peer_local_id)
             sent_from_a.extend(msg.get("type") for _, msg in out)
             return out
 
-        mgr_a._control._drain_outbound_to = recording_drain  # type: ignore[method-assign]
+        monkeypatch.setattr(ctrl_a, "_drain_outbound_to", recording_drain)
 
         # Producer parks the blocks, then reaps them before any fetch lands.
         mgr_b.submit_store(
             _job_metadata(
                 job_id=200,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 chunk_ids=[0],
                 kv_params={"remote_decoder": {"kv_request_id": kv_id}},
             )
@@ -1480,7 +1496,7 @@ class TestBidirectionalManager:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=101,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 chunk_ids=[0],
                 kv_params=consumer_params,
             )
@@ -1496,7 +1512,7 @@ class TestBidirectionalManager:
         assert JobResult(job_id=101, success=False) in all_a, all_a
         assert kv_id in mgr_a._failed_req_ids
         assert "abort_fetch" not in sent_from_a, sent_from_a
-        assert elapsed < _LOAD_TIMEOUT_S
+        assert elapsed < _PD_LOAD_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -1526,7 +1542,7 @@ class TestAcceptNewPeers:
         mgr._sessions[peer_id] = existing
 
         new_conn = _RecordingConn(peer_id)
-        mgr._accept_new_peers([new_conn])
+        mgr._accept_new_peers([new_conn])  # type: ignore[list-item]  # ControlConnection stand-in
 
         # Manager swallowed the ValueError and closed the duplicate conn.
         assert new_conn.close_calls == 1
@@ -1576,7 +1592,7 @@ class TestAcceptNewPeers:
             def close(self) -> None:
                 self.alive = False
 
-        mgr._accept_new_peers([_Conn(peer_id)])
+        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[list-item]  # ControlConnection stand-in
 
         assert peer_id in mgr._sessions
         assert mgr._sessions[peer_id].connected is True
@@ -1660,8 +1676,8 @@ class TestPollOnce:
         )
         mgr._sessions[peer] = sess
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=5, keys=[OffloadKey(b"k1")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=6, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         class _Ctrl:
@@ -1871,7 +1887,7 @@ class TestConnectionDeathMidTransfer:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=900,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
@@ -1879,7 +1895,7 @@ class TestConnectionDeathMidTransfer:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=901,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
@@ -1935,12 +1951,14 @@ class TestBindHostPortDefaults:
     """host/port fall back to VLLM_P2P_SIDE_CHANNEL_* when not in config."""
 
     @staticmethod
-    def _construct(monkeypatch, dp_index=0, **kwargs) -> P2PSecondaryTierManager:
+    def _construct(
+        monkeypatch, dp_index=0, calls: dict | None = None, **kwargs
+    ) -> P2PSecondaryTierManager:
         """Build a manager with the transports/file-mapper stubbed out.
 
         The host is used verbatim (no resolution). The transport constructor
-        args are recorded on ``mgr._test_calls`` so tests can assert the ZMQ
-        identity (``host:port``) stays decoupled from the NIXL agent name
+        args are recorded into ``calls`` (when given) so tests can assert the
+        ZMQ identity (``host:port``) stays decoupled from the NIXL agent name
         (a uuid).
         """
         monkeypatch.setenv("PYTHONHASHSEED", "0")
@@ -1953,19 +1971,19 @@ class TestBindHostPortDefaults:
                 )
             ),
         )
-        calls: dict = {}
+        recorded: dict = {} if calls is None else calls
         monkeypatch.setattr(
             manager_module,
             "NixlTransport",
             lambda agent_name, *a, **k: (
-                calls.update(nixl_name=agent_name) or SimpleNamespace()
+                recorded.update(nixl_name=agent_name) or SimpleNamespace()
             ),
         )
         monkeypatch.setattr(
             manager_module,
             "ZmqTransport",
             lambda local_id, host, port, *a, **k: (
-                calls.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
+                recorded.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
                 or SimpleNamespace()
             ),
         )
@@ -1975,9 +1993,7 @@ class TestBindHostPortDefaults:
                 parallel=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
-        mgr = P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
-        mgr._test_calls = calls
-        return mgr
+        return P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
 
     def test_defaults_from_env_unset(self, monkeypatch):
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
@@ -2020,13 +2036,14 @@ class TestBindHostPortDefaults:
     def test_nixl_name_decoupled_from_identity(self, monkeypatch):
         # The ZMQ identity is the verbatim host:port; the NIXL agent name is a
         # uuid, distinct from the identity and never used as an address.
-        mgr = self._construct(monkeypatch, host="127.0.0.1", port=5710)
-        assert mgr._test_calls["zmq_host"] == "127.0.0.1"
-        assert mgr._test_calls["zmq_port"] == 5710
-        assert mgr._test_calls["zmq_id"] == "127.0.0.1:5710"
+        calls: dict = {}
+        mgr = self._construct(monkeypatch, calls=calls, host="127.0.0.1", port=5710)
+        assert calls["zmq_host"] == "127.0.0.1"
+        assert calls["zmq_port"] == 5710
+        assert calls["zmq_id"] == "127.0.0.1:5710"
         assert mgr._local_id == "127.0.0.1:5710"
         # nixl_name is a valid uuid4 and not the host:port identity.
-        nixl_name = mgr._test_calls["nixl_name"]
+        nixl_name = calls["nixl_name"]
         assert nixl_name != mgr._local_id
         assert uuid.UUID(nixl_name).version == 4
 
@@ -2314,6 +2331,171 @@ class TestIdleSessionEviction:
 # ---------------------------------------------------------------------------
 
 
+class _RetiringFakeData:
+    """Fake DataTransport whose retired transfers stop on demand."""
+
+    def __init__(self) -> None:
+        self.stopped: list[int] = []
+        self.force_released: list[int] = []
+        self.removed: list[str] = []
+
+    def remove_remote_peer(self, pid) -> None:
+        self.removed.append(pid)
+
+    def poll_retired(self) -> list[int]:
+        stopped, self.stopped = self.stopped, []
+        return stopped
+
+    def force_release_retired(self, transfer_ids) -> None:
+        self.force_released.extend(transfer_ids)
+
+
+class TestRetainedTransfers:
+    """A reaped session's still-running transfers keep their source pins
+    until the transport reports them stopped, or the hold cap expires."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, retained, close_stores=None):
+        mgr = _make_manager()
+        data = _RetiringFakeData()
+        mgr._data = data  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            alive=False,
+            connected=True,
+            close_stores=close_stores,
+            close_retained=retained,
+        )
+        mgr._reap_dead_sessions()
+        return mgr, data
+
+    def test_reap_holds_pins_until_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1})}, close_stores=[2])
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+        assert data.removed == [self.PEER]
+
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs[-1] == JobResult(job_id=1, success=False)
+        assert mgr._retained == {}
+
+    def test_shared_job_held_until_last_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1}), 8: frozenset({1})})
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == []
+        data.stopped = [8]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_hold_cap_force_releases(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: now[0])
+        mgr, data = self._reap({7: frozenset({1})})
+
+        now[0] += _RETAINED_HOLD_CAP_S - 1
+        mgr._poll_retained()
+        assert data.force_released == []
+
+        now[0] += 1
+        mgr._poll_retained()
+        assert data.force_released == [7]
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+        assert mgr._retained_force_released == 1
+        assert mgr._retained == {}
+
+    def test_idle_eviction_retains_too(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+        mgr = _make_manager()
+        mgr._data = _RetiringFakeData()  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            last_activity_at=time.monotonic() - 20,
+            close_retained={7: frozenset({1})},
+        )
+        mgr._reap_idle_sessions()
+        assert self.PEER not in mgr._sessions
+        assert mgr._retained[7][:2] == (self.PEER, frozenset({1}))
+        assert mgr._finished_jobs == []
+
+    def test_shutdown_fails_retained_jobs(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        mgr._data = _ShutdownFakeData()  # type: ignore[assignment]
+        mgr._control = _ShutdownFakeControl()  # type: ignore[assignment]
+        mgr.shutdown()
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+        assert mgr._retained == {}
+
+    def test_outbound_waits_for_retained_transfers(self):
+        """A new session would load the peer's NIXL agent under the same
+        name while the reaped one's registration still holds it."""
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() while transfers are retained")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_inbound_is_told_to_disconnect_while_retained(self):
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_other_peers_are_not_held(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        assert not mgr._retained_peer("10.0.0.2:8000")
+
+    def test_drain_jobs_waits_for_retained_transfers(self, monkeypatch):
+        """reset_cache() asserts every job finished once drain_jobs()
+        returns, so a retained transfer's store jobs must be settled."""
+        mgr, data = self._reap({7: frozenset({1})})
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        polls = [0]
+
+        def poll_retired():
+            polls[0] += 1
+            return [7] if polls[0] == 3 else []
+
+        data.poll_retired = poll_retired  # type: ignore[method-assign]
+        monkeypatch.setattr(manager_module.time, "sleep", lambda s: None)
+        mgr.drain_jobs()
+
+        assert polls[0] == 3
+        assert mgr._retained == {}
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+
+
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
     first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
@@ -2422,3 +2604,66 @@ class TestReconnectBackoff:
         assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
         assert conn.close_calls == 1
         assert self.PEER not in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Serving a peer while a cache reset holds promotions
+# ---------------------------------------------------------------------------
+
+
+def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
+    """A P2P server looks a peer's keys up through its ParentManager, not the
+    scheduler, so the hold must stop the promotion such a lookup would start
+    and tell the peer the key is absent."""
+    consumer, server = _build_paired_managers()
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    key = OffloadKey(b"secondary-only")
+    example.chunks[key] = True
+    promotions: list[TransferJob] = []
+    submit_load = example.submit_load
+
+    def record_submit_load(job: TransferJob) -> None:
+        promotions.append(job)
+        submit_load(job)
+
+    monkeypatch.setattr(example, "submit_load", record_submit_load)
+    # Drive the server's polls on this thread, once per step.
+    tiering = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region),
+        secondary_tiers=[example, server],
+        tier_poll_interval_s=0,
+    )
+    step_end = ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+
+    def peer_lookup(kv_request_id: str) -> LookupResult:
+        ctx = ReqContext(
+            req_id=kv_request_id,
+            kv_transfer_params=_remote_kv_source_kv_params("B", 2, kv_request_id),
+        )
+        _annotate_req_context(ctx)
+        consumer.on_new_request(ctx)
+        for _ in range(3):
+            list(consumer.get_finished_jobs())
+            tiering.on_schedule_end(step_end)
+        assert consumer.lookup(key, ctx) is LookupResult.RETRY
+        consumer.on_schedule_end(step_end)
+        # The server receives the LookupMsg and serves it in one step.
+        tiering.on_schedule_end(step_end)
+        list(consumer.get_finished_jobs())
+        return consumer.lookup(key, ctx)
+
+    try:
+        tiering.reset_cache()
+        assert peer_lookup("req-held") is LookupResult.MISS
+        assert promotions == []
+
+        tiering.on_reset_flushed()
+        peer_lookup("req-released")
+        assert [job.keys for job in promotions] == [[key]]
+    finally:
+        tiering.shutdown()

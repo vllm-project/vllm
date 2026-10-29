@@ -40,7 +40,7 @@ def register_vllm_serve_api_routers(app: FastAPI):
     attach_tokenize_router(app)
 
     from vllm.entrypoints.serve.checkpoint.api_router import (
-        attach_router as attach_checkpoint_router,
+        attach_dev_router as attach_checkpoint_router,
     )
 
     attach_checkpoint_router(app)
