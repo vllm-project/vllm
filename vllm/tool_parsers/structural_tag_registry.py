@@ -45,6 +45,13 @@ from vllm.tool_parsers.utils import (
     require_function_tools,
 )
 
+# Longest run of consecutive whitespace characters allowed inside a tool call.
+# Every value boundary in a structural tag otherwise admits unbounded
+# whitespace, so a model whose preferred next token is masked out can spin on
+# whitespace tokens until ``max_tokens`` (#55541). 64 characters still covers
+# any pretty-printed arguments a model actually emits.
+TOOL_CALL_MAX_WHITESPACE_CNT = 64
+
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
     | ChatCompletionNamedToolChoiceParam
@@ -247,6 +254,7 @@ def get_model_structural_tag(
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
+        max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
     )
 
 
@@ -374,7 +382,8 @@ def _hermes_tool_tags(
         TagFormat(
             begin=begin + tool.function.name + arguments_field_prefix,
             content=JSONSchemaFormat(
-                json_schema=get_function_parameters(tool.function)
+                json_schema=get_function_parameters(tool.function),
+                max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
             ),
             end=end,
         )
@@ -448,6 +457,7 @@ def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
             content=JSONSchemaFormat(
                 json_schema=get_function_parameters(tool.function),
                 style="minimax_xml",
+                max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
             ),
             end="</invoke>\n",
         )
@@ -554,7 +564,8 @@ def get_plamo3_structural_tag(
                 + _PLAMO3_BEGIN_TOOL_ARGUMENTS
             ),
             content=JSONSchemaFormat(
-                json_schema=get_function_parameters(tool.function)
+                json_schema=get_function_parameters(tool.function),
+                max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
             ),
             end=_PLAMO3_END_TOOL_ARGUMENTS + _PLAMO3_END_TOOL_REQUEST,
         )
@@ -716,7 +727,9 @@ def _k3_argument_tag(
             embedded = dict(prop)
             for defs_key, defs_value in root_defs.items():
                 embedded.setdefault(defs_key, defs_value)
-        content = JSONSchemaFormat(json_schema=embedded)
+        content = JSONSchemaFormat(
+            json_schema=embedded, max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT
+        )
     return TagFormat(begin=begin, content=content, end=_K3_ARG_CLOSE)
 
 
@@ -1025,7 +1038,9 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
     if prop_type in (None, "string"):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    return JSONSchemaFormat(
+        json_schema={"type": prop_type}, max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT
+    )
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -1051,7 +1066,10 @@ def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
         return TagFormat(
             begin=f"<tool_call>{tool.function.name}",
             content=JSONSchemaFormat(
-                json_schema=True, style="glm_xml", any_order=False
+                json_schema=True,
+                style="glm_xml",
+                any_order=False,
+                max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
             ),
             end="</tool_call>",
         )
@@ -1087,6 +1105,7 @@ def _glm_4_7_strict_tool_tag(tool: FunctionToolParam) -> TagFormat:
             else True,
             style="glm_xml",
             any_order=False,
+            max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
         ),
         end="</tool_call>",
     )
@@ -1134,6 +1153,7 @@ def get_glm_4_7_structural_tag(
             tools=dumped_tools,
             tool_choice=dumped_choice,
             reasoning=reasoning,
+            max_whitespace_cnt=TOOL_CALL_MAX_WHITESPACE_CNT,
         )
 
     tags = [
