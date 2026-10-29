@@ -734,20 +734,18 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
 
 
 @pytest.mark.parametrize("monokernel", [True, False])
-@pytest.mark.parametrize("arch", ["gfx942", "gfx950", "gfx90a"])
-def test_swa_decode_meta_runs_on_gfx942_and_gfx950_with_the_flag(
-    monkeypatch, arch, monokernel
+@pytest.mark.parametrize("cdna", [3, 4])
+def test_swa_decode_meta_runs_on_cdna3_and_cdna4_with_the_flag(
+    monkeypatch, cdna, monokernel
 ):
     """swa_decode_meta's kernel is plain Triton, so with --monokernel a decode
-    batch gets its SWA metadata from the one launch on gfx950 as on gfx942.
-    Without the flag, or on another arch, the builder keeps vLLM's build."""
+    batch gets its SWA metadata from the one launch on CDNA4 (gfx950) as on
+    CDNA3 (gfx942). Without the flag, the builder keeps vLLM's build."""
     import vllm.platforms.rocm as rocm_platform
     from vllm.models.deepseek_v41.amd import ops, rocm
     from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
 
     monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
-    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: arch == "gfx942")
-    cdna = {"gfx90a": 2, "gfx942": 3, "gfx950": 4}[arch]
     monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     ops.record_monokernel(_config(monokernel=monokernel))
@@ -789,9 +787,8 @@ def test_swa_decode_meta_runs_on_gfx942_and_gfx950_with_the_flag(
     )
     # No later test may see this test's cached gate.
     ops.record_monokernel(_config(monokernel=False))
-    takes_it = monokernel and arch != "gfx90a"
-    assert launches == ([False] if takes_it else [])
-    assert (out is not None) is takes_it
+    assert launches == ([False] if monokernel else [])
+    assert (out is not None) is monokernel
 
 
 def test_dspark_speculator_asks_the_draft_model_first():

@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The one-launch DeepSeek-V4.1 decode metadata of gfx942 against the vLLM
-ops that it replaces.
+"""The gfx942 decode attention metadata of DeepSeek-V4.1 against the vLLM ops
+that it replaces.
 
-swa_decode_meta.launch replaces the decode part of the ROCm SWA metadata
-build: torch.ge for is_valid_token, the zero fill of the unused lengths,
-_compute_swa_indices_and_lens_kernel (or the DSpark draft block's
-ComputeDSparkNoncausalSWAIndicesKernel), build_ragged_indices_from_dense and
-_copy_ragged_to_graph_buffers. topk_pack.launch replaces
-compute_global_topk_ragged_indices_and_indptr. For each random decode batch
-vLLM's ops run first. Then every output buffer is overwritten with -7
-(is_valid_token with its negation), the fused launch runs, and every output
-that a reader uses must be equal.
+topk_pack.launch replaces compute_global_topk_ragged_indices_and_indptr. For
+each random decode batch vLLM's ops run first. Then every output buffer is
+overwritten with -7, the fused launch runs, and every output that a reader
+uses must be equal. swa_decode_meta, which also runs on gfx950, is tested in
+tests/models/test_dsv41_mono_numerics.py.
 """
 
 import pytest
@@ -23,179 +19,8 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="the fused launches are for ROCm"
 )
 
-WINDOW = 128
-MAX_TOKENS = 16384
 MAX_SEQS = 128
 TOPK = 512
-
-
-def _swa_case(g, max_rows):
-    """A random decode batch. It mixes short sequences, sequences at 128k,
-    padded tokens with slot -1, a replay start inside the window, null blocks
-    (block 0) and block sizes 64 and 128. Returns None when the batch has more
-    rows than the fused launch takes."""
-    block_size = (64, 128)[int(torch.randint(0, 2, (1,), generator=g))]
-    num_reqs = int(torch.randint(1, 6, (1,), generator=g))
-    q_len = (1, 6)[int(torch.randint(0, 2, (1,), generator=g))]
-    lens = []
-    for _ in range(num_reqs):
-        kind = int(torch.randint(0, 3, (1,), generator=g))
-        if kind == 0:
-            lens.append(int(torch.randint(q_len, 140, (1,), generator=g)))
-        elif kind == 1:
-            lens.append(int(torch.randint(140, 5000, (1,), generator=g)))
-        else:
-            lens.append(131072 + int(torch.randint(0, 64, (1,), generator=g)))
-    n = num_reqs * q_len
-    if n > max_rows:
-        return None
-    max_blocks = (max(lens) + block_size - 1) // block_size + 1
-    block_table = torch.randint(
-        1, 200000, (MAX_SEQS, max_blocks), generator=g, dtype=torch.int32
-    )
-    # The sliding window manager points blocks outside the window at the
-    # null block 0. Put some of those inside windows as well.
-    block_table[torch.rand(block_table.shape, generator=g) < 0.05] = 0
-    slot_mapping = torch.randint(0, 1 << 30, (n,), generator=g, dtype=torch.int64)
-    slot_mapping[torch.rand(n, generator=g) < 0.15] = -1
-    replay = torch.zeros(MAX_SEQS + 1, dtype=torch.int32)
-    for r in range(num_reqs):
-        if float(torch.rand(1, generator=g)) < 0.3:
-            replay[r] = max(0, lens[r] - int(torch.randint(1, 160, (1,), generator=g)))
-    return dict(
-        n=n,
-        block_size=block_size,
-        slot_mapping=slot_mapping.cuda(),
-        query_start_loc=(torch.arange(num_reqs + 1, dtype=torch.int32) * q_len).cuda(),
-        seq_lens=torch.tensor(lens, dtype=torch.int32).cuda(),
-        token_to_req=(torch.arange(n, dtype=torch.int32) // q_len).cuda(),
-        block_table=block_table.cuda(),
-        replay_start=replay.cuda(),
-    )
-
-
-def _swa_buffers(width, noncausal):
-    """Buffers of the size that the metadata builder allocates."""
-    return dict(
-        noncausal=noncausal,
-        width=width,
-        is_valid=torch.zeros(MAX_TOKENS, dtype=torch.bool, device="cuda"),
-        indices=torch.zeros(MAX_TOKENS, 1, width, dtype=torch.int32, device="cuda"),
-        lens=torch.full((MAX_TOKENS,), 5, dtype=torch.int32, device="cuda"),
-        ragged=torch.empty(MAX_TOKENS * width, dtype=torch.int32, device="cuda"),
-        indptr=torch.empty(MAX_TOKENS + 1, dtype=torch.int32, device="cuda"),
-    )
-
-
-def _swa_old_ops(c, b):
-    """The decode part of vLLM's SWA metadata build and its ROCm ragged
-    step."""
-    from vllm.models.deepseek_v41.amd.rocm import _copy_ragged_to_graph_buffers
-    from vllm.v1.attention.backends.mla.sparse_swa import (
-        _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
-        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
-    )
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        build_ragged_indices_from_dense,
-    )
-
-    n, width = c["n"], b["width"]
-    is_valid = b["is_valid"][:n]
-    torch.ge(c["slot_mapping"], 0, out=is_valid)
-    b["lens"][n:] = 0
-    common = (c["query_start_loc"], c["seq_lens"], c["token_to_req"], is_valid)
-    if b["noncausal"]:
-        _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL(
-            b["indices"],
-            b["lens"],
-            WINDOW,
-            width,
-            *common,
-            c["block_table"],
-            c["block_size"],
-            num_tokens=n,
-            token_offset=0,
-        )
-    else:
-        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
-            b["indices"],
-            b["lens"],
-            WINDOW,
-            width,
-            b["lens"],
-            b["lens"],
-            *common,
-            c["block_table"],
-            c["block_size"],
-            c["replay_start"],
-            num_tokens=n,
-            token_offset=0,
-        )
-    ragged, indptr = build_ragged_indices_from_dense(
-        b["indices"][:n].reshape(n, width), b["lens"][:n]
-    )
-    _copy_ragged_to_graph_buffers(ragged, indptr, b["ragged"], b["indptr"], n, width)
-
-
-@pytest.mark.parametrize("noncausal", [False, True])
-def test_swa_decode_meta_matches_vllm_ops(noncausal):
-    from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
-    from vllm.v1.attention.backends.mla.compressor_utils import (
-        get_dspark_swa_index_width,
-    )
-
-    width = get_dspark_swa_index_width(WINDOW, 5) if noncausal else WINDOW
-    g = torch.Generator().manual_seed(1234)
-    failed, done = [], 0
-    while done < 300:
-        c = _swa_case(g, swa_decode_meta.MAX_ROWS)
-        if c is None:
-            continue
-        done += 1
-        n = c["n"]
-        b = _swa_buffers(width, noncausal)
-        _swa_old_ops(c, b)
-        nnz = int(b["indptr"][n])
-        want = dict(
-            is_valid=b["is_valid"][:n].clone(),
-            indices=b["indices"][:n].clone(),
-            lens=b["lens"].clone(),
-            indptr=b["indptr"][: n + 1].clone(),
-            ragged=b["ragged"][:nnz].clone(),
-        )
-        b["is_valid"][:n].copy_(~want["is_valid"])
-        for key in ("indices", "lens", "ragged", "indptr"):
-            b[key].fill_(-7)
-        swa_decode_meta.launch(
-            c["slot_mapping"],
-            b["is_valid"][:n],
-            b["indices"],
-            b["lens"],
-            b["ragged"],
-            b["indptr"],
-            c["query_start_loc"],
-            c["seq_lens"],
-            c["token_to_req"],
-            c["block_table"],
-            c["replay_start"],
-            n,
-            WINDOW,
-            c["block_size"],
-            noncausal=noncausal,
-        )
-        got = dict(
-            is_valid=b["is_valid"][:n],
-            indices=b["indices"][:n],
-            lens=b["lens"],
-            indptr=b["indptr"][: n + 1],
-            ragged=b["ragged"][:nnz],
-        )
-        bad = [k for k in want if not torch.equal(want[k], got[k])]
-        if bad:
-            failed.append((done, n, c["block_size"], bad))
-    assert not failed, (
-        f"batches that differ (case, rows, block size, outputs): {failed}"
-    )
 
 
 def _topk_case(
