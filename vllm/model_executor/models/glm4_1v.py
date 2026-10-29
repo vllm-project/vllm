@@ -1704,6 +1704,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         direct path, so the timestamp helper must see that replacement. Also
         clear ``do_sample_frames`` so the helper keeps these indices instead of
         sampling again.
+
+        Metadata is copied before mutation so the caller's ``mm_data`` (which
+        shares the original dict) stays unchanged. A later re-parse of the same
+        ``mm_data`` (e.g. the cache path in ``test_processing_correctness``)
+        would otherwise see ``do_sample_frames=False`` against the original
+        unsampled frame tensor and produce ``grid_t != len(timestamps)`` for
+        odd-length videos.
         """
         if not video_metadata:
             return
@@ -1714,15 +1721,20 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             indices = getattr(meta_obj, "frames_indices", None)
             if indices is None or index >= video_items.get_count():
                 continue
-            item = video_items.get(index)
+            raw = video_items.data[index]
             if not (
-                isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], dict)
+                isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict)
             ):
                 continue
             if hasattr(indices, "tolist"):
                 indices = indices.tolist()
-            item[1]["frames_indices"] = [int(idx) for idx in indices]
-            item[1]["do_sample_frames"] = False
+            new_meta = dict(raw[1])
+            new_meta["frames_indices"] = [int(idx) for idx in indices]
+            new_meta["do_sample_frames"] = False
+            video_items.data[index] = (raw[0], new_meta)
+            metadata_lst = getattr(video_items, "metadata", None)
+            if isinstance(metadata_lst, list) and index < len(metadata_lst):
+                metadata_lst[index] = new_meta
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
