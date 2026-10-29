@@ -3,11 +3,12 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -83,7 +84,9 @@ def _trust_dsv4_extra_cache_nan_free(
     )
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(
+    has_kv_transfer: bool, kv_cache_dtype: str | None = None
+) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
@@ -96,7 +99,22 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
             "connector; DeepSeek V4 keeps the Triton sparse attention."
         )
         return False
+    # The aiter kernel decodes only the 584 B V4 record.
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with the "
+            "nvfp4_ds_mla KV cache; DeepSeek V4 keeps the Triton sparse attention."
+        )
+        return False
     return True
+
+
+def _rocm_v41_mxfp8_kv_record() -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # The gfx950 sparse decode tile reads the 528 B V4.1 record; aiter's sparse
+    # MLA reads only the 584 B V4 one, so a layer that may run it keeps that.
+    return _ON_GFX950 and not rocm_aiter_ops.is_triton_sparse_mla_enabled()
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -370,7 +388,8 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             device=self.device,
         )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+            self.vllm_config.kv_transfer_config is not None,
+            self.vllm_config.cache_config.cache_dtype,
         )
 
     def build(
@@ -524,6 +543,13 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # V4.1 fp8 SWA cache + NVFP4 compressed cache
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -548,6 +574,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
+    # Only the gfx950 sparse decode tile reads the NVFP4 compressed record.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = _ON_GFX950
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
@@ -593,7 +621,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
+            self._has_kv_transfer, self.kv_cache_dtype
+        )
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None

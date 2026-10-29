@@ -135,6 +135,10 @@ def _fill_short_context_topk_indices(
 # V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
 # pad byte (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd.rocm import _rocm_v41_mxfp8_kv_record
+
+        return _rocm_v41_mxfp8_kv_record()
     return current_platform.is_device_capability_family(100)
 
 
@@ -203,6 +207,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # Whether this layer's kernel decodes an NVFP4 compressed cache. Only that
+    # record changes width; the sliding-window one stays fp8.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = False
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -529,7 +536,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
         # stride, and 512 is free (its pages are already 512 B multiples).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
-        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not (
+            self.kv_mxfp8 or self.reads_nvfp4_compressed_cache
+        ):
             raise ValueError(
                 "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
                 "decodes only on SM100."
