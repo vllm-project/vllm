@@ -182,6 +182,152 @@ def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
     multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
 
 
+def _swizzled_scale_rows(scales: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    """[rows, cols] UE8M0 scales read out of the 128x4 swizzled layout."""
+    row = torch.arange(rows, device=scales.device)[:, None]
+    col = torch.arange(cols, device=scales.device)[None, :]
+    offset = (
+        col % 4
+        + col // 4 * 512
+        + row % 32 * 16
+        + row % 128 // 32 * 4
+        + row // 128 * 128 * cols
+    )
+    return scales[offset]
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _finalize_all_reduce_gemma_norm_mxfp8(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    from vllm.model_executor.layers.fused_moe.moe_output import (
+        MoEOutput,
+        UnfinalizedMoEOutput,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+        FinalizeAllReduceGemmaRMSNormMxfp8,
+    )
+
+    hidden, top_k, eps = 6144, 4, 1e-6
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        op = FinalizeAllReduceGemmaRMSNormMxfp8(
+            hidden_size=hidden,
+            max_num_tokens=32,
+            top_k=top_k,
+            fp32_weights=False,
+            device=device,
+        )
+
+        def run(n):
+            torch.manual_seed(7 + rank)
+            # A padded permuted GEMM2 buffer, like the MoE's.
+            rows = n * top_k + 5
+            gemm2 = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
+            permuted = torch.randperm(rows, device=device)[: n * top_k]
+            permuted = permuted.view(n, top_k).int()
+            # A route to an expert this rank does not hold.
+            permuted[0, -1] = -1
+            weights = torch.rand(n, top_k, device=device).bfloat16()
+            shared = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            torch.manual_seed(123)
+            residual = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            weight = torch.randn(hidden, device=device, dtype=torch.bfloat16) * 0.1
+            moe_output = MoEOutput(
+                routed=UnfinalizedMoEOutput(gemm2, weights, permuted),
+                shared_output=shared,
+            )
+
+            def fused():
+                return op(moe_output, residual, weight, eps)
+
+            def check(outputs):
+                quantized, residual_out = outputs
+                # One FP32 FMA per route in route order, the shared add, one
+                # rounding: the partial each rank publishes.
+                acc = torch.zeros(n, hidden, device=device)
+                for k in range(top_k):
+                    valid = (permuted[:, k] >= 0).unsqueeze(-1)
+                    rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
+                    torch.addcmul(
+                        acc,
+                        torch.where(valid, rows_k, 0.0),
+                        torch.where(valid, weights[:, k : k + 1].float(), 0.0),
+                        out=acc,
+                    )
+                partial = (acc + shared.float()).bfloat16()
+                peers = get_tp_group().all_gather(partial, dim=0).view(tp_size, n, -1)
+                reduced = peers[0].float()
+                for peer in peers[1:]:
+                    reduced = reduced + peer.float()
+                prenorm = (reduced + residual.float()).bfloat16()
+                assert torch.equal(residual_out, prenorm)
+
+                inv_rms = torch.rsqrt(
+                    prenorm.float().square().mean(-1, keepdim=True) + eps
+                )
+                normed = (prenorm.float() * inv_rms * (weight.float() + 1)).bfloat16()
+                ref_values, ref_scales = mxfp8_e4m3_quantize(
+                    normed, is_sf_swizzled_layout=True
+                )
+                # The norm sums the squares in another order with an approximate
+                # rsqrt, so a value can move by one BF16 ULP, and with it rarely
+                # a block's scale. Padding rows' scales are zero in both.
+                assert quantized.scale.shape == ref_scales.shape
+                assert (quantized.scale == ref_scales).float().mean() >= 0.99
+                codes = quantized.data.view(torch.uint8)
+                assert (codes == ref_values.view(torch.uint8)).float().mean() >= 0.99
+                cols = hidden // 32
+                scales = _swizzled_scale_rows(
+                    quantized.scale, quantized.scale.numel() // cols, cols
+                )
+                assert not scales[n:].any()
+                scales = scales[:n]
+                step = torch.exp2(scales.float() - 127).repeat_interleave(32, dim=1)
+                dequantized = quantized.data.float() * step
+                expected = normed.float()
+                # E4M3 rounding (3 mantissa bits) plus one BF16 ULP, and the
+                # smallest E4M3 subnormal step of the block.
+                tolerance = 0.07 * expected.abs() + step * 2.0**-9
+                assert torch.all((dequantized - expected).abs() <= tolerance)
+
+            check(fused())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(5):
+                    fused()
+                captured = fused()
+            for _ in range(20):
+                graph.replay()
+            check(captured)
+            # Replays must pick up in-place input changes.
+            gemm2.mul_(0.5)
+            residual.mul_(2)
+            graph.replay()
+            check(captured)
+
+        # Changing shapes cover shrinking and growing batches in one mailbox.
+        for n in (1, 6, 32, 3, 17, 2, 1):
+            run(n)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+)
+def test_finalize_all_reduce_gemma_norm_mxfp8_matches_unfused_path(monkeypatch):
+    """MiniMax-M3's fused MoE finalize + all-reduce + Gemma RMSNorm + MXFP8."""
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs with NVLink multicast")
+    multi_process_parallel(monkeypatch, 4, 1, _finalize_all_reduce_gemma_norm_mxfp8)
+
+
 @pytest.mark.parametrize(
     ("dtype", "expected"),
     [
