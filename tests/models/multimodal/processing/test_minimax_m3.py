@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for MiniMax-M3 VL ``max_long_side_pixel`` resize support.
+"""Unit tests for MiniMax-M3 VL ``max_long_side_pixel`` resize support and
+for the video data parser.
 
 These exercise the vendored processor directly (no checkpoint / GPU needed), so
 they validate the long-side resize spec and the resulting prompt-token counts
 deterministically.
 """
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
 
+from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VLProcessingInfo
 from vllm.transformers_utils.processors.minimax_m3 import (
     IMAGE_MAX_TOTAL_PIXELS,
     MIN_SHORT_SIDE_PIXEL,
@@ -136,3 +141,45 @@ def test_video_volumetric_cap_raises():
             max_long_side_pixel=1008,
             return_tensors="pt",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Data parser: per-frame timestamp metadata must survive the processor cache
+# --------------------------------------------------------------------------- #
+_LOADER_META = {
+    "total_num_frames": 120,
+    "fps": 30.0,
+    "duration": 4.0,
+    "frames_indices": [0, 30, 60, 90],
+}
+
+
+def _model_parser():
+    # The parser MiniMaxM3VLProcessingInfo hands the processor; the two
+    # attributes are all get_data_parser reads from the info object.
+    info = SimpleNamespace(
+        _get_expected_hidden_size=lambda: None, allow_missing_mm_embeddings=False
+    )
+    return MiniMaxM3VLProcessingInfo.get_data_parser(info)
+
+
+def _reparse_first_video(mm_data):
+    # Mirrors BaseMultiModalProcessor._get_cache_missing_items: a cache miss
+    # takes the parsed item back out and parses it again.
+    parser = _model_parser()
+    items = parser.parse_mm_data(mm_data)["video"]
+    return parser.parse_mm_data({"video": [items[0]]})["video"]
+
+
+def test_data_parser_keeps_loader_metadata_through_cache_miss():
+    frames = np.zeros((4, 28, 28, 3), dtype=np.uint8)
+    reparsed = _reparse_first_video({"video": [(frames, _LOADER_META)]})
+    assert reparsed.metadata == [_LOADER_META]
+
+
+def test_data_parser_accepts_videos_without_metadata():
+    # Bare frame arrays and profiling dummies carry no metadata. They must still
+    # parse (as timestamp-free videos) rather than be rejected.
+    frames = np.zeros((4, 28, 28, 3), dtype=np.uint8)
+    reparsed = _reparse_first_video({"video": [frames]})
+    assert reparsed.metadata == [{}]
