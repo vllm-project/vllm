@@ -12,8 +12,8 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1243,7 +1243,10 @@ def _apply_candidate_mask_strided(
     )
 
 
-def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+def _max_decode_logits_rows(
+    num_batched_tokens: int,
+    vllm_config: VllmConfig | None,
+) -> int:
     """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
 
     ``rocm_fp8_paged_mqa_logits`` sizes its workspace as
@@ -1256,9 +1259,6 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     smaller; the workspace is locked after profiling, so it must not be under-
     estimated.
     """
-    vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None and is_forward_context_available():
-        vllm_config = get_forward_context().vllm_config
     if vllm_config is None:
         return num_batched_tokens
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
@@ -1339,7 +1339,10 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+        vllm_config = forward_context.vllm_config
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config_or_none()
+        decode_rows = _max_decode_logits_rows(hidden_states.shape[0], vllm_config)
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
                 ((decode_rows, max_model_len), torch.float32),

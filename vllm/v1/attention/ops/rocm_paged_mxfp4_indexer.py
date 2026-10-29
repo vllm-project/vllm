@@ -21,7 +21,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
@@ -266,7 +266,11 @@ def reserve_rocm_mxfp4_indexer_workspace(
     """Profiling run: claim the decode logits workspace and the peak prefill
     logits, block scores included when the layer writes them, candidate lists
     when it gathers."""
-    rows = _max_decode_logits_rows(hidden_states.shape[0])
+    forward_context = get_forward_context()
+    vllm_config = forward_context.vllm_config
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+    rows = _max_decode_logits_rows(hidden_states.shape[0], vllm_config)
     specs = [((rows, logits_width), torch.float32)]
     budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     if candidate_block_size:
@@ -278,7 +282,7 @@ def reserve_rocm_mxfp4_indexer_workspace(
         # candidate block (int32 slot and position). The first consumer builds
         # them and they live until the step ends, across the later layers, so
         # one reservation is held for the rest of the forward.
-        held = get_forward_context().additional_kwargs
+        held = forward_context.additional_kwargs
         if "rocm_mxfp4_candidate_lists" not in held:
             held["rocm_mxfp4_candidate_lists"] = torch.empty(
                 hidden_states.shape[0] * (num_candidate_cols // gather_block_size) * 8,

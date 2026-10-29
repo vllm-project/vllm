@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -264,7 +265,9 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
         assert randomize_inputs is True
         # Without the config context, the helper falls back to all 32768
         # batched tokens, which would reserve 128 GiB at 1M context.
-        assert _max_decode_logits_rows(32768) == 16 * (1 + 5)
+        assert _max_decode_logits_rows(
+            32768, get_current_vllm_config_or_none()
+        ) == 16 * (1 + 5)
         raise Profiled
 
     worker = SimpleNamespace(
@@ -284,6 +287,226 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     with pytest.raises(Profiled):
         gpu_worker.Worker.determine_available_memory(worker)
     assert get_current_vllm_config_or_none() is None
+
+
+def test_max_decode_logits_rows_bounds_with_config():
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+
+    assert _max_decode_logits_rows(9216, config) == 6
+    assert _max_decode_logits_rows(4, config) == 4
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        SimpleNamespace(scheduler_config=None, speculative_config=None),
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=None),
+            speculative_config=SimpleNamespace(num_speculative_tokens=5),
+        ),
+    ],
+)
+def test_max_decode_logits_rows_conservative_fallback(config):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    assert _max_decode_logits_rows(9216, config) == 9216
+
+
+def test_max_decode_logits_rows_without_speculative_config():
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=3),
+        speculative_config=None,
+    )
+
+    assert _max_decode_logits_rows(9216, config) == 3
+
+
+def test_max_decode_logits_rows_propagates_unexpected_config_errors():
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
+
+    class BadScheduler:
+        @property
+        def max_num_seqs(self):
+            raise RuntimeError("bad scheduler")
+
+    config = SimpleNamespace(scheduler_config=BadScheduler(), speculative_config=None)
+
+    with pytest.raises(RuntimeError, match="bad scheduler"):
+        _max_decode_logits_rows(9216, config)
+
+
+def _enable_gfx1151_rocm(monkeypatch):
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+
+
+def test_disable_rocm_expandable_segments_preserves_alloc_conf(monkeypatch):
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    _enable_gfx1151_rocm(monkeypatch)
+    conf = "expandable_segments:True,garbage_collection_threshold:0.8"
+    writes: list[str] = []
+    guard_calls: list[None] = []
+
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", conf)
+    monkeypatch.setattr(gpu_worker, "current_alloc_conf", lambda: conf)
+    monkeypatch.setattr(gpu_worker, "set_alloc_conf", writes.append)
+    monkeypatch.setattr(
+        base_device_communicator,
+        "set_rocm_expandable_segments_steady_state_disabled",
+        lambda: guard_calls.append(None),
+    )
+
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    expected = "expandable_segments:False,garbage_collection_threshold:0.8"
+    assert writes == [expected]
+    assert os.environ["PYTORCH_HIP_ALLOC_CONF"] == expected
+    assert guard_calls == [None]
+
+
+def test_disable_rocm_expandable_segments_respects_env_precedence(monkeypatch):
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    _enable_gfx1151_rocm(monkeypatch)
+    conf = "expandable_segments:True,max_split_size_mb:64"
+    writes: list[str] = []
+
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", conf)
+    monkeypatch.setenv(
+        "PYTORCH_HIP_ALLOC_CONF",
+        "expandable_segments:True,garbage_collection_threshold:0.8",
+    )
+    monkeypatch.setattr(gpu_worker, "current_alloc_conf", lambda: conf)
+    monkeypatch.setattr(gpu_worker, "set_alloc_conf", writes.append)
+    monkeypatch.setattr(
+        base_device_communicator,
+        "set_rocm_expandable_segments_steady_state_disabled",
+        lambda: None,
+    )
+
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    expected = "expandable_segments:False,max_split_size_mb:64"
+    assert writes == [expected]
+    assert os.environ["PYTORCH_ALLOC_CONF"] == expected
+    assert os.environ["PYTORCH_HIP_ALLOC_CONF"] == (
+        "expandable_segments:True,garbage_collection_threshold:0.8"
+    )
+
+
+def test_disable_rocm_expandable_segments_already_disabled(monkeypatch):
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    _enable_gfx1151_rocm(monkeypatch)
+    monkeypatch.setenv(
+        "PYTORCH_HIP_ALLOC_CONF",
+        "expandable_segments:False,max_split_size_mb:64",
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_alloc_conf",
+        lambda: "expandable_segments:False,max_split_size_mb:64",
+    )
+    set_alloc_conf = patch.object(gpu_worker, "set_alloc_conf")
+    set_guard = patch.object(
+        base_device_communicator,
+        "set_rocm_expandable_segments_steady_state_disabled",
+    )
+    with set_alloc_conf as mocked_set_alloc_conf, set_guard as mocked_set_guard:
+        gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    mocked_set_alloc_conf.assert_not_called()
+    mocked_set_guard.assert_not_called()
+    assert (
+        os.environ["PYTORCH_HIP_ALLOC_CONF"]
+        == "expandable_segments:False,max_split_size_mb:64"
+    )
+
+
+@pytest.mark.parametrize(
+    "is_rocm,on_gfx1151",
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_disable_rocm_expandable_segments_scope(monkeypatch, is_rocm, on_gfx1151):
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: on_gfx1151)
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_alloc_conf",
+        lambda: "expandable_segments:True",
+    )
+    with patch.object(gpu_worker, "set_alloc_conf") as mocked_set_alloc_conf:
+        gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    mocked_set_alloc_conf.assert_not_called()
+
+
+def test_disable_rocm_expandable_segments_setter_failure(monkeypatch):
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    _enable_gfx1151_rocm(monkeypatch)
+    conf = "expandable_segments:True,max_split_size_mb:64"
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", conf)
+    monkeypatch.setattr(gpu_worker, "current_alloc_conf", lambda: conf)
+
+    def fail_set_alloc_conf(conf: str) -> None:
+        raise RuntimeError("allocator write failed")
+
+    monkeypatch.setattr(gpu_worker, "set_alloc_conf", fail_set_alloc_conf)
+    with (
+        patch.object(
+            base_device_communicator,
+            "set_rocm_expandable_segments_steady_state_disabled",
+        ) as mocked_set_guard,
+        pytest.raises(RuntimeError, match="allocator write failed"),
+    ):
+        gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    mocked_set_guard.assert_not_called()
+    assert os.environ["PYTORCH_HIP_ALLOC_CONF"] == conf
+
+
+def test_disable_rocm_expandable_segments_idempotent(monkeypatch):
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    _enable_gfx1151_rocm(monkeypatch)
+    conf = "expandable_segments:True,max_split_size_mb:64"
+    writes: list[str] = []
+    guard_calls: list[None] = []
+
+    def current_conf() -> str:
+        return writes[-1] if writes else conf
+
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", conf)
+    monkeypatch.setattr(gpu_worker, "current_alloc_conf", current_conf)
+    monkeypatch.setattr(gpu_worker, "set_alloc_conf", writes.append)
+    monkeypatch.setattr(
+        base_device_communicator,
+        "set_rocm_expandable_segments_steady_state_disabled",
+        lambda: guard_calls.append(None),
+    )
+
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    assert writes == ["expandable_segments:False,max_split_size_mb:64"]
+    assert guard_calls == [None]
 
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and

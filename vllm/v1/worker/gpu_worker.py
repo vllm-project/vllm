@@ -25,6 +25,14 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.alloc_conf import (
+    ALLOC_CONF_ENV_VARS,
+    EXPANDABLE_SEGMENTS,
+    conf_flag_enabled,
+    current_alloc_conf,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -128,75 +136,39 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     )
 
 
-def _allocator_conf_has_expandable_segments_enabled(conf: str) -> bool:
-    return any(
-        item.strip().lower() in ("expandable_segments:true", "expandable_segments:1")
-        for item in conf.split(",")
-    )
-
-
-def _allocator_conf_disable_expandable_segments(conf: str) -> str:
-    items: list[str] = []
-    found = False
-    for item in conf.split(","):
-        stripped = item.strip()
-        if not stripped:
-            continue
-        if stripped.split(":", 1)[0].strip().lower() == "expandable_segments":
-            items.append("expandable_segments:False")
-            found = True
-        else:
-            items.append(stripped)
-    if not found:
-        items.append("expandable_segments:False")
-    return ",".join(items)
-
-
 def _rocm_expandable_segments_should_disable_after_warmup() -> bool:
     if not current_platform.is_rocm():
         return False
-    try:
-        from vllm.platforms.rocm import on_gfx1151
-    except Exception:
-        return False
+
+    from vllm.platforms.rocm import on_gfx1151
+
     if not on_gfx1151():
         return False
 
-    env_names = (
-        "PYTORCH_ALLOC_CONF",
-        "PYTORCH_HIP_ALLOC_CONF",
-        "PYTORCH_CUDA_ALLOC_CONF",
-    )
-    return any(
-        _allocator_conf_has_expandable_segments_enabled(os.environ.get(name, ""))
-        for name in env_names
-    )
+    return conf_flag_enabled(current_alloc_conf(), EXPANDABLE_SEGMENTS)
 
 
 def _disable_rocm_expandable_segments_after_warmup() -> None:
     if not _rocm_expandable_segments_should_disable_after_warmup():
         return
 
-    set_allocator_settings = getattr(
-        torch._C,
-        "_accelerator_setAllocatorSettings",
-        torch.cuda.memory._set_allocator_settings,
-    )
-    env_names = (
-        "PYTORCH_ALLOC_CONF",
-        "PYTORCH_HIP_ALLOC_CONF",
-        "PYTORCH_CUDA_ALLOC_CONF",
-    )
+    conf = current_alloc_conf()
+    if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
+        return
+    updated_conf = with_conf_flag(conf, EXPANDABLE_SEGMENTS, False)
+
     logger.info_once(
         "Disabling PyTorch expandable segments after ROCm gfx1151 warmup; "
         "startup/profile allocations were kept intact, while steady-state "
         "serving avoids the VMM page-table growth path."
     )
-    set_allocator_settings("expandable_segments:False")
-    for name in env_names:
-        value = os.environ.get(name)
-        if value is not None and _allocator_conf_has_expandable_segments_enabled(value):
-            os.environ[name] = _allocator_conf_disable_expandable_segments(value)
+    set_alloc_conf(updated_conf)
+
+    authoritative_env = next(
+        (name for name in ALLOC_CONF_ENV_VARS if os.environ.get(name)),
+        ALLOC_CONF_ENV_VARS[0],
+    )
+    os.environ[authoritative_env] = updated_conf
 
     from vllm.distributed.device_communicators.base_device_communicator import (
         set_rocm_expandable_segments_steady_state_disabled,
