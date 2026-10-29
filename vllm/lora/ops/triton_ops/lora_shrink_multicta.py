@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.triton_utils import gl, gluon, triton
 
 
@@ -157,24 +156,16 @@ def launch_lora_shrink_multicta(
     lora_strides_d0: int,
     lora_strides_d1: int,
     lora_strides_d2: int,
+    *,
+    BLOCK_M: int | None,
+    BLOCK_N: int | None,
+    BLOCK_K: int | None,
+    SPLIT_K: int | None,
+    NUM_WARPS: int | None,
+    NUM_CTAS: int | None,
 ) -> None:
     M, K = inputs.shape
     NUM_SLICES, _, N = output_tensor.shape
-    MAX_LORAS = lora_ids.size(0)
-    kernel_config = get_lora_op_configs(
-        "shrink_multicta",
-        max_loras=MAX_LORAS,
-        batch=M,
-        hidden_size=K,
-        rank=N,
-        num_slices=NUM_SLICES,
-    )
-    BLOCK_M = kernel_config["block_m"]
-    BLOCK_N = kernel_config["block_n"]
-    BLOCK_K = kernel_config["block_k"]
-    SPLIT_K = kernel_config["split_k"]
-    NUM_WARPS = kernel_config["num_warps"]
-    NUM_CTAS = kernel_config["num_ctas"]
     assert NUM_CTAS is not None
     CGA_LAYOUT = tuple((1 << bit, 0, 0) for bit in range(NUM_CTAS.bit_length() - 1))
     grid = (

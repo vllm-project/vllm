@@ -306,6 +306,22 @@ def _lora_shrink(
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
 
+    # Triton kernel configs
+    kernel_config = get_lora_op_configs(
+        "shrink_multicta" if use_multicta else "shrink",
+        max_loras=MAX_LORAS,
+        batch=M,
+        hidden_size=K,
+        rank=N,
+        num_slices=NUM_SLICES,
+    )
+    BLOCK_M = kernel_config["block_m"]
+    BLOCK_N = kernel_config["block_n"]
+    BLOCK_K = kernel_config["block_k"]
+    SPLIT_K = kernel_config["split_k"]
+    NUM_WARPS = kernel_config["num_warps"]
+    NUM_CTAS = kernel_config["num_ctas"]
+
     if use_multicta:
         from vllm.lora.ops.triton_ops.lora_shrink_multicta import (
             launch_lora_shrink_multicta,
@@ -324,25 +340,16 @@ def _lora_shrink(
             lora_strides_d0,
             lora_strides_d1,
             lora_strides_d2,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            SPLIT_K=SPLIT_K,
+            NUM_WARPS=NUM_WARPS,
+            NUM_CTAS=NUM_CTAS,
         )
         return
 
-    # Triton kernel configs
-    kernel_config = get_lora_op_configs(
-        "shrink",
-        max_loras=MAX_LORAS,
-        batch=M,
-        hidden_size=K,
-        rank=N,
-        num_slices=NUM_SLICES,
-    )
-    BLOCK_M = kernel_config["block_m"]
-    BLOCK_N = kernel_config["block_n"]
-    BLOCK_K = kernel_config["block_k"]
-    SPLIT_K = kernel_config["split_k"]
-    NUM_WARPS = kernel_config["num_warps"]
     NUM_STAGES = kernel_config["num_stages"]
-    NUM_CTAS = kernel_config["num_ctas"]
     GROUP_SIZE_M = kernel_config.get("group_size_m", 8)
 
     # Every M must keep the same K partition for batch invariance.
