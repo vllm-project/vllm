@@ -430,9 +430,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
+        # Until the peer acks the handshake, prefill locally rather than wait
+        # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
             session = self._sessions.get(source.peer_id)
-            if session is None:
+            if session is None or not session.ready:
                 return LookupResult.MISS
             result = session.register_lookup(source.kv_request_id, key)
             if result is True:
@@ -675,6 +677,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
+
+        A load already failed with a deferred release stays pending until
+        its AbortAck, or until a missed AbortAck disconnects the session and
+        the reap's close() sets the event, so every event is set on return.
         """
         start = time.monotonic()
         warned = False
@@ -1117,7 +1123,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        deferred_release=lr.deferred_release,
+                    )
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)
