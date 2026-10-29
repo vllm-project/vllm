@@ -1100,9 +1100,8 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert g1_non_spec is not None and beta_non_spec is not None
             assert state_indices is not None
             assert has_initial_state is not None
-            zero_idx = state_indices[~has_initial_state]
-            recurrent_state[zero_idx] = 0
             initial_state = recurrent_state_active[state_indices].contiguous()
+            initial_state.masked_fill_(~has_initial_state[:, None, None, None], 0)
             out, last_state = chunk_kda(
                 q=q,
                 k=k,
