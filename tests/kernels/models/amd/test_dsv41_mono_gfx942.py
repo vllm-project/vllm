@@ -624,3 +624,108 @@ def test_contrib_942_is_bf16_of_product(routing):
     torch.accelerator.synchronize()
     ref = (v * w.view(rs.picks, 1)).to(torch.bfloat16).float()
     assert torch.equal(out.view(rs.picks, 16), ref)
+
+
+def _build_nan_route(rs):
+    """stage_route then load_route, then a flat load of each ordered pick.
+
+    The draft's all-NaN scores pick one expert twice. load_route counts picks
+    with a token bitmap, so the order table is short and the unread entries stay
+    at the sentinel. The flat load of that index is the gather that faults."""
+    from vllm.models.deepseek_v41.amd.mono.common.sync import Addr, Mailbox, Space
+
+    words = rs.tab_words
+    tokens, topk = rs.tokens, rs.topk
+    n = tokens * topk
+
+    @fx.struct
+    class Lds:
+        tab: fx.Array[fx.Int32, words, 16]
+        red: fx.Array[fx.Float32, 16, 16]
+
+    @fx.union
+    class U:
+        t: Lds
+
+    @flyc.kernel(
+        name=f"test_nan_route_{tokens}_{topk}", known_block_size=[THREADS, 1, 1]
+    )
+    def kern(logit: Int64, bias: Int64, route: Int64, x: Int64, ids: Int64):
+        tid = fx.thread_idx.x
+        lds = fx.SharedAllocator().allocate(U).t.peek()
+        for i in range_constexpr(-(-words // THREADS)):
+            u = tid + THREADS * i
+            if u < words:
+                fx.ptr_store(fx.Int32(0x7FFFFFFF), lds.tab.ptr + u)
+        gpu.barrier()
+        mb = Mailbox(fx.Int32(1))
+        c = {
+            "S": tokens,
+            "tid": tid,
+            "bid": fx.block_idx.x,
+            "lane": tid % 64,
+            "wave": tid // 64,
+            "rs": rs,
+            "red": lds.red.ptr,
+            "tab": lds.tab.ptr,
+            "args": {"bias": bias},
+            "put": mb.put,
+            "poll": mb.poll,
+            "logit": Addr("logit", Space.SCRATCH, logit),
+            "route": Addr("route", Space.SCRATCH, route),
+        }
+        for t in range_constexpr(tokens):
+            M.stage_route(c, t)
+        gpu.barrier()
+        M.load_route(c, lds.tab.ptr)
+        gpu.barrier()
+        if tid < n:
+            t = tid // topk
+            eid = fx.ptr_load(lds.tab.ptr + (t * 2 * topk + tid % topk))
+            _st(eid, ids, tid)
+            pick = rs.pick_at(lds.tab.ptr, tid)
+            at = x + (fx.Int64(pick) // topk) * 4
+            ptr = fx.inttoptr(fx.PointerType.get(T.f32, fx.AddressSpace.Global, 4), at)
+            # Kept: an unread load is deleted, and so is the fault it raises.
+            _st(fx.ptr_load(ptr).bitcast(fx.Int32), ids, n + tid)
+
+    @flyc.jit
+    def launch(logit: Int64, bias: Int64, route: Int64, x: Int64, ids: Int64):
+        kern(logit, bias, route, x, ids).launch(grid=(1,), block=(THREADS,))
+
+    return launch
+
+
+def test_nan_draft_route_stays_in_range():
+    """10 draft tokens, 128 experts, top-3, every logit NaN.
+
+    This is the gfx942 multi-tile shape from the capture fault. Each token's
+    three ids are unique and in range, and the ordered-pick load finishes."""
+    from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import RouteShape
+
+    tokens, experts, topk = 10, 128, 3
+    rs = RouteShape(experts, topk, tokens, 4)
+    parts = M.ROUTER_PARTS
+    n_pairs = tokens * experts * parts
+    nan_bits = torch.tensor(float("nan")).view(torch.int32)
+    logit = torch.empty(n_pairs * 2, device="cuda", dtype=torch.int32)
+    logit[0::2] = nan_bits
+    logit[1::2] = 1
+    route = torch.zeros(
+        M.ROUTE_COPIES * tokens * 2 * topk * 2, device="cuda", dtype=torch.int32
+    )
+    bias = torch.zeros(experts, device="cuda", dtype=torch.float32)
+    x = torch.zeros(tokens, device="cuda", dtype=torch.float32)
+    ids = torch.full((2 * tokens * topk,), -1, device="cuda", dtype=torch.int32)
+    _build_nan_route(rs)(
+        logit.data_ptr(),
+        bias.data_ptr(),
+        route.data_ptr(),
+        x.data_ptr(),
+        ids.data_ptr(),
+    )
+    torch.accelerator.synchronize()
+    got = ids[: tokens * topk].view(tokens, topk).cpu()
+    for row in got.tolist():
+        assert all(0 <= e < experts for e in row)
+        assert len(set(row)) == topk
