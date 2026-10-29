@@ -775,8 +775,6 @@ class ServerRole:
         poll_result = self._transport.poll(self._peer_id)
         if poll_result.peer_fault is not None:
             self.peer_fault = poll_result.peer_fault
-        elif self.peer_fault is None:
-            self._check_stalled_transfers()
 
         for tid in poll_result.done:
             xfer = self._inflight_pop(tid)
@@ -845,6 +843,10 @@ class ServerRole:
             if in_round and rnd.inflight == 0:
                 self._finalize_cancelled(xfer.kv_request_id, xfer.round_key)
             self._maybe_prune(xfer.kv_request_id)
+
+        # After the drain, so a transfer this poll resolved is not "stalled".
+        if self.peer_fault is None:
+            self._check_stalled_transfers()
 
         # Finalizing transfers can queue results for supplied but unfetched blocks.
         if self._pending_store_results:

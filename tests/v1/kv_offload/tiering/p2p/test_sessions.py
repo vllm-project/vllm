@@ -3768,6 +3768,17 @@ class TestPeerFaultEscalation:
         assert session.alive
         assert session._server.peer_fault is None
 
+    def test_transfer_done_in_same_poll_is_not_stalled(self):
+        """A WRITE past the stall timeout that the transport reports done in
+        this very poll completes; it does not fault the peer."""
+        session, _, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        transport._poll_done.append(tid)
+        stores = session.poll().stores
+        assert session.alive
+        assert session._server.peer_fault is None
+        assert StoreResult(job_id=1, success=True) in stores
+
     def test_stalled_transfer_faults_peer_without_releasing(self):
         """A WRITE past the stall timeout faults the peer at once (no drain
         wait), and close() retains it with its store job still pinned."""
