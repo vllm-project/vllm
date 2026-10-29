@@ -1067,68 +1067,69 @@ def _warn_if_unannotated_eagle_mamba(
     )
 
 
-def _retain_eagle_hit_blocks_below_window(
+def _retain_hit_blocks_below_window(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
-    """Retain the whole blocks an EAGLE sliding-window cache hit scans.
+    """Retain the whole blocks a sliding-window cache hit scans.
 
-    An EAGLE group's hit needs ``cdiv(sliding_window - 1, block_size) + 1``
-    contiguous cached blocks ending at a block boundary (see
-    ``SlidingWindowManager._contiguous_blocks_for_hit``), one more than the
-    window spans. Widen ``extra_retained_tokens`` so that run stays allocated
-    below the window for every prompt length; otherwise a KV connector import
-    lands and hashes one block too few and no later request can hit. Mirrors
-    the coordinator: every group is an EAGLE group when none is flagged.
-    Packed groups widen each per-layer spec, which the scheduler unwraps.
-    Engines without a KV transfer connector never import blocks, so they keep
-    the unwidened window.
+    A sliding-window hit needs ``cdiv(sliding_window - 1, block_size)``
+    contiguous cached blocks, one more in an EAGLE group that drops its last
+    matched block (see ``SlidingWindowManager._contiguous_blocks_for_hit``). A
+    KV connector import allocates and hashes only the blocks the window needs
+    for the next token, so for some prompt lengths that run is incomplete and
+    no later request can hit. Widen ``extra_retained_tokens`` so the run stays
+    allocated for every prompt length. With the drop, the coordinator looks
+    one block past the hit it keeps; without it, the lookup stops before the
+    last prompt token, a block earlier when the prompt ends on a block
+    boundary, so it needs one more retained token. Mirrors the coordinator:
+    with the drop, every group is an EAGLE group when none is flagged. Packed
+    groups widen each per-layer spec, which the scheduler unwraps. Engines
+    without a KV transfer connector never import blocks, so they keep the
+    unwidened window.
 
     Args:
-        vllm_config: Config supplying the speculative method and KV transfer
-            connector, if any.
+        vllm_config: Config supplying the KV transfer connector and the
+            speculative method, if any.
         kv_cache_groups: Groups to update in place.
 
     """
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle_block_drop():
-        return
     transfer_config = vllm_config.kv_transfer_config
     if transfer_config is None or not transfer_config.is_kv_transfer_instance:
         return
+    spec_config = vllm_config.speculative_config
+    use_drop = spec_config is not None and spec_config.use_eagle_block_drop()
+    annotated = any(group.is_eagle_group for group in kv_cache_groups)
 
-    def widen(spec: KVCacheSpec) -> KVCacheSpec:
+    def widen(spec: KVCacheSpec, drops: bool) -> KVCacheSpec:
         assert isinstance(spec, SlidingWindowSpec)
-        hit_blocks = cdiv(spec.sliding_window - 1, spec.block_size) + 1
+        hit_blocks = cdiv(spec.sliding_window - 1, spec.block_size) + int(drops)
+        retained = hit_blocks * spec.block_size - (spec.sliding_window - 1)
         return replace(
             spec,
             extra_retained_tokens=spec.extra_retained_tokens
-            + hit_blocks * spec.block_size
-            - (spec.sliding_window - 1),
+            + retained
+            + int(not drops),
         )
 
-    annotated = any(group.is_eagle_group for group in kv_cache_groups)
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
-        if (
-            not spec.prefix_cacheable
-            or (annotated and not group.is_eagle_group)
-            or not all(
-                isinstance(layer_spec, SlidingWindowSpec)
-                for layer_spec in iter_layer_specs(spec)
-            )
+        if not spec.prefix_cacheable or not all(
+            isinstance(layer_spec, SlidingWindowSpec)
+            for layer_spec in iter_layer_specs(spec)
         ):
             continue
+        drops = use_drop and (group.is_eagle_group or not annotated)
         if isinstance(spec, UniformTypeKVCacheSpecs):
             group.kv_cache_spec = replace(
                 spec,
                 kv_cache_specs={
-                    name: widen(layer_spec)
+                    name: widen(layer_spec, drops)
                     for name, layer_spec in spec.kv_cache_specs.items()
                 },
             )
         else:
-            group.kv_cache_spec = widen(spec)
+            group.kv_cache_spec = widen(spec, drops)
 
 
 def _largest_divisor_at_most(value: int, limit: int) -> int:
@@ -1714,7 +1715,7 @@ def get_global_kv_cache_groups(
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
-    _retain_eagle_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
+    _retain_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
     return global_kv_cache_groups
 
 

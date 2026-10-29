@@ -2041,9 +2041,9 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
     groups = _spec_decode_kv_cache_groups([specs])
 
-    # The tags pick which sliding-window groups retain the EAGLE hit blocks
-    # (_retain_eagle_hit_blocks_below_window), so compare the grouping with
-    # that retention stripped.
+    # The tags pick which sliding-window groups retain the EAGLE drop block
+    # (_retain_hit_blocks_below_window), so compare the grouping with that
+    # retention stripped.
     def without_retention(spec):
         if isinstance(spec, SlidingWindowSpec):
             return replace(spec, extra_retained_tokens=0)
@@ -2093,57 +2093,55 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
     assert warned == warns
 
 
-def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
-    # An EAGLE sliding-window hit scans cdiv(window - 1, block) + 1 = 5 whole
-    # blocks, so the group retains 5 * 16 - 63 = 17 tokens below the window.
-    from vllm.v1.core.kv_cache_planning import (
-        _retain_eagle_hit_blocks_below_window,
-    )
+def test_sliding_window_group_retains_hit_blocks_below_window():
+    # A window of 64 at block 16 needs cdiv(63, 16) = 4 whole blocks for a hit,
+    # so a sliding-window group retains 4 * 16 - 63 + 1 = 2 tokens below the
+    # window (a window of 128: 8 * 16 - 127 + 1 = 2). An EAGLE group that
+    # drops its last matched block needs 5 blocks and retains 5 * 16 - 63 = 17.
+    from vllm.v1.core.kv_cache_planning import _retain_hit_blocks_below_window
 
     draft_spec = new_sliding_window_spec(sliding_window=64)
-    retained_draft_spec = replace(draft_spec, extra_retained_tokens=17)
+    target_spec = new_sliding_window_spec(sliding_window=128)
     config = _grouping_config()
-    config.speculative_config = SimpleNamespace(
-        method="eagle", use_eagle_block_drop=lambda: True
-    )
     config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=True)
 
-    def specs_by_layer(specs):
-        # Mirror get_kv_cache_configs: tag the groups holding draft layers,
-        # then widen the retained window.
+    def retained(specs, drop):
+        # Mirror get_global_kv_cache_groups: tag the groups holding draft
+        # layers, then widen the retained window.
+        config.speculative_config = (
+            None
+            if drop is None
+            else SimpleNamespace(method="eagle", use_eagle_block_drop=lambda: drop)
+        )
         draft_layers = {name for name, spec in specs.items() if spec.is_draft}
         groups = get_kv_cache_groups(config, specs)
-        for group in groups:
-            group.is_eagle_group = not draft_layers.isdisjoint(group.layer_names)
-        _retain_eagle_hit_blocks_below_window(config, groups)
-        return {g.layer_names[0]: g.kv_cache_spec for g in groups}
+        if drop:
+            for group in groups:
+                group.is_eagle_group = not draft_layers.isdisjoint(group.layer_names)
+        _retain_hit_blocks_below_window(config, groups)
+        return {
+            g.layer_names[0]: getattr(g.kv_cache_spec, "extra_retained_tokens", None)
+            for g in groups
+        }
 
-    # No group is tagged as the draft's: every group counts as EAGLE.
+    # No group is tagged as the draft's: with the drop, every group is EAGLE.
     specs = {"target.attn": new_kv_cache_spec(), "draft.attn": draft_spec}
-    assert specs_by_layer(specs) == {
-        "target.attn": new_kv_cache_spec(),
-        "draft.attn": retained_draft_spec,
-    }
+    assert retained(specs, drop=True) == {"target.attn": None, "draft.attn": 17}
 
-    # A tagged draft group is widened; a target sliding-window group is
-    # untouched.
-    target_spec = new_sliding_window_spec(sliding_window=128)
+    # Only the tagged draft group adds the drop block.
     specs = {"target.attn": target_spec, "draft.attn": _as_draft(draft_spec)}
-    assert specs_by_layer(specs) == {
-        "target.attn": target_spec,
-        "draft.attn": _as_draft(retained_draft_spec),
-    }
+    assert retained(specs, drop=True) == {"target.attn": 2, "draft.attn": 17}
+
+    # Without the drop (e.g. DFlash) or a drafter, every sliding-window group
+    # still retains the blocks a hit scans.
+    assert retained(specs, drop=False) == {"target.attn": 2, "draft.attn": 2}
+    assert retained(specs, drop=None) == {"target.attn": 2, "draft.attn": 2}
 
     # Without a KV transfer connector no block is imported: nothing changes.
     config.kv_transfer_config = None
-    assert specs_by_layer(specs) == specs
+    assert retained(specs, drop=True) == {"target.attn": 0, "draft.attn": 0}
     config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=False)
-    assert specs_by_layer(specs) == specs
-    config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=True)
-
-    # Without a drafter nothing changes.
-    config.speculative_config = None
-    assert specs_by_layer(specs) == specs
+    assert retained(specs, drop=True) == {"target.attn": 0, "draft.attn": 0}
 
 
 _GQA_SPEC = FullAttentionSpec(
