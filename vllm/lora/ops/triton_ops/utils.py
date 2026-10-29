@@ -233,16 +233,15 @@ def get_lora_op_configs(
         }
     elif op_type == "shrink_multicta":
         # Keep K partitioning independent of batch size.
-        block_k = 128 if 256 < hidden_size <= 1024 else 256
-        block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
+        block_k = 256
         k_blocks = max(1, cdiv(hidden_size, block_k))
-        num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
+        num_ctas = min(8, 1 << (k_blocks.bit_length() - 1))
         default = {
-            "block_m": 16 if batch < 128 else 32,
-            "block_n": min(32, max(16, next_power_of_2(rank))),
+            "block_m": 32,
+            "block_n": 16,
             "block_k": block_k,
             "split_k": num_ctas,
-            "num_warps": 2 if batch < 128 and rank <= 16 else 4,
+            "num_warps": 4,
             "num_ctas": num_ctas,
         }
     # The default config for fused_moe_lora ops
