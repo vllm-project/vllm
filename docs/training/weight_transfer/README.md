@@ -131,10 +131,11 @@ parameter is usually itself a collective among its owners (an FSDP
 `full_tensor()` all-gather, a Megatron export) that would deadlock if some of
 them skipped it. Which ranks own which parameter is declared in
 [`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
-Only [sharded RDT](sharded_rdt.md) accepts ranks that own different parameters,
-such as pipeline stages. Pipeline-parallel support for NCCL and IPC is in
-progress; until then they, like NCCL M2N, need every parameter owned by rank 0
-or by every rank (see each backend's Limitations).
+Only [sharded RDT](sharded_rdt.md) and [NCCL](nccl.md#broadcasting-ranks)
+accept ranks that own different parameters, such as pipeline stages.
+Pipeline-parallel support for IPC is in progress; until then it, like NCCL M2N,
+needs every parameter owned by rank 0 or by every rank (see each backend's
+Limitations).
 
 Pass each process's own `rank` on the init info. It is explicit rather than read
 from a global process group, which is ambiguous once several groups (FSDP / TP /
