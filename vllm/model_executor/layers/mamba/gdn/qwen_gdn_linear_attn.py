@@ -310,6 +310,17 @@ def _log_gdn_backend_decision(
         )
 
 
+def _fi_pool_checkpoints_supported(state_dtype: torch.dtype) -> bool:
+    """Whether FlashInfer can emit prefill checkpoints from a state pool.
+
+    The checkpoint buffer is fp32. FlashInfer 0.7.2's regular (non-CP)
+    checkpointing kernel fails to compile when the pool it reads and writes
+    in place (``state_indices``) has another dtype (bf16 ``mamba_ssm_dtype``,
+    e.g. Qwen3-Next), so those prefills gather the states into fp32 instead.
+    """
+    return state_dtype == torch.float32
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1528,6 +1539,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ("auto", False), checkpoint_buffers, state_routes
         ):
             has_checkpoint = state_checkpoints is not None
+            if (
+                has_checkpoint
+                and "state_indices" in state_route
+                and not _fi_pool_checkpoints_supported(state.dtype)
+            ):
+                continue
             fi_chunk_gated_delta_rule(
                 q=q,
                 k=k,
@@ -1980,6 +1997,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         state_indices = attn_metadata.prefill_state_indices
         mode = attn_metadata.prefill_initial_state_mode
+        plan = attn_metadata.flashinfer_checkpoint_plan
+        if plan is not None and not _fi_pool_checkpoints_supported(ssm_state.dtype):
+            mode = "mixed"
         if mode == "mixed":
             has_initial_state = attn_metadata.prefill_has_initial_state
             assert has_initial_state is not None
@@ -1992,7 +2012,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # caller gathering them and scattering the final states back.
             initial_state = None if mode == "none" else ssm_state
             pool_kwargs = dict(output_state=ssm_state, state_indices=state_indices)
-        plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
             core_out, final_state = fi_chunk_gated_delta_rule(
                 q=q,
