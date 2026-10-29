@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
@@ -379,6 +380,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
+        # Where AITER's tuned GEMM would run f_b and g_b one at a time, their weights
+        # share one [2, N, K] buffer, which loading fills in place, and forward runs
+        # both as one batched GEMM over the adjacent f_a and g_a columns.
+        self._gate_b_weight: torch.Tensor | None = None
+        if rocm_aiter_ops.is_tgemm_enabled() and all(
+            isinstance(proj.quant_method, UnquantizedLinearMethod)
+            for proj in (self.f_b_proj, self.g_b_proj)
+        ):
+            weight = self.f_b_proj.weight
+            self._gate_b_weight = weight.new_empty((2, *weight.shape))
+            self.f_b_proj.weight.data = self._gate_b_weight[0]
+            self.g_b_proj.weight.data = self._gate_b_weight[1]
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,
@@ -543,10 +556,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
+        if self._gate_b_weight is None:
+            g1 = self.f_b_proj(f_a)[0]
+            g_proj_states = self.g_b_proj(g_a)[0]
+        else:
+            gate_a = projected[:, -2 * self.head_dim :].unflatten(1, (2, self.head_dim))
+            g1, g_proj_states = torch.bmm(
+                gate_a.transpose(0, 1), self._gate_b_weight.transpose(1, 2)
+            )
         g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        g_proj_states = self.g_b_proj(g_a)[0]
         # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
         g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
 

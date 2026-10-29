@@ -348,6 +348,11 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
         else:  # Input projections.
             param.normal_(0, param.shape[1] ** -0.5)
     layers["fused"].load_state_dict(stock.state_dict())
+    # The AITER layer runs f_b and g_b as one batched GEMM over the weights loading
+    # filled; the stock layer, the reference below, runs them one at a time.
+    fused_gate_b = layers["fused"]._gate_b_weight
+    assert stock._gate_b_weight is None and fused_gate_b is not None
+    assert layers["fused"].g_b_proj.weight.data_ptr() == fused_gate_b[1].data_ptr()
     conv_shape, state_shape = stock.get_state_shape()
     saved_caches = (
         (0.5 * torch.randn(num_slots, *conv_shape, device=device)).bfloat16(),
