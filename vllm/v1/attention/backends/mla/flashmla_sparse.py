@@ -25,7 +25,6 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     current_stream,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -54,7 +53,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -103,10 +102,11 @@ For DeepSeek V4.1, each token's KV cache is 528 Bytes, structured as:
 -   **Last 16 bytes:** Scale factors, containing 16 `ue8m0` values, one per 32
     consecutive `float8_e4m3` values (i.e. MXFP8).
 
-The V4 and V4.1 records are not laid out token-by-token within a page: a page
-holds all its data rows first and all its scale rows after, so a page is
-`block_size * bytes_per_token` bytes rounded up to the decode kernel's TMA
-stride (576 B for V4, 512 B for V4.1).
+The V4 record is not laid out token-by-token within a page: a page holds all
+its data rows first and all its scale rows after, so a page is
+`block_size * bytes_per_token` bytes rounded up to the decode kernel's 576 B
+TMA stride. The V4.1 records are interleaved: each token's scales directly
+follow its own data, and the decode kernel's TMA stride is the record width.
 
 In the "nvfp4_ds_mla" format (SM100 only, DeepSeek V3.2 geometry), each
 token's KV cache is 352 Bytes, structured as:
@@ -446,12 +446,6 @@ class FlashMLASparseMetadataBuilder(
         )
 
         if parallel_config.decode_context_parallel_size > 1:
-            if parallel_config.dcp_comm_backend != "ag_rs":
-                raise NotImplementedError(
-                    "DCP for FlashMLA sparse is only validated with the "
-                    "default 'ag_rs' DCP comm backend; got "
-                    f"'{parallel_config.dcp_comm_backend}'"
-                )
             if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
                 raise NotImplementedError(
                     "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
@@ -858,6 +852,21 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
+            if num_decode_tokens < q.shape[0] and cache.all_context_pages_resident:
+                physical_topk, lengths = index_group.convert_logical_to_physical_topk(
+                    self.index_group_index,
+                    topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=True,
+                )
+                return self._bf16_flash_mla_kernel(
+                    q,
+                    index_group.physical_kv_cache(self.index_group_index),
+                    physical_topk,
+                    lengths,
+                    actual_num_heads,
+                )
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
                     index_group.convert_logical_to_physical_topk(
@@ -1268,7 +1277,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
         lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         # The head-padding slice above can leave `out` non-contiguous, and the
-        # merge feeds it to reduce_scatter.
+        # DCP combines (reduce_scatter, direct A2A) need packed heads.
         return out.contiguous(), lse
 
     def _fp8_flash_mla_kernel(

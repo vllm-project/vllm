@@ -5,22 +5,23 @@ from typing import Any
 
 from fastapi import Request
 
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.decisions.question_types import (
+    Question,
+    StructuredDecisionError,
+    build_question,
+)
+from vllm.entrypoints.openai.decisions.serving import BaseServingDecisions
+from vllm.entrypoints.openai.decisions.strategies import DecisionLimits
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.logger import init_logger
 
 from .protocol import (
     DecisionUsage,
+    JointCanvas,
+    JointDiagnostics,
     QuestionDiagnostics,
     StructuredDecisionRequest,
     StructuredDecisionResponse,
 )
-from .question_types import Question, StructuredDecisionError, build_question
-from .strategies import DecisionLimits, ReadStrategy
-
-logger = init_logger(__name__)
 
 
 def parse_questions(
@@ -46,27 +47,13 @@ def parse_questions(
                 spec.instructions,
                 spec.criteria,
                 limits.max_options,
+                labeled=limits.labeled,
             )
         )
     return questions
 
 
-class ServingStructuredDecisions(BaseServing):
-    def __init__(
-        self,
-        models: OpenAIServingModels,
-        strategy: ReadStrategy,
-        *,
-        request_logger: RequestLogger | None = None,
-    ) -> None:
-        model_config = strategy.context.engine_client.model_config
-        super().__init__(
-            models=models, model_config=model_config, request_logger=request_logger
-        )
-        self.engine_client = strategy.context.engine_client
-        self.strategy = strategy
-        self.limits = strategy.limits()
-
+class ServingStructuredDecisions(BaseServingDecisions):
     def _media(self, request: StructuredDecisionRequest) -> dict[str, list[str]]:
         urls = {
             "image": request.images,
@@ -96,13 +83,14 @@ class ServingStructuredDecisions(BaseServing):
             questions = parse_questions(request, self.limits)
             media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
-            engine_client.check_admission(self.strategy.num_requests(questions))
+            joint = self._admit(questions, request.joint)
             trace_headers = (
                 None
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
-            reads = await self.strategy.read(
+            read_fn = self.strategy.read_joint if joint else self.strategy.read
+            reads = await read_fn(
                 questions,
                 request.instructions,
                 self.strategy.render_state(request.state),
@@ -121,11 +109,19 @@ class ServingStructuredDecisions(BaseServing):
 
         answers: dict[str, dict[str, Any]] = {}
         diagnostics: dict[str, QuestionDiagnostics] = {}
+        canvases: list[JointCanvas] = []
         for q, read in zip(questions, reads):
             answers[q.id] = q.type.answer(q, read.probs, read.label_mass)
             diagnostics[q.id] = QuestionDiagnostics(
                 label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
             )
+            if (slot := read.slot) is not None:
+                if slot.canvas == len(canvases):
+                    canvases.append(
+                        JointCanvas(questions=[], width=slot.width, slots=[])
+                    )
+                canvases[-1].questions.append(q.id)
+                canvases[-1].slots.append(slot.position)
         return StructuredDecisionResponse(
             id=request_id,
             model=self.models.model_name(lora_request),
@@ -135,4 +131,5 @@ class ServingStructuredDecisions(BaseServing):
                 output_tokens=sum(r.output_tokens for r in reads),
             ),
             diagnostics=diagnostics,
+            joint=JointDiagnostics(canvases=canvases) if joint else None,
         )

@@ -36,7 +36,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
 
         # test enable_prefix_caching plus all pooling
         # we need to skip reading cache at this request by
-        # request.skip_reading_prefix_cache
+        # pooling_params.skip_reading_prefix_cache
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
             pooling_task="token_embed",

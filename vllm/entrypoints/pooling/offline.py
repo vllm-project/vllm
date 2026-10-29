@@ -129,7 +129,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
+            ctx=OfflineOutputsContext(outputs=outputs, late_chunking=ctx.late_chunking)
         )
         return outputs
 
@@ -202,8 +202,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[EmbeddingRequestOutput]:
-        """Generate an embedding vector for each prompt.
+    ) -> list[EmbeddingRequestOutput] | list[PoolingRequestOutput]:
+        """Generate embeddings using the model's configured pooling task.
 
         This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
@@ -223,8 +223,11 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
-            A list of `EmbeddingRequestOutput` objects containing the
-            embedding vectors in the same order as the input prompts.
+            For `embed`, `EmbeddingRequestOutput` objects with one vector per
+            prompt in `outputs.embedding`. For `token_embed`,
+            `PoolingRequestOutput` objects with a matrix in `outputs.data`.
+            Rows are token vectors, or chunk vectors when late chunking is
+            enabled. Results follow input order and preserve chunk metadata.
 
         """
         items = self.encode(
@@ -232,10 +235,14 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             use_tqdm=use_tqdm,
             pooling_params=pooling_params,
             lora_request=lora_request,
-            pooling_task="embed",
+            pooling_task="token_embed"
+            if self.pooling_task == "token_embed"
+            else "embed",
             tokenization_kwargs=tokenization_kwargs,
         )
 
+        if self.pooling_task == "token_embed":
+            return items
         return [EmbeddingRequestOutput.from_base(item) for item in items]
 
     def classify(
@@ -325,8 +332,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            chat_template: The chat template to use for the scoring. If None, we
-                use the model's default chat template.
+            chat_template: The chat template to use for scoring. If None, use
+                the chat template passed to the LLM constructor.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
