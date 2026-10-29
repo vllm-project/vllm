@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
-import msgspec
 import numpy as np
 import pytest
 
@@ -367,9 +366,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
 
     tier.on_new_request(ctx)
 
-    assert kvcr.submit_hint_calls == [
-        ((), {"request_id": "req", "hints": msgspec.to_builtins(kv_hint)})
-    ]
+    assert kvcr.submit_hint_calls == [((), {"request_id": "req", "hints": kv_hint})]
 
     bindings = kvcr.constructor_bindings
     assert bindings is not None
