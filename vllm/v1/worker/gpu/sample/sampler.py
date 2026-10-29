@@ -132,7 +132,10 @@ class Sampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        logits_writable: bool = False,
     ) -> SamplerOutput:
+        """``logits_writable``: ``logits`` is this step's scratch tensor, which
+        sampling may modify in place."""
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
@@ -158,6 +161,10 @@ class Sampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
             return_logprobs=logprobs_dims is not None,
+            logits_writable=logits_writable
+            and (
+                logprobs_dims is None or self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            ),
         )
 
         if self.trace_replay_state is not None:
@@ -231,12 +238,16 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
+        logits_writable: bool = False,
     ) -> torch.Tensor:
+        """``logits_writable``: the caller does not read ``logits`` afterwards,
+        so FP32 logits are processed in place instead of copied."""
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
-        # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        if not (logits_writable and logits.dtype == torch.float32):
+            # Copy logits to a new FP32 tensor.
+            logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         ctx = LogitsContext(
             expanded_idx_mapping=expanded_idx_mapping,
@@ -283,6 +294,7 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
+        logits_writable: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -294,6 +306,7 @@ class Sampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
+            logits_writable=logits_writable,
         )
         top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
