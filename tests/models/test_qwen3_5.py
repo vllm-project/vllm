@@ -6,12 +6,15 @@ def test_qwen3_5_models_use_platform_specific_implementation():
     from vllm.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MTP
     from vllm.platforms import current_platform
 
-    # Only the NVIDIA variant drops torch.compile; ROCm and other platforms
+    # NVIDIA and XPU use eager models; ROCm and other platforms
     # keep the previous torch.compile implementation in
     # vllm/model_executor/models/qwen3_5{,_mtp}.py.
     if current_platform.is_cuda():
         model_module = "vllm.models.qwen3_5.nvidia.model"
         mtp_module = "vllm.models.qwen3_5.nvidia.mtp"
+    elif current_platform.is_xpu():
+        model_module = "vllm.models.qwen3_5.xpu.model"
+        mtp_module = "vllm.models.qwen3_5.xpu.mtp"
     else:
         model_module = "vllm.model_executor.models.qwen3_5"
         mtp_module = "vllm.model_executor.models.qwen3_5_mtp"
@@ -45,3 +48,14 @@ def test_qwen3_5_legacy_models_keep_torch_compile_wrapper():
         mtp_module.Qwen3_5MultiTokenPredictor, TorchCompileWithNoGuardsWrapper
     )
     assert issubclass(mtp_module.Qwen3_5MTP, TorchCompileWithNoGuardsWrapper)
+
+
+def test_qwen3_5_xpu_models_do_not_use_torch_compile_wrapper():
+    from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+    from vllm.models.qwen3_5.xpu import model, mtp
+
+    assert not issubclass(model.Qwen3_5Model, TorchCompileWithNoGuardsWrapper)
+    assert not issubclass(
+        mtp.Qwen3_5MultiTokenPredictor, TorchCompileWithNoGuardsWrapper
+    )
+    assert not issubclass(mtp.Qwen3_5MTP, TorchCompileWithNoGuardsWrapper)

@@ -658,6 +658,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.</br>
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 <sup>*</sup> Only specific variants of the model support this modality (see notes below).</br>
+Qwen3.5 on Intel XPU uses an independent eager model and MTP implementation
+adapted from the NVIDIA model. Existing XPU norms and attention operators
+provide the platform-specific paths. Model-level `torch.compile` is disabled;
+supported decode batches use XPU graph capture and replay. ROCm and other
+platforms retain the legacy compile model.
+
 <sup>Q</sup> `Qwen*-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen*`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
 !!! note
