@@ -4341,3 +4341,35 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Sécurité** : **aucune IP externe nouvelle avec 200** — `?` 824/817 · site `90.65.170.144` 602/562 · web1 `37.187.180.135` 14/14 · poste Paris `82.66.89.184` 2/2 (connue).
 
 **Annexes** : condensation **stable — 6 refus du primaire au total aujourd'hui, aucun nouveau depuis 08:06:26Z**. nbaudit ok 10:06:17Z (`Image/`). G: OK mais **610 Go libres** (705 → 610 en 2 h, disque 84 %). Prouveur : aucune passe. Registre : **Q45** + **Q46** (nouvelle).
+
+## Cycle 12:1xZ (29/10) — 🟢 moteur (batterie 0,74/0,60/0,64 s, 2 `fail 1/2` récupérés seuls) ; ⚠ hôte encore à 97,0 % ; ★ le trafic hub s'est effondré (94→23 req/h) et un banc « Nim » non identifié prend 46 % des requêtes
+
+**Prod** : health 200 (**6,4 ms**), RC=0, StartedAt stable `2026-10-28T18:20:28Z` (**17 h 51 sans restart**), OOM 0, 3/3 conteneurs Up (moteur 18 h, watchdog + télémétrie 2 j), `/dev/shm` **33G/63G = 51 %** (plancher = tier 32 GiB), KV GPU **0,0 %** à l'instant, running 0 / waiting 0 — **moteur au repos**. **Préemptions 28 (Δ+0, 6ᵉ cycle consécutif)**.
+
+**Batterie petits appelants** : warm-up 0,69 s puis **0,74 / 0,60 / 0,64 s**. Aucune lenteur récurrente → **🟢**.
+
+**Watchdog** : 3 899 `OK`, deux nouveaux `fail 1/2` — **10:19:14Z** et **11:09:04Z** — **chacun `RECOVERED` après un seul fail** (`BUSY streak was 0`), **zéro 2/2**, aucun restart. Signature de transient sur prefill, pas de wedge.
+
+**VRAM** : GPU 0 **23 214** / GPU 1 **21 786** / GPU 2 **234** MiB (CoursIA libre). ⚠ **GPU 0 dépasse la ligne d'alerte 23 000 alors que le moteur est au repos** : à gpu-util 0,73 le plancher structurel (poids + graphs capturés + pool KV 831 723) est ~23,2 GiB, la ligne avait été calibrée à 0,70. Marge **1 350 MiB**. Ce n'est pas une dérive — c'est le nouveau plancher ; le chiffre à surveiller est le **pic en charge mesuré à 23 600** (24/10), pas le repos. Le boot du 27/10 à 0,73 a d'ailleurs démarré du premier coup (22,25 GiB libres au calcul, Q41).
+
+**Amortissement des préfixes** : cumulé **180,23 M hits / 297,59 M queries = 60,6 %** (60,5 % il y a 2 h), tier externe **94,17 M / 117,36 M = 80,2 %** (81,1 %). **Delta 2 h : +3,63 M hits sur +5,59 M queries = 65,0 %** — contre **84,0 %** au cycle précédent, et tier externe **+0,67 M / +2,06 M = 32,5 %**. La baisse n'est **pas une régression du cache** : la composition du trafic a changé (voir ci-dessous), et un ratio de hit ne se compare qu'à composition constante. À re-mesurer au prochain cycle chargé.
+
+**★ Trafic — le hub s'est effondré, un banc inconnu prend la moitié.** Par heure sur 6 h (total / dont Bun=hub claudish) : 06h 204/**94** · 07h 173/**31** · 08h 221/**73** · 09h 164/**23** · 10h 380/**34** · 11h 244/**23** · 12h 47/**2**. Fenêtre 2 h : **626 requêtes** (5,2/min) dont **seulement 46 Bun** — contre ~155 req/h portant les en-têtes d'attribution il y a deux jours. **Le repli des lanes haiku est donc bien effectif côté moteur**, pas seulement côté hub. Côté outils : `claudish_traffic` auto-sélectionne le conteneur **`claudish-sidecar` d'ai-01**, silencieux par construction (le vrai hub est sur po-2025) — son « 0 requête » est **NOMINAL et ne prouve rien** ; seule la mesure moteur compte ici.
+
+**★ Banc non identifié « jeu de Nim »** : **287 requêtes** `Python-urllib/3.13`, **toutes 200**, sur `/v1/chat/completions`, corps **586-589 o** (max 19 871), modèle **`qwen3.6-35b-a3b`** (l'alias historique), `host=192.168.0.47:5002`, **sans XFF ni en-têtes claudish** ⇒ appel **direct LAN**, pas via le hub. Fenêtre **10:40 → 12:10Z**, rafale à ~2 req/s vers 10:47-10:48. **46 % des requêtes de la fenêtre** à elles seules, et c'est ce qui explique l'essentiel de la dilution du taux de hit (prompts courts et uniques, aucun préfixe récurrent). Charge légitime (200 partout, corps minuscules), mais **un consommateur non inventorié** — à rattacher à une lane.
+
+**400 window+1 : 7/2 h**, **tous `Bun/1.3.14`** (donc claudish) via **90.65.170.144** (hairpin), corps **874 K → 1,80 M o**, machines **po-2023 ×6** et **po-2024 ×1**. Les `body_tail` portent les **schémas d'outils MCP** (`roosync_messages`, `inbox/message`) ⇒ ce sont des sessions Claude Code à très gros harnais. Le corps à **1 797 247 o est un nouveau maximum** (précédent record 1 002 085 o le matin même) : la croissance se poursuit. Rien de nouveau à demander à claudish (#431 déjà déposé), mais le plafond monte.
+
+**401 : 31/2 h** — poller Go `1f7f6080cb65` depuis `116.202.50.2` (clé morte connue, bruit de fond) + 5 sans clé. Aucune clé vivante rejetée.
+
+**Sécurité (7 h)** : **aucune IP externe nouvelle avec des 200**. `90.65.170.144` (hairpin site) 413/460, `37.187.180.135` (web1) 14/14, `51.75.200.22` (web2) 2/2. 1 131 requêtes sans XFF dont 1 118 × 200 (watchdog + banc Nim + sk-agent local). Carte inchangée.
+
+**Hôte — commit 374,9/386,4 Go = 97,0 %** (11,5 Go libres), **en baisse de 0,6 pt** depuis 97,6 % à 10:1xZ. `vmmemWSL` privé **174,6 Go** (+5,6) et WS **88,3 Go** (+4,8), alors que la RAM libre de l'hôte tombe à **23,4 Go** (29,5 il y a 2 h). Autrement dit : **WSL a continué de monter pendant que d'autres process libéraient du commit** — le solde est favorable, la tendance interne ne l'est pas. Toujours au-dessus de la ligne d'alerte 93 % ; **aucun travail lourd lancé** ; la panne du 24/09 était à 97,8 %.
+
+**Condensation** : stable — `cloud fallback condensation succeeded` ×2 à 08:04-08:06Z (pendant la saturation, dégradation gracieuse), **aucun refus depuis 08:06**. Le WARN `[BaselineManager] NonNominativeBaselineService non disponible` (8× à 11:46:51Z) est lu **avec contexte** : le service s'initialise avec succès **6 ms plus tard** dans la même séquence de cold start, et on compte **245 occurrences dans la journée** = une par démarrage d'instance MCP. **Artefact d'ordre d'initialisation, PAS un événement prod** — non relayé.
+
+**nbaudit** : `ok:true`, `runner_rc 0 / deliver_rc 0`, 12:06:12Z, 5 séries, `per_series 3`, **`subpath: ["19451:Image/"]`** ⇒ **vague 2 ARMÉE** (bascule Audio/ → Image/ effectuée). G: **610 G libres** (84 %), écriture OK. Prouveur : aucune passe.
+
+**Coordination** : inbox 1 non-lu = dispatch **machine-only** `myia-ai-01` d'un worker roo-extensions (#4352, claim g7-repair) — **hors périmètre vllm, non traité** (bug #3960). Dashboard : `myia-po-2023|vllm` (CoursIA) répond à un WAKE-CLAUDE 09:39Z sur **son** incident embeddings — 21 conteneurs relancés ~10:04Z, :8004/:8005 revenus, `:6333` fermé et **aucun conteneur qdrant sur ce siège**, `D:` à **4,64 %** (86,5 Go libres). Information sur leur infra, **aucun geste de notre côté**.
+
+**Verdict** : 🟢 moteur (18 h, batterie au meilleur niveau, préemptions figées au 6ᵉ cycle, zéro restart) · ⚠ hôte à 97,0 % (en légère détente, mais WSL monte) · ⚠ GPU 0 au-dessus d'une ligne d'alerte devenue structurelle à 0,73. PR #265.
