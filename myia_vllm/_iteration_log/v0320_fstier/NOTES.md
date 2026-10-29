@@ -4259,3 +4259,28 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Coordination** : inbox 183 non lus (cumul multi-jours) — 5 traités/marqués lus (ACK claudish attribution, rapports worker github-4131 + fleet-manifest, lot CoursIA P0, mention #4395). HIGH re-review ms#1543 (roo-extensions, corrigé 035ad0a1) **laissé non lu délibérément** : review hors périmètre du cycle de surveillance, reste visible pour la prochaine session de travail.
 
 **Annexes** : nbaudit ok 04:05:45Z (`Image/`, 0 échec consécutif). G: OK (710 Go libres). Condensation nominale — disjoncteur half-open retry **réussi 03:11:56Z** (condensation complétée, aucun échec). Prouveur : aucune passe. Registre : **zéro question ouverte**. **Repli po-2027 sous Minimax : fenêtre 17-18Z aujourd'hui** — vérifier l'ack claudish et mesurer l'effet sur le pic du soir (barre : plateau 🟠 du 28/10).
+
+## Cycle 06:1xZ (29/10) — 🟡 montée matinale : KV 40,7 %, une sonde à timeout 90 s ; ⚠ marge commit 93,6 % (ligne d'alerte franchie) ; ★ deux réponses claudish capitales
+
+**Prod** : health 200 (3,2 ms), RC=0, StartedAt stable 28/10 18:20:28Z (**12 h sans restart**), OOM 0, 3/3 Up, `/dev/shm` 33G/63G = 51 %. KV GPU **40,7 %** (21,8 % au cycle précédent — montée matinale), running 5, waiting 0. **Préemptions 28 (Δ+0, 3ᵉ cycle consécutif)**. Watchdog : dernier `OK` frais **06:10:20Z**, aucun nouveau fail depuis 02:38:03Z, zéro 2/2. Prefix : cumulé 141,5 M hits / 252,9 M queries = **55,9 %** ; **tier externe 91,8 M / 111,5 M = 82,4 %**.
+
+**⚠ Batterie : timeout 90 s sur la sonde 1** (curl 000 à 90,017 s), puis **3,91 s et 0,79 s**. Un timeout isolé pendant la montée (KV 40 %, 5 requêtes en vol) — **critère 🟠 non rempli** (Δ préemptions = 0, aucune persistance) ⇒ **🟡**, pas de saturation KV réelle. Pattern connu : la file frappe la 1ʳᵉ sonde.
+
+**⚠ MARGE COMMIT 93,6 % (24,7 Go libres)** — la ligne d'alerte 93 est franchie (87,4 → 93,6 en 2 h, oscillation déjà vue 90,7 → 88,5 → 87,4). **Consommateur mesuré : `vmmemWSL` WS 106,3 Go / privé 164,7 Go** (VM WSL : tiers + page cache) ; `Code.exe` 3,6 Go. Aucun travail lourd lancé (règle ≥90). Levier structurel (`.wslconfig`) hors périmètre vllm — signal user.
+
+**★ Coordination — po-2027:claudish (HIGH) : la population window+1 est dimensionnée et il y a un fait nouveau.**
+- 22 corps mesurés, **860 Ko–1,18 Mo ≈ 245–336k tok** : une partie est **structurellement au-dessus de la fenêtre 262 144** — aucun reroutage ne la sauve, le refus moteur avant inférence est correct (#431 skip attendu).
+- Reroutage **non corrigeable côté siège** (sidecar en relais pur) : leviers hub-side (`CLAUDISH_FAILOVER_STEP_EXCLUDE` #693 ou plafond d'admission), `max_tokens=128000` demandé par le client à lire au hub.
+- **Fait qui pèse sur le plan du soir : hub 502 à 05:57:04Z**, AUTONOMOUS <1 s, NOMINAL sur sonde profonde 16 481 ms à 05:58:28Z. Pendant 84 s, **les 22 tours ont tous échoué localement (Z.AI 429, mur 5 h) : ce siège n'a aucun carburant de repli**. Côté moteur ai-01, **aucun 5xx** dans la fenêtre — le hub n'a rien déchargé sur swift. ⇒ **le repli 17-18Z est plus utile que prévu** : il donne un chemin à une population qui échoue en silence quand le hub bronche. Fenêtre tenue par po-2027, effet à confirmer + corrélation à nos compteurs.
+
+**★ Coordination — po-2024:claudish** : sidecar **NOMINAL** pendant toute la rafale 00:55→01:05Z, aucun défaut local démontré (diagnostic admission/hub confirmé). Mesure livrée : `swift-1.5-27b` = **0 cache-read sur 7 j**, 3,528 G tokens non cachés (414,7–562,6 M/jour). **Réponse mesurée : ce 0 est un trou de champ de reporting** (vLLM n'émet pas `cache_read_input_tokens`), pas une absence de cache — le moteur sert **82,4 %** de hits sur son tier externe (cumulé depuis le boot). Le volume non caché reste une mesure valide, son étiquette est à qualifier.
+
+**400 window+1 : 6/2 h** (3 po-2024 + 3 po-2023, isolés, tous corps >100 K) — **la rafale n'a pas repris** (1 au cycle précédent). 401 : 23× bruit d'auth connu.
+
+**Attribution 2 h (04:11→06:11Z)** : 530 lignes ~4,4 req/min ; **po-2028 139** · ai-01 99 · po-2023 21 · po-2027 6 · po-2024 3 · sans en-têtes 262. Corps : 259 dans 100K-1M, 4 >1M.
+
+**VRAM** : GPU 0 **23 414** (+262, haut de la journée ; ligne 23 000 dépassée, mécanisme desktop+high-water, Q41 « tenir en l'état »), GPU 1 **21 786** stable, GPU 2 156 (CoursIA léger).
+
+**Sécurité** : **aucune IP externe nouvelle avec 200** — site 894, interne `?` 740, web1 12, poste Paris 8 (IP connue et réclamée).
+
+**Annexes** : nbaudit ok 06:06:06Z (`Image/`). G: OK (708 Go libres). Condensation : **1 fallback cloud utilisé 05:33Z (#2719 succès)** pendant la montée matinale — dégradation gracieuse, aucun échec. Prouveur : aucune passe. Registre : **zéro question ouverte**.
