@@ -50,6 +50,7 @@ steps:
 
 - label: ":nvidia: (L4) Mooncake EC TCP E2E"
   key: mooncake-ec-tcp-e2e-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace"
   device: l4
@@ -113,6 +114,7 @@ steps:
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Mooncake EC TCP E2E"
       dind: false
       device: mi300_2
