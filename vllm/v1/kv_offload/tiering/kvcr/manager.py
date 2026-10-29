@@ -11,7 +11,6 @@ from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-import msgspec
 from kvcr import (
     DURATION_METRIC,
     KVCR,
@@ -20,6 +19,7 @@ from kvcr import (
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
     KVCRBindings,
+    ZmqPeerControlChannel,
 )
 from kvcr.config import (
     G3Options,
@@ -30,7 +30,6 @@ from kvcr.config import (
     LocalDramOptions,
     RemoteFWDramOptions,
 )
-from kvcr.control_channels import ZmqPeerControlChannel
 from kvcr.policy import (
     FIFOPolicy,
     G3FIFOPolicy,
@@ -618,7 +617,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         if (hint := req_context.kv_hints) is not None:
             self._kvcr.submit_hint(
                 request_id=req_context.req_id,
-                hints=msgspec.to_builtins(hint),
+                hints=hint,
             )
         return RequestOffloadingContext()
 
