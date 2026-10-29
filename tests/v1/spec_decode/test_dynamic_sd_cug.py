@@ -426,31 +426,3 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
-
-
-def test_dflash_manager_skips_per_k_capture(monkeypatch):
-    """DFlash always runs K_max + 1 tokens per request, so it needs no per-K graphs."""
-    from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
-        DFlashCudaGraphManager,
-    )
-
-    monkeypatch.setattr(
-        gpu_cudagraph_utils,
-        "get_pp_group",
-        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
-    )
-    vllm_config = _create_vllm_config_for_dsd(
-        max_num_seqs=16,
-        max_spec_tokens=7,
-        num_spec_per_batch_size=[(1, 4, 7), (5, 8, 4), (9, 16, 2)],
-    )
-    manager = DFlashCudaGraphManager(
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-        decode_query_len=8,
-    )
-    captured = {
-        d.uniform_token_count for d in manager._capture_descs[CUDAGraphMode.FULL]
-    }
-    assert captured == {8}

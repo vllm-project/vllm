@@ -23,10 +23,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.dp_utils import skip_dp_coordination
-from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -548,11 +548,13 @@ def test_standalone_draft_reports_its_own_dp_token_counts(monkeypatch):
     draft must report the tokens it runs, not the target's padded count."""
     num_reqs, num_steps, dp_rank = 3, 3, 1
     num_tokens = 2 * num_reqs
+    cpu = torch.device("cpu")
+    monkeypatch.setattr(ar_module.StandaloneARSpeculator, "max_model_len", 1024)
     spec = object.__new__(ar_module.StandaloneARSpeculator)
     spec.model = object()
     spec.dp_size, spec.dp_rank = 2, dp_rank
     spec.num_speculative_steps = num_steps
-    spec.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
+    spec.input_buffers = InputBuffers(max_num_reqs=8, max_num_tokens=8, device=cpu)
     spec.temperature = torch.zeros(8)
     spec.seeds = torch.zeros(8, dtype=torch.int64)
     spec.idx_mapping = torch.zeros(8, dtype=torch.int32)
@@ -561,12 +563,6 @@ def test_standalone_draft_reports_its_own_dp_token_counts(monkeypatch):
     spec.draft_tokens = torch.zeros(8, num_steps, dtype=torch.int64)
     spec.draft_logits = None
     spec.arange_gpu = torch.arange(9, dtype=torch.int32)
-    spec.input_buffers = SimpleNamespace(
-        input_ids=torch.zeros(8, dtype=torch.int32),
-        positions=torch.zeros(8, dtype=torch.int64),
-        seq_lens=torch.zeros(8, dtype=torch.int32),
-        query_start_loc=torch.zeros(9, dtype=torch.int32),
-    )
     monkeypatch.setattr(
         spec,
         "sample_draft",
@@ -582,18 +578,9 @@ def test_standalone_draft_reports_its_own_dp_token_counts(monkeypatch):
         return torch.zeros(input_ids.shape[0], 4)
 
     monkeypatch.setattr(spec, "_run_model", run_model)
-    monkeypatch.setattr(
-        dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)
-    )
 
-    input_batch = SimpleNamespace(
-        num_reqs=num_reqs,
-        num_tokens=num_tokens,
-        query_start_loc=torch.arange(0, num_tokens + 1, 2, dtype=torch.int32),
-        input_ids=torch.zeros(num_tokens, dtype=torch.int32),
-        positions=torch.arange(num_tokens, dtype=torch.int64),
-        seq_lens=torch.full((num_reqs,), 2, dtype=torch.int32),
-        idx_mapping=torch.arange(num_reqs, dtype=torch.int32),
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_tokens, InputBuffers(8, 8, device=cpu)
     )
     # The target padded its batch to 16 tokens.
     target_sync = DPSyncState(
