@@ -1070,7 +1070,7 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 
 @requires_sm100
 @pytest.mark.parametrize("shared", [None, "mxfp8", "bf16"])
-@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135])
+@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135, 600])
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""
