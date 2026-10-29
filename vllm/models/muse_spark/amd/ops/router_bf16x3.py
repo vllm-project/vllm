@@ -34,11 +34,15 @@ _CONFIGS_CDNA3 = (
 )
 
 
+_CONFIGS = {3: _CONFIGS_CDNA3, 4: _CONFIGS_CDNA4}
+
+
 @functools.cache
 def _device_configs() -> tuple[tuple, ...]:
     from vllm.platforms.rocm import get_cdna_version
 
-    return _CONFIGS_CDNA3 if get_cdna_version() == 3 else _CONFIGS_CDNA4
+    # No default: an architecture without a tuned table must not borrow one.
+    return _CONFIGS[get_cdna_version()]
 
 
 def _config(num_tokens: int) -> tuple[int, int, int, int, int]:
@@ -51,7 +55,7 @@ def _config(num_tokens: int) -> tuple[int, int, int, int, int]:
 def supports_router_bf16x3(num_experts: int, hidden_size: int) -> bool:
     return all(
         num_experts % bn == 0 and hidden_size % (splits * bk) == 0
-        for configs in (_CONFIGS_CDNA4, _CONFIGS_CDNA3)
+        for configs in _CONFIGS.values()
         for _, _, bn, bk, splits, _ in configs
     )
 
