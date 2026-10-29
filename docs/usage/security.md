@@ -85,6 +85,14 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+**Note:** Media fetches do not inherit process-level credentials (such as
+NETRC entries or proxy authentication) by default. The HTTP client used for
+caller-supplied media URLs is created with `trust_env=False`, so ambient
+credentials from the vLLM process environment are not attached to outbound
+media requests. The `--allowed-media-domains` option restricts which
+destinations vLLM will contact, but it is not an authorization boundary
+between public and credential-protected resources on the same host.
+
 ### 5. **Restrict Media Download and Decode Sizes:**
 
 Remote media responses and compressed media files can expand into gigabytes of
