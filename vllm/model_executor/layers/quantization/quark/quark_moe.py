@@ -55,6 +55,10 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
+    triton_weight,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+    select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
@@ -69,6 +73,11 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     validate_fp8_block_shape_moe,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
 )
@@ -77,6 +86,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
+    ocp_mx_weight_dtype_and_rows,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -100,6 +110,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E2M3Static,
+    kMxfp6E3M2Dynamic,
+    kMxfp6E3M2Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -108,7 +125,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    replace_parameter,
+    retire_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -121,6 +142,7 @@ __all__ = [
     "QuarkW4A16Int4MoEMethod",
     "QuarkW8A8Fp8MoEMethod",
     "QuarkOCP_MX_MoEMethod",
+    "QuarkW8A8Mxfp8MoEMethod",
     "QuarkNvfp4MoEMethod",
 ]
 
@@ -205,6 +227,21 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         if match := quant_config._is_w_ocp_mx_a_x(
             weight_config, input_config, allow_static_fp8=True
         ):
+            if match.weight_quant_key == kMxfp8Static:
+                # MXFP8 experts run through the FP8 MoE kernels (AITER_MXFP8 on
+                # gfx950), not the MXFP4/MXFP6 OCP MX path.
+                normalized = ocp_mx_weight_dtype_and_rows(weight_config)
+                if normalized is None or normalized[1] != 1:
+                    raise NotImplementedError(
+                        "Quark MXFP8 MoE experts support only the 1-D per_group "
+                        "(group_size=32, e8m0) weight spelling, got "
+                        f"{weight_config} for {layer_name}"
+                    )
+                return (
+                    match.weight_quant_key,
+                    match.activation_quant_key,
+                    QuarkW8A8Mxfp8MoEMethod,
+                )
             return (
                 match.weight_quant_key,
                 match.activation_quant_key,
@@ -244,6 +281,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             # All OCP MX schemes (W4A16, W4A8, etc.) handled by QuarkOCP_MX_MoEMethod
             # Backend selection happens inside via oracle
             return QuarkOCP_MX_MoEMethod(
+                module.moe_config, weight_quant_key, activation_quant_key
+            )
+        elif method_cls is QuarkW8A8Mxfp8MoEMethod:
+            return QuarkW8A8Mxfp8MoEMethod(
                 module.moe_config, weight_quant_key, activation_quant_key
             )
         elif method_cls is QuarkW8A8Int8MoEMethod:
@@ -841,12 +882,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                     "fp8 MoE layer. Using the maximum across experts "
                     "for each layer. "
                 )
-            layer.w13_input_scale = torch.nn.Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-            layer.w2_input_scale = torch.nn.Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
+            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
+            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
         if current_platform.is_fp8_fnuz():
             # Normalize the weights and scales
@@ -859,22 +896,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 layer.w2_weight, layer.w2_weight_scale, layer.w2_input_scale
             )
             # Reset the parameter
-            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w13_weight_scale, requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
             if w13_input_scale is not None:
-                layer.w13_input_scale = torch.nn.Parameter(
-                    w13_input_scale, requires_grad=False
-                )
-            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(
-                w2_weight_scale, requires_grad=False
-            )
+                replace_parameter(layer, "w13_input_scale", w13_input_scale)
+            replace_parameter(layer, "w2_weight", w2_weight)
+            replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
             if w2_input_scale is not None:
-                layer.w2_input_scale = torch.nn.Parameter(
-                    w2_input_scale, requires_grad=False
-                )
+                replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
         # For per-tensor case, Fp8 moe kernel needs single weight scale
         # for w13 per expert. Use max then dequant and requant each expert.
@@ -912,21 +941,15 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                         ) = ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
                         start += shard_size
 
-            layer.w13_weight_scale = torch.nn.Parameter(
-                max_w13_scales, requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", max_w13_scales)
 
         # quark's scale is 1 dim.
         elif self.weight_qscheme == "per_channel":
             if self.act_quant_group_shape == GroupShape.PER_TOKEN:
                 w13_weight_scale = layer.w13_weight_scale.unsqueeze(-1)
-                layer.w13_weight_scale = torch.nn.Parameter(
-                    w13_weight_scale, requires_grad=False
-                )
+                replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
                 w2_weight_scale = layer.w2_weight_scale.unsqueeze(-1)
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_weight_scale, requires_grad=False
-                )
+                replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
@@ -1221,16 +1244,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             layer.w13_bias, layer.w2_bias = None, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Discard zero points (INT8 fused MoE kernel uses symmetric quant)
-        for attr in (
-            "w13_input_zero_point",
-            "w2_input_zero_point",
-            "w13_weight_zero_point",
-            "w2_weight_zero_point",
-        ):
-            if hasattr(layer, attr):
-                delattr(layer, attr)
-
+        # Loaded zero points stay registered; the INT8 fused MoE kernel ignores them.
         # For static input scales, collapse the per-expert scales to a single
         # value (the legacy fused_experts path expects one scale per layer).
         if self.static_input_scales:
@@ -1247,12 +1261,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                     "INT8 MoE layer. Using the maximum across experts "
                     "for each layer."
                 )
-            layer.w13_input_scale = torch.nn.Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-            layer.w2_input_scale = torch.nn.Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
+            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
+            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
         # Per-channel scales: 2D [E, N] -> 3D [E, N, 1] for the int8 MoE kernel.
         if self.weight_qscheme == "per_channel":
@@ -1290,9 +1300,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                     )
                     start += shard_size
 
-            layer.w13_weight_scale = torch.nn.Parameter(
-                max_w13_scales, requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", max_w13_scales)
 
         # Dynamic activations run through the oracle's modular kernel; static
         # activations use the legacy fused_experts path in apply().
@@ -1483,8 +1491,8 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
             layer.w13_weight.data, layer.w2_weight.data
         )
-        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+        replace_parameter(layer, "w13_weight", shuffled_w13)
+        replace_parameter(layer, "w2_weight", shuffled_w2)
 
         # INT4-FP8 : offset INT4 w13_weight_scale1 to single w13_weight_scale
         # Fp8 moe kernel needs single fp8 w13_weight_scale for w13 per expert.
@@ -1506,7 +1514,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
                     )
                 start += shard_size
 
-        layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales, requires_grad=False)
+        replace_parameter(layer, "w13_weight_scale", max_w13_scales)
 
         # special hack to asm_moe, which takes (weight_scale1 * weight_scale) as post
         # GEMM scaling optimal design - shall apply per-column weight_scale1 before
@@ -1551,13 +1559,21 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
+    # MXFP8 experts are handled by QuarkW8A8Mxfp8MoEMethod; this path only
+    # implements the packed MXFP4 / MXFP6 elements.
     supported_activation_quant_keys = [
-        *_ACTIVATION_QUANT_KEY_MAP.values(),
+        kMxfp4Dynamic,
+        kMxfp6E3M2Dynamic,
+        kMxfp6E2M3Dynamic,
         kFp8DynamicTensorSym,
         kFp8StaticTensorSym,
         None,
     ]
-    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
+    supported_weight_quant_keys = [
+        kMxfp4Static,
+        kMxfp6E3M2Static,
+        kMxfp6E2M3Static,
+    ]
 
     def __init__(
         self,
@@ -1590,9 +1606,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             raise ValueError(
                 f"Unsupported OCP MX dtype combination for MoE: "
                 f"input_dtype={self.input_dtype}, weight_dtype={self.weight_dtype}. "
-                f"MXFP8 experts are not supported through the MoE path; only "
-                f"the linear path handles MXFP8. Supported MoE weight dtypes "
-                f"are mxfp4, mxfp6_e3m2, and mxfp6_e2m3."
+                f"Supported MoE weight dtypes are mxfp4, mxfp6_e3m2, and mxfp6_e2m3."
             )
 
         # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes,
@@ -1831,8 +1845,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
         else:
@@ -1952,8 +1966,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -1974,9 +1988,193 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
+        )
+
+
+class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
+    """Quark OCP MX MXFP8 (W8A8) experts.
+
+    FP8 E4M3 weights with E8M0 uint8 scales per 1x32 block (Quark ``fp8_e4m3``
+    ``per_group`` ``group_size=32`` ``scale_format=e8m0``), and activations
+    dynamically quantized to MXFP8. The stored layout is the one the online,
+    ModelOpt and compressed-tensors MXFP8 MoE methods produce or load
+    (``[E, rows, cols]`` E4M3, ``[E, rows, cols / 32]`` uint8), and the weights go
+    through the same backend selection, kernel-format conversion and kernel
+    (``AITER_MXFP8`` on gfx950).
+    """
+
+    supported_activation_quant_keys = [kMxfp8Dynamic]
+    supported_weight_quant_keys = [kMxfp8Static]
+
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        weight_quant_key: QuantKey,
+        activation_quant_key: QuantKey | None,
+    ):
+        super().__init__(moe, weight_quant_key, activation_quant_key)
+        if self.has_bias:
+            raise NotImplementedError("Quark MXFP8 MoE does not support biases.")
+        self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        logger.info_once(
+            "Using %s backend for Quark MXFP8 (W8A8) MoE.", self.mxfp8_backend.value
+        )
+
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if (
+            hidden_size % MXFP8_BLOCK_SIZE != 0
+            or intermediate_size_per_partition % MXFP8_BLOCK_SIZE != 0
+        ):
+            raise ValueError(
+                "Quark MXFP8 MoE requires hidden_size and "
+                f"intermediate_size_per_partition divisible by {MXFP8_BLOCK_SIZE}, "
+                f"got {hidden_size} and {intermediate_size_per_partition}."
+            )
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        w13_rows = self.moe.w13_num_shards * intermediate_size_per_partition
+        # The scales are sharded with their weights along both dims (one scale
+        # per 32 input elements), like the OCP MX block scales.
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
+        )
+        shapes = {
+            "w13_weight": ((num_experts, w13_rows, hidden_size), MXFP8_VALUE_DTYPE),
+            "w2_weight": (
+                (num_experts, hidden_size, intermediate_size_per_partition),
+                MXFP8_VALUE_DTYPE,
+            ),
+            "w13_weight_scale": (
+                (num_experts, w13_rows, hidden_size // MXFP8_BLOCK_SIZE),
+                MXFP8_SCALE_DTYPE,
+            ),
+            "w2_weight_scale": (
+                (
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // MXFP8_BLOCK_SIZE,
+                ),
+                MXFP8_SCALE_DTYPE,
+            ),
+        }
+        for name, (shape, dtype) in shapes.items():
+            param = torch.nn.Parameter(
+                torch.empty(shape, dtype=dtype), requires_grad=False
+            )
+            layer.register_parameter(name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        layer.weight_block_size = self.weight_block_size
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.mxfp8_backend,
+            layer=layer,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.mxfp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        return make_fp8_moe_quant_config(
+            fp8_backend=self.mxfp8_backend,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
+        )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -2002,6 +2200,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         super().__init__(moe, kNvfp4Static, activation_quant_key)
         self.quant_config = quant_config
         self.group_size = 16
+        # Whether the selected backend reads the activation input scales.
+        self.uses_input_scales = True
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -2172,12 +2372,19 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-        replace_parameter(layer, "w13_input_scale_2", a13_scale)
 
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        replace_parameter(layer, "w2_input_scale_2", a2_scale)
+        # Weight-only backends (Marlin, Humming) return no input scales: the
+        # loaded ones keep their data, retired, and the kernel config gets None.
+        self.uses_input_scales = a13_scale is not None
+        if self.uses_input_scales:
+            replace_parameter(layer, "w13_input_scale_2", a13_scale)
+            replace_parameter(layer, "w2_input_scale_2", a2_scale)
+        else:
+            retire_parameter(layer, "w13_input_scale_2")
+            retire_parameter(layer, "w2_input_scale_2")
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -2200,8 +2407,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
-            a13_scale=layer.w13_input_scale_2,
-            a2_scale=layer.w2_input_scale_2,
+            a13_scale=layer.w13_input_scale_2 if self.uses_input_scales else None,
+            a2_scale=layer.w2_input_scale_2 if self.uses_input_scales else None,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),

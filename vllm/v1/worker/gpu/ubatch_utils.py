@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -36,6 +36,10 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.ubatching import make_ubatch_contexts
 from vllm.v1.worker.utils import AttentionGroup
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState
+
 logger = init_logger(__name__)
 
 
@@ -46,7 +50,9 @@ class UBatchState(NamedTuple):
     forward_contexts: list[ForwardContext]
 
 
-def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
+def create_ubatch_slices(
+    input_batch: InputBatch, num_ubatches: int, uniform_token_count: int | None = None
+) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
     Splitting at the midpoint of the DP-padded token count leaves the trailing
@@ -54,13 +60,24 @@ def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSl
     request slice onto the last request leaves it holding that request with
     zero query tokens -- the shape a straddling request already takes -- so it
     stays well-formed with no work to do, like a dummy run.
+
+    A uniform batch of multi-token queries (spec decode verification) is split
+    on a request boundary instead, so each microbatch stays a uniform decode.
+    `uniform_token_count` must be agreed across DP ranks.
     """
+    split_point = None
+    if uniform_token_count is not None and uniform_token_count > 1:
+        num_tokens = input_batch.num_tokens_after_padding
+        reqs_per_ubatch = num_tokens // (uniform_token_count * num_ubatches)
+        if reqs_per_ubatch > 0:
+            split_point = reqs_per_ubatch * uniform_token_count
     _, ubatch_slices = maybe_create_ubatch_slices(
         True,
         input_batch.num_scheduled_tokens,
         input_batch.num_tokens_after_padding,
         input_batch.num_reqs_after_padding,
         num_ubatches,
+        split_point=split_point,
     )
     assert ubatch_slices is not None
     return [
@@ -263,8 +280,9 @@ def slice_model_inputs(
 def merge_ubatch_outputs(outputs: list[Any]) -> Any:
     """Reassemble the full-batch model output from the per-microbatch ones.
 
-    Models return hidden states, a tuple of those plus auxiliary hidden states
-    (EAGLE3), or IntermediateTensors on non-final pipeline ranks.
+    Models return hidden states, a tuple of those plus a list of auxiliary
+    hidden states (EAGLE3, DFlash), or IntermediateTensors on non-final
+    pipeline ranks.
     """
     first = outputs[0]
     if isinstance(first, IntermediateTensors):
@@ -275,7 +293,9 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
             }
         )
     if isinstance(first, tuple):
-        return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
+        return tuple(merge_ubatch_outputs(list(parts)) for parts in zip(*outputs))
+    if isinstance(first, list):
+        return [merge_ubatch_outputs(list(parts)) for parts in zip(*outputs)]
     return torch.cat(outputs, dim=0)
 
 
@@ -337,7 +357,8 @@ class UBatchRunner:
         input_batch: InputBatch,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
-        cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_desc: "BatchExecutionDescriptor",
+        dp_sync_state: "DPSyncState | None" = None,
         for_capture: bool = False,
     ) -> UBatchState:
         """Split the batch into the microbatches the step will run on.
@@ -346,9 +367,19 @@ class UBatchRunner:
         contexts the threads install, not in the caller's.
 
         FULL uses padded sizes; `for_capture` refreshes metadata from dummy
-        block tables.
+        block tables. Eager steps split by the DP-agreed uniform token count in
+        `dp_sync_state` (see `create_ubatch_slices`); FULL replays the split
+        its graph captured with.
         """
-        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        cg_mode = batch_desc.cg_mode
+        uniform_token_count = (
+            batch_desc.uniform_token_count
+            if cg_mode == CUDAGraphMode.FULL or dp_sync_state is None
+            else dp_sync_state.uniform_token_count
+        )
+        ubatch_slices = create_ubatch_slices(
+            input_batch, self.num_ubatches, uniform_token_count
+        )
 
         attn_metadata = []
         slot_mappings_by_layer = []
@@ -462,6 +493,7 @@ class UBatchRunner:
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
+            token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
         outputs: dict[int, Any] = {}
@@ -520,7 +552,7 @@ class UBatchRunner:
                 stack.close()
 
             if errors:
-                failed = min(errors)
+                failed = next(iter(errors))
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
                 ) from errors[failed]
