@@ -310,6 +310,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2127,7 +2128,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
-    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
@@ -2143,6 +2144,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
+    # larger than this skip the skinny path at 1 < n <= 5 (see
+    # vllm.model_executor.layers.utils.lmhead_skinny_guard_permits).
+    # wvSplitK's cost at n activation rows scales as ~n passes over the
+    # weight, so once the weight exceeds the last-level (memory-side)
+    # cache those extra passes are HBM round trips. 0 (the default)
+    # derives the cap from that cache size once at first use (256 MiB on
+    # MI355X, 128 MiB on MI300X-class parts), with a 256 MiB fallback
+    # where the size cannot be read — see the guard for how it's read.
+    # The portable device-properties API cannot be used: it exposes only
+    # the far smaller L2 (4 MiB on gfx950), which would disable the
+    # fastpath on every real lm_head shard. Set a value explicitly to
+    # override the hardware-derived cap; set it very large (e.g. 2**60)
+    # to disable the guard.
+    "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES": lambda: int(
+        os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", "0")
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
