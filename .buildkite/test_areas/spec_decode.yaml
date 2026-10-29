@@ -453,7 +453,9 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
@@ -497,7 +499,9 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
@@ -522,7 +526,9 @@ steps:
       - vllm/v1/attention/
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dflash2.py
+      - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/quantization/
       - vllm/model_executor/kernels/linear/
