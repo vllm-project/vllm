@@ -22,6 +22,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.common.ops.sequence_parallel import is_sequence_parallel_active
 from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_bf16 import (
@@ -47,13 +48,38 @@ def _get_deep_gemm():
         or not hasattr(module, "bf16_mega_moe")
         or "post_expert_norm_gamma"
         not in inspect.signature(module.bf16_mega_moe).parameters
+        or "weight_layout" not in inspect.signature(module.fp4_fp4_mega_moe).parameters
     ):
         raise RuntimeError(
             "Muse Spark MegaMoE requires the pinned DeepGEMM build "
-            "with BF16 post-expert normalization. "
+            "with BF16 post-expert normalization and TRT-LLM NVFP4 weight layout. "
             "Install it with tools/install_deepgemm.sh or rebuild the vLLM wheel."
         )
     return module
+
+
+def get_trtllm_token_threshold(vllm_config: VllmConfig) -> int:
+    parallel = vllm_config.parallel_config
+    default_threshold = (
+        16
+        if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        and isinstance(vllm_config.quant_config, ModelOptNvFp4Config)
+        and parallel.enable_expert_parallel
+        and parallel.tensor_parallel_size in (4, 8)
+        and parallel.data_parallel_size == 1
+        and parallel.pipeline_parallel_size == 1
+        else 0
+    )
+    additional_config = vllm_config.additional_config
+    assert isinstance(additional_config, dict)
+    threshold = additional_config.get(
+        "muse_spark_trtllm_token_threshold", default_threshold
+    )
+    if type(threshold) is not int or not 0 <= threshold <= 256:
+        raise ValueError(
+            "Muse Spark TRT-LLM token threshold must be an integer in [0, 256]"
+        )
+    return threshold
 
 
 def _shard_padding_mask(is_padding: torch.Tensor, num_tokens: int) -> torch.Tensor:
@@ -98,7 +124,11 @@ class MuseSparkMegaMoEExperts(nn.Module):
         self.is_sequence_parallel = is_sequence_parallel
         self.post_expert_norm = post_expert_norm
         self.is_nvfp4 = is_nvfp4
-
+        self.trtllm_token_threshold = get_trtllm_token_threshold(vllm_config)
+        self.sp_min_tokens = self.trtllm_token_threshold + 1
+        self.weight_layout = (
+            "trtllm" if is_nvfp4 and self.trtllm_token_threshold else "native"
+        )
         if hidden_size % 256 != 0 or intermediate_size % 256 != 0:
             raise ValueError(
                 "MuseSpark1x MegaMoE requires hidden and intermediate "
@@ -199,7 +229,9 @@ class MuseSparkMegaMoEExperts(nn.Module):
             return
         deep_gemm = _get_deep_gemm()
 
-        if self.is_nvfp4:
+        if self.weight_layout == "trtllm":
+            self._prepare_trtllm_weights()
+        elif self.is_nvfp4:
 
             def sf_to_kernel_layout(sf: torch.Tensor) -> torch.Tensor:
                 # Four E4M3 block scales per int32, then MN-major for the TMA loads.
@@ -232,6 +264,40 @@ class MuseSparkMegaMoEExperts(nn.Module):
         if norm.zero_centered_gamma:
             gamma = gamma + norm.gain_center
         self._norm_gamma = gamma.contiguous()
+
+    def _prepare_trtllm_weights(self) -> None:
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            prepare_static_weights_for_trtllm_fp4_moe,
+            reorder_w1w3_to_w3w1,
+        )
+
+        w13, sf13 = reorder_w1w3_to_w3w1(
+            self.w13_weight.data, self.w13_weight_scale.data
+        )
+        w13, sf13, w2, sf2 = prepare_static_weights_for_trtllm_fp4_moe(
+            w13,
+            self.w2_weight.data,
+            sf13,
+            self.w2_weight_scale.data,
+            self.hidden_size,
+            self.intermediate_size,
+            self.num_local_experts,
+            True,
+        )
+        self.w13_weight.data = w13
+        self.w13_weight_scale.data = sf13
+        self.w2_weight.data = w2
+        self.w2_weight_scale.data = sf2
+        e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
+        # Views describe logical shapes; DeepGEMM reads the physical TRT layout.
+        self._transformed_l1 = (
+            w13.view(torch.int8),
+            sf13.view(torch.int32).view(e, 2 * i, h // 64),
+        )
+        self._transformed_l2 = (
+            w2.view(torch.int8),
+            sf2.view(torch.int32).view(e, h, i // 64),
+        )
 
     def _drop_retransformed_weights(self) -> None:
         """Release the checkpoint tensors the kernel no longer reads."""
@@ -300,7 +366,9 @@ class MuseSparkMegaMoEExperts(nn.Module):
         is_padding = get_forward_context().is_padding
         if is_padding is None:
             return None
-        if is_sequence_parallel_active(self.is_sequence_parallel, is_padding.shape[0]):
+        if is_sequence_parallel_active(
+            self.is_sequence_parallel, is_padding.shape[0], self.sp_min_tokens
+        ):
             return _shard_padding_mask(is_padding, num_tokens)
         return is_padding[:num_tokens]
 
@@ -372,6 +440,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
             a2_scales=self.w2_input_scale.data,
             post_expert_norm_gamma=self._norm_gamma,
             post_expert_norm_eps=self.post_expert_norm.variance_epsilon,
+            weight_layout=self.weight_layout,
         )
         return y
 
