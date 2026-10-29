@@ -309,6 +309,17 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    # Fused DSpark draft-sampling epilogue; the hot path reads this
+    # directly from os.environ (baked at CUDA-graph capture), this
+    # registration keeps the kill-var inventory complete.
+    VLLM_DISABLE_DRAFT_SAMPLE_EPILOGUE_FUSION: bool = False
+    # Draft-batch gate shared by the fused draft-sampling levers (the
+    # markov GEMV and the sample epilogue): they win by launch
+    # elimination at tiny draft batches and lose to the stock chain
+    # above (the fused GEMV re-reads w2 per row), so they engage at
+    # num draft rows <= this gate. Read per call; baked per captured
+    # graph size.
+    VLLM_DRAFT_SAMPLING_FUSION_MAX_TOKENS: int = 2
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2135,6 +2146,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # Fused DSpark draft sampling: kill switch, and the draft-batch
+    # gate (the measured crossover between the fused chain and the
+    # stock one at TP4 on MI355X).
+    "VLLM_DISABLE_DRAFT_SAMPLE_EPILOGUE_FUSION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_DRAFT_SAMPLE_EPILOGUE_FUSION", "0"))
+    ),
+    "VLLM_DRAFT_SAMPLING_FUSION_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_DRAFT_SAMPLING_FUSION_MAX_TOKENS", "2")
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream

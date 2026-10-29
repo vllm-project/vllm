@@ -32,6 +32,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.sample_epilogue_fused import (
+    SampleEpilogueScratch,
+    dspark_sample_epilogue_fused,
+)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -39,6 +43,11 @@ logger = init_logger(__name__)
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+
+    # Class-level defaults so __new__-constructed speculators (the unit-test
+    # pattern) see an unarmed epilogue before __init__ runs.
+    _sample_epilogue_scratch: "SampleEpilogueScratch | None" = None
+    _fused_epilogue_wrote = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -81,6 +90,14 @@ class DSparkSpeculator(DFlashSpeculator):
 
         self.use_confidence_head: bool = False
 
+        # Fused draft sampling epilogue. Scratch is allocated in
+        # load_draft_model once structural eligibility is known; this
+        # handshake flag tells the sequential callers whether the fused
+        # kernel already wrote draft_tokens in-kernel (the stock chain
+        # still needs the slice copy).
+        self._sample_epilogue_scratch: SampleEpilogueScratch | None = None
+        self._fused_epilogue_wrote = False
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -103,6 +120,37 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits_spec(self.vllm_config)[0],
                 device=self.device,
             )
+        # Fused draft sampling epilogue. Eligible only on the exact chain
+        # the fusion replicates: probabilistic drafting (the draft_logits
+        # cache exists), a FULL-vocab draft (no d2t scatter --
+        # reduced-vocab models keep the stock scatter + gumbel chain), and
+        # no draft watermarker (its sampler is a different path). The
+        # scratch is allocated regardless of the kill switch so an eager
+        # in-process A/B works; the per-call check in the wrapper falls
+        # back to the stock chain, and the choice is baked at CUDA-graph
+        # capture.
+        if (
+            self.draft_logits is not None
+            and self._d2t_scatter_index is None
+            and self.draft_watermarker is None
+        ):
+            self._sample_epilogue_scratch = SampleEpilogueScratch(
+                self.max_num_reqs,
+                self.vocab_size,
+                self.device,
+                self.use_fp64_gumbel,
+            )
+            logger.warning(
+                "DSpark draft sample-epilogue fusion READY: full-vocab "
+                "probabilistic draft (vocab %d -> %d blocks, %d req rows) "
+                "-- one Triton kernel per draft position replaces the stock "
+                "sample_pos-offset + idx_map-copy + gumbel_sample + argmax + "
+                "gather + draft_tokens-copy chain (bit-exact; kill var "
+                "VLLM_DISABLE_DRAFT_SAMPLE_EPILOGUE_FUSION)",
+                self.vocab_size,
+                self._sample_epilogue_scratch.num_blocks,
+                self.max_num_reqs,
+            )
         self.use_confidence_head = (
             self.enable_adaptive_verification
             and model.model.confidence_head is not None
@@ -124,6 +172,7 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
+        self._fused_epilogue_wrote = False
         self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
             draft_ids = logits.argmax(dim=-1)
@@ -136,6 +185,29 @@ class DSparkSpeculator(DFlashSpeculator):
             buf = self._draft_scatter_buf[: logits.shape[0]]
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
+
+        # Fused one-launch sampling epilogue (bit-exact; see
+        # sample_epilogue_fused.py). Sits after the d2t scatter above and is
+        # only armed when that scatter is absent. Returns None on the kill
+        # switch or when the draft batch exceeds the fusion gate (per-call
+        # reads, baked at CUDA-graph capture) and the stock chain below
+        # then runs unchanged.
+        if self._sample_epilogue_scratch is not None:
+            sampled = dspark_sample_epilogue_fused(
+                logits,
+                idx_map,
+                self.temperature,
+                self.seeds,
+                sample_pos,
+                self.draft_logits,
+                self._step_cols[step],
+                self.draft_tokens,
+                self._sample_epilogue_scratch,
+                use_fp64=self.use_fp64_gumbel,
+            )
+            if sampled is not None:
+                self._fused_epilogue_wrote = True
+                return sampled
 
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
@@ -197,19 +269,38 @@ class DSparkSpeculator(DFlashSpeculator):
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
+        # Fused Markov bias: one Triton kernel per step fuses the embed
+        # gather + markov_w2 GEMV + base-logits add (kill switch
+        # VLLM_DISABLE_MARKOV_FUSED_GEMV, read per call and baked at
+        # CUDA-graph capture). Models without a fused-eligible markov head,
+        # the confidence-head path (it needs the raw markov embeds), and
+        # draft batches above VLLM_DRAFT_SAMPLING_FUSION_MAX_TOKENS (the
+        # kernel re-reads w2 per row, so large batches keep the stock GEMM)
+        # fall back to the stock chain. The sampler is untouched, so the
+        # RNG stream is identical; only the GEMM fp32 accumulation order
+        # can differ (non-bit-exact).
+        markov_bias_add_fused = getattr(self.model, "markov_bias_add_fused", None)
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
-            markov_embed = self.model.markov_embed(prev)
-            if self.use_confidence_head:
-                confidence_markov_embeds.append(markov_embed)
-            bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
+            logits_i = None
+            if markov_bias_add_fused is not None and not self.use_confidence_head:
+                logits_i = markov_bias_add_fused(prev, base_logits[:, i])
+            if logits_i is None:
+                markov_embed = self.model.markov_embed(prev)
+                if self.use_confidence_head:
+                    confidence_markov_embeds.append(markov_embed)
+                bias = self.model.markov_bias(markov_embed)
+                logits_i = base_logits[:, i] + bias
             if hasattr(self.model, "apply_output_logit_transform"):
                 logits_i = self.model.apply_output_logit_transform(logits_i)
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
-            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            # The fused epilogue writes draft_tokens in-kernel (positionally,
+            # the same [row, step] cells); the stock chain still needs the
+            # slice copy.
+            if not self._fused_epilogue_wrote:
+                self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
         if self.use_confidence_head:
@@ -258,7 +349,10 @@ class DSparkSpeculator(DFlashSpeculator):
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
-            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            # As in the loop above: the fused epilogue already wrote
+            # these cells when it engaged.
+            if not self._fused_epilogue_wrote:
+                self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
         if self.use_confidence_head:
