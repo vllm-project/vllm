@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
-import importlib.util
 import sys
 import threading
 import time
@@ -57,14 +56,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
-)
-from vllm.platforms import current_platform
-
-mori_available = importlib.util.find_spec("mori") is not None
-
-pytestmark = pytest.mark.skipif(
-    not (current_platform.is_rocm() and mori_available),
-    reason="UMBP is only available on ROCm with the mori package installed",
 )
 
 
