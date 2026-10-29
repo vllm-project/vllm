@@ -57,6 +57,26 @@ class TraceReplayState:
             self.req_states.prompt_len.gpu,
         )
 
+    def apply_trace_to_verified(
+        self,
+        sampled: torch.Tensor,
+        num_sampled: torch.Tensor,
+        draft_sampled: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+    ) -> None:
+        apply_trace_tokens_to_verified(
+            sampled,
+            num_sampled,
+            draft_sampled,
+            cu_num_logits,
+            idx_mapping,
+            self.trace_token_ids.gpu,
+            self.trace_len.gpu,
+            self.req_states.total_len.gpu,
+            self.req_states.prompt_len.gpu,
+        )
+
 
 @triton.jit
 def _trace_replay_kernel(
@@ -104,6 +124,86 @@ def apply_trace_tokens(
     num_reqs = idx_mapping.shape[0]
     _trace_replay_kernel[(num_reqs,)](
         sampled,
+        idx_mapping,
+        trace_token_ids,
+        trace_token_ids.stride(0),
+        trace_len,
+        total_len,
+        prompt_len,
+    )
+
+
+@triton.jit
+def _trace_replay_verified_kernel(
+    sampled_ptr,
+    sampled_stride,
+    num_sampled_ptr,
+    draft_sampled_ptr,
+    cu_num_logits_ptr,
+    idx_mapping_ptr,
+    trace_token_ids_ptr,
+    trace_token_ids_stride,
+    trace_len_ptr,
+    total_len_ptr,
+    prompt_len_ptr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    if req_state_idx < 0:
+        return
+
+    trace_len = tl.load(trace_len_ptr + req_state_idx)
+    if trace_len <= 0:
+        return
+
+    step = tl.load(total_len_ptr + req_state_idx) - tl.load(
+        prompt_len_ptr + req_state_idx
+    )
+    if step < 0 or step >= trace_len:
+        return
+
+    start = tl.load(cu_num_logits_ptr + req_idx)
+    num_draft_tokens = tl.load(cu_num_logits_ptr + req_idx + 1) - start - 1
+    num_replayed = tl.minimum(num_draft_tokens + 1, trace_len - step)
+    trace_row = (
+        trace_token_ids_ptr + req_state_idx.to(tl.int64) * trace_token_ids_stride + step
+    )
+    num_accepted = tl.zeros((), tl.int32)
+    matching = tl.full((), 1, tl.int1)
+    for i in range(num_replayed):
+        if matching:
+            token_id = tl.load(trace_row + i).to(tl.int64)
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, token_id)
+            num_accepted = i + 1
+            draft_token_id = tl.load(
+                draft_sampled_ptr + start + i + 1,
+                mask=i < num_draft_tokens,
+                other=-1,
+            ).to(tl.int64)
+            matching = draft_token_id == token_id
+    tl.store(num_sampled_ptr + req_idx, num_accepted)
+
+
+def apply_trace_tokens_to_verified(
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    trace_token_ids: torch.Tensor,
+    trace_len: torch.Tensor,
+    total_len: torch.Tensor,
+    prompt_len: torch.Tensor,
+) -> None:
+    """Replace verified tokens with the trace, accepting each draft only if it
+    equals the trace token at its position."""
+    num_reqs = idx_mapping.shape[0]
+    _trace_replay_verified_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        draft_sampled,
+        cu_num_logits,
         idx_mapping,
         trace_token_ids,
         trace_token_ids.stride(0),
