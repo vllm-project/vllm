@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
-from vllm.model_executor.utils import copy_weight_
+from vllm.model_executor.utils import copy_weight_, kernel_parameters
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -726,6 +726,24 @@ class RoutedExperts(PluggableLayer):
 
         quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
+        num_global_experts = (
+            self.moe_config.num_experts
+            + self.expert_map_manager.num_fused_shared_experts
+        )
+        # `num_experts` counts logical and redundant experts; fused shared
+        # slots are appended after them.
+        # Expert substitution checkpoints name retained experts by their
+        # logical ID, which is not bounded by the number of allocated slots.
+        expert_substitution = getattr(self, "expert_substitution", None)
+        if expert_substitution is not None:
+            num_global_experts = (
+                expert_substitution.num_logical_experts
+                + self.expert_map_manager.num_fused_shared_experts
+            )
+        assert global_expert_id < num_global_experts, (
+            f"Expert id {global_expert_id} is out of range for "
+            f"{self.layer_name}; expected < {num_global_experts}"
+        )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
@@ -1330,7 +1348,21 @@ class RoutedExperts(PluggableLayer):
                 torch.transpose(p.data, 1, 2), requires_grad=False
             )
 
-        weights = list(self.named_parameters())
+        # Kernel views of the params: live ones only, under their runtime names
+        # (an aliased checkpoint name such as `w13_weight_packed` is reported as
+        # `w13_weight`, which the name filters below expect).
+        weights = [
+            (f"{prefix}.{name}" if prefix else name, p)
+            for prefix, module in self.named_modules()
+            for name, p in kernel_parameters(module).items()
+        ]
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor
