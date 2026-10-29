@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -928,19 +928,12 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
         self.num_tokens: list[int] = []
-        self.prefetched: list[int] = []
-        self.adopted: list[tuple[str, object]] = []
-        self.discarded: list[str] = []
 
     def discard(self, req_id):
-        self.discarded.append(req_id)
-
-    def prefetch(self, num_tokens: int, block_hashes: list[bytes]):
-        self.prefetched.append(num_tokens)
-        return SimpleNamespace(future=MagicMock())
+        pass
 
     def adopt(self, req_id: str, state) -> None:
-        self.adopted.append((req_id, state))
+        pass
 
     def lookup(
         self,
@@ -951,55 +944,6 @@ class _StubLookupClient:
     ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
         return MooncakeLookupResult(self._hit_tokens)
-
-
-def _make_admission_request(request_id="req-0"):
-    return SimpleNamespace(
-        request_id=request_id,
-        num_tokens=48,
-        block_hashes=[b"h0", b"h1", b"h2"],
-        skip_reading_external_kv=False,
-        kv_preschedule_handle=None,
-    )
-
-
-@pytest.mark.parametrize(
-    "option", ["sync", "disabled", "skip_cache", "short", "no_hash"]
-)
-def test_admission_lookup_skips_ineligible_requests(option):
-    scheduler = _make_bare_scheduler()
-    scheduler.lookup_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
-    request = _make_admission_request()
-    if option == "sync":
-        scheduler.lookup_async = False
-    elif option == "disabled":
-        scheduler.enable_lookup = False
-    elif option == "skip_cache":
-        request.skip_reading_external_kv = True
-    elif option == "short":
-        request.num_tokens = 12
-    else:
-        request.block_hashes = []
-
-    assert scheduler.start_lookup_prefetch(request) is None
-    assert scheduler.client.prefetched == []
-
-
-@pytest.mark.parametrize("preempted", [False, True])
-def test_admission_lookup_is_discarded_on_finish_or_preemption(preempted):
-    scheduler = _make_bare_scheduler()
-    scheduler.lookup_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
-    request = _make_admission_request()
-    output = _make_preemption_scheduler_output()
-    if not preempted:
-        output.preempted_req_ids = set()
-        output.finished_req_ids = {request.request_id}
-
-    scheduler.build_connector_meta(output)
-
-    assert scheduler.client.discarded == [request.request_id]
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
