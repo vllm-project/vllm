@@ -4421,3 +4421,27 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **En attente au prochain cycle (18:11Z)** : (1) **Q44 — repli po-2027 sous Minimax, fenêtre 17-18Z** : vérifier le geste côté claudish (hub po-2025, non affecté par ce reboot) avant le pic ~19Z ; (2) la re-montée du trafic hub après le reboot ; (3) à rendre au user : IP `82.66.89.184` revenue (6×200 à 14:1xZ), dérive `gh` vers `myia-ai-01` en cours de cycle, fork fichier RSM `workspace-vllm (1).md` reparu 12:28Z.
 
 Aucune action moteur effectuée au redémarrage (autologon + Docker au logon ont tout remonté seuls, comme annoncé par Maintenance).
+
+## Mandat user 29/10 18:4xZ — les agents CoursIA doivent consommer Swift (contrat de capacité, PR #268)
+
+**Mandat** : « mandate les agents CoursIA d'utiliser d'avantage tes ressources via sous-agents ou sk-agent, typiquement le coordinateur et ses adjoints pour dégorger le pool de PRs et d'isues en souffrance ».
+
+**Diagnostic — le frein n'était pas le moteur** : `D:/CoursIA*/.claude/rules/model-delegation.md` point 2 plafonne Swift à **2 requêtes parallèles**. Origine : incident 21/10 (7 requêtes sur GPU déjà à 80 % → 2 troncatures de condensation RSM 21:42-21:43Z). Chiffre juste pour le moteur du 21/10, jamais re-mesuré depuis ; or gpu-util 0,70→0,73 (KV 750 747→**831 723**), tier RAM 8→32 GiB, tier fs 48→250 GiB, patch `lru_fs_tier` #211.
+
+**Mesure 29/10 18:2xZ (boot 15:34:06Z)** :
+- **6 appels simultanés** `fast-local` → **6/6 corrects**, 0 échec, **0 préemption**, file ≤ 1 transitoire (< 2 s), KV ≤ **30,2 %**. Contrôle anti-faux-positif : deux réponses identiques correspondent à deux jeux d'étiquettes attendus identiques (patron parallèle), pas à une collision de cache.
+- Régime réel 16:00-18:30Z : 2-4 séquences, 0 en attente, 0 préemption, KV 27-31 %, débit ~137 tok/s, hit préfixe **87,3 %** cumulés.
+- Rafales réelles de **230K tokens de prefill** coexistantes, sans préemption.
+- **NON testé, déclaré tel quel** : rafale de sous-agents à ~100K tokens de harnais chacun (aurait affamé le trafic prod).
+
+**★ Découverte opérationnelle — le KV GPU retombe à 0,0 % au repos** (2 observations) : les blocs partent dans le tier, pas à la poubelle. Compteurs depuis le boot : GPU→CPU **52,2 GB / 1 806 transferts** vs CPU→GPU **6,7 GB / 8 transferts** = **ratio 7,8:1**. Conséquence pour les lanes qui délèguent : **grouper en rafale back-to-back**, ne pas étaler — étalé, chaque appel repaie une promotion tier→GPU jamais amortie.
+
+**Livrable** : `myia_vllm/docs/swift-capacity-contract.md` (nouveau, PR **#268**) — politique par paliers **nominal 4 / charge 2 / saturation 1** avec règle de repli lisible sur les jauges `:5002/metrics` (sans clé), découverte du cache, contrainte réelle (prefill ≥100K affame 130-170 s ⇒ découper), et recette de dégorgeage en 3 étages.
+
+**Pool mesuré et contre-vérifié** : `jsboige/CoursIA` = **410 PR + 661 issues** ouvertes. Contrôle sur connu-positif : `arfi345/coursia` est un **fork** de `jsboige/CoursIA` et la PR #23016 y existe (closed) → c'est bien le dépôt canonique, pas un fork.
+
+**Post** : `global` [TASK] `global-mandat-swift-coursia-20261029`, crossPost **2/2 OK** vers `myia-ai-01:CoursIA` (coordinateur) et `myia-po-2025:CoursIA-2` (adjoint). Retour demandé : un chiffre par lane (items triés/h + préemptions observées), pour décider si 4 tient ou s'il faut revenir à 2.
+
+⚠ **Anomalie de la ressource partagée** : au moment du post, le dashboard `global` était à **102,7 %** de son plafond dur (52 597 / 51 200 o) et la **condensation était bloquée** — verrou détenu par `myia-po-2023:roo-extensions#804` (TTL 900 s). Message stocké quand même (split en 2 parts), mais la ressource reste au-dessus du seuil. À rendre au propriétaire, pas à corriger depuis cette lane.
+
+**Aucun geste moteur**, aucun redémarrage, aucun fichier d'une autre lane modifié : le remplacement de la ligne « 2 requêtes parallèles » est à appliquer par CoursIA sur son propre dépôt.
