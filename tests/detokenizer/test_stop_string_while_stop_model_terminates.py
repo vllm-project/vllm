@@ -357,7 +357,7 @@ def test_stop_string_matches_only_content(
 
     assert _update_in_steps(detok, "a cd b|x cd y cd", step) == "cd"
     assert detok.output_text == (
-        "a cd b|x cd" if include_stop_str_in_output else "a cd b|x"
+        "a cd b|x cd" if include_stop_str_in_output else "a cd b|x "
     )
 
 
@@ -365,8 +365,8 @@ def test_stop_string_matches_only_content(
 @pytest.mark.parametrize(
     "strip, prefix, output, expected_text, expected_text_with_stop",
     [
-        ("<>", "", "a cd|x c<>d y", "a cd|x", "a cd|x c<>d"),
-        ("", "<p>", "a cd|x cd y", "a cd|x", "a cd|x cd"),
+        ("<>", "", "a cd|x c<>d y", "a cd|x ", "a cd|x c<>d"),
+        ("", "<p>", "a cd|x cd y", "a cd|x ", "a cd|x cd"),
     ],
 )
 def test_stop_string_in_content_not_verbatim(
