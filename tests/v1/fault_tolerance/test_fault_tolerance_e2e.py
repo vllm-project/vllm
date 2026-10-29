@@ -21,17 +21,18 @@ from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
 from vllm.utils.network_utils import get_open_port
 
-MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V2-Lite-Chat")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 
 # Fault-detection timeout budget:
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
 # - nixl_ep: kernel masks the dead rank after Buffer's default timeout_ms=30000 (30s).
-# - Deadline (45s): slowest fallback (30s) + margin.
+# - Eager FP8 quantization can wait for the GPU timeout before the next CPU sync.
+# - Deadline (75s): both 30s waits + margin.
 CPU_DISTRIBUTED_TIMEOUT_S = 30
-FAULT_DETECTION_DEADLINE_S = 45
+FAULT_DETECTION_DEADLINE_S = 75
 
 
-NUM_REDUNDANT_EXPERTS = 32
+NUM_REDUNDANT_EXPERTS = 64
 
 # Recovery after scale_down (mask + expert redistribution + weight reload)
 # is expected to finish well within this deadline; the busy-loop wrapper
@@ -180,10 +181,9 @@ def _complete(client):
     )
 
 
-# Accuracy probe constants mirror test_elastic_ep.py; invalid responses
-# count as wrong answers. Env overrides exist for tuning.
+# Invalid responses count as wrong answers. Env overrides exist for tuning.
 NUM_GSM8K_QUESTIONS = int(os.getenv("NUM_GSM8K_QUESTIONS", "256"))
-EXPECTED_ACCURACY = float(os.getenv("EXPECTED_ACCURACY", "0.58"))
+EXPECTED_ACCURACY = float(os.getenv("EXPECTED_ACCURACY", "0.8"))
 ACCURACY_TOL = float(os.getenv("ACCURACY_TOL", "0.08"))
 
 
@@ -433,7 +433,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("quantization", [None, "fp8_per_tensor"])
+@pytest.mark.parametrize("quantization", [None, "fp8_per_block"])
 def test_scale_down_removes_dead_rank_and_recovers(quantization):
     """Preserve physical expert IDs and reload recovered placement after scale-down.
 
