@@ -14,18 +14,21 @@ from typing import cast
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA required for trace-replay tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.trace_replay import (
     TraceReplayState,
     apply_trace_tokens,
+    apply_trace_tokens_to_verified,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 TEST_MAX_MODEL_LEN = 2048
 
 
@@ -193,3 +196,96 @@ def test_slot_reuse_clears_trace():
     _set_lens(state, [3, 0], [3, 0])
     state.apply_trace(sampled, idx_mapping)
     assert sampled.tolist() == [888]
+
+
+class TestApplyTraceToVerified:
+    @pytest.mark.parametrize(
+        "drafts,trace,step,expected_tokens,expected_num_sampled",
+        [
+            ([10, 11, 12], [10, 11, 12, 13, 14], 0, [10, 11, 12, 13], 4),
+            ([10, 99, 12], [10, 11, 12, 13, 14], 0, [10, 11], 2),
+            ([99, 11, 12], [10, 11, 12, 13, 14], 0, [10], 1),
+            ([-1, -1, -1], [10, 11, 12, 13, 14], 0, [10], 1),
+            ([11, 12, 13], [10, 11, 12, 13, 14], 1, [11, 12, 13, 14], 4),
+            ([12, 13, 14], [10, 11, 12, 13, 14], 2, [12, 13, 14], 3),
+            ([13, 14, 15], [10, 11, 12, 13, 14], 3, [13, 14], 2),
+            ([], [10, 11, 12], 1, [11], 1),
+        ],
+        ids=[
+            "all-accepted",
+            "reject-middle",
+            "reject-first",
+            "placeholder-drafts",
+            "offset-step",
+            "trace-ends-at-bonus",
+            "trace-ends-mid-step",
+            "no-drafts",
+        ],
+    )
+    def test_accepts_drafts_matching_trace(
+        self, drafts, trace, step, expected_tokens, expected_num_sampled
+    ):
+        num_steps = 3
+        prompt_len = 6
+        trace_token_ids = torch.zeros(
+            1, TEST_MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+        )
+        trace_token_ids[0, : len(trace)] = _i32(trace)
+        sampled = torch.full((1, num_steps + 1), -7, dtype=torch.int64, device=DEVICE)
+        num_sampled = _i32([1])
+        draft_sampled = _i64([5, *drafts])
+        cu_num_logits = _i32([0, len(drafts) + 1])
+
+        apply_trace_tokens_to_verified(
+            sampled,
+            num_sampled,
+            draft_sampled,
+            cu_num_logits,
+            _i32([0]),
+            trace_token_ids,
+            _i32([len(trace)]),
+            _i32([prompt_len + step]),
+            _i32([prompt_len]),
+        )
+
+        assert num_sampled.tolist() == [expected_num_sampled]
+        assert sampled[0, :expected_num_sampled].tolist() == expected_tokens
+
+    def test_batch_with_mixed_requests(self):
+        trace_token_ids = torch.zeros(
+            3, TEST_MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+        )
+        trace_token_ids[0, :4] = _i32([100, 101, 102, 103])
+        trace_token_ids[2, :3] = _i32([300, 301, 302])
+        trace_len = _i32([4, 0, 3])
+        prompt_len = _i32([4, 4, 4])
+        total_len = _i32([5, 9, 7])
+        sampled = torch.tensor(
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]],
+            dtype=torch.int64,
+            device=DEVICE,
+        )
+        num_sampled = _i32([1, 2, 3, 1])
+        draft_sampled = _i64([0, 101, 102, 0, 5, 6, 0, 0, 0, 7])
+        cu_num_logits = _i32([0, 3, 6, 9, 10])
+        idx_mapping = _i32([0, 1, -1, 2])
+
+        apply_trace_tokens_to_verified(
+            sampled,
+            num_sampled,
+            draft_sampled,
+            cu_num_logits,
+            idx_mapping,
+            trace_token_ids,
+            trace_len,
+            total_len,
+            prompt_len,
+        )
+
+        assert num_sampled.tolist() == [3, 2, 3, 1]
+        assert sampled.tolist() == [
+            [101, 102, 103],
+            [4, 5, 6],
+            [7, 8, 9],
+            [10, 11, 12],
+        ]

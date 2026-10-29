@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx115x  # noqa: E402
 
 device = "cuda"
 
@@ -28,10 +28,13 @@ hybrid_module = importlib.import_module(
 )
 RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
+dequantize_w4a16 = hybrid_module.dequantize_w4a16
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
+MIN_DENSE_M = hybrid_module.MIN_DENSE_M
+triton_w4a16_skinny_fmt_gemm = hybrid_module.triton_w4a16_skinny_fmt_gemm
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +56,26 @@ def _pack_zp_rows_for_kernel(zp_nkg: torch.Tensor) -> torch.Tensor:
     ).contiguous()
 
 
+def _dequant_reference(
+    w_int4_nk: torch.Tensor,
+    scales_nkg: torch.Tensor,
+    zp_nkg: torch.Tensor | None,
+    group_size: int,
+) -> torch.Tensor:
+    """fp32 [N, K] dequantized weight.
+
+    w_int4_nk: [N, K] int32 with raw uint4 values in [0, 15]
+    scales_nkg: [N, K//G] fp16/bf16
+    zp_nkg: [N, K//G] int32 raw zero points in [0, 15], or None for
+            symmetric (uint4b8, dequant subtracts 8)
+    """
+    G = group_size
+    assert w_int4_nk.shape[1] % G == 0
+    s_full = scales_nkg.repeat_interleave(G, dim=1).to(torch.float32)
+    z_full = 8.0 if zp_nkg is None else zp_nkg.repeat_interleave(G, dim=1).float()
+    return (w_int4_nk.to(torch.float32) - z_full) * s_full
+
+
 def _rdna_hybrid_w4a16_reference(
     x_mk: torch.Tensor,
     w_int4_nk: torch.Tensor,
@@ -61,23 +84,8 @@ def _rdna_hybrid_w4a16_reference(
     group_size: int,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    """Reference for the Hybrid W4A16 op.
-
-    x_mk: [M, K] fp16/bf16
-    w_int4_nk: [N, K] int32 with raw uint4 values in [0, 15]
-    scales_nkg: [N, K//G] fp16/bf16
-    zp_nkg: [N, K//G] int32 raw zero points in [0, 15], or None for
-            symmetric (uint4b8, dequant subtracts 8)
-    """
-    G = group_size
-    N, K = w_int4_nk.shape
-    assert K % G == 0
-    s_full = scales_nkg.repeat_interleave(G, dim=1).to(torch.float32)  # [N, K]
-    if zp_nkg is None:
-        z_full = torch.full((N, K), 8.0, device=x_mk.device, dtype=torch.float32)
-    else:
-        z_full = zp_nkg.repeat_interleave(G, dim=1).to(torch.float32)
-    w_fp = (w_int4_nk.to(torch.float32) - z_full) * s_full  # [N, K]
+    """Reference for the Hybrid W4A16 op; x_mk is [M, K] fp16/bf16."""
+    w_fp = _dequant_reference(w_int4_nk, scales_nkg, zp_nkg, group_size)
     out = x_mk.to(torch.float32) @ w_fp.t()  # [M, N]
     if bias is not None:
         out = out + bias.to(torch.float32)
@@ -95,10 +103,13 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64],
-    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill"],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, MIN_DENSE_M],
+    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill", "M=256_dense"],
 )
-def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
+@pytest.mark.parametrize("use_dequant", [False, True])
+def test_rdna_hybrid_w4a16_apply_matches_reference(
+    dtype, group_size, has_zp, M, use_dequant
+):
     """Smoke test the registered custom op for both decode and prefill batches.
 
     Verifies the dispatch logic in `_rdna_hybrid_w4a16_apply_impl`:
@@ -137,6 +148,14 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
         zp_nkg = None
         w_zp = None
 
+    w_dequant = (
+        dequantize_w4a16(
+            w_int4_nk, scales_nkg, zp_nkg, group_size, 0 if has_zp else 8, dtype
+        )
+        if use_dequant
+        else None
+    )
+
     from vllm.utils.platform_utils import num_compute_units
 
     out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
@@ -147,6 +166,7 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
         None,  # bias
         num_compute_units(),
         group_size,
+        w_dequant,
     )
 
     ref = _rdna_hybrid_w4a16_reference(
@@ -190,6 +210,114 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
     ref = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales_nkg, None, G, bias=bias)
 
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "M,has_dense,expected_path",
+    [
+        (MAX_SKINNY_BATCH_SIZE, True, "triton"),
+        (MIN_DENSE_M - 1, True, "triton"),
+        (MIN_DENSE_M, True, "dense"),
+        (MIN_DENSE_M, False, "triton"),
+    ],
+    ids=["skinny_past_lds", "below_dense_threshold", "at_dense_threshold", "off"],
+)
+def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypatch):
+    """Memory-bound batches must stay on int4, including decode batches that
+    miss the skinny path on the LDS limit (e.g. spec-decode verify).
+    """
+    import vllm._custom_ops as ops
+
+    N, K, G = 16, 16384, 128
+    assert M > MAX_SKINNY_BATCH_SIZE or K * M > MEDIUM_SKINNY_LIMIT_ELEMENTS
+
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    w_dequant = torch.empty((N, K), dtype=torch.float16) if has_dense else None
+    called = []
+
+    def fake(path):
+        def record(*args, **kwargs):
+            called.append(path)
+            return torch.empty((M, N), dtype=x_mk.dtype)
+
+        return record
+
+    monkeypatch.setattr(ops, "wvSplitK_int4_g", fake("hip"))
+    monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake("triton"))
+    monkeypatch.setattr(hybrid_module, "rocm_unquantized_gemm_impl", fake("dense"))
+    # gfx115x sends every small batch to HIP regardless of the LDS limit;
+    # pin it off so the past-LDS case is exercised on every target.
+    monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: False)
+
+    hybrid_module._rdna_hybrid_w4a16_apply_impl(
+        x_mk, w_q, scales, None, None, 40, G, w_dequant
+    )
+
+    assert called == [expected_path]
+
+
+# ---------------------------------------------------------------------------
+# Triton prefill path
+# ---------------------------------------------------------------------------
+
+
+def _make_prefill_case(M, K, N, G, dtype, has_zp):
+    """Random [M,K] activations + skinny [N,K//8] weights and their metadata.
+
+    Zero points come back twice: ``zp_raw`` as [N, K//G] int32 nibbles for the
+    float32 oracle, and ``zp_packed`` as [N//8, K//G] int32 in the packed layout
+    the kernel reads.
+    """
+    x = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4 = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    b_q = pack_int4_exllama_shuffle(w_int4)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    if has_zp:
+        zp_raw = torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        zp_packed = _pack_zp_rows_for_kernel(zp_raw)
+    else:
+        zp_raw = zp_packed = None
+    return x, w_int4, b_q, scales, zp_raw, zp_packed
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [
+        (17, 256, 512, 32),
+        (32, 512, 256, 64),
+        (33, 512, 512, 128),
+        (64, 1024, 256, 128),
+        (129, 256, 512, 32),
+        (256, 512, 512, 128),
+        (257, 512, 512, 128),
+    ],
+)
+def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
+    """The Triton prefill GEMM matches a float32 dequantize-then-matmul reference.
+
+    Covers fp16 and bf16, with and without zero points, at M values on both
+    sides of where gfx1151 switches fp16 to the packed dequant.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    set_random_seed(0)
+
+    x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
+        M, K, N, G, dtype, has_zp
+    )
+    out = triton_w4a16_skinny_fmt_gemm(
+        a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed
+    )
+    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +536,173 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
 
 
 # ---------------------------------------------------------------------------
+# process_weights_after_loading: rdna_hybrid_w4a16_prefill_dequant cache
+# ---------------------------------------------------------------------------
+
+_W_DEQUANT_ATTR = RDNAHybridW4A16LinearKernel.DEQUANT_WEIGHT_NAME
+
+
+def _build_prefill_dequant_case(K: int, N: int, G: int, has_zp: bool):
+    """Return (layer, kernel, w_int4_nk, scales_nkg, zp_nkg) for a CT layer."""
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    scales_nkg = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
+    if has_zp:
+        zeros_int4_gn = torch.randint(
+            0, 16, (K // G, N), device=device, dtype=torch.int32
+        )
+        zeros_ckpt = _pack_int4_along_n_for_zp(zeros_int4_gn).t().contiguous()
+        zp_nkg = zeros_int4_gn.t().contiguous()
+    else:
+        zeros_ckpt = zp_nkg = None
+
+    layer = _build_dummy_layer(
+        _pack_int4_along_k_to_ckpt(w_int4_kn), scales_nkg, zeros_ckpt
+    )
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4 if has_zp else scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=has_zp,
+    )
+    kernel = RDNAHybridW4A16LinearKernel(
+        config,
+        w_q_param_name="weight_packed",
+        w_s_param_name="weight_scale",
+        w_zp_param_name="weight_zero_point" if has_zp else None,
+    )
+    return layer, kernel, w_int4_kn.t().contiguous(), scales_nkg, zp_nkg
+
+
+def _prefill_dequant_vllm_config(mode: str, gpu_memory_utilization: float):
+    from vllm.config import CacheConfig, KernelConfig, VllmConfig
+
+    return VllmConfig(
+        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode),
+        cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
+    )
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [("Enable", "enable"), ("DISABLE", "disable"), (True, None), ("on", None)],
+)
+def test_rdna_hybrid_w4a16_prefill_dequant_mode_normalized(value, expected):
+    """Mode strings are case-insensitive; booleans are not modes."""
+    from pydantic import ValidationError
+
+    from vllm.config import KernelConfig
+
+    if expected is None:
+        with pytest.raises(ValidationError):
+            KernelConfig(rdna_hybrid_w4a16_prefill_dequant=value)
+    else:
+        config = KernelConfig(rdna_hybrid_w4a16_prefill_dequant=value)
+        assert config.rdna_hybrid_w4a16_prefill_dequant == expected
+
+
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("mode", ["disable", "enable"])
+def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
+    """Within budget, enabling caches the dense copy; disabled caches nothing."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.config import set_current_vllm_config
+
+    set_random_seed(0)
+    K, N, G = 256, 128, 128
+    layer, kernel, w_int4_nk, scales_nkg, zp_nkg = _build_prefill_dequant_case(
+        K, N, G, has_zp
+    )
+
+    # Utilization 1.0 leaves all free memory in budget, so the tiny layer fits.
+    with set_current_vllm_config(_prefill_dequant_vllm_config(mode, 1.0)):
+        kernel.process_weights_after_loading(layer)
+
+    if mode == "disable":
+        assert not hasattr(layer, _W_DEQUANT_ATTR)
+        return
+
+    expected = _dequant_reference(w_int4_nk, scales_nkg, zp_nkg, G).to(torch.float16)
+    torch.testing.assert_close(
+        getattr(layer, _W_DEQUANT_ATTR), expected, rtol=0, atol=0
+    )
+    assert _W_DEQUANT_ATTR not in layer.state_dict()
+
+
+def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(dist_init, monkeypatch):
+    """Over budget, enabling the cache raises instead of caching a subset."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+
+    # The real free memory is machine dependent; 40 GiB free with 50 GiB
+    # outside a 0.5 budget leaves nothing to spend.
+    monkeypatch.setattr(
+        hybrid_module,
+        "MemorySnapshot",
+        lambda device: SimpleNamespace(
+            free_memory=40 * 2**30, total_memory=100 * 2**30
+        ),
+    )
+    set_random_seed(0)
+    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
+
+    with (
+        set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)),
+        pytest.raises(ValueError, match="gpu_memory_utilization"),
+    ):
+        kernel.process_weights_after_loading(layer)
+
+
+@pytest.mark.parametrize("min_kv_gib, fits", [(0, True), (8, False)])
+def test_rdna_hybrid_w4a16_prefill_dequant_reserves_min_kv(
+    min_kv_gib, fits, dist_init, monkeypatch
+):
+    """The budget keeps room for one max_model_len request of KV cache."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+
+    # 60 GiB free with 50 GiB outside a 0.5 budget leaves 10 GiB, 6 GiB after
+    # the activation headroom: enough for the layer unless KV claims 8 GiB.
+    monkeypatch.setattr(
+        hybrid_module,
+        "MemorySnapshot",
+        lambda device: SimpleNamespace(
+            free_memory=60 * 2**30, total_memory=100 * 2**30
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
+        lambda vllm_config, specs: min_kv_gib * 2**30,
+    )
+    set_random_seed(0)
+    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
+
+    with set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)):
+        if fits:
+            kernel.process_weights_after_loading(layer)
+            assert hasattr(layer, _W_DEQUANT_ATTR)
+        else:
+            with pytest.raises(ValueError, match="gpu_memory_utilization"):
+                kernel.process_weights_after_loading(layer)
+
+
+# ---------------------------------------------------------------------------
 # can_implement enforces the supported-group-size policy
 # ---------------------------------------------------------------------------
 
@@ -446,22 +741,28 @@ def _hip_skinny_reference(
     scales_nkg: torch.Tensor,
     *,
     group_size: int,
-    zp_bias: int,
+    zp_nkg: torch.Tensor | None,
 ) -> torch.Tensor:
-    """Reference for symmetric HIP skinny: C = A @ (W - zp_bias) * S."""
+    """Reference for HIP skinny: C = A @ (W - zp) * S.
+
+    ``zp_nkg`` is [N, K//G] int32 raw zero points for the asymmetric case, or
+    None for symmetric uint4b8, where the kernel subtracts a constant 8.
+    """
     K = a_mk.shape[1]
     N = w_int4_nk.shape[0]
     num_groups = K // group_size
 
-    w_fp = (w_int4_nk.to(torch.float32) - zp_bias).view(N, num_groups, group_size)
+    w_g = w_int4_nk.to(torch.float32).view(N, num_groups, group_size)
+    zp = 8.0 if zp_nkg is None else zp_nkg.to(torch.float32).unsqueeze(-1)
     s = scales_nkg.to(torch.float32).unsqueeze(-1)
-    w_dequant = (w_fp * s).view(N, K)
+    w_dequant = ((w_g - zp) * s).view(N, K)
 
     return (a_mk.to(torch.float32) @ w_dequant.t()).to(a_mk.dtype)
 
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M,K,N,G",
     [
@@ -470,12 +771,49 @@ def _hip_skinny_reference(
         (1, 512, 256, 128),
         (2, 512, 256, 64),
         (3, 256, 512, 64),
+        # M is the kernel's batch dimension; 4 and 5 reach dispatch tuples that
+        # 1..3 never take, and 5 is MAX_SKINNY_BATCH_SIZE.
+        (4, 512, 256, 32),
+        (4, 256, 512, 64),
+        (5, 512, 256, 128),
+        (5, 256, 256, 32),
+        # N == 8 is exactly one packed zero-point word.
+        (1, 256, 8, 32),
+        # K must exceed THRDS * A_CHUNK * UNRL for the K loop to run a whole
+        # unrolled block; every K above is below that bound, so without these
+        # the deep-K path goes untested. 2560 is not a multiple of the 1024 K
+        # step the batch 2 and 4 tuples take, so it also hits the ragged tail.
+        (1, 4096, 256, 128),
+        (2, 2560, 256, 32),
+        (3, 4096, 256, 64),
+        (4, 2560, 256, 128),
+        (5, 4096, 256, 32),
+        # On gfx115x, batch 1 with K == 4096, or symmetric with K a multiple of
+        # 8192, takes a tuple with A_CHUNK = 32 instead of 16. G = 32 is the
+        # tight case there: each lane's A_CHUNK spans exactly one scale group.
+        (1, 4096, 256, 32),
+        (1, 8192, 256, 128),
+        (1, 16384, 256, 64),
+        # K * batch beyond what LDS holds (32768 fp16 elements), so gfx115x
+        # walks K in chunks; elsewhere the op rejects these, as the layer
+        # routes them to Triton. The per-row window shrinks as the batch grows,
+        # so these cover a single reload and several, with and without a short
+        # final chunk. 20992 is not a multiple of the K step either, so it
+        # crosses a chunk boundary *and* has a ragged K tail.
+        (2, 20480, 512, 64),
+        (3, 16384, 512, 32),
+        (4, 16384, 512, 128),
+        (5, 21504, 512, 32),
+        (5, 20992, 512, 128),
     ],
 )
-def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
+def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     """Test HIP wvSplitK_int4_g kernel directly via _custom_ops."""
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
+
+    if K * M > LDS_CAPACITY_ELEMENTS and not on_gfx115x():
+        pytest.skip("deep-K HIP path is gfx115x only")
 
     set_random_seed(0)
 
@@ -489,10 +827,64 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
         dtype
     )
 
-    cu_count = num_compute_units()
-    out = ops.wvSplitK_int4_g(b_packed_i8, a, scales, cu_count, G)
+    zp_nkg = None
+    zp_packed = None
+    if has_zp:
+        zp_nkg = torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        zp_packed = _pack_zp_rows_for_kernel(zp_nkg)
 
-    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+    cu_count = num_compute_units()
+    out = ops.wvSplitK_int4_g(b_packed_i8, a, scales, cu_count, G, zp_packed)
+
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=zp_nkg)
+
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("G", [32, 128])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("M", [2, 64], ids=["M=2_decode", "M=64_prefill"])
+def test_hip_skinny_padded_group_stride(dtype, G, has_zp, M):
+    """Scale and zero-point rows may be padded past K // group_size.
+
+    Both paths index them by their own row stride, so a padded row is read
+    correctly rather than bleeding into the next row. M picks the path: the
+    HIP skinny kernel at 2, the Triton prefill kernel at 64.
+    """
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    K, N = 2048, 256
+    num_groups = K // G
+    pad = 7
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    b_packed_i8 = pack_int4_exllama_shuffle(w_int4_nk).view(torch.int8)
+
+    scales = (0.05 * torch.rand((N, num_groups), device=device)).to(dtype)
+    scales_padded = torch.zeros((N, num_groups + pad), device=device, dtype=dtype)
+    scales_padded[:, :num_groups] = scales
+    scales_view = scales_padded[:, :num_groups]
+    assert scales_view.stride(0) == num_groups + pad
+
+    zp_nkg = zp_view = None
+    if has_zp:
+        zp_nkg = torch.randint(0, 16, (N, num_groups), device=device, dtype=torch.int32)
+        zp_packed = _pack_zp_rows_for_kernel(zp_nkg)
+        zp_padded = torch.zeros(
+            (N // 8, num_groups + pad), device=device, dtype=torch.int32
+        )
+        zp_padded[:, :num_groups] = zp_packed
+        zp_view = zp_padded[:, :num_groups]
+
+    cu_count = num_compute_units()
+    out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, b_packed_i8, scales_view, zp_view, None, cu_count, G
+    )
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=zp_nkg)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
@@ -510,6 +902,8 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
         (1, 256, 256, 64),
         (1, 512, 256, 32),
         (1, 512, 256, 128),
+        # Past LDS: HIP on gfx115x, Triton elsewhere.
+        (2, 20480, 256, 64),
         (32, 512, 256, 64),
         (64, 1024, 256, 128),
     ],
@@ -535,7 +929,7 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
         a, b_packed_i8, scales, None, None, cu_count, G
     )
 
-    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=None)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
@@ -748,17 +1142,30 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
-    "M,K,expected_path",
+    "M,K,gfx115x,expected_path",
     [
-        (4, 8192, "hip"),
-        (4, 9728, "hip"),
-        (4, 9856, "triton"),
-        (MAX_SKINNY_BATCH_SIZE + 1, 1024, "triton"),
+        (4, 8192, False, "hip"),
+        (4, 9728, False, "hip"),
+        (4, 9856, False, "triton"),
+        (4, 9856, True, "hip"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, "triton"),
     ],
-    ids=["regular_limit", "medium_range", "above_medium", "batch_too_large"],
+    ids=[
+        "regular_limit",
+        "medium_range",
+        "above_medium",
+        "above_medium_gfx115x",
+        "batch_too_large",
+    ],
 )
-def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch):
-    """Route only supported regular and medium skinny shapes to HIP."""
+def test_rdna_hybrid_w4a16_dispatch_boundaries(
+    M, K, gfx115x, expected_path, monkeypatch
+):
+    """Route only supported regular and medium skinny shapes to HIP.
+
+    gfx115x drops the K*M bound, so a shape past the medium limit still goes to
+    HIP there; the batch bound holds on every target.
+    """
     import vllm._custom_ops as ops
 
     N, G = 16, 128
@@ -777,6 +1184,7 @@ def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch)
 
     monkeypatch.setattr(ops, "wvSplitK_int4_g", fake_hip)
     monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
+    monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: gfx115x)
 
     output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
         x_mk, w_q, scales, None, None, 40, G

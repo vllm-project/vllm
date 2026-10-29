@@ -18,8 +18,15 @@ from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import Glm5NextConfig, LlamaConfig, PreTrainedConfig, Qwen3Config
+from transformers import (
+    AutoConfig,
+    Glm5NextConfig,
+    LlamaConfig,
+    PreTrainedConfig,
+    Qwen3Config,
+)
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.config import patch_rope_parameters
@@ -43,29 +50,38 @@ def test_dict_overrides_are_not_forwarded_to_draft():
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "max_position_embeddings", None) != 1234
 
 
 @pytest.mark.cpu_test
 def test_none_overrides_fall_back_to_arch_mapping():
     composed = SpeculativeConfig.compose_draft_hf_overrides(None)
-    assert composed is SpeculativeConfig.hf_config_override
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
 
 
 def _make_speculative_config(
-    hf_kwargs: dict, architecture: str, **speculative_kwargs
+    hf_kwargs: dict,
+    architecture: str,
+    target_model: str = "target",
+    **speculative_kwargs,
 ) -> SpeculativeConfig:
     hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
         hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
     )
     draft.registry.inspect_model_cls.return_value = (None, architecture)
-    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+    target = MagicMock(
+        model=target_model, max_model_len=128, quantization=None, hf_overrides={}
+    )
     target.hf_config.model_type = hf_kwargs["model_type"]
+    target.using_transformers_backend.return_value = False
+    speculative_kwargs.setdefault("model", "draft")
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft):
         return SpeculativeConfig(
-            model="draft",
             **speculative_kwargs,
             target_model_config=target,
             target_parallel_config=ParallelConfig(),
@@ -116,6 +132,75 @@ def test_dspark_width_is_independent_of_mtp_stages(
     assert config.num_speculative_tokens == 5
     assert getattr(config.draft_model_config.hf_config, "n_predict", None) == n_predict
     assert config.draft_model_config.hf_config.architectures == [architecture]
+
+
+def _make_minimax_dspark_hf_kwargs() -> dict:
+    return dict(
+        model_type="minimax_m3_vl",
+        architectures=["DSparkMiniMaxDraftModel"],
+        quantization_config={
+            "quant_method": "mxfp8",
+            "ignored_layers": ["language_model.model.dspark.fc"],
+        },
+        text_config=_make_hf_config(
+            architectures=["DSparkMiniMaxDraftModel"],
+            model_type="",
+            num_hidden_layers=5,
+            dspark_block_size=7,
+            dspark_markov_rank=256,
+            dflash_config={"block_size": 7},
+        ),
+    )
+
+
+@pytest.mark.cpu_test
+def test_minimax_dspark_draft_promotes_text_config():
+    """The MiniMax DSpark draft ships a VL wrapper config. It must keep its own
+    draft class (not MiniMax MTP or DeepSeek DSpark), with the DSpark keys and
+    the wrapper's quantization config on the promoted text config."""
+    hf_kwargs = _make_minimax_dspark_hf_kwargs()
+    config = _make_speculative_config(
+        hf_kwargs, "DSparkMiniMaxDraftModel", method="dspark"
+    )
+
+    hf_config = config.draft_model_config.hf_config
+    assert hf_config is hf_kwargs["text_config"]
+    assert hf_config.architectures == ["DSparkMiniMaxDraftModel"]
+    assert config.num_speculative_tokens == 7
+    assert hf_config.quantization_config == hf_kwargs["quantization_config"]
+    assert hf_config.markov_rank == 256
+    assert hf_config.dflash_config["causal"] is False
+
+
+@pytest.mark.cpu_test
+def test_minimax_dspark_defaults_to_dspark_subfolder(tmp_path):
+    """With only method="dspark", MiniMax-M3 loads the draft checkpoint shipped
+    in the target's dspark/ subfolder, with its own quantization config."""
+    (tmp_path / "dspark").mkdir()
+    (tmp_path / "dspark" / "config.json").write_text("{}")
+    config = _make_speculative_config(
+        _make_minimax_dspark_hf_kwargs(),
+        "DSparkMiniMaxDraftModel",
+        target_model=str(tmp_path),
+        model=None,
+        method="dspark",
+    )
+
+    assert config.model == str(tmp_path / "dspark")
+    assert config.quantization is None
+    assert config.num_speculative_tokens == 7
+
+
+@pytest.mark.cpu_test
+def test_minimax_dspark_without_subfolder_raises(tmp_path):
+    with pytest.raises(ValueError, match="no draft checkpoint in the 'dspark/'"):
+        _make_speculative_config(
+            _make_minimax_dspark_hf_kwargs(),
+            "DSparkMiniMaxDraftModel",
+            target_model=str(tmp_path),
+            model=None,
+            method="dspark",
+        )
 
 
 @pytest.mark.cpu_test
@@ -250,6 +335,7 @@ def _make_mtp_speculative_config(
         quantization=None,
         hf_overrides={},
     )
+    target_model_config.using_transformers_backend.return_value = False
 
     with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
         return SpeculativeConfig(
@@ -510,3 +596,37 @@ def test_eagle_rope_diagnostics_recognize_speculators_rope(
     assert any("draft model RoPE" in record.getMessage() for record in caplog.records)
     assert not any(record.levelno == logging.WARNING for record in caplog.records)
     assert config.draft_model_config.hf_config.to_dict() == original_draft
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("model_type", "model_impl", "architecture"),
+    [
+        ("glm4_moe", "transformers", "TransformersMoEForMTP"),
+        ("glm4_moe", "auto", "Glm4MoeMTPModel"),
+        # Does not follow the Transformers MTP standard (no `num_mtp_layers`)
+        ("qwen3_next", "transformers", "Qwen3NextMTP"),
+    ],
+)
+def test_mtp_draft_architecture_follows_target_model_impl(
+    tmp_path, model_type: str, model_impl: str, architecture: str
+):
+    """The MTP draft of a Transformers backend target uses the Transformers backend
+    too if the model follows the Transformers MTP standard, while other targets keep
+    their native MTP draft."""
+    config = AutoConfig.for_model(model_type, num_nextn_predict_layers=1)
+    config.architectures = [config.__class__.__name__.replace("Config", "ForCausalLM")]
+    config.save_pretrained(tmp_path)
+    target = ModelConfig(str(tmp_path), model_impl=model_impl, skip_tokenizer_init=True)
+
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert speculative_config.method == "mtp"
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == architecture
+    assert draft.hf_config.n_predict == 1
