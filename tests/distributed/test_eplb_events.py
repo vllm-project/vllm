@@ -102,3 +102,47 @@ def test_producer_consumer(device):
 
     t.join(timeout=10.0)
     assert not errors, f"Buffer ordering errors: {errors}"
+
+
+def test_idle_worker_survives_without_rearrangement():
+    """Verify that an async worker waiting on rearrange_event does not exit or raise
+    during idle intervals without rearrangement.
+    """
+    rearrange_event = CpuGpuEvent()
+    consumed_event = CpuGpuEvent()
+    worker_stream = torch.Stream()
+    main_stream = torch.Stream()
+    stop_event = threading.Event()
+    cycles_processed = 0
+
+    def worker_loop():
+        nonlocal cycles_processed
+        while not stop_event.is_set():
+            # Wait for main thread to trigger rearrangement
+            rearrange_event.wait(stream=worker_stream)
+            if stop_event.is_set():
+                break
+            cycles_processed += 1
+            # Wait for main thread to consume result
+            consumed_event.wait(stream=worker_stream)
+
+    t = threading.Thread(target=worker_loop)
+    t.start()
+
+    # Simulate extended idle period where no rearrange occurs
+    time.sleep(0.15)
+    assert t.is_alive(), "Worker thread terminated during idle waiting period"
+
+    # Now trigger a rearrangement after idle delay
+    rearrange_event.record(stream=main_stream)
+    time.sleep(0.05)
+    assert cycles_processed == 1, "Worker failed to consume rearrangement after idle"
+
+    # Unblock consumed_event
+    consumed_event.record(stream=main_stream)
+
+    # Stop worker
+    stop_event.set()
+    rearrange_event.record(stream=main_stream)
+    t.join(timeout=5.0)
+    assert not t.is_alive()

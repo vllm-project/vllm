@@ -78,6 +78,8 @@ def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
+        # rearrange_event signals that a new rearrangement should start and is
+        # recorded by the main thread.
         state.rearrange_event.wait(stream=stream)
 
         eplb_group = get_eplb_group().device_group
