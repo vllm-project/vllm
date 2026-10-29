@@ -48,10 +48,11 @@ def enabled() -> bool:
 
 @functools.cache
 def swa_decode_meta_enabled() -> bool:
-    """True with --monokernel on a gfx942 or gfx950 GPU. swa_decode_meta is
-    plain Triton and writes the buffers that the attention of both reads."""
+    """True with --monokernel on a CDNA3 (gfx942) or CDNA4 (gfx950) GPU.
+    swa_decode_meta is plain Triton and writes the buffers that the attention
+    of both reads."""
     if not _monokernel or not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx942, on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    return on_gfx942() or on_gfx950()
+    return get_cdna_version() in (3, 4)
