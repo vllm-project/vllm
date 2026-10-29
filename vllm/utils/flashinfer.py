@@ -225,6 +225,30 @@ def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
         return False
 
 
+@functools.cache
+def is_flashinfer_auto_bf16_gemm_supported() -> bool:
+    """Return whether FlashInfer mm_bf16(backend="auto") is available.
+
+    mm_bf16.is_backend_supported() only knows concrete backends, so require one
+    of them to support the device. "auto" runs FlashInfer's SM100 dispatcher.
+    """
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_flashinfer_bf16_gemm()
+    ):
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    from flashinfer import mm_bf16
+
+    try:
+        return bool(mm_bf16.is_compute_capability_supported(capability.to_int()))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable FlashInfer backend."""
     raise RuntimeError(

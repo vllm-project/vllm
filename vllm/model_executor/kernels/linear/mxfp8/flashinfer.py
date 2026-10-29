@@ -42,7 +42,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
 
     supports_pre_processed_weights = True
-    _flashinfer_backend = "cutlass"
 
     @classmethod
     def is_supported(
@@ -114,7 +113,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             input_scale,
             weight_scale,
             out_dtype=out_dtype,
-            backend=self._flashinfer_backend,
+            backend="cutlass",
         )
 
         if bias is not None:
@@ -122,14 +121,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         output_shape = (*input_shape[:-1], N)
         return output.view(output_shape)
-
-
-class FlashInferAutoMxfp8LinearKernel(FlashInferCutlassMxfp8LinearKernel):
-    """MXFP8 W8A8 GEMM via FlashInfer mm_mxfp8(backend="auto") on the CUTLASS
-    weight layout. FlashInfer's auto candidates share that layout; TRT-LLM,
-    which needs shuffled weights, is never one of them."""
-
-    _flashinfer_backend = "auto"
 
 
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):

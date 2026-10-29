@@ -119,7 +119,6 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-    FlashInferAutoMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     FlashInferTrtllmMxfp8LinearKernel,
@@ -304,7 +303,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     # Kernels that let FlashInfer pick the backend (backend="auto").
     "flashinfer": {
         FlashInferFP8ScaledMMLinearKernel,
-        FlashInferAutoMxfp8LinearKernel,
         FlashInferAutoNvFp4LinearKernel,
     },
     "flashinfer_cutlass": {
@@ -583,8 +581,6 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
         TorchMxFp8LinearKernel,
-        # Only with --linear-backend=flashinfer.
-        FlashInferAutoMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -1441,7 +1437,6 @@ __all__ = [
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
     "Rdna3W4A8MxFp4LinearKernel",
-    "FlashInferAutoMxfp8LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",

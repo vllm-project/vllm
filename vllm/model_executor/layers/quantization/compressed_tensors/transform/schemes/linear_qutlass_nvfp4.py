@@ -82,8 +82,10 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         """
         kernel_type = type(kernel)
         for key, kernels in _LINEAR_BACKEND_KERNEL_MAP.items():
-            if not key.startswith("flashinfer_") or kernel_type not in kernels:
+            if not key.startswith("flashinfer") or kernel_type not in kernels:
                 continue
+            if key == "flashinfer":
+                return "auto"
             backend = key.removeprefix("flashinfer_")
             # flashinfer GEMM backend uses "cute-dsl", not "cutedsl"
             return backend.replace("cutedsl", "cute-dsl")

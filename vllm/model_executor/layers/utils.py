@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
-    is_flashinfer_bf16_gemm_supported,
+    is_flashinfer_auto_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -156,7 +156,7 @@ def _can_use_flashinfer_cutedsl_bf16(
 _FLASHINFER_BF16_BACKENDS = {
     "flashinfer": _FlashInferBf16Backend(
         flashinfer_backend="auto",
-        is_supported=functools.partial(is_flashinfer_bf16_gemm_supported, "auto"),
+        is_supported=is_flashinfer_auto_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_bf16,
         pass_pdl=False,
     ),
