@@ -16,6 +16,24 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1 image inputs
+
+On NVIDIA GPUs, DeepSeek-V4.1 supports image inputs with Model Runner V2 PCP
+in eager mode without speculative decoding. Enable PCP with
+`--prefill-context-parallel-size` and use `--enforce-eager`. Leave
+`--language-model-only` disabled and allow the required number of images with
+`--limit-mm-per-prompt`, for example `'{"image": 2}'`.
+
+The vision encoder runs within each PCP replica. PCP partitions the language
+model's sequence, including image embeddings, and each rank consumes the
+embeddings belonging to its local token segments. This does not partition a
+single image's vision attention across PCP ranks.
+
+This image-input path requires PP=DP=DCP=1 and does not support speculative
+decoding or CUDA graphs. The existing DeepSeek-V4.1 PCP restrictions on
+microbatching, KV transfer and MegaMoE still apply. Prefix caching requires
+`--swa-bounded-replay`. Other multimodal models remain unsupported by PCP.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.
