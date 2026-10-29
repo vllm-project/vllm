@@ -4,7 +4,6 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -12,6 +11,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
     KVConnectorTransferResults,
     KVLoadRange,
     SupportsHMA,
@@ -33,22 +34,24 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-    ConnectorLoad,
     MultiConnector,
     MultiKVConnectorMetadata,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
-    RequestLoadPlan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -123,14 +126,12 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
     """Mock connector that supports HMA for testing."""
 
     _supports_divergent_local_hybrid_hits = False
-    _supports_load_range = False
 
     def __new__(cls, *args, **kwargs):
         mock = MagicMock(spec_set=cls)
         mock.supports_divergent_local_hybrid_hits = (
             cls._supports_divergent_local_hybrid_hits
         )
-        mock.supports_load_range = cls._supports_load_range
         mock.get_kv_connector_stats.return_value = None
         return mock
 
@@ -163,17 +164,10 @@ class MockDivergentHMAConnector(MockHMAConnector):
     _supports_divergent_local_hybrid_hits = True
 
 
-class MockRangeHMAConnector(MockHMAConnector):
-    _supports_load_range = True
-
-
 # Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
-)
-KVConnectorFactory.register_connector(
-    "MockRangeHMAConnector", __name__, MockRangeHMAConnector.__name__
 )
 KVConnectorFactory.register_connector(
     "MockDivergentHMAConnector",
@@ -200,14 +194,6 @@ def test_register_finished_partial_tail_notifies_every_connector():
     second.register_finished_partial_tail.assert_called_once_with(
         request, block_ids, offloads
     )
-
-
-def test_multi_connector_aggregates_load_errors(mc: MultiConnector):
-    first, second = mc._connectors
-    first.get_block_ids_with_load_errors.return_value = {1, 2}
-    second.get_block_ids_with_load_errors.return_value = {2, 3}
-
-    assert mc.get_block_ids_with_load_errors() == {1, 2, 3}
 
 
 @pytest.fixture
@@ -295,657 +281,585 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
-def _make_policy_connector(
-    matches: list[tuple[int | None, bool]],
-    supports_range: list[bool],
-) -> MultiConnector:
-    connector = MultiConnector.__new__(MultiConnector)
-    connector._connectors = []
-    for match, supports in zip(matches, supports_range):
-        child = MagicMock(spec_set=KVConnectorBase_V1)
-        child.get_num_new_matched_tokens.return_value = match
-        child.supports_load_range = supports
-        child.load_range_alignment = None
-        connector._connectors.append(child)
-    connector._range_load = True
-    connector._scheduler_block_size = 16
-    connector._requests_to_connector = {}
-    connector._load_plans = {}
-    connector._async_load_connectors_to_send = {}
-    connector._async_load_progress = {}
-    connector._extra_async_saves = {}
-    return connector
+class RangeTransport(KVConnectorBase_V1, SupportsHMA):
+    """Deterministic external transport; MultiConnector itself is real."""
+
+    def __init__(self, config, role, kv_cache_config):
+        super().__init__(config, role, kv_cache_config)
+        self.options = config.kv_transfer_config.kv_connector_extra_config
+        self.loads = []
+        self.lookups = []
+        self.completions = KVConnectorTransferResults()
+
+    @property
+    def supports_load_range(self):
+        return self.options.get("range", True)
+
+    @property
+    def load_range_alignment(self):
+        return self.options.get("alignment")
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        self.lookups.append(num_computed_tokens)
+        endpoint = self.options.get("endpoint", 0)
+        return (
+            None if endpoint is None else max(0, endpoint - num_computed_tokens),
+            self.options.get("async", True),
+        )
+
+    def get_loaded_kv_cache_group_ids(self, request):
+        return tuple(self.options.get("groups", [0]))
+
+    def get_loadable_window_group_ids(self, request, end_token):
+        if "windows" in self.options:
+            return tuple(self.options["windows"].get(str(end_token), []))
+        if end_token <= self.options.get("endpoint", 0):
+            return tuple(g for g in self.options.get("groups", [0]) if g != 0)
+        return ()
+
+    def get_external_cache_hit_sources(self, request, num_external_tokens):
+        return {CacheHitSource.DISK: num_external_tokens} if num_external_tokens else {}
+
+    def update_state_after_alloc(self, request, blocks, num_external_tokens):
+        self.loads.append(num_external_tokens)
+
+    def update_state_after_alloc_for_range(self, request, blocks, load_range):
+        self.loads.append(load_range)
+
+    def get_transfer_results(self, finished_req_ids):
+        return self.completions
+
+    def get_block_ids_with_load_errors(self):
+        return set(self.options.get("load_errors", []))
+
+    def build_connector_meta(self, scheduler_output):
+        return KVConnectorMetadata()
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def request_finished_all_groups(self, request, block_ids):
+        return False, None
 
 
-def _make_hybrid_policy_config(
-    load_policy: str = "range_aware",
-    connector_name: str = "MockHMAConnector",
-):
-    child_config = {
-        "kv_connector": connector_name,
-        "kv_role": "kv_both",
-        "kv_connector_module_path": __name__,
+KVConnectorFactory.register_connector("RangeTransport", __name__, "RangeTransport")
+
+
+def _range_config(options, policy="range_aware"):
+    extra = {
+        "connectors": [
+            {
+                "kv_connector": "RangeTransport",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": option,
+            }
+            for option in options
+        ]
     }
+    if policy is not None:
+        extra["load_policy"] = policy
     return create_vllm_config(
         kv_connector="MultiConnector",
-        kv_connector_extra_config={
-            "load_policy": load_policy,
-            "connectors": [child_config, child_config],
-        },
+        kv_role="kv_both",
+        kv_connector_extra_config=extra,
+        max_num_batched_tokens=256,
+        max_model_len=256,
     )
 
 
-def _make_unequal_group_cache_config() -> KVCacheConfig:
+def _range_cache(kind="full"):
     full = FullAttentionSpec(
-        block_size=256,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.float16,
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
     )
-    swa = SlidingWindowSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.float16,
-        sliding_window=16,
-    )
-    return KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["swa"], swa),
-        ],
-    )
-
-
-def _make_recurrent_cache_config(*, wrapped: bool = False) -> KVCacheConfig:
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-    )
-    group_spec = (
-        UniformTypeKVCacheSpecs(
-            block_size=16,
-            kv_cache_specs={"mamba": mamba_spec},
-        )
-        if wrapped
-        else mamba_spec
-    )
-    return KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["mamba"],
-                group_spec,
+    groups = [KVCacheGroupSpec(["full"], full)]
+    if kind != "full":
+        spec = (
+            SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                sliding_window=32,
+                bounded_replay=True,
             )
-        ],
-    )
-
-
-def test_range_aware_init_uses_scheduler_block_size_for_hybrid_groups():
-    connector = MultiConnector(
-        _make_hybrid_policy_config(),
-        KVConnectorRole.SCHEDULER,
-        _make_unequal_group_cache_config(),
-    )
-
-    assert connector._scheduler_block_size == 256
-
-
-def test_multi_connector_rejects_unknown_load_policy():
-    with pytest.raises(ValueError, match="Unknown MultiConnector load_policy"):
-        MultiConnector(
-            _make_hybrid_policy_config("range-aware"),
-            KVConnectorRole.SCHEDULER,
-            _make_unequal_group_cache_config(),
+            if kind == "bounded"
+            else SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                sliding_window=32,
+            )
         )
+        groups.append(KVCacheGroupSpec(["swa"], spec))
+    return KVCacheConfig(num_blocks=1000, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_range_aware_recurrent_cache_requires_range_capable_children(wrapped: bool):
-    with pytest.raises(ValueError, match="requires every child connector"):
-        MultiConnector(
-            _make_hybrid_policy_config(),
-            KVConnectorRole.SCHEDULER,
-            _make_recurrent_cache_config(wrapped=wrapped),
-        )
+def _range_connector(options, policy="range_aware", role=KVConnectorRole.SCHEDULER):
+    return MultiConnector(_range_config(options, policy), role, _range_cache())
 
 
-def test_range_aware_recurrent_cache_accepts_range_capable_children():
-    MultiConnector(
-        _make_hybrid_policy_config(connector_name="MockRangeHMAConnector"),
-        KVConnectorRole.SCHEDULER,
-        _make_recurrent_cache_config(),
-    )
-
-
-def test_range_aware_load_assigns_contiguous_ranges():
-    connector = _make_policy_connector([(64, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    leading, suffix = connector._connectors
-    leading.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    suffix.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 96)
-    )
-    assert connector._async_load_connectors_to_send == {"req": (0, 1)}
-
-
-def test_range_aware_load_queries_all_connectors_while_lookup_pending():
-    connector = _make_policy_connector([(None, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
-    for child in connector._connectors:
-        child.get_num_new_matched_tokens.assert_called_once_with(request, 0)
-    assert connector._load_plans == {}
-
-    connector._connectors[0].get_num_new_matched_tokens.return_value = (64, True)
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    assert connector._load_plans == {
-        "req": RequestLoadPlan(
-            assignments=(
-                ConnectorLoad(0, KVLoadRange(0, 64, is_terminal=False), False),
-                ConnectorLoad(1, KVLoadRange(64, 96), True),
-            ),
-            is_async=True,
-        )
-    }
-
-
-def test_range_aware_load_gives_range_capable_leader_explicit_ownership():
-    connector = _make_policy_connector([(64, True), (96, True)], [True, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    leading, suffix = connector._connectors
-    leading.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(0, 64, is_terminal=False)
-    )
-    suffix.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 96)
-    )
-
-
-def test_range_aware_load_respects_scheduler_declining_external_load():
-    connector = _make_policy_connector([(64, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 0)
-
-    for child in connector._connectors:
-        child.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-        child.update_state_after_alloc_for_range.assert_not_called()
-    assert connector._async_load_connectors_to_send == {}
-
-
-def test_scheduler_partial_local_tail_cancels_range_load():
-    scheduler = create_scheduler(_make_hybrid_policy_config())
-    connector = scheduler.connector
-    assert isinstance(connector, MultiConnector)
-    first, second = connector._connectors
-    first.get_num_new_matched_tokens.return_value = (0, True)
-    second.get_num_new_matched_tokens.return_value = (6, True)
-    second.supports_load_range = True
-    second.load_range_alignment = None
-
-    request = create_request(num_tokens=32, block_size=16)
-    scheduler.add_request(request)
-    scheduler._get_local_prefix_cache_hit = MagicMock(
-        return_value=(
-            scheduler.kv_cache_manager.empty_kv_cache_blocks,
-            6,
+@pytest.mark.parametrize(
+    "options,local,adopted,expected",
+    [
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}],
             0,
-            False,
-        )
-    )
-
-    output = scheduler.schedule()
-
-    assert output.num_scheduled_tokens[request.request_id] == 26
-    assert request.status == RequestStatus.RUNNING
-    first.update_state_after_alloc.assert_called_once_with(
-        request, scheduler.kv_cache_manager.get_blocks(request.request_id), 0
-    )
-    second.update_state_after_alloc.assert_called_once_with(
-        request, scheduler.kv_cache_manager.get_blocks(request.request_id), 0
-    )
-    second.update_state_after_alloc_for_range.assert_not_called()
-
-
-def test_range_aware_load_rejects_changed_positive_token_count():
-    connector = _make_policy_connector([(64, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-
-    with pytest.raises(ValueError, match="expected 96, got 80"):
-        connector.update_state_after_alloc(request, MagicMock(), 80)
-
-
-def test_range_aware_load_extends_a_local_hit():
-    connector = _make_policy_connector([(32, True), (64, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 32) == (64, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 64)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 32)
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 96)
-    )
-
-
-def test_range_aware_load_rounds_previous_range_to_next_alignment():
-    connector = _make_policy_connector([(60, True), (96, True)], [True, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-    first, second = connector._connectors
-    first.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(0, 48, is_terminal=False)
-    )
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(48, 96)
-    )
-
-
-def test_range_aware_load_does_not_trim_legacy_leader():
-    connector = _make_policy_connector([(60, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 96)
-    first.update_state_after_alloc_for_range.assert_not_called()
-    second.update_state_after_alloc_for_range.assert_not_called()
-
-
-def test_range_aware_load_does_not_mix_sync_and_async_ranges():
-    connector = _make_policy_connector([(64, False), (96, True)], [True, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 96)
-    first.update_state_after_alloc_for_range.assert_not_called()
-    second.update_state_after_alloc_for_range.assert_not_called()
-
-
-def test_range_aware_load_falls_back_when_aligned_range_is_empty():
-    connector = _make_policy_connector([(12, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 96)
-
-
-def test_range_aware_load_combines_adjacent_and_scheduler_alignments():
-    connector = _make_policy_connector([(60, True), (96, True)], [True, True])
-    connector._connectors[0].load_range_alignment = 24
-    connector._connectors[1].load_range_alignment = 4
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-    first, second = connector._connectors
-    first.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(0, 48, is_terminal=False)
-    )
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(48, 96)
-    )
+            96,
+            [64, KVLoadRange(64, 96)],
+        ),
+        (
+            [{"endpoint": 64}, {"endpoint": 96}],
+            0,
+            96,
+            [KVLoadRange(0, 64, False), KVLoadRange(64, 96)],
+        ),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 0, [0, 0]),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}],
+            32,
+            64,
+            [32, KVLoadRange(64, 96)],
+        ),
+        (
+            [{"endpoint": 60}, {"endpoint": 96}],
+            0,
+            96,
+            [KVLoadRange(0, 48, False), KVLoadRange(48, 96)],
+        ),
+        ([{"endpoint": 60, "range": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        ([{"endpoint": 64, "async": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        ([{"endpoint": 12, "range": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        (
+            [{"endpoint": 60, "alignment": 24}, {"endpoint": 96, "alignment": 4}],
+            0,
+            96,
+            [KVLoadRange(0, 48, False), KVLoadRange(48, 96)],
+        ),
+        (
+            [{"endpoint": 48, "alignment": 64}, {"endpoint": 80}, {"endpoint": 112}],
+            16,
+            96,
+            [0, KVLoadRange(16, 80, False), KVLoadRange(80, 112)],
+        ),
+        (
+            [{"endpoint": 48, "alignment": 64}, {"endpoint": 80, "alignment": 64}],
+            16,
+            64,
+            [0, 64],
+        ),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}, {"endpoint": 128}],
+            0,
+            128,
+            [64, KVLoadRange(64, 96, False), KVLoadRange(96, 128)],
+        ),
+        (
+            [
+                {"endpoint": 64, "range": False},
+                {"endpoint": 96, "range": False},
+                {"endpoint": 128},
+            ],
+            0,
+            128,
+            [64, 0, KVLoadRange(64, 128)],
+        ),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 70}],
+            0,
+            70,
+            [64, KVLoadRange(64, 70)],
+        ),
+        ([{"endpoint": 96}, {"endpoint": 96}], 0, 96, [96, 0]),
+        ([{"endpoint": 96}, {"endpoint": 64}], 0, 96, [96, 0]),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96, "range": False}],
+            0,
+            96,
+            [0, 96],
+        ),
+        (
+            [{"endpoint": 64}, {"endpoint": 96}],
+            0,
+            80,
+            [KVLoadRange(0, 64, False), KVLoadRange(64, 80)],
+        ),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 64, [KVLoadRange(0, 64), 0]),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 32, [KVLoadRange(0, 32), 0]),
+    ],
+)
+@pytest.mark.cpu_test
+def test_range_assignments(options, local, adopted, expected):
+    connector = _range_connector(options)
+    request = create_request(num_tokens=160)
+    matched, _ = connector.get_num_new_matched_tokens(request, local)
+    assert matched == max(o["endpoint"] for o in options) - local
+    blocks = KVCacheBlocks(([],))
+    connector.update_state_after_alloc(request, blocks, adopted)
+    assert [c.loads for c in connector.sub_connectors] == [[e] for e in expected]
+    # A later no-load update must not repeat a transfer or discard replay state.
+    connector.update_state_after_alloc(request, blocks, 0)
+    assert [c.loads for c in connector.sub_connectors] == [[e, 0] for e in expected]
+    if adopted:
+        assert connector.get_external_cache_hit_sources(request, adopted) == {
+            CacheHitSource.DISK: adopted
+        }
 
 
-def test_range_aware_load_skips_unaligned_explicit_leader():
-    connector = _make_policy_connector(
-        [(32, True), (64, True), (96, True)], [True, True, True]
-    )
-    connector._connectors[0].load_range_alignment = 64
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 16) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-    first, second, third = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(16, 80, is_terminal=False)
-    )
-    third.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(80, 112)
-    )
+@pytest.mark.cpu_test
+def test_range_lookup_waits_for_all_sources():
+    connector = _range_connector([{"endpoint": None}, {"endpoint": 96}])
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert [c.lookups for c in connector.sub_connectors] == [[0], [0]]
 
 
-def test_range_aware_load_falls_back_when_all_leaders_are_unaligned():
-    connector = _make_policy_connector([(32, True), (64, True)], [True, True])
-    for child in connector._connectors:
-        child.load_range_alignment = 64
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 16) == (64, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 64)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    for child in connector._connectors:
-        child.update_state_after_alloc_for_range.assert_not_called()
+@pytest.mark.cpu_test
+def test_range_load_errors_are_unioned():
+    connector = _range_connector([{"load_errors": [1, 2]}, {"load_errors": [2, 3]}])
+    assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
 
 
 @pytest.mark.parametrize("alignment", [0, -1])
-def test_range_aware_load_rejects_non_positive_alignment(alignment: int):
-    connector = _make_policy_connector([(64, True), (96, True)], [True, True])
-    connector._connectors[1].load_range_alignment = alignment
-
+@pytest.mark.cpu_test
+def test_range_invalid_alignment(alignment):
+    connector = _range_connector(
+        [{"endpoint": 64}, {"endpoint": 96, "alignment": alignment}]
+    )
     with pytest.raises(ValueError, match="load_range_alignment must be positive"):
-        connector.get_num_new_matched_tokens(SimpleNamespace(request_id="req"), 0)
+        connector.get_num_new_matched_tokens(create_request(num_tokens=160), 0)
 
 
-def test_range_aware_load_combines_three_sources():
-    connector = _make_policy_connector(
-        [(64, True), (96, True), (128, True)], [False, True, True]
+@pytest.mark.cpu_test
+def test_unknown_range_policy():
+    with pytest.raises(ValueError, match="Unknown MultiConnector load_policy"):
+        _range_connector([{"endpoint": 64}], policy="range-aware")
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("range_capable", [False, True])
+@pytest.mark.cpu_test
+def test_recurrent_load_uses_single_source(wrapped, range_capable):
+    spec = MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"mamba": spec})
+    cache = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], spec)],
     )
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (128, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 128)
-
-    first, second, third = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 96, is_terminal=False)
-    )
-    third.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(96, 128)
-    )
-    assert connector._async_load_connectors_to_send == {"req": (0, 1, 2)}
-
-
-def test_range_aware_load_skips_unsupported_intermediate_source():
-    connector = _make_policy_connector(
-        [(64, True), (96, True), (128, True)], [False, False, True]
-    )
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (128, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 128)
-
-    first, second, third = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    second.update_state_after_alloc_for_range.assert_not_called()
-    third.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 128)
-    )
-
-
-def test_range_aware_load_allows_unaligned_final_tail():
-    connector = _make_policy_connector([(64, True), (70, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (70, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 70)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    second.update_state_after_alloc_for_range.assert_called_once_with(
-        request, blocks, KVLoadRange(64, 70)
-    )
-
-
-def test_range_aware_load_uses_one_source_for_equal_hits():
-    connector = _make_policy_connector([(96, True), (96, True)], [True, True])
-    request = SimpleNamespace(request_id="req")
-
+    config = _range_config([{"endpoint": 64, "range": range_capable}, {"endpoint": 96}])
+    connector = MultiConnector(config, KVConnectorRole.SCHEDULER, cache)
+    request = create_request(num_tokens=160)
     assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 96)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 96)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    assert connector._async_load_connectors_to_send == {"req": (0,)}
+    connector.update_state_after_alloc(request, KVCacheBlocks(([],)), 96)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [96]]
 
 
-def test_range_aware_load_waits_for_all_async_sources():
-    scheduler = _make_policy_connector(
-        [(64, True), (96, True), (128, True)], [False, True, True]
+@pytest.mark.cpu_test
+def test_range_hybrid_block_alignment():
+    cache = _range_cache("swa")
+    cache.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+        block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
     )
-    request = SimpleNamespace(request_id="req")
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (128, True)
-    scheduler.update_state_after_alloc(request, MagicMock(), 128)
-
-    metadata = scheduler.build_connector_meta(MagicMock())
-    assert metadata.pending_async_loads == {"req": (0, 1, 2)}
-
-    worker = _make_policy_connector(
-        [(0, False), (0, False), (0, False)], [False, True, True]
+    connector = MultiConnector(
+        _range_config([{"endpoint": 384}, {"endpoint": 512, "groups": [0, 1]}]),
+        KVConnectorRole.SCHEDULER,
+        cache,
     )
-    worker.bind_connector_metadata(metadata)
-    first, second, third = worker._connectors
-    first.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"}
+    request = create_request(num_tokens=600)
+    assert connector.get_num_new_matched_tokens(request, 0) == (512, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 512)
+    assert [c.loads for c in connector.sub_connectors] == [
+        [KVLoadRange(0, 256, False)],
+        [KVLoadRange(256, 512, window_group_ids=(1,), window_end_token=512)],
+    ]
+
+
+@pytest.mark.parametrize("groups", [[0], [0, 1]])
+@pytest.mark.cpu_test
+def test_legacy_window_loader_cannot_race_terminal_source(groups):
+    connector = MultiConnector(
+        _range_config(
+            [
+                {"endpoint": 64, "range": False, "groups": groups},
+                {"endpoint": 96, "groups": [0, 1]},
+            ]
+        ),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("swa"),
     )
-    second.get_transfer_results.return_value = KVConnectorTransferResults()
-    third.get_transfer_results.return_value = KVConnectorTransferResults()
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 96)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [96]]
 
-    assert worker.get_finished(set()) == (None, None)
 
-    first.get_transfer_results.return_value = KVConnectorTransferResults()
-    second.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"}
+@pytest.mark.parametrize("policy", [None, "range_aware"])
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("kind", ["full", "swa", "bounded"])
+@pytest.mark.parametrize(
+    "endpoint,window_loaded", [(128, False), (127, False), (128, True), (127, True)]
+)
+@pytest.mark.cpu_test
+def test_range_scheduler_replay(policy, is_async, kind, endpoint, window_loaded):
+    """Complete async receives before checking the real scheduler's replay."""
+    groups = [0, 1] if window_loaded or kind == "swa" else [0]
+    config = _range_config(
+        [
+            {
+                "endpoint": 64,
+                "async": is_async,
+                "groups": [0, 1] if kind == "swa" else [0],
+            },
+            {"endpoint": endpoint, "async": is_async, "groups": groups},
+        ],
+        policy,
     )
-    assert worker.get_finished(set()) == (None, None)
-
-    second.get_transfer_results.return_value = KVConnectorTransferResults()
-    third.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"}
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(
+        config, num_blocks=1000, kv_cache_config=_range_cache(kind)
     )
-    assert worker.get_finished(set()) == (None, {"req"})
-
-    third.get_transfer_results.return_value = KVConnectorTransferResults()
-    first.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"}
-    )
-    assert worker.get_finished(set()) == (None, None)
-
-    first.get_transfer_results.return_value = KVConnectorTransferResults()
-    assert worker.get_finished({"req"}) == (None, None)
-    assert worker._async_load_progress == {}
-
-
-@pytest.mark.parametrize("failed_source", [None, 0, 1])
-def test_range_transfer_results_wait_for_failed_and_successful_sources(failed_source):
-    worker = _make_policy_connector([(0, False)] * 3, [True] * 3)
-    worker.bind_connector_metadata(
-        MultiKVConnectorMetadata(
-            metadata=(MagicMock(),) * 3, pending_async_loads={"req": (0, 1)}
+    request = create_request(num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    adopted = endpoint if policy else 64
+    restores = bool(policy and window_loaded)
+    if kind == "bounded" and not restores:
+        adopted = adopted // 16 * 16
+    if is_async:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
         )
-    )
-    first, second, unused = worker._connectors
-    first.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"},
-        failed_recving={"req"} if failed_source == 0 else set(),
-    )
-    second.get_transfer_results.return_value = KVConnectorTransferResults()
-    unused.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"}, failed_recving={"req"}
-    )
-    assert worker.get_transfer_results(set()) == KVConnectorTransferResults()
+        output = scheduler.schedule()
+    expected = adopted - 32 if kind == "bounded" and not restores else adopted
+    new = next(r for r in output.scheduled_new_reqs if r.req_id == request.request_id)
+    assert new.num_computed_tokens == expected
+    assert new.replay_start == (expected if kind == "bounded" and not restores else 0)
+    assert output.num_scheduled_tokens[request.request_id] == 160 - expected
+    assert scheduler.connector.get_external_cache_hit_sources(request, adopted) == {
+        CacheHitSource.DISK: adopted
+    }
 
-    first.get_transfer_results.return_value = KVConnectorTransferResults()
-    second.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_recving={"req"},
-        failed_recving={"req"} if failed_source == 1 else set(),
+
+@pytest.mark.parametrize("adopted", [32, 64, 80, 96])
+@pytest.mark.cpu_test
+def test_truncation_reselects_window_before_allocation(adopted):
+    connector = MultiConnector(
+        _range_config(
+            [{"endpoint": 64, "groups": [0, 1]}, {"endpoint": 96, "groups": [0, 1]}]
+        ),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("swa"),
     )
-    assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
-        finished_recving={"req"},
-        failed_recving={"req"} if failed_source is not None else set(),
+    request = create_request(num_tokens=160)
+    connector.get_num_new_matched_tokens(request, 0)
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, adopted) == (
+        0,
+        1,
     )
-    assert worker.get_transfer_results(set()) == KVConnectorTransferResults()
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), adopted)
+    assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    loads = [c.loads[0] for c in connector.sub_connectors]
+    owner = 0 if adopted <= 64 else 1
+    assert loads[owner].window_group_ids == (1,)
+    assert loads[owner].window_end_token == adopted
+    assert loads[1 - owner] == 0 or loads[1 - owner].window_group_ids == ()
+    assert connector.get_external_cache_hit_sources(request, adopted) == {
+        CacheHitSource.DISK: adopted
+    }
+
+
+@pytest.mark.parametrize("owner", [0, 2, None, "sync_only"])
+@pytest.mark.parametrize("kind", ["swa", "bounded"])
+@pytest.mark.cpu_test
+def test_window_owner_is_independent_of_prefix_ranges(owner, kind):
+    options: list[dict[str, Any]] = [{"endpoint": n} for n in (64, 96, 32)]
+    if owner == "sync_only":
+        options[2].update({"async": False, "windows": {"96": [1]}})
+    elif owner is not None:
+        options[owner]["windows"] = {"96": [1]}
+        if owner == 0:
+            options[1]["windows"] = {"96": [1]}
+    connector = MultiConnector(
+        _range_config(options), KVConnectorRole.SCHEDULER, _range_cache(kind)
+    )
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 96)
+    loads = [c.loads[0] for c in connector.sub_connectors]
+    if owner is None or owner == "sync_only":
+        assert loads == [0, 96, 0]
+        assert connector.get_loaded_kv_cache_group_ids(request) == (0,)
+    else:
+        assert loads[0].start_token == 0 and loads[0].end_token == 64
+        assert loads[1] == KVLoadRange(64, 96)
+        assert loads[owner].window_group_ids == (1,)
+        assert loads[owner].window_end_token == 96
+        if owner == 2:
+            assert loads[2].num_tokens == 0
+        assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        assert metadata.pending_async_loads == {
+            request.request_id: (0, 1, 2) if owner == 2 else (0, 1)
+        }
+    assert connector.get_external_cache_hit_sources(request, 96) == {
+        CacheHitSource.DISK: 96
+    }
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.cpu_test
+def test_scheduler_uses_window_only_source_without_replay(is_async):
+    config = _range_config(
+        [
+            {"endpoint": 64, "async": is_async},
+            {"endpoint": 128, "async": is_async},
+            {"endpoint": 32, "async": is_async, "windows": {"128": [1]}},
+        ]
+    )
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(
+        config, num_blocks=1000, kv_cache_config=_range_cache("bounded")
+    )
+    request = create_request(num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if is_async:
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        output = scheduler.schedule()
+    new = next(r for r in output.scheduled_new_reqs if r.req_id == request.request_id)
+    assert new.num_computed_tokens == 128
+    assert new.replay_start == 0
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    assert scheduler.connector.sub_connectors[2].loads[0] == KVLoadRange(
+        128, 128, window_group_ids=(1,), window_end_token=128
+    )
+
+
+@pytest.mark.cpu_test
+def test_window_missing_at_shortened_endpoint_falls_back_before_allocation():
+    connector = MultiConnector(
+        _range_config([{"endpoint": 64, "windows": {"96": [1]}}, {"endpoint": 96}]),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("bounded"),
+    )
+    request = create_request(num_tokens=160)
+    connector.get_num_new_matched_tokens(request, 0)
+    assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, 80) == (0,)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 80)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [80]]
 
 
 @pytest.mark.parametrize("first_source", [0, 1])
 @pytest.mark.parametrize("failed_source", [None, 0, 1])
-@pytest.mark.parametrize("abort_timing", ["before", "with_first", "after_first"])
-def test_range_transfer_results_aborted_request_waits_for_all_sources(
-    first_source, failed_source, abort_timing
-):
-    """An aborted request's blocks remain in use until every writer drains."""
-    worker = _make_policy_connector([(0, False)] * 3, [True] * 3)
+@pytest.mark.parametrize(
+    "abort_timing", ["never", "before", "with_first", "after_first"]
+)
+@pytest.mark.cpu_test
+def test_range_receive_barrier(first_source, failed_source, abort_timing):
+    """Cancellation and a failed source cannot release another writer's blocks."""
+    worker = _range_connector([{}, {}, {}], role=KVConnectorRole.WORKER)
     worker.bind_connector_metadata(
         MultiKVConnectorMetadata(
-            metadata=(MagicMock(),) * 3, pending_async_loads={"req": (0, 1)}
+            metadata=tuple(KVConnectorMetadata() for _ in range(3)),
+            pending_async_loads={"req": (0, 1)},
         )
     )
-    for child in worker._connectors:
-        child.get_transfer_results.return_value = KVConnectorTransferResults()
-    # A connector not assigned a range must not release this request's blocks.
-    worker._connectors[
-        2
-    ].get_transfer_results.return_value = KVConnectorTransferResults(
+    children = worker.sub_connectors
+    children[2].completions = KVConnectorTransferResults(
         finished_recving={"req"}, failed_recving={"req"}
     )
     if abort_timing == "before":
         assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
-
-    first = worker._connectors[first_source]
-    first.get_transfer_results.return_value = KVConnectorTransferResults(
+    children[first_source].completions = KVConnectorTransferResults(
         finished_recving={"req"},
         failed_recving={"req"} if failed_source == first_source else set(),
     )
     finished = {"req"} if abort_timing == "with_first" else set()
     assert worker.get_transfer_results(finished) == KVConnectorTransferResults()
-
     if abort_timing == "after_first":
         assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
-    # Duplicate notifications cannot substitute for the other source finishing.
     assert worker.get_transfer_results(set()) == KVConnectorTransferResults()
-
-    last_source = 1 - first_source
-    worker._connectors[
-        last_source
-    ].get_transfer_results.return_value = KVConnectorTransferResults(
+    last = 1 - first_source
+    children[last].completions = KVConnectorTransferResults(
         finished_recving={"req"},
-        failed_recving={"req"} if failed_source == last_source else set(),
+        failed_recving={"req"} if failed_source == last else set(),
     )
     assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
         finished_recving={"req"},
         failed_recving={"req"} if failed_source is not None else set(),
     )
-    assert worker._async_load_progress == {}
-    for child in worker._connectors:
-        assert any(
-            call.args == ({"req"},)
-            for call in child.get_transfer_results.call_args_list
+    for child in children:
+        child.completions = KVConnectorTransferResults()
+    assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
+
+
+@pytest.mark.cpu_test
+def test_range_three_source_metadata_and_completion():
+    options = [{"endpoint": n} for n in (64, 96, 128)]
+    scheduler = _range_connector(options)
+    request = create_request(num_tokens=160)
+    scheduler.get_num_new_matched_tokens(request, 0)
+    scheduler.update_state_after_alloc(request, KVCacheBlocks(([],)), 128)
+    metadata = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert metadata.pending_async_loads == {request.request_id: (0, 1, 2)}
+    worker = _range_connector(options, role=KVConnectorRole.WORKER)
+    worker.bind_connector_metadata(metadata)
+    for index, child in enumerate(worker.sub_connectors):
+        child.completions = KVConnectorTransferResults(
+            finished_recving={request.request_id}
         )
+        assert worker.get_finished(set()) == (
+            None,
+            {request.request_id} if index == 2 else None,
+        )
+    assert worker.get_finished(set()) == (None, None)
 
 
-def test_default_transfer_results_preserve_failures_and_async_saves():
-    worker = _make_policy_connector([(0, False)] * 2, [True] * 2)
-    worker._range_load = False
-    worker._extra_async_saves = {"saved": 1}
-    first, second = worker._connectors
-    first.get_transfer_results.return_value = KVConnectorTransferResults(
+@pytest.mark.cpu_test
+def test_default_first_hit_and_async_saves():
+    worker = _range_connector([{"endpoint": 64}, {"endpoint": 96}], policy=None)
+    request = create_request(num_tokens=160)
+    assert worker.get_num_new_matched_tokens(request, 0) == (64, True)
+    worker.update_state_after_alloc(request, KVCacheBlocks(([],)), 64)
+    assert [c.loads for c in worker.sub_connectors] == [[64], [0]]
+    worker.bind_connector_metadata(
+        MultiKVConnectorMetadata(
+            metadata=(KVConnectorMetadata(), KVConnectorMetadata()),
+            extra_async_saves={"saved": 1},
+        )
+    )
+    first, second = worker.sub_connectors
+    first.completions = KVConnectorTransferResults(
         finished_sending={"saved"},
         finished_recving={"failed"},
         failed_recving={"failed"},
     )
-    second.get_transfer_results.return_value = KVConnectorTransferResults(
-        finished_sending={"saved"}, finished_recving={"loaded"}
+    second.completions = KVConnectorTransferResults(
+        finished_sending={"saved"},
+        finished_recving={"loaded"},
     )
-
     assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
         finished_sending={"saved"},
         finished_recving={"failed", "loaded"},
         failed_recving={"failed"},
     )
-    assert worker._extra_async_saves == {}
-
-
-def test_range_aware_second_allocation_update_is_forwarded_as_no_load():
-    connector = _make_policy_connector([(64, True), (96, True)], [False, True])
-    request = SimpleNamespace(request_id="req")
-    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
-    connector.update_state_after_alloc(request, MagicMock(), 96)
-    for child in connector._connectors:
-        child.reset_mock()
-
-    blocks = MagicMock()
-    connector.update_state_after_alloc(request, blocks, 0)
-
-    for child in connector._connectors:
-        child.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-        child.update_state_after_alloc_for_range.assert_not_called()
-
-
-def test_default_load_policy_still_selects_first_hit():
-    connector = _make_policy_connector([(64, True), (96, True)], [False, True])
-    connector._range_load = False
-    load_plans = connector._load_plans = MagicMock()
-    request = SimpleNamespace(request_id="req")
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (64, True)
-    connector.update_state_after_alloc(request, blocks := MagicMock(), 64)
-
-    first, second = connector._connectors
-    first.update_state_after_alloc.assert_called_once_with(request, blocks, 64)
-    second.update_state_after_alloc.assert_called_once_with(request, blocks, 0)
-    load_plans.pop.assert_not_called()
-
-
-def test_prom_metrics_skips_configured_connector_without_exporter():
-    metrics = MultiKVConnectorPromMetrics.__new__(MultiKVConnectorPromMetrics)
-    supported = MagicMock()
-    metrics._prom_metrics = {"Supported": supported, "Unsupported": None}
-
-    metrics.observe(
-        {
-            "Supported": {"bytes": 1},
-            "Unsupported": {"bytes": 2},
-        },
-        engine_idx=3,
-    )
-
-    supported.observe.assert_called_once_with({"bytes": 1}, 3)
-
-
-@pytest.mark.parametrize(
-    "matches,supports_range,chosen",
-    [
-        ([(32, True), (64, True)], [True, True], 1),
-        ([(64, True), (32, True)], [True, True], 0),
-        ([(32, True), (64, True)], [False, False], 1),
-    ],
-)
-def test_range_loaded_groups_follow_terminal_source(matches, supports_range, chosen):
-    connector = _make_policy_connector(matches, supports_range)
-    request = SimpleNamespace(request_id="req")
-    for i, child in enumerate(connector._connectors):
-        child.get_loaded_kv_cache_group_ids.return_value = (0, i + 1)
-
-    assert connector.get_num_new_matched_tokens(request, 0) == (64, True)
-    assert connector.get_loaded_kv_cache_group_ids(request) == (0, chosen + 1)
-    connector._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
 
 
 # Helper function to compare directories recursively
@@ -1699,7 +1613,7 @@ class TestMultiConnectorStats:
         assert not stats.is_empty()
 
 
-def test_multi_connector_overrides_all_base_methods():
+def test_multi_connector_overrides_all_base_methods(mc):
     """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
@@ -1711,7 +1625,12 @@ def test_multi_connector_overrides_all_base_methods():
         "supports_load_range",
         "load_range_alignment",
         "update_state_after_alloc_for_range",
+        # MultiConnector coordinates range loaders, but is not itself one.
+        "get_loadable_window_group_ids",
     }
+
+    assert not mc.supports_load_range
+    assert mc.get_loadable_window_group_ids(create_request(num_tokens=160), 96) == ()
 
     base_members = {
         name for name in dir(KVConnectorBase_V1) if not name.startswith("_")
