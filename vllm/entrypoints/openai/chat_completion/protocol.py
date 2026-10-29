@@ -6,6 +6,8 @@
 import time
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
+from jsonschema import ValidationError as JSONSchemaValidationError
+from jsonschema.validators import validator_for
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
@@ -60,6 +62,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
     ThinkingTokenBudget,
+    check_json_nesting,
 )
 from vllm.utils import random_uuid
 
@@ -851,6 +854,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "'json_schema' field must be provided.",
                     parameter="response_format",
                 )
+            schema = (
+                json_schema.get("schema", json_schema.get("json_schema"))
+                if isinstance(json_schema, dict)
+                else getattr(json_schema, "json_schema", None)
+            )
+            if not isinstance(schema, dict):
+                raise VLLMValidationError(
+                    "response_format.json_schema.schema must be a JSON Schema object.",
+                    parameter="response_format",
+                )
+            check_json_nesting(schema)
+            try:
+                validator = validator_for(schema)
+                # Grammar backends support regex dialects that Python's
+                # format checker rejects, including Unicode property escapes.
+                validator(validator.META_SCHEMA, format_checker=None).validate(schema)
+            except JSONSchemaValidationError as error:
+                raise VLLMValidationError(
+                    "Invalid JSON Schema in response_format.json_schema.schema.",
+                    parameter="response_format",
+                ) from error
 
         if rf_type == "structural_tag":
             validate_structural_tag_response_format(response_format)
