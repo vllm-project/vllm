@@ -348,6 +348,10 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
         else:  # Input projections.
             param.normal_(0, param.shape[1] ** -0.5)
     layers["fused"].load_state_dict(stock.state_dict())
+    # load_state_dict skips the weight loaders and the non-persistent decode
+    # conv weight; vLLM's loaders end with this hook.
+    for layer in layers.values():
+        layer.process_weights_after_loading(vllm_config.model_config.dtype)
     conv_shape, state_shape = stock.get_state_shape()
     saved_caches = (
         (0.5 * torch.randn(num_slots, *conv_shape, device=device)).bfloat16(),
@@ -460,6 +464,11 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
         assert fused_launches == expected_launches, (
             f"{query_lens}: fused launches (rows each) {fused_launches}"
         )
+        # The requests own slots 1..len(query_lens); every other slot is as saved.
+        untouched = torch.ones(num_slots, dtype=torch.bool, device=device)
+        untouched[1 : len(query_lens) + 1] = False
+        for cache, saved in zip((fused_conv, fused_state), saved_caches):
+            assert torch.equal(cache[untouched], saved[untouched])
         torch.testing.assert_close(
             fused_out, stock_out, rtol=rtol, atol=rtol * stock_out.abs().max().item()
         )
