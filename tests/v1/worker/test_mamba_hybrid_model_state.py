@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import types
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,24 +14,53 @@ from tests.v1.attention.test_gdn_metadata_builder import (
     DEVICE,
     _create_gdn_builder,
 )
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from tests.v1.worker.test_gpu_ubatch_slicing import (
+    MAX_NUM_REQS,
+    MAX_NUM_TOKENS,
     _make_buffers,
     _make_input_batch,
+    _make_model_inputs,
     _make_ubatch_buffers,
 )
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import create_forward_context, override_forward_context
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    QwenGatedDeltaNetAttention,
+)
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
-from vllm.v1.worker.gpu.ubatch_utils import _slice_input_batch, create_ubatch_slices
+from vllm.v1.worker.gpu.ubatch_utils import (
+    UBatchRunner,
+    _slice_input_batch,
+    create_ubatch_slices,
+)
+from vllm.v1.worker.ubatching import dbo_yield
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -291,6 +321,188 @@ def test_prepare_attn_builds_each_microbatch_on_its_requests_state_slots():
         assert metadata.non_spec_state_indices_tensor.tolist() == (
             state_slots[ubatch_slice.request_slice, 0].tolist()
         )
+
+
+# Small GDN dims, as in tests/kernels/mamba/test_gdn_forward_core_split.py.
+GDN_H, GDN_HV, GDN_K, GDN_V, GDN_CONV_KERNEL = 4, 8, 128, 128, 4
+GDN_CONV_DIM = 2 * GDN_H * GDN_K + GDN_HV * GDN_V
+GDN_PREFIX = "model.layers.0.linear_attn"
+
+
+def _gdn_decode_layer(conv_state, ssm_state, device):
+    """The real GDN ``_forward_core`` bound to random weights and state pools."""
+    layer = SimpleNamespace(
+        prefix=GDN_PREFIX,
+        enable_packed_recurrent_decode=False,
+        tp_size=1,
+        num_k_heads=GDN_H,
+        num_v_heads=GDN_HV,
+        head_k_dim=GDN_K,
+        head_v_dim=GDN_V,
+        key_dim=GDN_H * GDN_K,
+        value_dim=GDN_HV * GDN_V,
+        activation="silu",
+        A_log=torch.randn(GDN_HV, device=device) * 0.1,
+        dt_bias=torch.randn(GDN_HV, device=device) * 0.1,
+        conv1d=SimpleNamespace(
+            weight=torch.randn(
+                GDN_CONV_DIM, 1, GDN_CONV_KERNEL, dtype=torch.bfloat16, device=device
+            )
+            * 0.1,
+            bias=torch.randn(GDN_CONV_DIM, dtype=torch.bfloat16, device=device) * 0.1,
+        ),
+        kv_cache=(conv_state, ssm_state),
+    )
+    for name in ("rearrange_mixed_qkv", "_forward_core"):
+        method = getattr(QwenGatedDeltaNetAttention, name)
+        setattr(layer, name, types.MethodType(method, layer))
+    return layer
+
+
+def _gdn_core_attn(layer, mixed_qkv, b, a):
+    out = torch.zeros(
+        mixed_qkv.shape[0], GDN_HV, GDN_V, dtype=mixed_qkv.dtype, device=b.device
+    )
+    layer._forward_core(
+        mixed_qkv=mixed_qkv.clone(), b=b.clone(), a=a.clone(), core_attn_out=out
+    )
+    return out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_dbo_decode_steps_match_the_unsplit_recurrent_update(monkeypatch):
+    """Two DBO decode microbatches running the real GDN kernels on interleaved
+    threads update the recurrent state pool exactly like one unsplit batch,
+    across steps with reordered requests and DP padding."""
+    monkeypatch.setenv("VLLM_DBO_COMM_SMS", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    torch.manual_seed(0)
+    device = torch.device("cuda:0")
+    # Only the config of the hybrid MoE is used; no weights are loaded. Expert
+    # parallelism stays off so the runner needs no EP process group.
+    dbo_config = VllmConfig(
+        model_config=ModelConfig(
+            model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+            max_model_len=512,
+            enforce_eager=True,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        scheduler_config=SchedulerConfig(
+            max_model_len=512, is_encoder_decoder=False, async_scheduling=False
+        ),
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_dbo=True,
+            all2all_backend="nixl_ep",
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+
+    gdn_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+        hf_config_override={"linear_key_head_dim": GDN_K},
+    )
+    gdn_config.cache_config.mamba_cache_mode = "none"
+    gdn_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    spec = MambaSpec(block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,))
+    group = AttentionGroup(
+        backend=GDNAttentionBackend,
+        layer_names=[GDN_PREFIX],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+        metadata_builders=[
+            GDNAttentionMetadataBuilder(spec, [GDN_PREFIX], gdn_config, device)
+            for _ in range(2)
+        ],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec([GDN_PREFIX], spec)],
+    )
+    model_state = _mamba_hybrid_state(num_speculative_tokens=0)
+    runner = UBatchRunner(
+        dbo_config,
+        device,
+        model_state=model_state,
+        attn_groups=[[group]],
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=MAX_NUM_REQS,
+    )
+
+    # Slot 0 is the reserved null block; five requests own scattered slots.
+    pool_size = 12
+    conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        1, GDN_H, GDN_HV, GDN_K, GDN_V, GDN_CONV_KERNEL, num_spec=0
+    )
+    conv_state = torch.randn(
+        pool_size, *conv_shape, dtype=torch.bfloat16, device=device
+    )
+    ssm_state = torch.randn(pool_size, *ssm_shape, device=device) * 0.05
+    initial_pools = (conv_state.clone(), ssm_state.clone())
+    unsplit = _gdn_decode_layer(conv_state.clone(), ssm_state.clone(), device)
+    split = _gdn_decode_layer(conv_state, ssm_state, device)
+    for name in ("A_log", "dt_bias", "conv1d"):
+        setattr(split, name, getattr(unsplit, name))
+
+    class _GDNModel(torch.nn.Module):
+        def forward(self, input_ids, positions, **kwargs):
+            out = _gdn_core_attn(split, *(x[input_ids] for x in inputs))
+            # Hand off to the other microbatch, as at the expert all-to-all.
+            dbo_yield()
+            return out
+
+    buffers = InputBuffers(MAX_NUM_REQS, MAX_NUM_TOKENS, device)
+    slots = [11, 2, 7, 4, 9]
+    seq_lens = [20, 33, 7, 48, 15]
+    num_padded_tokens = 8
+    for step in range(2):
+        order = list(range(5)) if step == 0 else list(reversed(range(5)))
+        batch = _make_input_batch(
+            [1] * 5,
+            [seq_lens[i] + step for i in order],
+            buffers,
+            num_tokens_padded=num_padded_tokens,
+        )
+        block_table = torch.zeros(5, 1, dtype=torch.int32, device=device)
+        block_table[:, 0] = torch.tensor([slots[i] for i in order])
+        slot_mappings = torch.zeros(
+            1, num_padded_tokens, dtype=torch.int64, device=device
+        )
+        inputs = (
+            torch.randn(num_padded_tokens, GDN_CONV_DIM, device=device) * 0.1,
+            torch.randn(num_padded_tokens, GDN_HV, device=device) * 0.1,
+            torch.randn(num_padded_tokens, GDN_HV, device=device) * 0.1,
+        )
+        inputs = tuple(x.to(torch.bfloat16) for x in inputs)
+
+        desc = BatchExecutionDescriptor(
+            CUDAGraphMode.NONE, num_padded_tokens, 5, num_ubatches=2
+        )
+        ubatch_state = runner.prepare(batch, (block_table,), slot_mappings, desc)
+        split_out = runner.run(
+            _GDNModel(), _make_model_inputs(num_padded_tokens, device), ubatch_state
+        )
+
+        metadata = model_state.prepare_attn(
+            batch,
+            CUDAGraphMode.NONE,
+            (block_table,),
+            slot_mappings,
+            [[group]],
+            kv_cache_config,
+        )
+        with override_forward_context(create_forward_context(metadata, dbo_config)):
+            unsplit_out = _gdn_core_attn(unsplit, *inputs)
+
+        assert len(ubatch_state.slices) == 2
+        torch.testing.assert_close(split_out[:5], unsplit_out[:5], rtol=0, atol=0)
+        for pool, initial in zip(split.kv_cache, initial_pools):
+            assert not torch.equal(pool[slots], initial[slots])
+        for split_pool, unsplit_pool in zip(split.kv_cache, unsplit.kv_cache):
+            torch.testing.assert_close(split_pool[1:], unsplit_pool[1:], rtol=0, atol=0)
 
 
 def test_prepare_attn_keeps_the_accepted_offset_when_the_batch_drafted_nothing(
