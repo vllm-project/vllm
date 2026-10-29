@@ -815,6 +815,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
+            and self._k_scale_float == 1.0,
         )
 
     def prepare_kv_cache_update(
@@ -1245,8 +1247,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
             # prefill and decode. Release the now-unused raw weight.
-            self.kv_b_proj.weight = torch.nn.Parameter(
-                torch.empty(0), requires_grad=False
+            replace_parameter(
+                self.kv_b_proj, "weight", self.kv_b_proj.weight.new_empty(0)
             )
             return
 
@@ -1380,9 +1382,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
-            # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
+            state_content_bytes=(
+                cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
+                if self.kv_cache_dtype == "fp8_ds_mla"
+                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:
@@ -2990,6 +2993,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             chunk_block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=chunk_block_table,
+                    workspace_starts=chunk.cu_seq_lens,
+                    batch_size=chunk.num_requests,
+                    seq_starts=chunk.starts,
+                )
+            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
                     block_table=chunk_block_table,

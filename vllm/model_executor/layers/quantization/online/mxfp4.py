@@ -235,8 +235,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
         else:
@@ -269,8 +269,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         # AITER_MXFP4_FP8` to read `self.w13_precision_config`/
         # `self.w2_precision_config` instead of `layer.w13_weight_scale`/
         # `layer.w2_weight_scale`. For those backends,
-        # `convert_weight_to_mxfp4_moe_kernel_format` deletes the latter, so
-        # `getattr` below would raise `AttributeError`. This is currently
+        # `convert_weight_to_mxfp4_moe_kernel_format` empties the latter, so
+        # the scales read below would be empty. This is currently
         # unreachable because `activation_quant_key` is hardcoded to
         # `kMxfp4Dynamic`
         # TODO: When supporting online activation quant key override,

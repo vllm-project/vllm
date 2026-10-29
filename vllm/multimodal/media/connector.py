@@ -352,7 +352,7 @@ class MediaConnector:
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
-            raise RuntimeError(
+            raise VLLMValidationError(
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 

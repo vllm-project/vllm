@@ -44,7 +44,7 @@ BASE_ARGS = [
     "--language-model-only",
     "--load-format",
     "dummy",
-    "--no-enable-flashinfer-autotune",
+    "--disable-flashinfer-autotune",
     "--enable-prompt-tokens-details",
     # Default max_num_seqs OOMs one GPU during warmup.
     "--max-num-seqs",
@@ -52,8 +52,12 @@ BASE_ARGS = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="Kimi-K3 NVIDIA kernels require the SM100 family",
+    not (
+        current_platform.supports_mx()
+        if current_platform.is_rocm()
+        else current_platform.is_device_capability_family(100)
+    ),
+    reason="Kimi-K3 needs the SM100 family, or native MX support on ROCm",
 )
 
 SPEC_CONFIG = {
@@ -173,7 +177,7 @@ DEPLOYMENTS = {
 
 def _known_failure(name: str, mode: Mode) -> str | None:
     deployment = DEPLOYMENTS[name]
-    if mode.spec and deployment.decode.dcp > 1:
+    if mode.spec and deployment.decode.dcp > 1 and current_platform.is_cuda():
         return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
     return None
 
@@ -378,7 +382,7 @@ def _format(turns: list[Turn]) -> str:
 def _check_resend_reuses_prompt_checkpoint(
     deployment: Deployment, prompt_len: int
 ) -> None:
-    """Resends reuse the Mamba checkpoint and its companion EAGLE attention proof."""
+    """Resends reuse the last prompt checkpoint before the final token."""
     mode = Mode(128, True)
     salt = str(uuid4())
     rng = random.Random(0)
@@ -391,8 +395,8 @@ def _check_resend_reuses_prompt_checkpoint(
         resend = _complete(url, prompt, salt, max_tokens=1)
         recompute = _complete(url, prompt, f"{salt}-recompute", max_tokens=1)
 
-    # EAGLE's dropped hash unit already leaves tokens to recompute on resend.
-    expected = (prompt_len // 128 - 1) * 128
+    # DSpark keeps the trailing hash unit, unlike EAGLE.
+    expected = (prompt_len - 1) // 128 * 128
     actual = _cached(resend)
     assert _cached(cold) == _cached(recompute) == 0
     assert actual == expected, f"{prompt_len=}: {actual=}, {expected=}"
@@ -408,13 +412,11 @@ def _check_resend_reuses_prompt_checkpoint(
     "prompt_len",
     [
         # Blocks=6144, PMU=128. P=7040 is PMU-aligned but not block-aligned:
-        # ensure lookup reads the cached attention proof at 7040 despite
-        # the final hit limit of 7039, then applies EAGLE's 128-token drop.
-        pytest.param(7040, id="eagle-proof-scan"),
+        # the final hit limit of 7039 puts the checkpoint at 6912.
+        pytest.param(7040, id="pmu-aligned-tail"),
         # Blocks=6144, PMU=128. P=7296 is an exact PMU multiple:
-        # ensure the Mamba checkpoint is 7168, not 7040 from applying both
-        # the P - 1 cap and EAGLE's 128-token drop.
-        pytest.param(7296, id="eagle-double-cap"),
+        # ensure the Mamba checkpoint is 7168, not 7040 from capping twice.
+        pytest.param(7296, id="single-cap"),
     ],
 )
 def test_dspark_exact_resend_reuses_prompt_checkpoint(prompt_len: int) -> None:
@@ -457,7 +459,7 @@ def mooncake_store(tmp_path, monkeypatch) -> Iterator[None]:
                 {
                     "metadata_server": "P2PHANDSHAKE",
                     "master_server_address": f"127.0.0.1:{port}",
-                    "protocol": "rdma",
+                    "protocol": os.getenv("MOONCAKE_PROTOCOL", "rdma"),
                     "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
                     "global_segment_size": "4GB",
                     "local_buffer_size": "1GB",
@@ -474,9 +476,9 @@ def mooncake_store(tmp_path, monkeypatch) -> Iterator[None]:
 
 @pytest.mark.usefixtures("mooncake_store")
 def test_mooncake_resend_reuses_prompt_checkpoint() -> None:
-    """Blocks=6144, PMU=128. P=7449 needs Mamba state at 7296 and attention proof
-    at 7424, both beyond the normal Mooncake save boundary of 6144: ensure they
-    remain reusable from the store after a GPU cache reset."""
+    """Blocks=6144, PMU=128. P=7449 needs Mamba state at 7424, beyond the normal
+    Mooncake save boundary of 6144: ensure it remains reusable from the store
+    after a GPU cache reset."""
     _check_resend_reuses_prompt_checkpoint(
         Deployment(Instance(kv_config=MOONCAKE), offload=True), 7449
     )
