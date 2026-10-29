@@ -106,6 +106,28 @@ publics aujourd'hui. Un dépôt retiré ou rendu privé par son auteur rendrait 
 précédent Genesis (base Docker nightly 404, image devenue irreproductible) est exactement ce
 risque-là. **Si la lane Maintenance préfère une copie physique, elle est possible** : voir §4.
 
+### 3bis. Règle de préservation opposable (posée par la lane Maintenance, 29/10)
+
+**Un pin de révision distant ne constitue PAS une preuve de préservation durable.** C'est un
+pointeur vers un contenu que son auteur peut retirer, rendre privé ou réécrire à tout moment ; il
+ne garantit rien sur la disponibilité future, seulement sur l'identité du contenu *si* il reste
+servi. Le précédent Genesis — base Docker nightly passée en 404, image devenue irreproductible —
+est un pin distant qui a péri.
+
+Par conséquent, **avant toute suppression**, la règle appliquée est :
+
+1. **copie physique vérifiée** (archive `tar` + empreinte sha256 consignée, §4) — c'est elle qui
+   constitue la préservation, pas le pin ;
+2. le pin distant reste utile comme **index d'identité** (quelle révision, quels blobs), et comme
+   chemin de restauration *préféré* tant qu'il fonctionne — jamais comme la preuve elle-même.
+
+**Interdiction explicite** : ne jamais substituer la révision **amont** de `z-lab` à la révision
+**locale** (§2.3). Le local `42d3b34d…` n'est pas la tête amont `f181eece…` ; archiver « au nom du
+dépôt » sans nommer la révision locale archiverait un autre contenu que celui qu'on possède.
+
+**Statut de ce document** : reçu par la lane Maintenance comme **RAPPORTÉ**. Aucun retrait, aucun
+transfert n'est autorisé sur sa base seule.
+
 ---
 
 ## 4. Destination et procédure, si une copie physique est retenue
@@ -157,8 +179,47 @@ Attendu : une révision non vide pour les trois. Un `null` ou une erreur = **ne 
 |---|---|
 | Gisement brut proposé | **21,1 Gio** (19 + 1,2 + 0,9) |
 | Gisement avec la stratégie « pin de révision » | **0 Gio** — le manifeste suffit |
+| Gisement si copie physique exigée (§3bis) | **21,1 Gio** d'archives `tar` sur `F:` ou `D:` |
+| Prérequis avant toute suppression | **archive `tar` vérifiée + sha256 consigné** (§3bis) |
 | Geste exécuté | **aucun** |
 | Décision attendue | lane `Maintenance`, sur ce document |
 
 **Non proposé** : `hub/hub/blobs` (20 Gio). Layout content-addressed par préfixe hexadécimal, non
 référencé par les snapshots vérifiés. Rôle non établi ⇒ hors manifeste jusqu'à instruction.
+
+---
+
+## 7. Qualification transmise : cache K2-Horizon de **CoursIA-2** (29/10)
+
+**Hors de ma machine** — `/home/jesse/.cache/huggingface/hub` ≈ **134 Gio** (`.cache153` inclus, non
+inspecté). Qualifié **par carte de références dans `d:/vllm`**, pas par mesure des dépôts.
+
+| Dépôt | Taille | Révision (rapportée) | Référence réelle | Statut |
+|---|---|---|---|---|
+| `cyankiwi/K2-Horizon-MoVA-36B-A4B-AWQ-INT4` | 23 G | `3bba61dce4d7…` | **défaut** de `medium-k2-horizon-cyankiwi.yml` | profil d'éval, parqué |
+| `urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` | 21 G | `0e38c26ca3ce…` | **défaut** de `medium-k2-horizon-gptq.yml` (+ overlay `vllm-openai-v0300-s56637:v1`) | profil d'éval, parqué |
+| `Siladrim/K2-Horizon-MoVA-36B-A4B-GPTQ-Int4` | 21 G | `308c093e636f…` | **commentaire seulement** (variante `VLLM_MODEL_K2=`, 2 profils) | variante documentée, non armée |
+| `IFM/K2-Horizon-MoVA-36B-A4B70G` | 70 G | `7730b92d1b57…` (3 snapshots) | **aucune** (ni profil, ni script) | source de dérivation |
+
+**Aucun n'est production ni rollback.** K2-Horizon est **parqué** (décision user 2026-09-23,
+registre Q3 option b). Condition de réouverture : support CUDA amont pour `v_experts` quantifiés —
+l'overlay PR #56637 est **XPU-only**, le fork cyankiwi ne sert qu'en `--enforce-eager` à 65 K pour
+**6-8 t/s** contre ~120 en prod, le plugin Siladrim ne démontre que TP=1.
+
+### Ce qui doit survivre pour rouvrir l'éval
+
+- les **deux défauts de profil** (`cyankiwi`, `urakozz`) et **l'overlay** `vllm-openai-v0300-s56637:v1` ;
+- le **manifeste exact** (chemins + révisions), sans quoi on ne sait pas ce qu'on compare.
+
+### ⚠ La source IFM ne suffit pas à reconstituer les quants à l'identique
+
+`IFM/…A4B70G` permet la **dérivation** (c'est la source dont les trois quants descendent), mais **il
+ne garantit pas une reproduction bit-à-bit** : une quantification AWQ / AutoRound-GPTQ dépend de la
+**recette** (calibration set, group size, schéma, ordre) **et** de l'**environnement** (versions
+cuBLAS/torch, non-déterminisme GPU). Le précédent maison est mesuré : deux runs frais de GPTQ sur
+GPU diffèrent sur **~10 % des éléments par couche MoE** (zéro-points identiques), cf.
+`_iteration_log/k2_horizon_serving_eval/NOTES.md`. **Conséquence pour l'archivage : les trois quants
+ne sont pas « reproductibles depuis IFM » ; ils sont soit conservés, soit perdus.** Seul
+`IFM/…70G` est re-dérivable depuis son amont public.
+
+**Aucun retrait autorisé.** Qualification reçue par la lane Maintenance comme **RAPPORTÉ**.

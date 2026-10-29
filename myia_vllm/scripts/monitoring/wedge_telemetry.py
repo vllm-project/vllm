@@ -68,17 +68,39 @@ def fetch_metrics():
     return vals
 
 
+_GPU_ERR = [None]   # first nvidia-smi failure; surfaced in EVERY record
+
+
+def _note_gpu_error(msg):
+    """A GPU failure must never be silent.
+
+    This channel was blind from 2026-07-03 03:22:15Z to 2026-10-29 (164 325
+    samples with an empty `gpu` list, 118 days) because `fetch_gpu()` swallowed
+    a FileNotFoundError: the container image ships no `nvidia-smi` and has no
+    GPU device access at all. `gpu_lowpower_pegged` was therefore hardwired to
+    False for four months without a single warning anywhere.
+    """
+    if _GPU_ERR[0] != msg:
+        _GPU_ERR[0] = msg
+        print("[telemetry] GPU COLUMNS DEAD -- %s" % msg, flush=True)
+
+
 def fetch_gpu():
     try:
-        out = subprocess.run(
+        r = subprocess.run(
             ["nvidia-smi",
              "--query-gpu=index,utilization.gpu,power.draw,memory.used",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-    except Exception:
+            capture_output=True, text=True, timeout=10)
+    except Exception as e:                      # noqa: BLE001 - must be recorded
+        _note_gpu_error("%s: %s" % (type(e).__name__, e))
+        return []
+    if r.returncode != 0:
+        _note_gpu_error("nvidia-smi rc=%d: %s"
+                        % (r.returncode, (r.stderr or "").strip()[:120]))
         return []
     gpus = []
-    for ln in out.splitlines():
+    for ln in r.stdout.strip().splitlines():
         p = [x.strip() for x in ln.split(",")]
         if len(p) >= 4:
             try:
@@ -86,6 +108,9 @@ def fetch_gpu():
                              "pw": float(p[2]), "mem": int(float(p[3]))})
             except ValueError:
                 pass
+    if not gpus:
+        _note_gpu_error("nvidia-smi returned no parseable GPU row: %r"
+                        % r.stdout.strip()[:120])
     return gpus
 
 
@@ -106,7 +131,8 @@ def sample(prev, dt):
     gpu01 = [{"i": g["i"], "util": g["util"], "pw": g["pw"]}
              for g in gpus if g["i"] in (0, 1)]
     if now is None:
-        return {"ts": ts, "endpoint": "down", "gpu": gpu01}, None
+        return {"ts": ts, "endpoint": "down", "gpu": gpu01,
+                "gpu_err": _GPU_ERR[0]}, None
     gen_rate = _rate(now, prev, "vllm:generation_tokens_total", dt)
     prm_rate = _rate(now, prev, "vllm:prompt_tokens_total", dt)
     running = int(now.get("vllm:num_requests_running", 0))
@@ -120,7 +146,8 @@ def sample(prev, dt):
            "gen_rate": None if gen_rate is None else round(gen_rate, 2),
            "prompt_rate": None if prm_rate is None else round(prm_rate, 1),
            "running": running, "waiting": waiting, "kv_pct": kv_pct,
-           "gpu_lowpower_pegged": tell, "wedge": bool(wedge), "gpu": gpu01}
+           "gpu_lowpower_pegged": tell, "wedge": bool(wedge), "gpu": gpu01,
+           "gpu_err": _GPU_ERR[0]}
     return rec, now
 
 
