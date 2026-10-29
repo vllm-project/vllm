@@ -50,7 +50,8 @@ def fused_sigmoid_gate_mul(
         x: (num_tokens, hidden) tensor, e.g. attention output.
         gate: (num_tokens, hidden) pre-sigmoid gate.
         scale: optional static per-tensor FP8 scale. When given, the result is
-            quantized to float8_e4m3fn (no eager fallback).
+            quantized to float8_e4m3fn; ineligible inputs take the eager
+            sequence followed by scaled_fp8_quant.
 
     Returns:
         A fresh (num_tokens, hidden) tensor with x's dtype (or FP8) and device.
@@ -64,8 +65,14 @@ def fused_sigmoid_gate_mul(
         or not gate.is_contiguous()
         or not x.is_cuda
     ):
-        assert scale is None, "FP8 output needs contiguous 2D CUDA inputs"
-        return x * torch.sigmoid(gate)
+        out = x * torch.sigmoid(gate)
+        if scale is None:
+            return out
+        # E.g. a strided gate view at num_heads == 1 per TP rank: quantize
+        # the eager result, matching the unfused chain.
+        from vllm import _custom_ops as ops
+
+        return ops.scaled_fp8_quant(out, scale, group_shape=(-1, -1))[0]
 
     num_tokens, hidden = x.shape
     out = torch.empty_like(x, dtype=x.dtype if scale is None else torch.float8_e4m3fn)

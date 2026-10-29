@@ -141,8 +141,13 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
     key = get_input_quant_key(linear)
     if key == kFp8StaticTensorSym:
         return key
-    # The norm writes block scales for exactly K = hidden_size.
-    if key == kNvfp4Dynamic and nvfp4_weight_padding_bytes(linear) == 0:
+    # The norm writes block scales for exactly K = hidden_size, in whole
+    # 4-column scale tiles (weights only require K % 32 == 0).
+    if (
+        key == kNvfp4Dynamic
+        and nvfp4_weight_padding_bytes(linear) == 0
+        and linear.input_size_per_partition % 64 == 0
+    ):
         return key
     return None
 
