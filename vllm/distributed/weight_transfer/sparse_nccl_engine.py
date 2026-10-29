@@ -145,11 +145,7 @@ class SparseNCCLWeightTransferEngine(
         pass
 
     def finish_weight_update(self) -> None:
-        """Run the model-level post-load hook once, after all patches.
-
-        Patches are applied in place, so there is no layerwise reload to
-        finalize, but weight-derived model state still has to be rebuilt.
-        """
+        """No layerwise reload; rebuild model-level derived state once."""
         from vllm.model_executor.model_loader.weight_utils import (
             finalize_model_weights,
         )

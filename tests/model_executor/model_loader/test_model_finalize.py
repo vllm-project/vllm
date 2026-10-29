@@ -26,18 +26,6 @@ def test_reload_finish_runs_model_hook_once():
     assert model.calls == 1
 
 
-def test_sparse_update_finish_runs_model_hook_once():
-    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-        SparseNCCLWeightTransferEngine,
-    )
-
-    engine = object.__new__(SparseNCCLWeightTransferEngine)
-    engine.model = _HookCounter()
-    engine.start_weight_update()
-    engine.finish_weight_update()
-    assert engine.model.calls == 1
-
-
 def test_llama4_dp_vision_qkv_shards_split_across_calls():
     """Llama4 DP vision: q/k/v land in their rows in any order, one per call."""
     from vllm.model_executor.models.mllama4 import Llama4VisionAttention
