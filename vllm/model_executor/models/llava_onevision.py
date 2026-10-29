@@ -114,10 +114,6 @@ LlavaOnevisionImageInputs: TypeAlias = (
     LlavaOnevisionImagePixelInputs | LlavaOnevisionImageEmbeddingInputs
 )
 
-LlavaOnevisionMultiInputs: TypeAlias = (
-    LlavaOnevisionImageInputs | LlavaOnevisionVideoPixelInputs
-)
-
 
 class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
     video_token_index: int

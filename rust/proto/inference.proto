@@ -148,7 +148,8 @@ message ResponseOptions {
   bool prompt_logprobs = 2;
   optional CandidateTokens prompt_candidates = 3;
 
-  // Output options; output_text defaults to true
+  // Output options; output_text defaults to true. When false, the server does
+  // not detokenize, and stop_strings must be empty.
   optional bool output_text = 4;
   bool output_token_ids = 5;
   bool output_logprobs = 6;
