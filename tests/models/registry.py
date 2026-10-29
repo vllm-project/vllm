@@ -278,6 +278,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlintForCausalLM": _HfExamplesInfo("RecursiveSI/flint", is_available_online=False),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo(
@@ -747,6 +748,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-mini": "vllm-sr/d3-mini",
             "d3-nano": "vllm-sr/d3-nano",
             "d3-lite": "vllm-sr/d3-lite",
+            "d3-turbo": "vllm-sr/d3-turbo",
         },
         max_model_len=4096,
     ),
@@ -819,6 +821,7 @@ _AUTOMATIC_CONVERTED_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf"
@@ -1199,6 +1202,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MuseGlimmerForCausalLM": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
     ),
+    "MuseSparkForConditionalGeneration": _HfExamplesInfo(
+        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        is_available_online=False,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1536,6 +1543,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    # [XPress]
+    "Qwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
+    ),
+    "DFlashQwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
+    ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
@@ -1555,6 +1575,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,  # DSpark has >1 draft block
         trust_remote_code=True,
         # FIXME: Investigate the NVML failure in CI.
+        is_available_online=False,
+    ),
+    "MuseSparkDSparkModel": _HfExamplesInfo(
+        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        speculative_model="meta-models/Muse-Spark-1.2-816B-A42B-open",
         is_available_online=False,
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(

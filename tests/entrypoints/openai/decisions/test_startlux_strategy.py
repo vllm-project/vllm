@@ -135,6 +135,7 @@ def test_native_read_restricts_candidates_then_calibrates():
 
     async def encode(prompt, params, request_id, **kwargs):
         assert params.task == "classify" and params.use_activation is False
+        assert params.extra_kwargs is None
         # Excluded labels dominate the full vocabulary: normalization must only
         # include the current question's two candidates.
         yield SimpleNamespace(

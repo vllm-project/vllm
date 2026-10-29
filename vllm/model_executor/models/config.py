@@ -1124,7 +1124,7 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"unsupported decision_config.json pooling {decision['pooling']!r}"
             )
         attention_mode = decision.get("attention_mode", "causal")
-        if attention_mode not in ("causal", "noncausal_full_attention"):
+        if attention_mode not in ("causal", "noncausal_full_attention", "prefix_bidir"):
             raise ValueError(
                 f"unsupported decision_config.json attention_mode {attention_mode!r}"
             )
@@ -1135,15 +1135,34 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
                 "decision_config.json must list one token id per answer code"
             )
 
-        # The full attention layers read the whole prompt in both directions;
-        # the Gated DeltaNet layers stay causal.
-        is_causal = attention_mode == "causal"
-        for config in {
-            id(config): config for config in (hf_config, model_config.hf_text_config)
-        }.values():
-            config.is_causal = is_causal
+        if attention_mode == "prefix_bidir":
+            # The full attention layers stay decoder layers that read each
+            # request's state and question blocks as PrefixLM ranges
+            # (`D3PrefixBidirModelState`). The prompt as a whole is still read
+            # bidirectionally, so chunked prefill and prefix caching stay off.
+            if model_config.hf_text_config is hf_config:
+                raise ValueError("prefix_bidir needs a separate text config")
+            hf_config.is_causal = False
+        else:
+            # The full attention layers read the whole prompt in both
+            # directions; the Gated DeltaNet layers stay causal.
+            is_causal = attention_mode == "causal"
+            for config in {
+                id(config): config
+                for config in (hf_config, model_config.hf_text_config)
+            }.values():
+                config.is_causal = is_causal
         # One readout row per answer code.
         hf_config.id2label = dict(enumerate(codes))
+        # The length the checkpoint was validated at is the default limit;
+        # --max-model-len still reaches the model's positions.
+        validated = decision.get("validated_length")
+        if validated and model_config.original_max_model_len is None:
+            model_config.max_model_len = min(model_config.max_model_len, validated)
+            logger.info(
+                "Using max model len %d, the checkpoint's validated length",
+                model_config.max_model_len,
+            )
 
         # Probabilities only exist over a question's own options, so the head
         # returns raw code logits unless activation is requested.
