@@ -157,6 +157,8 @@ class CuMemAllocator:
             libcudart.cudaGetLastError()
 
     def _get_pluggable_allocator(self) -> torch.cuda.memory.CUDAPluggableAllocator:
+        if lib_name is None:
+            raise RuntimeError("cumem allocator library is not loaded")
         init_module(self.python_malloc_callback, self.python_free_callback)
         return torch.cuda.memory.CUDAPluggableAllocator(
             lib_name, "my_malloc", "my_free"
@@ -376,19 +378,34 @@ class CuMemAllocator:
         torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
+            if (
+                tags is not None
+                and data.tag in DEFERRABLE_TAGS
+                and data.tag not in tags
+            ):
+                continue
             if not data.is_asleep:
                 continue
-            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
-                handle = data.handle
-                self._create_and_map(handle)
-                data.is_asleep = False
-                if data.cpu_backup_tensor is not None:
-                    cpu_ptr = data.cpu_backup_tensor.data_ptr()
-                    libcudart.cudaMemcpy(ptr, cpu_ptr, handle[1])
-                elif current_platform.is_rocm():
-                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
-                    libcudart.cudaMemset(ptr, 0, handle[1])
-                    torch.accelerator.synchronize()
+            handle = data.handle
+            self._create_and_map(handle)
+            data.is_asleep = False
+            if data.cpu_backup_tensor is not None:
+                try:
+                    libcudart.cudaMemcpy(
+                        ptr, data.cpu_backup_tensor.data_ptr(), handle[1]
+                    )
+                except Exception:
+                    # A failed restore must not leave the allocation mapped with
+                    # undefined contents. Undo the mapping so it stays asleep
+                    # and the next wake retries the copy; the host buffer is
+                    # kept for reuse.
+                    data.is_asleep = True
+                    self._unmap_and_release(handle)
+                    raise
+            elif current_platform.is_rocm():
+                # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                libcudart.cudaMemset(ptr, 0, handle[1])
+                torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
