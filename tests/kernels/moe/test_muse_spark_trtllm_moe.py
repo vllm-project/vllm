@@ -432,3 +432,98 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
         ckpt, quant_config = _bf16_checkpoint(), None
     _, _, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt, quant_config)
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
+
+
+@torch.inference_mode()
+def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
+    """Shared TRT storage must preserve native MegaMoE outputs and graph replay."""
+    from vllm.models.muse_spark.nvidia.mega_moe import _get_deep_gemm
+    from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
+        prepare_megamoe_nvfp4_inputs,
+    )
+
+    torch.manual_seed(137)
+    ckpt = _nvfp4_checkpoint()
+    norm = MuseSpark1xRMSNormWithInputScale(
+        hidden_size=K,
+        eps=1e-8,
+        has_weight=True,
+        is_post_norm=True,
+        zero_centered_gamma=True,
+    ).cuda()
+    norm.weight.copy_(torch.linspace(-0.5, 0.5, K, device="cuda"))
+    layers = []
+    for layout, threshold in (("native", 0), ("trtllm", 16)):
+        config = VllmConfig(
+            additional_config={"muse_spark_trtllm_token_threshold": threshold}
+        )
+        with set_current_vllm_config(config):
+            layer = MuseSparkMegaMoEExperts(
+                config,
+                num_experts=E,
+                num_local_experts=E,
+                experts_start_idx=0,
+                top_k=TOPK,
+                hidden_size=K,
+                intermediate_size=N,
+                post_expert_norm=norm,
+                num_max_tokens_per_rank=128,
+                prefix=f"shared_layout.{layout}",
+            ).cuda()
+            assert layer.weight_layout == layout
+            assert set(layer.load_weights(ckpt.items())) == set(ckpt)
+            layer.finalize_weights()
+            layers.append(layer)
+    native, shared = layers
+    for view, parameter in (
+        (shared._transformed_l1[0], shared.w13_weight),
+        (shared._transformed_l1[1], shared.w13_weight_scale),
+        (shared._transformed_l2[0], shared.w2_weight),
+        (shared._transformed_l2[1], shared.w2_weight_scale),
+    ):
+        assert view.data_ptr() == parameter.data_ptr()
+        assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
+    shared.finalize_weights()  # Must not shuffle the already finalized weights again.
+
+    dg = _get_deep_gemm()
+    buffer = dg.SymmBuffer(
+        torch.distributed.group.WORLD, E, 128, TOPK, K, N, mma_type="fp4xfp4"
+    )
+    try:
+        for tokens in (1, 8, 32, 64):
+            x = torch.randn(tokens, K, device="cuda", dtype=torch.bfloat16) / 10
+            weights, ids = torch.randn(tokens, E, device="cuda").topk(TOPK)
+            weights = weights.softmax(-1)
+            ids = ids.int()
+            ids[::3, -1] = -1
+            buffer.topk_idx.fill_(-1)
+            buffer.topk_weights.zero_()
+
+            def stage(x=x, weights=weights, ids=ids, tokens=tokens):
+                prepare_megamoe_nvfp4_inputs(
+                    x,
+                    weights,
+                    ids,
+                    buffer.x[:tokens],
+                    buffer.x_sf[:tokens].view(torch.uint8),
+                    buffer.topk_idx[:tokens],
+                    buffer.topk_weights[:tokens],
+                    None,
+                )
+
+            stage()
+            expected = native.forward_prepared(x, buffer)
+            actual = shared.forward_prepared(x, buffer)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = shared.forward_prepared(x, buffer)
+            for _ in range(3):
+                x.normal_(std=0.1)
+                ids.copy_(torch.randn(tokens, E, device="cuda").topk(TOPK).indices)
+                stage()
+                expected = native.forward_prepared(x, buffer)
+                graph.replay()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        buffer.destroy()
