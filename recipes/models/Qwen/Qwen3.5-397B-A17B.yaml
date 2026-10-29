@@ -310,7 +310,7 @@ presets:
       | 16 | 936 | 8.7 ms | 0.70 s |
 
       Further concurrencies and the comparison against this recipe's baseline command on the same
-      image and trace are being collected and will be added before this preset leaves draft.
+      image and trace are being collected and will follow in a separate update.
 
       The 48-sequence cap trades time to first token for inter-token latency at 64 clients; raise
       `--max-num-seqs` if TTFT matters more than ITL for your traffic. The offload tier only helps
