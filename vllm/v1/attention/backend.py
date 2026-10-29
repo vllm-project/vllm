@@ -107,6 +107,11 @@ class AttentionBackend(ABC):
         return (not supported_head_sizes) or head_size in supported_head_sizes
 
     @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        """Whether the backend can serve a V head size that differs from K's."""
+        return head_size_v == head_size
+
+    @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
         return dtype in cls.supported_dtypes
 

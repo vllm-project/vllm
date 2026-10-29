@@ -36,6 +36,10 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     head_size_v: int = 128
 
     @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        return True
+
+    @classmethod
     def set_head_size_v(cls, head_size_v: int) -> None:
         cls.head_size_v = head_size_v
 

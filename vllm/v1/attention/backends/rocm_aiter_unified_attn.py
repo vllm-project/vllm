@@ -88,6 +88,12 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return head_size >= 32
 
     @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        # The cache is split with `split(head_size)` over a 2*head_size page, so
+        # V can be narrower than K but not wider.
+        return head_size_v <= head_size
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         # Not implemented
         return False
