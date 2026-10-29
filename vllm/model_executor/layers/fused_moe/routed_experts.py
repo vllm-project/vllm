@@ -41,6 +41,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _constant_value(t: torch.Tensor) -> float:
+    """``t``'s value if every element holds the same bytes, else 0."""
+    if t.is_meta or t.numel() == 0:
+        return 0
+    flat = t.detach().reshape(-1)
+    raw = flat.view(torch.uint8).view(-1, t.element_size())
+    chunk = 1 << 26
+    for start in range(0, raw.shape[0], chunk):
+        if not bool((raw[start : start + chunk] == raw[:1]).all()):
+            return 0
+    return flat[:1].float().item()
+
+
 def _index_expert_mapping(
     mapping: list[tuple[str, str, int, str]],
 ) -> dict[str, list[tuple[str, str, int, str]]]:
@@ -212,6 +225,7 @@ class RoutedExperts(PluggableLayer):
         }
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        self._record_padding_values()
 
         self.lora_base_layer_prefix = ""
 
@@ -376,7 +390,6 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         loaded_weight: torch.Tensor,
         tp_rank: int,
-        is_scale: bool = False,
         param: torch.nn.Parameter | None = None,
     ):
         """Load grouped weight scales for group quantization or model weights
@@ -387,7 +400,6 @@ class RoutedExperts(PluggableLayer):
             shard_id: either w1, w2, or w3
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
-            is_scale: whether padding should use unit scales instead of zero weights.
             param: the parameter ``expert_data`` views, for recording padding
 
         """
@@ -414,8 +426,6 @@ class RoutedExperts(PluggableLayer):
             start = min(tp_rank * shard_size, expected_size)
             size = min(shard_size, expected_size - start)
             loaded_weight = loaded_weight.narrow(shard_dim, start, size)
-            destination.fill_(1 if is_scale else 0)
-        pad_value = (1 if is_scale else 0) if padded_tp else None
 
         if shard_id == "w2":
             self._load_w2(
@@ -425,7 +435,6 @@ class RoutedExperts(PluggableLayer):
                 tp_rank=tp_rank,
                 load_full=padded_tp,
                 param=param,
-                pad_value=pad_value,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -436,7 +445,6 @@ class RoutedExperts(PluggableLayer):
                 tp_rank=tp_rank,
                 load_full=padded_tp,
                 param=param,
-                pad_value=pad_value,
             )
 
     def _load_per_channel_weight_scale(
@@ -549,24 +557,43 @@ class RoutedExperts(PluggableLayer):
         loaded_weight: torch.Tensor,
         hidden_dim: int,
         shard_dim: int | None = None,
-        pad_value: float | None = None,
     ) -> torch.Tensor:
         """`_split_padding`, recording the padding left out so post-load
-        processing fills it (see `mark_padding`): ``pad_value`` if given, else
-        1 for floating-point scales and 0 for everything else."""
+        processing fills it with the parameter's initial value (see
+        `mark_padding`, `_record_padding_values`)."""
         expert_data, padding = self._split_padding(
             expert_data, loaded_weight, hidden_dim, shard_dim
         )
-        # meta: a dry run, nothing to fill
-        if padding and param is not None and not expert_data.is_meta:
-            name = next((n for n, p in self._parameters.items() if p is param), None)
-            if name is not None:  # a tensor of this layer, not a scratch copy
-                if pad_value is None:
-                    is_scale = "scale" in name and param.dtype.is_floating_point
-                    pad_value = 1 if is_scale else 0
-                for region in padding:
-                    mark_padding(self, name, region, pad_value)
+        # meta: a dry run, nothing to fill; a plain tensor: a scratch copy
+        if not padding or expert_data.is_meta:
+            return expert_data
+        if not isinstance(param, torch.nn.Parameter):
+            return expert_data
+        name = next((n for n, p in self._parameters.items() if p is param), None)
+        if name is None:
+            logger.warning_once(
+                "%s: padding of a parameter not registered on the layer is not "
+                "recorded; a reload may leave it stale.",
+                type(self).__name__,
+            )
+            return expert_data
+        value = self.__dict__.get("_padding_values", {}).get(name, 0)
+        for region in padding:
+            mark_padding(self, name, region, value)
         return expert_data
+
+    def _record_padding_values(self) -> None:
+        """Remember the value each parameter's padding is created with, so
+        every load fills it with the same value: a ``padding_value`` attribute
+        set in ``create_weights``, else the initial value if constant (e.g.
+        unit scales), else 0 (uninitialized or meta)."""
+        values = {}
+        for name, param in self._parameters.items():
+            if param is None:
+                continue
+            value = getattr(param, "padding_value", None)
+            values[name] = _constant_value(param) if value is None else value
+        self._padding_values = values
 
     def _load_w13(
         self,
@@ -577,7 +604,6 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
         param: torch.nn.Parameter | None = None,
-        pad_value: float | None = None,
     ):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
@@ -619,7 +645,6 @@ class RoutedExperts(PluggableLayer):
             loaded_weight,
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
-            pad_value=pad_value,
         )
         expert_data.copy_(loaded_weight)
 
@@ -631,7 +656,6 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
         param: torch.nn.Parameter | None = None,
-        pad_value: float | None = None,
     ):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
@@ -657,7 +681,6 @@ class RoutedExperts(PluggableLayer):
             loaded_weight,
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
-            pad_value=pad_value,
         )
         if (
             loaded_weight.device.type == "cpu"
@@ -1037,7 +1060,6 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
-                    is_scale=True,
                     param=param,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:

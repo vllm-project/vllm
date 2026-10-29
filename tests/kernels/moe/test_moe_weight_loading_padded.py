@@ -425,60 +425,68 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
 
 class TestPaddingFilledByPostProcessing:
-    """Loaders record padding instead of writing it; `fill_padding` writes it
-    before post-load processing, so a reload into storage holding old bytes
-    matches a cold start."""
+    """Loaders record padding instead of writing it; `fill_padding` writes the
+    parameter's initial value there before post-load processing, so a reload
+    into storage holding old bytes matches a cold start."""
 
     class _Experts(torch.nn.Module):
         _get_hidden_dim = staticmethod(RoutedExperts._get_hidden_dim)
         _split_padding = staticmethod(RoutedExperts._split_padding)
         _narrow_and_mark_padding = RoutedExperts._narrow_and_mark_padding
+        _record_padding_values = RoutedExperts._record_padding_values
         _load_w13 = RoutedExperts._load_w13
 
-        def __init__(self, name: str, experts: int, intermediate: int, hidden: int):
+        def __init__(self, init: torch.Tensor, padding_value: float | None = None):
             super().__init__()
             self.moe_config = SimpleNamespace(
                 is_act_and_mul=True,
                 moe_parallel_config=SimpleNamespace(tp_size=1),
             )
-            # Storage holding other bytes, as on a reload
-            param = torch.full((experts, 2 * intermediate, hidden), 7.0)
-            self.register_parameter(name, torch.nn.Parameter(param, False))
+            self.w13_weight = torch.nn.Parameter(init, requires_grad=False)
+            if padding_value is not None:
+                self.w13_weight.padding_value = padding_value
+            self._record_padding_values()  # as after create_weights
+            self.w13_weight.data.fill_(7)  # storage holding other bytes
 
     @staticmethod
-    def _load_all(layer, param, loaded):
-        for expert in range(param.shape[0]):
+    def _load_all(layer, loaded):
+        for expert in range(layer.w13_weight.shape[0]):
             for shard_id in ("w1", "w3"):
                 layer._load_w13(
-                    expert_data=param.data[expert],
+                    expert_data=layer.w13_weight.data[expert],
                     shard_dim=0,
                     shard_id=shard_id,
                     loaded_weight=loaded,
                     tp_rank=0,
-                    param=param,
+                    param=layer.w13_weight,
                 )
 
     @pytest.mark.parametrize(
-        "name,pad", [("w13_weight", 0.0), ("w13_weight_scale", 1.0)]
+        "init,padding_value,expected",
+        [
+            (torch.zeros(3, 8, 6), None, 0.0),
+            (torch.ones(3, 8, 6), None, 1.0),  # e.g. unit block scales
+            (torch.randn(3, 8, 6), None, 0.0),  # uninitialized
+            (torch.ones(3, 8, 6), 2.0, 2.0),  # declared in create_weights
+        ],
     )
-    def test_loader_leaves_padding_to_post_processing(self, name, pad):
+    def test_padding_gets_initial_value(self, init, padding_value, expected):
         # intermediate 3 of 4 and hidden 5 of 6 come from the checkpoint
-        layer = self._Experts(name, experts=3, intermediate=4, hidden=6)
-        param = getattr(layer, name)
+        layer = self._Experts(init, padding_value)
         loaded = torch.randn(3, 5)
-        self._load_all(layer, param, loaded)
-        w13 = param.data
+        self._load_all(layer, loaded)
+        w13 = layer.w13_weight.data
         assert torch.equal(w13[:, 3], torch.full((3, 6), 7.0))  # left to the fill
 
         fill_padding(layer)
         for half in (slice(0, 3), slice(4, 7)):
             assert torch.equal(w13[:, half, :5], loaded.expand(3, 3, 5))
         for padding in (w13[:, 3], w13[:, 7], w13[:, :, 5]):
-            assert torch.all(padding == pad)
+            assert torch.all(padding == expected)
 
     def test_fill_only_once_per_load(self):
-        layer = self._Experts("w13_weight", experts=2, intermediate=4, hidden=6)
-        self._load_all(layer, layer.w13_weight, torch.randn(3, 5))
+        layer = self._Experts(torch.zeros(2, 8, 6))
+        self._load_all(layer, torch.randn(3, 5))
         fill_padding(layer)
         # post-load processing rewrote the tensor; a second fill must not touch it
         layer.w13_weight.data.fill_(3)
@@ -486,8 +494,8 @@ class TestPaddingFilledByPostProcessing:
         assert torch.all(layer.w13_weight.data == 3)
 
     def test_fill_skips_post_processed_layout(self):
-        layer = self._Experts("w13_weight", experts=2, intermediate=4, hidden=6)
-        self._load_all(layer, layer.w13_weight, torch.randn(3, 5))
+        layer = self._Experts(torch.zeros(2, 8, 6))
+        self._load_all(layer, torch.randn(3, 5))
         # post-load processing ran before the fill and changed the layout
         layer.w13_weight.data = torch.full((2, 6, 8), 3.0)
         fill_padding(layer)

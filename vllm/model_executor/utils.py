@@ -100,11 +100,18 @@ def mark_padding(
 
 def fill_padding(module: torch.nn.Module) -> None:
     """Write the padding recorded by `mark_padding` since the last fill, in
-    checkpoint layout, before post-load processing reads it."""
+    checkpoint layout, before post-load processing reads it.
+
+    Code that loads weights and then runs ``process_weights_after_loading`` on
+    a layer itself must call this on the layer in between, as cold start and
+    layerwise reload do."""
     if not module.__dict__.pop("_padding_pending", False):
         return
     for name, regions in module._padding_regions.items():
-        data = getattr(module, name).data
+        param = getattr(module, name, None)
+        if param is None:  # released by post-load processing
+            continue
+        data = param.data
         layout = (tuple(data.shape), tuple(data.stride()), data.dtype)
         if layout != module._padding_layouts[name]:
             continue  # already post-processed
