@@ -50,6 +50,7 @@ class AuxOutputConnectorMetadata:
     released_block_hashes: PackedBlockHashes | None = None
     hidden_plans: dict[str, HiddenStateCapturePlan] = field(default_factory=dict)
     finished_hidden_requests: tuple[str, ...] = ()
+    hidden_accepted_ends: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -110,6 +111,10 @@ class AuxOutputSchedulerConnector:
                 scheduler_output.num_scheduled_tokens, requests
             )
         )
+        hidden_accepted_ends = {
+            rid: requests[rid].num_prompt_tokens - 1 + requests[rid].num_output_tokens
+            for rid in hidden_plans
+        }
         if not self._routing:
             return AuxOutputConnectorMetadata(
                 self._generation,
@@ -117,6 +122,7 @@ class AuxOutputSchedulerConnector:
                 {},
                 tuple(scheduler_output.finished_req_ids),
                 hidden_plans=hidden_plans,
+                hidden_accepted_ends=hidden_accepted_ends,
                 finished_hidden_requests=hidden_finished,
             )
         scheduled_requests: dict[str, int] = {}
@@ -166,6 +172,7 @@ class AuxOutputSchedulerConnector:
             self._pack_hashes(self._released_hashes),
         )
         metadata.hidden_plans = hidden_plans
+        metadata.hidden_accepted_ends = hidden_accepted_ends
         metadata.finished_hidden_requests = hidden_finished
         self._retained_hashes, self._released_hashes = [], []
         return metadata

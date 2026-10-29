@@ -59,7 +59,7 @@ class _WorkerRequestState:
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
-    connector: AuxOutputWorkerConnector
+    connector: RoutedExpertsWorkerConnector
     request_ids: list[str]
     token_starts: np.ndarray
     query_start_loc: np.ndarray
@@ -84,7 +84,7 @@ class PendingAuxOutput:
         return self.connector.process_output(self)
 
 
-class AuxOutputWorkerConnector:
+class RoutedExpertsWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
     def __init__(
@@ -138,9 +138,6 @@ class AuxOutputWorkerConnector:
             max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
-
-    def prepare_hidden_output(self, batch, hidden_states, aux_hidden_states, logits):
-        """Optional hidden-output hook; routing-only connectors do no work here."""
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -412,7 +409,7 @@ class AuxOutputWorkerConnector:
                     self._store = None
 
 
-class PendingCombinedAuxOutput(PendingAuxOutput):
+class PendingCombinedAuxOutput:
     def __init__(
         self, routed: PendingAuxOutput | None, hidden: PendingHiddenOutput | None
     ):
@@ -435,33 +432,36 @@ class PendingCombinedAuxOutput(PendingAuxOutput):
         return outputs
 
 
-class HiddenStateWorkerConnector(AuxOutputWorkerConnector):
+class AuxOutputWorkerConnector:
     """Compose windowed hidden capture with optional routed-experts output."""
 
     def __init__(self, *, vllm_config, model, kv_cache_config):
-        self._routing = vllm_config.aux_output_config.enable_return_routed_experts
-        self._hidden = (
-            HiddenStateWorker(model, vllm_config)
-            if get_tp_group().is_first_rank
-            else None
-        )
-        if self._routing:
-            super().__init__(
+        self._routing = (
+            RoutedExpertsWorkerConnector(
                 vllm_config=vllm_config, model=model, kv_cache_config=kv_cache_config
             )
+            if vllm_config.aux_output_config.enable_return_routed_experts
+            else None
+        )
+        self._hidden = (
+            HiddenStateWorker(model, vllm_config)
+            if vllm_config.aux_output_config.enable_hidden_states
+            and get_tp_group().is_first_rank
+            else None
+        )
 
     def begin_step(self, metadata):
         if self._hidden is not None and metadata is not None:
             self._hidden.begin_step(metadata)
         if self._routing:
-            super().begin_step(metadata)
+            self._routing.begin_step(metadata)
 
     def prepare_hidden_output(self, batch, hidden_states, aux_hidden_states, logits):
         if self._hidden is not None:
             self._hidden.prepare(batch, hidden_states, aux_hidden_states, logits)
 
     def prepare_output(self, input_batch):
-        routed = super().prepare_output(input_batch) if self._routing else None
+        routed = self._routing.prepare_output(input_batch) if self._routing else None
         hidden = None if self._hidden is None else self._hidden.pending
         if routed is None and hidden is None:
             return None
@@ -470,20 +470,16 @@ class HiddenStateWorkerConnector(AuxOutputWorkerConnector):
     def close(self):
         if self._hidden is not None:
             self._hidden.plans.clear()
+            self._hidden.accepted_ends.clear()
             self._hidden.pending = None
         if self._routing:
-            super().close()
+            self._routing.close()
 
 
 def get_aux_output_connector(
     model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> AuxOutputWorkerConnector:
-    connector_cls = (
-        HiddenStateWorkerConnector
-        if vllm_config.aux_output_config.enable_hidden_states
-        else AuxOutputWorkerConnector
-    )
-    return connector_cls(
+    return AuxOutputWorkerConnector(
         model=model,
         kv_cache_config=kv_cache_config,
         vllm_config=vllm_config,

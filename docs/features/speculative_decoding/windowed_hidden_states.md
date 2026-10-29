@@ -61,6 +61,9 @@ disable auxiliary outputs needed by the speculative decoder itself.
 
 `logprob_topk` optionally includes window-aligned top-k raw logprobs and token IDs.
 These are computed before sampling penalties, temperature or grammar masks.
+After preemption, recomputed positions already delivered to the caller are excluded
+before hidden rows and logits are selected. Rejected speculative positions remain
+eligible for capture when they are computed again.
 
 Supported execution uses CUDA Model Runner V2, synchronous scheduling, a causal
 decoder, one completion per request, and TP with PP=CP=1. Stop strings, streaming
@@ -77,3 +80,5 @@ for an additional run with the connector disabled, and `--draft-model` to exerci
 EAGLE3. Keep the GPU exclusive during timing and compare identical configurations.
 For strict cross-run equality, set `VLLM_BATCH_INVARIANT=1` and record that setting
 with the results, since it can select different execution kernels.
+Rerun these measurements after changes to the connector or output delivery path;
+measurements from another implementation do not validate the current data path.

@@ -85,6 +85,7 @@ steps:
     - vllm/v1/
     - tests/v1/core
     - tests/distributed/aux_output_connector/test_hidden_states.py
+    - vllm/distributed/aux_output_connector/
     - tests/v1/executor
     - tests/v1/kv_offload
     - tests/v1/simple_kv_offload
@@ -97,7 +98,10 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/core
-    - pytest -v -s distributed/aux_output_connector/test_hidden_states.py
+    - >-
+      pytest -v -s
+      distributed/aux_output_connector/test_hidden_states.py
+      v1/worker/test_aux_hidden_states.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 Core"

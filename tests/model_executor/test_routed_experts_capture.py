@@ -693,7 +693,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
     )
     model = Mock()
-    connector = aux_output_worker.AuxOutputWorkerConnector(
+    connector = aux_output_worker.RoutedExpertsWorkerConnector(
         vllm_config=config,
         model=model,
         kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
@@ -748,7 +748,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         ),
     )
 
-    aux_output_worker.AuxOutputWorkerConnector(**kwargs)
+    aux_output_worker.RoutedExpertsWorkerConnector(**kwargs)
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16

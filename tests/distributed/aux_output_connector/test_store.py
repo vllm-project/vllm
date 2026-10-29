@@ -31,7 +31,7 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStoreError,
 )
 from vllm.distributed.aux_output_connector.worker import (
-    AuxOutputWorkerConnector,
+    RoutedExpertsWorkerConnector,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -176,7 +176,7 @@ def _execution_ranges(metadata, request_ids):
     return token_starts, num_tokens
 
 
-def _begin_step(worker: AuxOutputWorkerConnector, step: _WorkerStep) -> None:
+def _begin_step(worker: RoutedExpertsWorkerConnector, step: _WorkerStep) -> None:
     worker.begin_step(step.metadata)
 
 
@@ -185,7 +185,7 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
-) -> AuxOutputWorkerConnector:
+) -> RoutedExpertsWorkerConnector:
     object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
     store = _make_store(
         max_bytes=(
@@ -193,7 +193,7 @@ def _make_worker(
         ),
         object_nbytes=object_nbytes,
     )
-    worker = object.__new__(AuxOutputWorkerConnector)
+    worker = object.__new__(RoutedExpertsWorkerConnector)
     worker._store = store
     worker._buffer = RoutedExpertsBuffer(
         _DTYPE,
@@ -246,7 +246,7 @@ def _input_batch(request_ids, token_starts, query_start_loc):
 
 
 def test_non_output_rank_skips_capture_snapshot():
-    worker = object.__new__(AuxOutputWorkerConnector)
+    worker = object.__new__(RoutedExpertsWorkerConnector)
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()

@@ -138,6 +138,7 @@ def capture_scheduled_hidden_states(
     *,
     logits: torch.Tensor | None = None,
     logits_indices: torch.Tensor | None = None,
+    accepted_ends: dict[str, int] | None = None,
 ) -> dict[str, HiddenStateCaptureChunk]:
     """Snapshot only window rows before reusable model buffers are overwritten."""
     chunks: dict[str, HiddenStateCaptureChunk] = {}
@@ -151,7 +152,9 @@ def capture_scheduled_hidden_states(
         plan = plans.get(req_id)
         if plan is not None:
             start = num_computed_tokens[req_id]
-            first = max(start, plan.window_start_abs)
+            first = max(
+                start, plan.window_start_abs, (accepted_ends or {}).get(req_id, 0)
+            )
             end = min(start + num_rows, plan.window_end_abs)
             if first < end:
                 first_row = row_offset + first - start
@@ -365,6 +368,7 @@ class HiddenStateWorker:
         )
 
         self.plans: dict[str, HiddenStateCapturePlan] = {}
+        self.accepted_ends: dict[str, int] = {}
         self.pending: PendingHiddenOutput | None = None
         layers: tuple[int, ...] = ()
         if config.speculative_config is not None and requires_aux_hidden_states(
@@ -381,7 +385,9 @@ class HiddenStateWorker:
             metadata.finished_requests + metadata.finished_hidden_requests
         ):
             self.plans.pop(request_id, None)
+            self.accepted_ends.pop(request_id, None)
         self.plans.update(metadata.hidden_plans)
+        self.accepted_ends.update(metadata.hidden_accepted_ends)
 
     def prepare(self, batch, hidden_states, aux_hidden_states, logits) -> None:
         if not self.plans:
@@ -408,6 +414,7 @@ class HiddenStateWorker:
             batch.query_start_loc_np,
             logits=logits,
             logits_indices=batch.logits_indices,
+            accepted_ends=self.accepted_ends,
         )
         self.pending = PendingHiddenOutput(chunks) if chunks or errors else None
         if self.pending is not None:

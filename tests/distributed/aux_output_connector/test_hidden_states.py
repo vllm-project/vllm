@@ -19,6 +19,36 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
 
 
+def test_recomputed_history_needs_no_logits_after_delivery():
+    plan = HiddenStateCapturePlan.from_window("r", 1, 0, 16, "test", logprob_topk=2)
+    assert (
+        capture_scheduled_hidden_states(
+            {"r": plan},
+            ["r"],
+            {"r": 8},
+            {"r": 0},
+            torch.zeros(8, 2),
+            accepted_ends={"r": 8},
+        )
+        == {}
+    )
+
+
+def test_rejected_rows_remain_eligible_after_recomputation():
+    plan = HiddenStateCapturePlan.from_window("r", 1, 0, 16, "test")
+    hidden = torch.arange(20).reshape(10, 2)
+    chunk = capture_scheduled_hidden_states(
+        {"r": plan},
+        ["r"],
+        {"r": 10},
+        {"r": 0},
+        hidden,
+        accepted_ends={"r": 8},
+    )["r"]
+    np.testing.assert_array_equal(chunk.positions, [8, 9])
+    torch.testing.assert_close(chunk.hidden_states, hidden[8:10])
+
+
 def test_rejected_window_suffix_is_collected_on_replay():
     plan = HiddenStateCapturePlan.from_window("r", 3, 1, 4, "test", min_rows=3)
     request = Request(
