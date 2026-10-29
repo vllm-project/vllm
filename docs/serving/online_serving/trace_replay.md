@@ -44,6 +44,7 @@ When `trace_decode_token_ids` is set:
 - The trace is truncated if it does not fit within `max_model_len` given the prompt length.
 - All stop conditions (EOS, stop strings, stop token IDs) are disabled.
 - Generation produces exactly the trace tokens, then stops.
+- With speculative decoding, a draft token is accepted only if it equals the trace token at its position, so a step emits the matching drafts plus one trace token, up to the end of the trace. The returned logprobs are those of the trace tokens, but each verification step scores several positions in one forward pass, so they are bitwise equal to the logprobs without speculative decoding only with batch invariance (`VLLM_BATCH_INVARIANT=1`).
 
 ## Limitations
 
@@ -53,7 +54,6 @@ When `trace_decode_token_ids` is set:
 | --- | --- |
 | `n > 1` | Trace replay produces a single deterministic sequence |
 | `prompt_logprobs` | Expanded logit layout conflicts with trace kernel indexing |
-| Speculative decoding | Multi-token speculation conflicts with single-token trace stepping |
 | Structured outputs | Grammar constraints conflict with forced token injection |
 | `repetition_detection` | Would terminate the request on repeated patterns in the trace |
 | `thinking_token_budget` | Logit masking corrupts logprobs for trace tokens |
