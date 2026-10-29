@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.input_batch import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 logger = init_logger(__name__)
 
@@ -889,7 +890,7 @@ class PCPManager:
         self,
         draft_tokens: torch.Tensor,
         idx_mapping: torch.Tensor,
-        draft_logits: torch.Tensor | None,
+        draft_logits: "DraftLogitsCache | None",
     ) -> None:
         """Broadcast PCP rank 0's drafts and draft logits.
 
@@ -900,9 +901,9 @@ class PCPManager:
         pcp_group.broadcast(draft_tokens, src=0)
         if draft_logits is not None:
             # Draft logits are indexed by persistent request slots.
-            logits = draft_logits[idx_mapping]
+            logits = draft_logits.values[idx_mapping]
             pcp_group.broadcast(logits, src=0)
-            draft_logits[idx_mapping] = logits
+            draft_logits.values[idx_mapping] = logits
 
     def restore_for_sampling(
         self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None
