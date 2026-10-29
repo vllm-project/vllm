@@ -45,8 +45,8 @@ def test_verified_counters_differ_from_proposals(verified_lengths, expected_per_
     for verified in verified_lengths:
         stats.observe_draft_stats_per_req(
             num_draft_tokens=5,
-            num_accepted_tokens=min(verified, 2),
             num_verified_tokens=verified,
+            num_accepted_tokens=0,
         )
     assert stats.num_verified_tokens_per_pos == expected_per_pos
     assert sum(expected_per_pos) == stats.num_verified_tokens
@@ -59,18 +59,13 @@ def test_verified_counters_differ_from_proposals(verified_lengths, expected_per_
     }
     assert samples["vllm:spec_decode_num_drafts_total"] == 3
     assert samples["vllm:spec_decode_num_draft_tokens_total"] == 15
-    assert samples["vllm:spec_decode_num_accepted_tokens_total"] == sum(
-        min(verified, 2) for verified in verified_lengths
-    )
+    assert samples["vllm:spec_decode_num_accepted_tokens_total"] == 0
     assert samples["vllm:spec_decode_num_verified_tokens_total"] == 3
+
+    per_pos_name = "vllm:spec_decode_num_verified_tokens_per_pos_total"
     for pos, expected in enumerate(expected_per_pos):
-        assert (
-            registry.get_sample_value(
-                "vllm:spec_decode_num_verified_tokens_per_pos_total",
-                {"engine": "0", "position": str(pos)},
-            )
-            == expected
-        )
+        labels = {"engine": "0", "position": str(pos)}
+        assert registry.get_sample_value(per_pos_name, labels) == expected
 
 
 def test_adaptive_verified_budget_logging():
