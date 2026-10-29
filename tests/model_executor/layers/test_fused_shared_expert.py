@@ -36,7 +36,6 @@ from vllm.model_executor.models.utils import (
     get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
 )
-from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
@@ -563,6 +562,10 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
         expert_dtype = "fp4"
         online_quantization_config = None
 
+        @classmethod
+        def get_name(cls) -> str:
+            return "deepseek_v4_fp8"
+
         def _is_quark_mxfp4_ocp(self, hf_config: object) -> bool:
             return True
 
@@ -574,9 +577,6 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
             },
             "global_quant_config": {"weight": {"dtype": "fp8"}},
         },
-    )
-    monkeypatch.setattr(
-        deepseek_v4_quant_config, "DeepseekV4FP8Config", DeepseekV4Config
     )
     monkeypatch.setattr(
         vllm_config_module,

@@ -4,7 +4,7 @@
 from collections.abc import Iterable, Mapping
 from fnmatch import fnmatch
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import regex as re
 
@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 
 logger = init_logger(__name__)
 
@@ -84,9 +85,13 @@ def is_shared_expert_quant_fse_compatible(
         is_layer_skipped,
         kMxfp4Static,
     )
-    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
-    from vllm.models.deepseek_v41.quant_config import (
-        DeepseekV4FP8Config as DeepseekV41FP8Config,
+
+    # Match DeepSeek-V4/V4.1 by method name: importing their config classes
+    # would load both model packages for every MoE model.
+    is_deepseek_v4_fp4 = (
+        quant_config is not None
+        and quant_config.get_name() == "deepseek_v4_fp8"
+        and getattr(quant_config, "expert_dtype", None) == "fp4"
     )
 
     if projection_names is None:
@@ -127,11 +132,7 @@ def is_shared_expert_quant_fse_compatible(
             routed_weight_key, routed_activation_key, _ = (
                 quant_config.get_quant_method_target(expert_prefix, RoutedExperts)
             )
-        elif (
-            isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config))
-            and quant_config.expert_dtype == "fp4"
-            and moe_backend == "aiter_mega_moe"
-        ):
+        elif is_deepseek_v4_fp4 and moe_backend == "aiter_mega_moe":
             # AITER MegaMoE quantizes the activations of every slot itself.
             routed_weight_key, routed_activation_key = kMxfp4Static, None
         else:
@@ -191,10 +192,7 @@ def is_shared_expert_quant_fse_compatible(
             '\'{"*shared_experts*": "mxfp4"}\'',
         )
 
-    if (
-        isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config))
-        and quant_config.expert_dtype == "fp4"
-    ):
+    if is_deepseek_v4_fp4:
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
 
@@ -207,7 +205,8 @@ def is_shared_expert_quant_fse_compatible(
         if quantization_config is None:
             return False, "DeepSeek-V4/V4.1 has no quantization configuration"
 
-        if not quant_config._is_quark_mxfp4_ocp(quantization_config):
+        deepseek_config = cast("DeepseekV4FP8Config", quant_config)
+        if not deepseek_config._is_quark_mxfp4_ocp(quantization_config):
             return (
                 False,
                 "DeepSeek-V4/V4.1 FSE is only implemented/tested with Quark MXFP4",
