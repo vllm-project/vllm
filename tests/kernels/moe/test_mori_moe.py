@@ -40,13 +40,16 @@ MNKS = [
 ]
 
 
-def _mxfp4_aiter_weights(w1, w2, start, end):
-    """MXFP4-quantize experts [start, end) into AITER's W4A4 kernel layout."""
+def _mxfp4_aiter_weights(w1, w2, start, end, dsv4=False):
+    """MXFP4-quantize experts [start, end) into AITER's W4A4 kernel layout, or
+    with dsv4 into DeepSeek V4.1's A4W4 one: a W4A16 quant config whose BF16
+    input AITER quantizes to MXFP4, over SEPARATED gate/up weights."""
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_quant_config,
     )
 
@@ -55,11 +58,17 @@ def _mxfp4_aiter_weights(w1, w2, start, end):
         q, s = dynamic_mxfp4_quant(w.flatten(0, 1))
         return q.view(*w.shape[:2], -1), s.view(*w.shape[:2], -1)
 
-    backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
     (q1, s1), (q2, s2) = quantize(w1), quantize(w2)
-    q1, q2, s1, s2, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-        backend, None, q1, q2, s1, s2
-    )
+    if dsv4:
+        backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+        q1, q2, s1, s2, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+            backend, None, q1, q2, s1, s2, use_separated_a4w4=True
+        )
+    else:
+        backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+        q1, q2, s1, s2, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            backend, None, q1, q2, s1, s2
+        )
     return q1, q2, make_mxfp4_moe_quant_config(backend, s1, s2)
 
 
@@ -80,7 +89,10 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     init_workspace_manager(pgi.device)
     set_random_seed(47)
     fp8 = scheme == "fp8_token_channel"
-    mxfp4 = scheme == "mxfp4"
+    # DeepSeek V4.1 A4W4: VLLM_MORI_A4W4_FP4_DISPATCH=1 dispatches its input
+    # as packed MXFP4, like the W4A4 path.
+    dsv4 = scheme == "mxfp4_dsv4"
+    mxfp4 = scheme == "mxfp4" or dsv4
     dtype = current_platform.fp8_dtype() if fp8 else None
     (_, w1, s1, _), (_, w2, s2, _) = make_test_weights(
         32, n, k, quant_dtype=dtype, per_out_ch_quant=fp8
@@ -112,11 +124,12 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
             max_num_tokens=256,
         ),
         moe_parallel_config=parallel,
+        use_mxfp4_w4a4_dsv4=dsv4,
     )
     start, end = pgi.rank * 16, (pgi.rank + 1) * 16
     if mxfp4:
-        local_w1, local_w2, quant = _mxfp4_aiter_weights(w1, w2, start, end)
-        ref_w1, ref_w2, ref_quant = _mxfp4_aiter_weights(w1, w2, 0, 32)
+        local_w1, local_w2, quant = _mxfp4_aiter_weights(w1, w2, start, end, dsv4)
+        ref_w1, ref_w2, ref_quant = _mxfp4_aiter_weights(w1, w2, 0, 32, dsv4)
     else:
         quant = FusedMoEQuantConfig.make(
             dtype,
@@ -138,6 +151,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
         "bf16": AiterUnquantizedExperts,
         "fp8_token_channel": AiterFp8ChannelExperts,
         "mxfp4": AiterMxfp4Experts,
+        "mxfp4_dsv4": AiterMxfp4Experts,
     }
     experts_cls = experts_cls_by_scheme[scheme]
     experts = experts_cls(config, quant)
@@ -225,10 +239,10 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     not current_platform.is_rocm() or not has_mori(), reason="Requires ROCm MoRI"
 )
 @pytest.mark.parametrize("m,n,k", MNKS)
-@pytest.mark.parametrize("scheme", ["bf16", "fp8_token_channel", "mxfp4"])
+@pytest.mark.parametrize("scheme", ["bf16", "fp8_token_channel", "mxfp4", "mxfp4_dsv4"])
 @multi_gpu_test(num_gpus=2)
 def test_mori_moe(m, n, k, scheme):
-    if scheme == "mxfp4":
+    if scheme in ("mxfp4", "mxfp4_dsv4"):
         from vllm.platforms.rocm import on_gfx950
 
         if not on_gfx950():
@@ -245,5 +259,6 @@ def test_mori_moe(m, n, k, scheme):
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_ROCM_USE_AITER_MOE": "1",
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0",
+        "VLLM_MORI_A4W4_FP4_DISPATCH": "1" if scheme == "mxfp4_dsv4" else "0",
     }
     parallel_launch_with_config(2, _mori_worker, config, env, m, n, k, scheme, m == 32)
