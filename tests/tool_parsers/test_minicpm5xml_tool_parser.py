@@ -792,3 +792,49 @@ class TestParameterWhitespace:
         assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
             "content": "    def foo():\n        pass\n"
         }
+
+
+_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+_STRING_SCHEMA_CASES = [
+    # (schema, raw value, expected argument)
+    ({"type": "string"}, "1.10", "1.10"),
+    ({"type": "string"}, "null", "null"),
+    (_NULLABLE_STR, "1.10", "1.10"),
+    (_NULLABLE_STR, "1984", "1984"),
+    (_NULLABLE_STR, "null", None),
+    ({"type": ["string", "null"]}, "1984", "1984"),
+    ({"type": ["string", "null"]}, "null", None),
+    ({"enum": ["1.10", "2.0"]}, "1.10", "1.10"),
+    ({"$ref": "#/$defs/Version"}, "1984", "1984"),
+    ({"type": "number"}, "1.10", 1.1),
+]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("schema", "raw", "expected"), _STRING_SCHEMA_CASES)
+def test_string_schema_forms_keep_raw_text(
+    parser: ToolParser, schema: dict, raw: str, expected, stream: bool
+) -> None:
+    """Strings behind anyOf/type lists/enum/$ref are not JSON-decoded."""
+    request = make_request(
+        [
+            _tool(
+                "f",
+                {
+                    "type": "object",
+                    "properties": {"v": schema},
+                    "$defs": {"Version": {"type": "string"}},
+                },
+            )
+        ]
+    )
+    text = f'<function name="f"><param name="v">{raw}</param></function>'
+    if stream:
+        chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
+        calls = run_tool_extraction_streaming(
+            parser, chunks, request, assert_one_tool_per_delta=False
+        ).tool_calls
+    else:
+        calls = parser.extract_tool_calls(text, request).tool_calls
+    assert len(calls) == 1
+    assert json.loads(calls[0].function.arguments) == {"v": expected}

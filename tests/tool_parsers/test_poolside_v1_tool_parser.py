@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -217,7 +218,7 @@ def test_non_string_arg_still_deserialized() -> None:
 
 def test_responses_extract_tool_calls_with_flat_tools() -> None:
     # required/named Responses calls route into extract_tool_calls with flat
-    # FunctionTool (.name); _is_string_type must not raise.
+    # FunctionTool (.name); _allowed_types must not raise.
     request = _build_responses_request(tool_choice="required")
     parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
 
@@ -364,3 +365,68 @@ def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
     result = _stream_partial_start_token(request)
     assert result is not None
     assert result.content == ""
+
+
+# ---------------------------------------------------------------------------
+# String schemas other than a bare {"type": "string"} keep the raw text
+# ---------------------------------------------------------------------------
+
+_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("schema", "raw", "expected"),
+    [
+        ({"type": "string"}, "1.10", "1.10"),
+        ({"type": "string"}, "null", "null"),
+        (_NULLABLE_STR, "1.10", "1.10"),
+        (_NULLABLE_STR, "1984", "1984"),
+        (_NULLABLE_STR, " null ", None),
+        (_NULLABLE_STR, "  x = 1\n", "  x = 1\n"),
+        ({"type": ["string", "null"]}, "null", None),
+        ({"type": ["string", "null"]}, "true", "true"),
+        ({"enum": ["1.10", "2.0"]}, "1.10", "1.10"),
+        ({"$ref": "#/$defs/Version"}, "1984", "1984"),
+        ({"type": "number"}, " 1.10 ", 1.1),
+    ],
+)
+def test_string_schema_forms_keep_raw_text(
+    schema: dict[str, Any], raw: str, expected: Any, stream: bool
+) -> None:
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "poolside-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"v": schema},
+                            "$defs": {"Version": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    parser = _make_parser(request)
+    model_output = (
+        f"<tool_call>f\n<arg_key>v</arg_key><arg_value>{raw}</arg_value></tool_call>"
+    )
+    if not stream:
+        result = parser.extract_tool_calls(model_output, request)
+        args = result.tool_calls[0].function.arguments
+    else:
+        args, prev = "", ""
+        for ch in model_output:
+            delta = parser.extract_tool_calls_streaming(
+                prev, prev + ch, ch, [], [], [], request
+            )
+            prev += ch
+            for tc in (delta.tool_calls if delta else None) or []:
+                args += (tc.function.arguments or "") if tc.function else ""
+    assert json.loads(args) == {"v": expected}

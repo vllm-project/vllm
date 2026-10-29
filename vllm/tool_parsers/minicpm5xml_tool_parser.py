@@ -27,6 +27,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.schema_types import ParameterTypes, convert_value
 from vllm.tool_parsers.utils import partial_tag_overlap, safe_literal_eval
 from vllm.utils import random_uuid
 
@@ -121,35 +122,24 @@ def _parse_arguments(json_value: str) -> tuple[Any, bool]:
         return json_value, False
 
 
-def _get_argument_type(
-    func_name: str,
-    arg_key: str,
-    name_to_tool: dict[str, ChatCompletionToolsParam],
-) -> str | None:
-    tool = name_to_tool.get(func_name)
-    if tool is None or tool.function.parameters is None:
-        return None
-    props = tool.function.parameters.get("properties", {})
-    if arg_key not in props:
-        return None
-    return props[arg_key].get("type")
-
-
 def _coerce_argument_value(
     func_name: str,
     arg_key: str,
     value: Any,
     name_to_tool: dict[str, ChatCompletionToolsParam],
 ) -> Any:
-    arg_type = _get_argument_type(func_name, arg_key, name_to_tool)
-    if arg_type == "string":
-        return (
-            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        )
+    tool = name_to_tool.get(func_name)
+    allowed = (
+        ParameterTypes.from_schema(tool.function.parameters).get(arg_key)
+        if tool is not None
+        else None
+    )
     if isinstance(value, str):
-        parsed_val, _ = _parse_arguments(value)
-        return parsed_val
-    return value
+        return convert_value(value, allowed, lambda v: _parse_arguments(v)[0])
+    # Already decoded (wrapped arguments): serialize it where a string is meant.
+    return convert_value(
+        json.dumps(value, ensure_ascii=False), allowed, lambda _: value
+    )
 
 
 def _add_argument(
