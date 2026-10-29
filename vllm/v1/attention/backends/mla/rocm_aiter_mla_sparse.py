@@ -723,7 +723,8 @@ class ROCMAiterMLASparseMetadataBuilder(
                     dtype_q=self._mla_q_dtype,
                     dtype_kv=self._mla_kv_dtype,
                 )
-                torch.cuda.current_stream(self.device).synchronize()
+                with gpu_sync_allowed():
+                    torch.cuda.current_stream(self.device).synchronize()
                 self._prev_metadata_key = metadata_key
             work_meta_data = self._mla_work_meta_data
             work_indptr = self._mla_work_indptr

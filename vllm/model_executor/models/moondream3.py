@@ -70,6 +70,7 @@ from vllm.transformers_utils.configs.moondream3 import (
     Moondream3VisionConfig,
 )
 from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1282,7 +1283,8 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return []
 
         device = self.vision.patch_emb.weight.device
-        bos_ids = torch.tensor([self.config.bos_token_id], device=device)
+        with gpu_sync_allowed():
+            bos_ids = torch.tensor([self.config.bos_token_id], device=device)
         bos_embedding = self.text.embed_input_ids(bos_ids)
 
         embeddings: list[torch.Tensor] = []

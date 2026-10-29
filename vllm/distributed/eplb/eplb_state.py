@@ -875,60 +875,61 @@ class EplbState:
                     )
 
                 skip_rearrange = False
-                if (
-                    current_platform.is_rocm()
-                    and not is_profile
-                    and rank_mapping is None
-                    and bool((eplb_model_state.physical_to_logical_map >= 0).all())
-                ):
-                    logical_loads = global_expert_load_window.float()
-                    ep_size = ep_group.size()
+                with gpu_sync_allowed():
+                    if (
+                        current_platform.is_rocm()
+                        and not is_profile
+                        and rank_mapping is None
+                        and bool((eplb_model_state.physical_to_logical_map >= 0).all())
+                    ):
+                        logical_loads = global_expert_load_window.float()
+                        ep_size = ep_group.size()
 
-                    def rank_load_imbalance(
-                        mapping: torch.Tensor,
-                        logical_loads: torch.Tensor = logical_loads,
-                        ep_size: int = ep_size,
-                    ) -> float:
-                        mapping = mapping.to(
-                            device=logical_loads.device,
-                            dtype=torch.long,
-                        )
-                        replica_counts = torch.zeros_like(logical_loads)
-                        replica_counts.scatter_add_(
-                            dim=1,
-                            index=mapping,
-                            src=torch.ones_like(mapping, dtype=logical_loads.dtype),
-                        )
-                        loads_per_replica = torch.gather(
-                            logical_loads / replica_counts.clamp_min(1),
-                            dim=1,
-                            index=mapping,
-                        )
-                        loads_per_rank = loads_per_replica.reshape(
-                            logical_loads.shape[0], ep_size, -1
-                        ).sum(dim=(0, 2))
-                        mean_load = loads_per_rank.mean()
-                        if mean_load == 0:
-                            return 1.0
-                        return (loads_per_rank.max() / mean_load).item()
+                        def rank_load_imbalance(
+                            mapping: torch.Tensor,
+                            logical_loads: torch.Tensor = logical_loads,
+                            ep_size: int = ep_size,
+                        ) -> float:
+                            mapping = mapping.to(
+                                device=logical_loads.device,
+                                dtype=torch.long,
+                            )
+                            replica_counts = torch.zeros_like(logical_loads)
+                            replica_counts.scatter_add_(
+                                dim=1,
+                                index=mapping,
+                                src=torch.ones_like(mapping, dtype=logical_loads.dtype),
+                            )
+                            loads_per_replica = torch.gather(
+                                logical_loads / replica_counts.clamp_min(1),
+                                dim=1,
+                                index=mapping,
+                            )
+                            loads_per_rank = loads_per_replica.reshape(
+                                logical_loads.shape[0], ep_size, -1
+                            ).sum(dim=(0, 2))
+                            mean_load = loads_per_rank.mean()
+                            if mean_load == 0:
+                                return 1.0
+                            return (loads_per_rank.max() / mean_load).item()
 
-                    current_imbalance = rank_load_imbalance(
-                        eplb_model_state.physical_to_logical_map
-                    )
-                    proposed_imbalance = rank_load_imbalance(
-                        new_physical_to_logical_map
-                    )
-                    relative_improvement = (
-                        current_imbalance - proposed_imbalance
-                    ) / current_imbalance
-                    skip_rearrange = relative_improvement < 0.05
-                    if skip_rearrange and is_main_rank:
-                        logger.info(
-                            "[EPLB] Skip rearrange: imbalance %.4f -> "
-                            "%.4f (no material gain)",
-                            current_imbalance,
-                            proposed_imbalance,
+                        current_imbalance = rank_load_imbalance(
+                            eplb_model_state.physical_to_logical_map
                         )
+                        proposed_imbalance = rank_load_imbalance(
+                            new_physical_to_logical_map
+                        )
+                        relative_improvement = (
+                            current_imbalance - proposed_imbalance
+                        ) / current_imbalance
+                        skip_rearrange = relative_improvement < 0.05
+                        if skip_rearrange and is_main_rank:
+                            logger.info(
+                                "[EPLB] Skip rearrange: imbalance %.4f -> "
+                                "%.4f (no material gain)",
+                                current_imbalance,
+                                proposed_imbalance,
+                            )
 
                 if not skip_rearrange:
                     # Update expert weights

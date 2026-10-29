@@ -18,6 +18,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
@@ -1139,7 +1140,8 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
             2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
             - 1.0
         )
-        _RHT_SIGNS_CACHE[key] = signs.to(device)
+        with gpu_sync_allowed():
+            _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
 
 

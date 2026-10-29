@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
@@ -2785,11 +2786,12 @@ class rocm_aiter_ops:
             build_gated_delta_rule_prefill_metadata,
         )
 
-        return build_gated_delta_rule_prefill_metadata(
-            seq_lens_cpu,
-            cu_seqlens=cu_seqlens,
-            chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
-        )
+        with gpu_sync_allowed():  # AITER syncs inside; nothing to fix on our side
+            return build_gated_delta_rule_prefill_metadata(
+                seq_lens_cpu,
+                cu_seqlens=cu_seqlens,
+                chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
+            )
 
     @classmethod
     def gdn_flydsl_prefill(
