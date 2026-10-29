@@ -76,6 +76,9 @@ void qsa_norm_rope_rdna3(torch::Tensor x, torch::Tensor out,
                          int64_t section_h, int64_t section_w,
                          bool interleaved);
 
+void shared_expert_gate_rdna3(torch::Tensor out, torch::Tensor x,
+                              torch::Tensor weight);
+
 std::vector<torch::Tensor> qwen4_hc_combine_mix(
     const torch::Tensor& h, const torch::Tensor& block_out,
     const torch::Tensor& inj, const torch::Tensor& norm_w,
