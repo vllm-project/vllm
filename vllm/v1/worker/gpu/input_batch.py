@@ -360,8 +360,12 @@ def _prepare_pos_seq_lens_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
+    is_padding_ptr,
+    num_tokens_padded,
+    pad_start,
     max_num_reqs,
     BLOCK_SIZE: tl.constexpr,
+    WRITE_IS_PADDING: tl.constexpr,
 ):
     req_id = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
@@ -371,6 +375,25 @@ def _prepare_pos_seq_lens_kernel(
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs
             tl.store(seq_lens_ptr + block, 0, mask=mask)
+        if WRITE_IS_PADDING:
+            # Compaction can leave real scheduler rows outside the query ranges.
+            num_tokens = tl.load(query_start_loc_ptr + num_reqs)
+            for i in tl.range(num_tokens, pad_start, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
+                mask = block < pad_start
+                tl.store(
+                    is_padding_ptr + block,
+                    tl.zeros([BLOCK_SIZE], tl.int1),
+                    mask=mask,
+                )
+            for i in tl.range(pad_start, num_tokens_padded, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
+                mask = block < num_tokens_padded
+                tl.store(
+                    is_padding_ptr + block,
+                    tl.full([BLOCK_SIZE], 1, tl.int1),
+                    mask=mask,
+                )
         return
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
@@ -388,6 +411,12 @@ def _prepare_pos_seq_lens_kernel(
         mask = block < query_len
         pos = num_computed_tokens + block
         tl.store(pos_ptr + start + block, pos, mask=mask)
+        if WRITE_IS_PADDING:
+            tl.store(
+                is_padding_ptr + start + block,
+                tl.zeros([BLOCK_SIZE], tl.int1),
+                mask=mask,
+            )
 
 
 def prepare_pos_seq_lens(
@@ -396,6 +425,9 @@ def prepare_pos_seq_lens(
     num_computed_tokens: torch.Tensor,
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
+    num_tokens_padded: int = 0,
+    pad_start: int = 0,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
@@ -406,8 +438,12 @@ def prepare_pos_seq_lens(
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
+        pos if is_padding is None else is_padding,
+        num_tokens_padded,
+        pad_start,
         seq_lens.shape[0],
         BLOCK_SIZE=1024,
+        WRITE_IS_PADDING=is_padding is not None,
     )
 
 

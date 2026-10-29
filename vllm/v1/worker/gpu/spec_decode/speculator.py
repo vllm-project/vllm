@@ -486,6 +486,10 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         return attn_metadata
 
+    def enable_batch_sharded_sampling(self) -> None:
+        """Called when the target samples batch-sharded: each request is
+        verified on its owner rank, which alone reads its draft logits."""
+
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         """Dtype and fill for the cached proposal distribution.
 

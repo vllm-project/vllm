@@ -528,3 +528,33 @@ def test_logits_cache_narrower_than_logits_is_rejected():
             logits_cache=cache,
             logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_gumbel_combine_preserves_first_nan_and_maximum(dtype):
+    """Combining block partials preserves argmax/gather's tie and NaN ordering."""
+    from vllm.v1.worker.gpu.sample.gumbel import _gumbel_combine_kernel
+
+    # Padded rows exercise strides; 197 blocks exercise the masked reduction tail.
+    maxima = torch.randn(6, 211, dtype=dtype, device=DEVICE)[:, :197]
+    maxima[0].fill_(-torch.inf)
+    maxima[1].fill_(1)
+    maxima[2, 7] = maxima[2, 9] = torch.nan
+    maxima[3, 5] = maxima[3, 6] = torch.inf
+    maxima[4].fill_(-torch.inf)
+    maxima[4, 196] = 0
+    token_ids = torch.arange(197, dtype=torch.int64, device=DEVICE).expand(6, -1)
+    sampled = torch.empty(6, dtype=torch.int64, device=DEVICE)
+
+    _gumbel_combine_kernel[(6,)](
+        token_ids,
+        token_ids.stride(0),
+        maxima,
+        maxima.stride(0),
+        sampled,
+        197,
+        PADDED_NUM_BLOCKS=256,
+    )
+
+    expected = token_ids.gather(1, maxima.argmax(-1, keepdim=True)).view(-1)
+    assert torch.equal(sampled, expected)

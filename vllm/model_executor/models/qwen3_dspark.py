@@ -277,6 +277,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # Markov bias in draft space, then remaps via map_draft_to_target.
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # This rank's vocab shard, vocab padding included.
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         # Map draft-vocab ids to target ids (identity for full-vocab drafts).
         if self.draft_id_to_target_id is None:

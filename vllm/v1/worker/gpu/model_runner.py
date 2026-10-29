@@ -472,6 +472,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     draft_logits=draft_logits,
                 )
                 logger.info("Batch-sharded sampling enabled.")
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.speculator.enable_batch_sharded_sampling()
             else:
                 logger.warning_once(
                     "Disabling batch-sharded sampling: %s does not implement "
@@ -495,7 +497,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
                 with self.jit_warmup_registry.activate():
-                    register_top_k_top_p_warmups()
+                    if current_platform.is_cuda():
+                        # V2's native logits processors use contiguous FP32 rows.
+                        register_top_k_top_p_warmups(
+                            vllm_config=self.vllm_config,
+                            logits_strides=(self.vocab_size,),
+                        )
+                    else:
+                        register_top_k_top_p_warmups()
 
             sampler_kwargs: dict[str, Any] = {
                 "vllm_config": self.vllm_config,
@@ -1430,9 +1439,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
@@ -1536,6 +1542,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            is_padding=(is_padding if envs.VLLM_MOE_SKIP_PADDING else None),
+            num_tokens_padded=num_tokens_after_padding,
+            pad_start=num_tokens,  # Scheduler total before adaptive compaction.
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 

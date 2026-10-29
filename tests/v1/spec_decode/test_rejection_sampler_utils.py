@@ -1291,6 +1291,78 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
     )
 
 
+def test_block_verification_is_unbiased_across_steps():
+    """Consecutive block verification steps must keep the target distribution.
+
+    Block verification observes the draft and the acceptance draw of every row,
+    and after a partial accept the next step verifies the same positions again.
+    If those draws are keyed by position alone, the next step reuses draws that
+    verification has already observed, which biases the output. The single-step
+    tests above give every trial fresh positions and cannot see this, so here
+    each request decodes many steps from its own advancing position, drafting
+    with gumbel_sample the way the speculators do.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_reqs, num_steps, k = 2048, 32, 5
+    vocab_size = NARROW_VOCAB_SIZE
+
+    target_logits_1d = torch.randn(vocab_size, device=device)
+    # A draft close to the target accepts most proposals, so steps often revisit
+    # positions the previous step verified past its accepted prefix.
+    draft_logits_1d = target_logits_1d + torch.randn(vocab_size, device=device)
+
+    reqs = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    rows = torch.arange(k + 1, device=device)
+    draft_cols = rows[:k].to(torch.int32).repeat(num_reqs)
+    temperature = torch.ones(num_reqs, dtype=torch.float32, device=device)
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=device)
+    draft_logits = torch.empty(num_reqs, k, vocab_size, device=device)
+    target_logits = target_logits_1d.expand(num_reqs * (k + 1), -1).contiguous()
+    cu_num_logits = torch.arange(num_reqs + 1, dtype=torch.int32, device=device) * (
+        k + 1
+    )
+
+    start = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+    emitted = []
+    for _ in range(num_steps):
+        pos = start.unsqueeze(1) + rows
+        # A draft is keyed by the position before it, i.e. its verifying row.
+        drafts = gumbel_sample(
+            draft_logits_1d.expand(num_reqs * k, -1),
+            reqs.repeat_interleave(k),
+            temperature,
+            seed,
+            pos[:, :k].reshape(-1),
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=draft_logits,
+            logits_cache_col=draft_cols,
+        )
+        draft_sampled = torch.zeros(num_reqs, k + 1, dtype=torch.int64, device=device)
+        draft_sampled[:, 1:] = drafts.view(num_reqs, k)
+        sampled, num_sampled = _rejection_sample(
+            target_logits=target_logits,
+            draft_logits=draft_logits,
+            draft_sampled=draft_sampled.view(-1),
+            cu_num_logits=cu_num_logits,
+            pos=pos.reshape(-1),
+            idx_mapping=reqs,
+            expanded_idx_mapping=reqs.repeat_interleave(k + 1),
+            expanded_local_pos=rows.to(torch.int32).repeat(num_reqs),
+            temperature=temperature,
+            seed=seed,
+            num_speculative_steps=k,
+            use_block_verification=True,
+        )
+        emitted.append(sampled[rows < num_sampled.unsqueeze(1)])
+        start += num_sampled
+
+    _assert_distribution_match(
+        torch.cat(emitted), torch.softmax(target_logits_1d, dim=0), device
+    )
+
+
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("fly_window_size", [0, 2])
 def test_chunked_requests_match_full_batch(
