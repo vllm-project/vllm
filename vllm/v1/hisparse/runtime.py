@@ -852,9 +852,6 @@ class HiSparseRuntime:
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
-            None,
-            None,
-            0,
         )
         return staged
 
@@ -956,14 +953,12 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             self.max_union_rows,
-            None,
             group.swap_stats,
             physical_topk_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
             block_table,
             block_size,
-            None,
             valid_topk_counts,
             swap_host_physical_rows,
             swap_device_physical_rows,
@@ -972,7 +967,6 @@ class HiSparseRuntime:
             resident.view.block_size
             if resident is not None and resident.view is not None
             else 0,
-            0,
             num_valid_rows,
         )
 
