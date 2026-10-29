@@ -214,23 +214,6 @@ def get_lora_op_configs(
         "fused_moe_lora_w2_expand",
     ]
 
-    if op_type == "shrink_multicta":
-        # Keep K partitioning batch-independent and bypass legacy tuning tables.
-        block_k = 128 if 256 < hidden_size <= 1024 else 256
-        block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
-        k_blocks = max(1, cdiv(hidden_size, block_k))
-        num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
-        block_m = 16 if batch < 128 else 32
-        block_n = min(32, max(16, next_power_of_2(rank)))
-        return {
-            "block_m": block_m,
-            "block_n": block_n,
-            "block_k": block_k,
-            "split_k": num_ctas,
-            "num_ctas": num_ctas,
-            "num_warps": 2 if block_m == 16 and block_n == 16 else 4,
-        }
-
     # default config
     default = {}
     if op_type == "shrink":
@@ -247,6 +230,20 @@ def get_lora_op_configs(
             "group_size_m": 8,
             "num_stages": 2,
             "max_nreg": None,
+        }
+    elif op_type == "shrink_multicta":
+        # Keep K partitioning independent of batch size.
+        block_k = 128 if 256 < hidden_size <= 1024 else 256
+        block_k = min(block_k, max(32, next_power_of_2(hidden_size)))
+        k_blocks = max(1, cdiv(hidden_size, block_k))
+        num_ctas = min(4 if rank >= 32 else 8, 1 << (k_blocks.bit_length() - 1))
+        default = {
+            "block_m": 16 if batch < 128 else 32,
+            "block_n": min(32, max(16, next_power_of_2(rank))),
+            "block_k": block_k,
+            "split_k": num_ctas,
+            "num_warps": 2 if batch < 128 and rank <= 16 else 4,
+            "num_ctas": num_ctas,
         }
     # The default config for fused_moe_lora ops
     elif op_type in [
@@ -332,7 +329,7 @@ def get_lora_op_configs(
 
 
 @lru_cache
-def supports_multicta_shrink(device: torch.device) -> bool:
+def supports_multicta_shrink(device: torch.device | None = None) -> bool:
     """Check basic device/toolchain requirements for experimental shrink."""
     supported = False
     if current_platform.is_cuda() and current_platform.has_device_capability(90):
