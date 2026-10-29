@@ -1270,7 +1270,9 @@ class EngineArgs:
             "--data-parallel-address",
             "-dpa",
             type=str,
-            help="Address of data parallel cluster head-node.",
+            help="Address of data parallel cluster head-node. With Ray, defaults "
+            "to the launch node's IP even with --data-parallel-size=1, and "
+            "takes precedence over VLLM_DP_MASTER_IP.",
         )
         parallel_group.add_argument(
             "--data-parallel-rpc-port",
