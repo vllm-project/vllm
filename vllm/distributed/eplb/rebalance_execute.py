@@ -180,15 +180,22 @@ def _first_rows(local_expert_ids: np.ndarray) -> dict[int, int]:
     return rows
 
 
+def _recv_masks(
+    old_local_expert_ids: np.ndarray, new_local_expert_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rows keeping their expert, and rows filled without a remote receive."""
+    is_unchanged = old_local_expert_ids == new_local_expert_ids
+    can_recv_local = np.isin(new_local_expert_ids, old_local_expert_ids)
+    is_received_locally = is_unchanged | ((new_local_expert_ids != -1) & can_recv_local)
+    return is_unchanged, is_received_locally
+
+
 def _remote_recv_rows(
     old_local_expert_ids: np.ndarray, new_local_expert_ids: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Experts a rank receives from peers (sorted), and the first row needing each."""
-    is_unchanged = old_local_expert_ids == new_local_expert_ids
-    new_valid = new_local_expert_ids != -1
-    can_recv_local = np.isin(new_local_expert_ids, old_local_expert_ids)
-    is_received_locally = is_unchanged | (new_valid & can_recv_local)
-    need_recv = ~is_received_locally & new_valid
+    _, is_received_locally = _recv_masks(old_local_expert_ids, new_local_expert_ids)
+    need_recv = ~is_received_locally & (new_local_expert_ids != -1)
     experts, first = np.unique(new_local_expert_ids[need_recv], return_index=True)
     return experts, np.flatnonzero(need_recv)[first]
 
@@ -344,16 +351,8 @@ def move_to_buffer(
     old_local_expert_ids = old_indices[local_global]
     new_local_expert_ids = new_indices[local_global]
 
-    # Unchanged mask
-    is_unchanged = old_local_expert_ids == new_local_expert_ids
-
-    # Local receive eligibility
-    new_valid = new_local_expert_ids != -1
-    can_recv_local = np.isin(
-        new_local_expert_ids, old_local_expert_ids, assume_unique=False
-    )
-    is_received_locally = np.logical_or(
-        is_unchanged, np.logical_and(new_valid, can_recv_local)
+    is_unchanged, is_received_locally = _recv_masks(
+        old_local_expert_ids, new_local_expert_ids
     )
 
     # Send map: first src row per unique expert present locally in old mapping

@@ -1385,12 +1385,9 @@ def compute_logical_maps(
 
 
 def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
-    src_padding = dst.shape[-1] - src.shape[-1]
-    assert src_padding >= 0
-    new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    if PIN_MEMORY:
-        new_src = new_src.pin_memory()
-    dst.copy_(new_src, non_blocking=True)
+    padded = torch.full(dst.shape, -1, dtype=dst.dtype, pin_memory=PIN_MEMORY)
+    padded[..., : src.shape[-1]] = src
+    dst.copy_(padded, non_blocking=True)
 
 
 def _commit_eplb_maps_for_layer(

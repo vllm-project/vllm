@@ -746,8 +746,7 @@ class SymmMemEplbCommunicator(EplbCommunicator):
 
     def __init__(
         self,
-        ep_group: ProcessGroup,
-        cpu_group: ProcessGroup,
+        group_coordinator: GroupCoordinator,
         layer: Sequence[torch.Tensor],
     ) -> None:
         import torch.distributed._symmetric_memory as symm_mem
@@ -756,6 +755,8 @@ class SymmMemEplbCommunicator(EplbCommunicator):
             _group_can_attempt_mnnvl,
         )
 
+        ep_group = group_coordinator.device_group
+        cpu_group = group_coordinator.cpu_group
         device = layer[0].device
         if not current_platform.is_cuda():
             raise ValueError("symm_mem EPLB requires CUDA")
@@ -794,7 +795,7 @@ class SymmMemEplbCommunicator(EplbCommunicator):
         self._buffer = as_layer(buffer)
 
         self._stream = None
-        self._cpu_group = cpu_group
+        self._group_coordinator = group_coordinator
         self._recv_rows: Sequence[dict[int, int]] = []
         self._sends: list[tuple[list[torch.Tensor], int, int]] = []
         self._log_initialized()
@@ -844,10 +845,7 @@ class SymmMemEplbCommunicator(EplbCommunicator):
     def _barrier(self) -> None:
         with gpu_sync_allowed():
             torch.accelerator.current_stream().synchronize()
-        # A CPU all_reduce stays on gloo; barrier() would use NCCL on split groups.
-        torch.distributed.all_reduce(
-            torch.zeros(1, dtype=torch.int32), group=self._cpu_group
-        )
+        self._group_coordinator.cpu_all_reduce_(torch.zeros(1, dtype=torch.int32))
 
 
 def create_eplb_communicator(
@@ -938,9 +936,7 @@ def create_eplb_communicator(
         return _create_pynccl()
 
     if backend == "symm_mem":
-        return SymmMemEplbCommunicator(
-            torch_group, group_coordinator.cpu_group, first_layer
-        )
+        return SymmMemEplbCommunicator(group_coordinator, first_layer)
     elif backend == "nixl":
         if not has_nixl():
             raise RuntimeError(
