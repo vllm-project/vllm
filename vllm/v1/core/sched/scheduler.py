@@ -2461,8 +2461,6 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
-            else:
-                prefill_stats = request.prefill_stats
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2507,7 +2505,7 @@ class Scheduler(SchedulerInterface):
                 sampled_progress_ids.add(req_id)
                 prefill_progress = self._update_prefill_progress(
                     request,
-                    prefill_stats,
+                    prefill_stats or request.prefill_stats,
                     bool(new_token_ids) and not output_is_stale,
                     finish_reason,
                     prefill_progress_timestamp,

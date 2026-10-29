@@ -57,7 +57,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -8740,6 +8740,59 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("include_prefill_progress", [False, True])
+@pytest.mark.parametrize("max_tokens", [1, 3])
+def test_prefill_progress_emits_prefill_stats_once(
+    async_scheduling, include_prefill_progress, max_tokens
+):
+    """Progress must not duplicate the first model output's token accounting."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16,
+        max_model_len=128,
+        async_scheduling=async_scheduling,
+    )
+    request = Request(
+        "progress",
+        list(range(64)),
+        SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+        None,
+        include_prefill_progress=include_prefill_progress,
+    )
+    scheduler.add_request(request)
+    outputs: list[EngineCoreOutput] = []
+    for _ in range(4 + max_tokens - 1):
+        scheduled = scheduler.schedule()
+        sampled = request.num_computed_tokens >= request.num_prompt_tokens
+        batches = scheduler.update_from_output(
+            scheduled,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[1] if sampled else []],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        outputs.extend(output for batch in batches.values() for output in batch.outputs)
+
+    progress_outputs = [output for output in outputs if not output.new_token_ids]
+    assert bool(progress_outputs) == include_prefill_progress
+    assert all(output.prefill_progress is not None for output in progress_outputs)
+    assert all(output.prefill_stats is None for output in progress_outputs)
+    if include_prefill_progress:
+        progress = progress_outputs[0].prefill_progress
+        assert progress.total_compute_tokens == 64
+        assert progress.remaining_compute_tokens == 48
+    token_outputs = [output for output in outputs if output.new_token_ids]
+    assert len(token_outputs) == max_tokens
+    assert token_outputs[0].prefill_stats is not None
+    assert token_outputs[0].prefill_stats.num_computed_tokens == 64
+    assert all(output.prefill_stats is None for output in token_outputs[1:])
+    assert token_outputs[-1].finish_reason == FinishReason.LENGTH
 
 
 def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
