@@ -1098,6 +1098,7 @@ def test_verify_rejects_unproposed_drafts():
             seeds=SimpleNamespace(gpu=inputs["seed"]),
         ),
         use_fp64_gumbel=False,
+        trace_replay_state=None,
     )
     rejection_sampler.num_speculative_steps = K
     rejection_sampler.synthetic_conditional_rates = None
@@ -1105,6 +1106,7 @@ def test_verify_rejects_unproposed_drafts():
     rejection_sampler.fly_window_size = 0
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
+    rejection_sampler.draft_logits_num_shards = 1
     rejection_sampler.watermark_key = None
 
     def verify() -> tuple[torch.Tensor, torch.Tensor]:
