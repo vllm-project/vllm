@@ -64,6 +64,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe as k2b
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 O0, O1 = NA, BLOCKS  # o_proj CTAs: every CTA past AttnRes's
 O_N = O1 - O0  # 200
@@ -540,7 +541,8 @@ def k2_launch(
     """Host launcher: ``core`` [S, 1536] (o_proj's input), ``prefix`` updated in
     place, ``out`` the MoE output [S, 7168]; MoE weights as ``moe``."""
     f = build(key)
-    f(
+    _run_compiled(
+        f,
         core.data_ptr(),
         w_o.data_ptr(),
         prefix.data_ptr(),
@@ -569,5 +571,5 @@ def k2_launch(
         layer,
         health.data_ptr(),
         alarm,
-        stream=torch.cuda.current_stream(),
+        torch.cuda.current_stream(),
     )
