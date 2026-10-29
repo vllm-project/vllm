@@ -1435,35 +1435,6 @@ class TestTieringOffloadingManager:
         ]
         assert not self.manager._pending_load_submissions
 
-    def test_submit_load_failure_releases_promotion(self, manager_setup, monkeypatch):
-        """A synchronous submission failure must not leak the job or its
-        primary slot, and must not block request finalization."""
-        chunk = to_keys([0])[0]
-        self.secondary_tier1.chunks[chunk] = True
-        ctx = ReqContext(req_id="req_submit_load_failure")
-
-        tier1_submit_load = MagicMock(side_effect=RuntimeError("submit failed"))
-        tier1_on_request_finished = MagicMock(
-            wraps=self.secondary_tier1.on_request_finished
-        )
-        monkeypatch.setattr(self.secondary_tier1, "submit_load", tier1_submit_load)
-        monkeypatch.setattr(
-            self.secondary_tier1, "on_request_finished", tier1_on_request_finished
-        )
-
-        self._start_request(ctx)
-        assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
-        assert self.manager.has_pending_work()
-
-        self.manager.on_request_finished(ctx)
-
-        assert self.manager._jobs == {}
-        assert not self.manager._pending_load_submissions
-        assert self.manager.primary_tier.lookup(chunk, ctx) is LookupResult.MISS
-        assert not self.manager.has_pending_work()
-        tier1_on_request_finished.assert_called_once_with(ctx)
-        assert ctx.req_id not in self.manager._req_state
-
     def test_has_pending_work_includes_deferred_promotions(self, manager_setup):
         """An unflushed promotion must keep the engine stepping."""
         chunk = to_keys([0])[0]

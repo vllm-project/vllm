@@ -839,27 +839,14 @@ class TieringOffloadingManager(OffloadingManager):
             req_context=entry.req_context,
         )
         self._register_job(transfer_job, tier_idx)
-        try:
-            self.secondary_tiers[tier_idx].submit_load(transfer_job)
-        except Exception:
-            logger.exception(
-                "Failed to submit promotion job %d to tier #%d",
-                transfer_job.job_id,
-                tier_idx,
-            )
-            job_metadata = self._pop_job(transfer_job.job_id)
-            assert job_metadata is not None
-            failed = JobResult(job_id=transfer_job.job_id, success=False)
-            self._metrics.on_job_finished(job_metadata, failed)
-            self._complete_promotion(job_metadata, failed)
+        self.secondary_tiers[tier_idx].submit_load(transfer_job)
 
     def _flush_pending_promotions_for(self, req_context: ReqContext) -> None:
         """Submit promotions queued by one request before it is finalized."""
         for tier_idx, pending_by_ctx in list(self._pending_load_submissions.items()):
-            for req_id, entry in list(pending_by_ctx.items()):
-                if entry.req_context is not req_context:
-                    continue
-                del pending_by_ctx[req_id]
+            entry = pending_by_ctx.get(req_context.req_id)
+            if entry is not None and entry.req_context is req_context:
+                del pending_by_ctx[req_context.req_id]
                 self._submit_promotion(tier_idx, entry)
             if not pending_by_ctx:
                 del self._pending_load_submissions[tier_idx]

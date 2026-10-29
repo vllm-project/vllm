@@ -279,11 +279,6 @@ class SecondaryTierManager(ABC):
 
         Report completion via ``get_finished_jobs()``.
 
-        If this method raises, the manager treats the job as failed and
-        releases its primary-tier slots. The implementation must not retain
-        the job or continue the transfer after raising. Once this method
-        returns, it must report a terminal result via ``get_finished_jobs()``.
-
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to write into.
