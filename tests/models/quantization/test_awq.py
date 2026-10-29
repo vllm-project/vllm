@@ -209,6 +209,7 @@ def test_awq_bfloat16_on_rocm(
 def test_awq_legacy_fallback_on_rdna(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
+    enable_pickle,
 ) -> None:
     """Disabling MP kernels must preserve FP16 AWQ loading and generation."""
     disabled_kernels = ",".join(
