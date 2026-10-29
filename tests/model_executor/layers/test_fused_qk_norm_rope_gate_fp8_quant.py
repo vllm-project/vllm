@@ -444,6 +444,7 @@ def test_qwen3_next_forward_dispatches_projection(use_prequantized_qkv):
 
     attention: Any = SimpleNamespace(
         use_prequantized_qkv=use_prequantized_qkv,
+        use_fused_output_gate=False,
         qkv_proj=lambda hidden_states: (hidden_states, None),
         o_proj=lambda attn_output: (attn_output, None),
         attn=attn,

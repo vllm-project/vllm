@@ -219,6 +219,10 @@ if TYPE_CHECKING:
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_USE_LOCALITY_DOMAINS: bool = False
+    VLLM_MOE_LOCALIZE_BACKFILL: bool = False
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -305,6 +309,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -1685,6 +1690,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
+    # Split Rubin NVFP4 MoE across locality domains. Requires cuda-bindings >= 13.4,
+    # a PyTorch build with torch.cuda.execute_on_streams, and FlashInfer with
+    # locality-domain MoE support (see vllm/distributed/localization.py).
+    "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
+        int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
+    ),
+    # Give each compute partition an equal share of all SMs, allowing remote SMs.
+    "VLLM_MOE_LOCALIZE_BACKFILL": lambda: bool(
+        int(os.getenv("VLLM_MOE_LOCALIZE_BACKFILL", "0"))
+    ),
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, overlap the
+    # output memset with FC1 on an auxiliary stream.
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
+    ),
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, release the
+    # full-width weight storage after sharding, disabling the full-width
+    # fallback. EPLB uses the registered shards instead of the originals.
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
+    ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
@@ -2094,7 +2120,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
-    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
@@ -2110,6 +2136,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
+    # larger than this skip the skinny path at 1 < n <= 5 (see
+    # vllm.model_executor.layers.utils.lmhead_skinny_guard_permits).
+    # wvSplitK's cost at n activation rows scales as ~n passes over the
+    # weight, so once the weight exceeds the last-level (memory-side)
+    # cache those extra passes are HBM round trips. 0 (the default)
+    # derives the cap from that cache size once at first use (256 MiB on
+    # MI355X, 128 MiB on MI300X-class parts), with a 256 MiB fallback
+    # where the size cannot be read — see the guard for how it's read.
+    # The portable device-properties API cannot be used: it exposes only
+    # the far smaller L2 (4 MiB on gfx950), which would disable the
+    # fastpath on every real lm_head shard. Set a value explicitly to
+    # override the hardware-derived cap; set it very large (e.g. 2**60)
+    # to disable the guard.
+    "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES": lambda: int(
+        os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", "0")
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream

@@ -290,6 +290,7 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        query_pre_quantized: bool = False,
         **extra_impl_args,
     ) -> None:
         """The KV cache is stored inside this class and is accessed via
@@ -503,7 +504,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
-            self.impl.supports_quant_query_input
+            # A model whose fused QK-norm/RoPE kernel already emits the
+            # quantized query (MiniMax-M3's DSpark draft) passes
+            # query_pre_quantized and skips this second quantization.
+            not query_pre_quantized
+            and self.impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8")
                 or self.kv_cache_dtype.startswith("nvfp4")
