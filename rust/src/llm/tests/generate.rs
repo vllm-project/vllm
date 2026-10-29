@@ -488,6 +488,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
+                                    num_cache_creation_tokens: 1,
                                     ..Default::default()
                                 })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
@@ -541,7 +542,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
-    assert_eq!(collected.usage.cached_token_count, 1);
+    assert_eq!(collected.usage.prompt_cache_usage.cached_token_count, 1);
+    assert_eq!(
+        collected.usage.prompt_cache_usage.cache_creation_token_count,
+        1
+    );
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
@@ -571,7 +576,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
-        cached_token_count: 0,
+        prompt_cache_usage: Default::default(),
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: Some(SamplingMask {
@@ -666,11 +671,17 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             .generate(request)
             .await
             .unwrap()
-            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .inspect(|output| {
+                streamed_counts.push(output.as_ref().unwrap().prompt_cache_usage.cached_token_count)
+            })
             .collect_output()
             .await
             .unwrap();
-        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        results.push((
+            name,
+            streamed_counts,
+            collected.usage.prompt_cache_usage.cached_token_count,
+        ));
         expected.push((
             name,
             vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
