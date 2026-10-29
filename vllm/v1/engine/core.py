@@ -103,7 +103,6 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheSpec,
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
@@ -258,16 +257,6 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
-    def _resolve_extensible_kv_cache(
-        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> None:
-        """Disable the extensible KV cache, everywhere, where it cannot be used."""
-        reason = self.model_executor.extensible_kv_cache_unsupported_reason(
-            kv_cache_specs
-        )
-        if reason is not None:
-            self.model_executor.disable_extensible_kv_cache(reason)
-
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -305,7 +294,11 @@ class EngineCore:
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
         if vllm_config.cache_config.enable_extensible_kv_cache:
-            self._resolve_extensible_kv_cache(kv_cache_specs)
+            # Disable it, everywhere, where it cannot be used.
+            executor = self.model_executor
+            reason = executor.extensible_kv_cache_unsupported_reason(kv_cache_specs)
+            if reason is not None:
+                executor.disable_extensible_kv_cache(reason)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
