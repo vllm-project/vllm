@@ -1,8 +1,9 @@
 /.venv
 /build
-/artifacts/vllm-rocm-install/
-/bake-config-build-*.json
-/wheel-export/
+/.rocm-version/
+/.rocm-wheel/
+/.rocm-kernel-map/
+/.rocm-src/
 dist
 vllm/*.so
 vllm/vllm-rs

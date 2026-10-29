@@ -95,6 +95,7 @@ def test_auto_backend_selects_guidance_for_mistral_lark(mode: ToolChoiceEnum):
         json_schema=None,
         parallel_tool_calls=True,
         json_only=False,
+        force_tool_names=False,
     )
     assert _validate(grammar, "auto", tokenizer)._backend == "guidance"
 

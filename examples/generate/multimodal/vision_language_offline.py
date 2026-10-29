@@ -21,6 +21,7 @@ from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
 from vllm.platforms import current_platform
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -1454,6 +1455,36 @@ def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# OpenVLA
+def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "openvla/openvla-7b"
+    chat_template = get_chat_template_fallback_path("openvla", model_name)
+    assert chat_template is not None
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [{"role": "user", "content": "pick up the red block"}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=chat_template.read_text(),
+        tokenize=False,
+    ).removeprefix(tokenizer.bos_token)
+    prompts = [prompt for _ in questions]
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=512,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=7),
+    )
+
+
 # Ovis
 def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2179,6 +2210,7 @@ model_example_map = {
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "openpangu_vl": run_openpangu_vl,
+    "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,

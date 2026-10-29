@@ -27,6 +27,8 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
         echo ">>> WARNING: ROCm ${ROCM_VER} wheel index not found at ${CANDIDATE_URL}"
         echo ">>>          Falling back to default PyPI (resolution may be incomplete)"
         TORCH_INDEX_URL=""
+        # The image's own stack builds (TheRock torch, triton, amdsmi) are on no public index.
+        LOCAL_BUILDS=1
     fi
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then
@@ -109,6 +111,14 @@ with open(out_path, "w") as f:
 
 print(f"Wrote {len(lines)} constraints to {out_path}")
 PYEOF
+
+if [[ -n "${LOCAL_BUILDS:-}" ]]; then
+    # Compare them at their public release. Dropped: amdsmi has none (TheRock ships it as
+    # sources) and triton is the stack's own, which its torch is repacked to require.
+    echo ">>> Pinning local builds to their public release:"
+    grep -E '==[^ ;]*\+|\[device-' "${WORK_DIR}/vllm-constraints.txt" || true
+    sed -i -E -e '/^(amdsmi|triton)([=<>!~ ;[]|$)|\[device-/d' -e 's/(==[^ ;+]+)\+[^ ;]*/\1/' "${WORK_DIR}/vllm-constraints.txt"
+fi
 
 echo ">>> Installed vllm deps (first 20 lines):"
 head -20 "${WORK_DIR}/vllm-constraints.txt"

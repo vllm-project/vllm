@@ -15,6 +15,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 logger = init_logger(__name__)
 
@@ -773,7 +774,8 @@ def flydsl_ultraquant_decode_attention(
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
         )
-    launch(
+    _run_compiled(
+        launch,
         segm_out,
         segm_sum,
         segm_max,

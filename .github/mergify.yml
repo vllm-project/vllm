@@ -752,6 +752,28 @@ pull_request_rules:
         - "stmatengss"
         - "LCAIZJ"
 
+- name: label-nixl
+  description: Automatically apply nixl label
+  conditions:
+    - label != stale
+    - or:
+      # Any NIXL-named file: KV connector and shared utils, NIXL EP
+      # dispatch, EC-transfer NIXL data, the offload p2p data layer,
+      # tests, docs, examples.
+      - files~=(?i)nixl
+      # KV offloading paths (multi-tiered KVCR tiering and simple), plus
+      # their tests and docs.
+      - files~=kv_offload
+      - title~=(?i)nixl
+  actions:
+    label:
+      add:
+        - nixl
+    assign:
+      users:
+        - "ovidiusm"
+        - "iyastreb"
+
 - name: label-scheduler
   description: Automatically apply scheduler label
   conditions:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from vllm.config.utils import config
 
@@ -50,6 +50,9 @@ class SpeechToTextParams:
     to_language: str | None = None
     """Target language for translation (model-dependent)."""
 
+    extra_args: dict[str, str | int | float | list[str | int | float]] | None = None
+    """Request extensions supplied through vllm_xargs."""
+
 
 @config
 class SpeechToTextConfig:
@@ -59,6 +62,10 @@ class SpeechToTextConfig:
     """Sample rate (Hz) to resample input audio to. Most speech models expect
     16kHz audio input. The input audio will be automatically resampled to this
     rate before processing."""
+
+    audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] | None = None
+    """Optional resampler applied after decoding at the native sample rate.
+    None preserves the audio decoder's default resampling behavior."""
 
     max_audio_clip_s: int | None = 30
     """Maximum duration in seconds for a single audio clip without chunking.

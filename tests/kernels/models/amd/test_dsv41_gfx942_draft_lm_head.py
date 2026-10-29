@@ -6,9 +6,11 @@ With --monokernel on gfx942, the draft's 5 rows of one request get a sixth
 row of zeros, so that vLLM's dispatch (rocm_unquantized_gemm) takes the torch
 GEMM instead of wvSplitK, and the logits of the first 5 rows come back. Every
 other row count, and every call without --monokernel, keeps vLLM's dispatch,
-which sends up to 5 rows to wvSplitK. The tests count the wvSplitK calls of
-vLLM's dispatch on the draft's lm_head shard at TP 4 and compare the logits
-with an fp32 GEMM.
+which sends up to 5 rows to wvSplitK. This shard is 315 MiB, over the
+memory-side cache, so the skinny-GEMM guard would skip wvSplitK for n > 1.
+The counting test lifts that cap to the shard. The guard has its own tests.
+The calls are counted on the draft's lm_head shard at TP 4 and the logits
+are compared with an fp32 GEMM.
 """
 
 import pytest
@@ -75,6 +77,29 @@ def wvsplitk_rows(monkeypatch):
     return rows
 
 
+@pytest.fixture
+def _shard_under_skinny_cap(monkeypatch):
+    """Let this shard take wvSplitK.
+
+    32320 x 5120 bf16 is 315 MiB, over the 256 MiB cap, so the guard
+    skips wvSplitK for n > 1. The cap here is the shard itself. The
+    accessor caches its one evaluation, so clear it on the way in and out.
+    """
+    import vllm.envs as envs
+    from vllm.model_executor.layers.utils import _skinny_gemm_max_weight_bytes
+
+    monkeypatch.setenv(
+        "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES",
+        str(VOCAB_SHARD * HIDDEN * torch.bfloat16.itemsize),
+    )
+    envs.disable_envs_cache()
+    _skinny_gemm_max_weight_bytes.cache_clear()
+    yield
+    envs.disable_envs_cache()
+    _skinny_gemm_max_weight_bytes.cache_clear()
+
+
+@pytest.mark.usefixtures("_shard_under_skinny_cap")
 @pytest.mark.parametrize("monokernel", [False, True])
 @pytest.mark.parametrize("rows", [1, 4, 5, 6, 10])
 def test_draft_lm_head_takes_5_rows_off_wvsplitk(

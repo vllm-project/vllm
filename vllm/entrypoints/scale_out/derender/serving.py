@@ -172,7 +172,7 @@ class ServingDerender(BaseServing):
             )
 
         try:
-            choices = await self.online_derenderer.derender_chat(
+            choices, prompt_logprobs = await self.online_derenderer.derender_chat(
                 request.generate_response,
                 request.chat_request,
                 request.prompt_token_ids,
@@ -205,7 +205,7 @@ class ServingDerender(BaseServing):
             created=int(time.time()),
             choices=choices,
             usage=usage,
-            prompt_logprobs=gen.prompt_logprobs,
+            prompt_logprobs=prompt_logprobs,
             prompt_token_ids=(
                 gen.prompt_token_ids
                 if request.chat_request is not None

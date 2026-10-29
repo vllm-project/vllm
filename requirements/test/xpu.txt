@@ -489,7 +489,7 @@ mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.7
+mistral-common==1.13.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1156,7 +1156,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.20.2
+transformers==5.21.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1212,7 +1212,6 @@ typing-extensions==4.16.0
     #   lm-eval
     #   mcp
     #   mcp-types
-    #   mistral-common
     #   mteb
     #   openai
     #   opentelemetry-api

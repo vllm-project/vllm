@@ -597,252 +597,96 @@ steps:
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
   # =============================================================================
-  #
-  # One group per ROCm stack, identified by its base Dockerfile (ROCM_BASE_DOCKERFILE).
-  # The scripts derive the ROCm version, wheel variant, cache keys and image tags from
-  # it (.buildkite/scripts/rocm/stack.sh), so both groups share one set of step
-  # definitions, anchored on the ROCm 10.0 group.
-  #
-  # - ROCm 10.0 (TheRock, docker/Dockerfile.rocm{,_base}) is the default: it owns the
-  #   :nightly / :latest images and the root wheel index.
-  # - ROCm 7.2 (docker/Dockerfile.rocm_72{,_base}) is kept for a transition period as
-  #   rocm72 images and wheels.
-  #
-  # vLLM version is determined by the Buildkite checkout (like the CUDA pipeline).
+  # One group per ROCm stack, on this pipeline's own agents. A serialized step builds the stack and
+  # runtime from source into ECR (once per content key, with only its own ECR build cache; it never
+  # reads rocm/vllm-ci); the build step compiles csrc for all release arches and pushes
+  # <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the steps
+  # after it only copy those (.buildkite/scripts/rocm/publish.sh).
+  # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
+  #   the root wheel index.
   # =============================================================================
 
-  - group: "Build ROCm 10.0 Wheel / Image"
-    key: "build-rocm100"
+  - group: ":rocm: ROCm 10.0"
+    key: build-rocm100
     depends_on: ~
     steps:
-      - label: ":rocm: Build ROCm 10.0 Base Image & Wheels"
-        id: build-rocm100-base
+      - label: ":rocm: Ensure ROCm 10.0 release stack + runtime"
+        key: build-rocm100-release-base
         depends_on: ~
-        agents: &rocm_build_agents
-          queue: cpu_queue_release
-        timeout_in_minutes: 360
-        env: &rocm100_env
-          ROCM_BASE_DOCKERFILE: "docker/Dockerfile.rocm_base"
-          ROCM_DEFAULT_ARG: "--default"
-          DOCKER_BUILDKIT: "1"
-          S3_BUCKET: "vllm-wheels"
-          DOCKERHUB_USERNAME: "vllmbot"
-        commands: &rocm_base_commands
-          - |
-            set -euo pipefail
-            source .buildkite/scripts/rocm/stack.sh "$${ROCM_BASE_DOCKERFILE}"
-            SCCACHE_ARGS=(--build-arg USE_SCCACHE=1 --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache
-              --build-arg SCCACHE_REGION_NAME=us-west-2 --build-arg SCCACHE_S3_NO_CREDENTIALS=0)
-            aws ecr-public get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 720   # a new stack key (release never uses the CI cache) takes hours
+        concurrency_group: vllm/rocm/release/stack-rocm   # one run builds a new key; the others then reuse it
+        concurrency: 1
+        env: &rocm_release_env {ROCM_CI_REPO: &rocm_ecr public.ecr.aws/q9t5s3a7/vllm-release-repo, SCCACHE_BUCKET_NAME: vllm-build-sccache}
+        commands:
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release-base
+        retry: &rocm_release_retry {automatic: [{exit_status: 75, limit: 1}]}   # registry error (build.sh)
+        plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
 
-            # Base image, cached in ECR by the base Dockerfile's hash
-            if docker manifest inspect "$${ROCM_STACK_ECR_BASE}" > /dev/null 2>&1; then
-              echo "ECR image cache HIT: $${ROCM_STACK_ECR_BASE}"
-            else
-              docker buildx build --file "$${ROCM_BASE_DOCKERFILE}" --tag "$${ROCM_STACK_ECR_BASE}" \
-                "$${SCCACHE_ARGS[@]}" --push .
-            fi
+      - label: ":rocm: Build ROCm 10.0 release image + wheels"
+        key: build-rocm100-release
+        depends_on: build-rocm100-release-base
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 720   # an all-arch csrc compile without sccache hits takes ~3h
+        env: *rocm_release_env
+        commands:
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release
+        retry: *rocm_release_retry
+        plugins: *rocm_hub_login
 
-            # Base wheels, cached in S3 (see cache-rocm-base-wheels.sh)
-            CACHE=.buildkite/scripts/cache-rocm-base-wheels.sh
-            if [ "$$($${CACHE} "$${ROCM_BASE_DOCKERFILE}" check)" = "hit" ]; then
-              $${CACHE} "$${ROCM_BASE_DOCKERFILE}" download
-            else
-              DEBS="rocm-base-debs:$${BUILDKITE_BUILD_NUMBER}-$${ROCM_STACK_VARIANT}"
-              docker buildx build --file "$${ROCM_BASE_DOCKERFILE}" --tag "$${DEBS}" \
-                --target debs_wheel_release "$${SCCACHE_ARGS[@]}" --load .
-              mkdir -p "$${ROCM_STACK_BASE_WHEELS_DIR}"
-              cid=$$(docker create "$${DEBS}")
-              docker cp "$${cid}":/app/debs/. "$${ROCM_STACK_BASE_WHEELS_DIR}/"
-              docker rm "$${cid}"
-              $${CACHE} "$${ROCM_BASE_DOCKERFILE}" upload
-            fi
-            buildkite-agent artifact upload "$${ROCM_STACK_BASE_WHEELS_DIR}/*.whl"
-
-      - label: ":python: Build vLLM ROCm 10.0 Wheel - x86_64"
-        id: build-rocm100-vllm-wheel
-        depends_on: build-rocm100-base
-        agents: *rocm_build_agents
-        timeout_in_minutes: 180
-        env: *rocm100_env
-        commands: &rocm_vllm_wheel_commands
-          - |
-            set -euo pipefail
-            source .buildkite/scripts/rocm/stack.sh "$${ROCM_BASE_DOCKERFILE}"
-            # Buildkite's default fetch doesn't update moved tags; version detection needs them
-            git fetch --tags --force origin
-            buildkite-agent artifact download "$${ROCM_STACK_BASE_WHEELS_DIR}/*.whl" .
-            aws ecr-public get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-            docker pull "$${ROCM_STACK_ECR_BASE}"
-            mkdir -p docker/context/base-wheels
-            touch docker/context/base-wheels/.keep
-            cp "$${ROCM_STACK_BASE_WHEELS_DIR}"/*.whl docker/context/base-wheels/
-            docker build --file "$${ROCM_STACK_DOCKERFILE}" --target export_vllm_wheel_release \
-              --output type=local,dest=rocm-dist \
-              --build-arg BASE_IMAGE="$${ROCM_STACK_ECR_BASE}" --build-arg REMOTE_VLLM=0 \
-              --build-arg GIT_REPO_CHECK=1 --build-arg USE_SCCACHE=1 \
-              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-              --build-arg SCCACHE_REGION_NAME=us-west-2 --build-arg SCCACHE_S3_NO_CREDENTIALS=0 .
-            mkdir -p "$${ROCM_STACK_VLLM_WHEEL_DIR}"
-            cp rocm-dist/*.whl "$${ROCM_STACK_VLLM_WHEEL_DIR}/"
-            buildkite-agent artifact upload "$${ROCM_STACK_VLLM_WHEEL_DIR}/*.whl"
-
-      - label: ":s3: Upload ROCm 10.0 Wheels to S3"
-        id: upload-rocm100-wheels
-        depends_on: build-rocm100-vllm-wheel
-        agents: *rocm_build_agents
+      - label: ":s3: Upload ROCm 10.0 wheels"
+        key: upload-rocm100-wheels
+        depends_on: build-rocm100-release
+        agents: {queue: cpu_queue_release}
         timeout_in_minutes: 60
-        env: *rocm100_env
-        commands: &rocm_upload_commands
-          - |
-            set -euo pipefail
-            source .buildkite/scripts/rocm/stack.sh "$${ROCM_BASE_DOCKERFILE}"
-            buildkite-agent artifact download "$${ROCM_STACK_BASE_WHEELS_DIR}/*.whl" .
-            buildkite-agent artifact download "$${ROCM_STACK_VLLM_WHEEL_DIR}/*.whl" .
-            bash .buildkite/scripts/upload-rocm-wheels.sh "$${ROCM_BASE_DOCKERFILE}"
+        env: {S3_BUCKET: vllm-wheels, ECR: *rocm_ecr}
+        command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
+        plugins: *rocm_hub_login
 
-      - label: ":memo: Annotate ROCm 10.0 wheel release"
-        id: annotate-rocm100-release
-        depends_on: upload-rocm100-wheels
-        agents: *rocm_build_agents
-        env: *rocm100_env
-        commands: &rocm_annotate_commands
-          - bash .buildkite/scripts/annotate-rocm-release.sh "$${ROCM_BASE_DOCKERFILE}" $${ROCM_DEFAULT_ARG}
+      - label: ":docker: ROCm 10.0 image: ECR tags (+ nightly Docker Hub)"
+        key: build-rocm100-release-image
+        depends_on:
+          - step: block-build-release-images
+            allow_failure: true
+          - build-rocm100-release
+        agents: {queue: small_cpu_queue_release}
+        env: {ECR: *rocm_ecr}
+        command: bash .buildkite/scripts/rocm/publish.sh rocm images
+        plugins: *rocm_hub_login
 
-      # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant), so users can
-      # `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/` (release only)
+      # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant).
       - block: "Generate Root Index for ROCm Wheels for Release"
         key: block-generate-root-index-rocm-wheels
-        depends_on:
-          - upload-rocm100-wheels
-          - upload-rocm72-wheels
+        depends_on: upload-rocm100-wheels
 
       - label: ":package: Generate Root Index for ROCm Wheels for Release"
+        key: generate-root-index-rocm-wheels
         depends_on: block-generate-root-index-rocm-wheels
-        id: generate-root-index-rocm-wheels
-        agents: *rocm_build_agents
-        env: *rocm100_env
-        commands:
-          - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
+        agents: {queue: cpu_queue_release}
+        env: {S3_BUCKET: vllm-wheels}
+        command: VARIANT=$$(buildkite-agent meta-data get rocm-rocm-variant) bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh
 
-      - label: ":docker: Build release image - x86_64 - ROCm 10.0"
-        id: build-rocm100-release-image
-        depends_on:
-          - step: block-build-release-images
-            allow_failure: true
-          - step: build-rocm100-base
-            allow_failure: false
-        agents: *rocm_build_agents
-        timeout_in_minutes: 180
-        env: *rocm100_env
-        commands: &rocm_release_image_commands
-          - |
-            set -euo pipefail
-            source .buildkite/scripts/rocm/stack.sh "$${ROCM_BASE_DOCKERFILE}"
-            aws ecr-public get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-            docker pull "$${ROCM_STACK_ECR_BASE}"
-            docker build --file "$${ROCM_STACK_DOCKERFILE}" --target vllm-openai \
-              --tag "$${ROCM_STACK_ECR_IMAGE}" --progress plain \
-              --build-arg max_jobs=16 --build-arg BASE_IMAGE="$${ROCM_STACK_ECR_BASE}" \
-              --build-arg INSTALL_LMCACHE=true --build-arg USE_SCCACHE=1 \
-              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-              --build-arg SCCACHE_REGION_NAME=us-west-2 --build-arg SCCACHE_S3_NO_CREDENTIALS=0 .
-            docker push "$${ROCM_STACK_ECR_IMAGE}"
-
-      - label: "Publish nightly ROCm 10.0 image to DockerHub"
-        id: publish-rocm100-nightly
-        depends_on: build-rocm100-release-image
-        if: build.env("NIGHTLY") == "1"
-        agents: &rocm_publish_agents
-          queue: small_cpu_queue_release
-        env: *rocm100_env
-        commands: &rocm_publish_nightly_commands
-          - bash .buildkite/scripts/push-nightly-builds-rocm.sh "$${ROCM_BASE_DOCKERFILE}" $${ROCM_DEFAULT_ARG}
-        plugins: &rocm_dockerhub_login
-          - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
-
-  - group: "Build ROCm 7.2 Wheel / Image"
-    key: "build-rocm72"
-    depends_on: ~
-    steps:
-      - label: ":rocm: Build ROCm 7.2 Base Image & Wheels"
-        id: build-rocm72-base
-        depends_on: ~
-        agents: *rocm_build_agents
-        timeout_in_minutes: 360
-        env: &rocm72_env
-          ROCM_BASE_DOCKERFILE: "docker/Dockerfile.rocm_72_base"
-          ROCM_DEFAULT_ARG: ""
-          DOCKER_BUILDKIT: "1"
-          S3_BUCKET: "vllm-wheels"
-          DOCKERHUB_USERNAME: "vllmbot"
-        commands: *rocm_base_commands
-
-      - label: ":python: Build vLLM ROCm 7.2 Wheel - x86_64"
-        id: build-rocm72-vllm-wheel
-        depends_on: build-rocm72-base
-        agents: *rocm_build_agents
-        timeout_in_minutes: 180
-        env: *rocm72_env
-        commands: *rocm_vllm_wheel_commands
-
-      - label: ":s3: Upload ROCm 7.2 Wheels to S3"
-        id: upload-rocm72-wheels
-        depends_on: build-rocm72-vllm-wheel
-        agents: *rocm_build_agents
-        timeout_in_minutes: 60
-        env: *rocm72_env
-        commands: *rocm_upload_commands
-
-      - label: ":memo: Annotate ROCm 7.2 wheel release"
-        id: annotate-rocm72-release
-        depends_on: upload-rocm72-wheels
-        agents: *rocm_build_agents
-        env: *rocm72_env
-        commands: *rocm_annotate_commands
-
-      - label: ":docker: Build release image - x86_64 - ROCm 7.2"
-        id: build-rocm72-release-image
-        depends_on:
-          - step: block-build-release-images
-            allow_failure: true
-          - step: build-rocm72-base
-            allow_failure: false
-        agents: *rocm_build_agents
-        timeout_in_minutes: 180
-        env: *rocm72_env
-        commands: *rocm_release_image_commands
-
-      - label: "Publish nightly ROCm 7.2 image to DockerHub"
-        id: publish-rocm72-nightly
-        depends_on: build-rocm72-release-image
-        if: build.env("NIGHTLY") == "1"
-        agents: *rocm_publish_agents
-        env: *rocm72_env
-        commands: *rocm_publish_nightly_commands
-        plugins: *rocm_dockerhub_login
-
-      - label: "Publish nightly XPU image to DockerHub"
-        depends_on:
-          - create-manifest-xpu
-        if: build.env("NIGHTLY") == "1"
-        agents:
-          queue: small_cpu_queue_release
-        commands:
-          - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
-        plugins:
-          - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
-        env:
-          DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
+  - label: "Publish nightly XPU image to DockerHub"
+    depends_on:
+      - create-manifest-xpu
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
   # Publish to DockerHub and PyPI (at the end so all builds complete first)
@@ -854,7 +698,6 @@ steps:
       - create-multi-arch-manifest
       - create-manifest-xpu
       - build-rocm100-release-image
-      - build-rocm72-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish
@@ -882,7 +725,6 @@ steps:
       # AWS EFA variant; skipped if no EFA image was built, fails on a partial build.
       - "cuda-13-0-efa"
       - "rocm"
-      - "rocm72"
       - "xpu"
       - "cpu"
     plugins:
