@@ -6,18 +6,18 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config_or_none
-
-from .ops.prefill_indexer_metadata import prepare_prefill_indexer
-from .ops.sparse_decode_attention import (
+from vllm.models.step5.common.ops.sparse_decode_attention import (
     sparse_decode_attention,
     sparse_decode_splits,
 )
-from .ops.sparse_indexer import (
+from vllm.models.step5.common.ops.sparse_indexer import (
     pack_decode_summary_pages,
     pack_summary_pages,
     select_regions,
 )
-from .ops.sparse_indexer_scores import decode_summary_scores
+from vllm.models.step5.common.ops.sparse_indexer_scores import decode_summary_scores
+
+from .ops.prefill_indexer_metadata import prepare_prefill_indexer
 from .ops.sparse_prefill import PrefillChunk, gather_prefill_kv
 from .ops.sparse_prefill_pages import CompactPagedPrefill
 
@@ -44,7 +44,9 @@ class Step5FlashInferSparse:
             config.kernel_config.sparse_indexer_topk_backend if config else "auto"
         )
         if torch.cuda.get_device_capability(device) == (9, 0):
-            from .ops.sparse_indexer_scores import paged_mqa_logits_sm90
+            from vllm.models.step5.common.ops.sparse_indexer_scores import (
+                paged_mqa_logits_sm90,
+            )
 
             self._logits = paged_mqa_logits_sm90
         else:

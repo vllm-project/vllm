@@ -12,9 +12,7 @@ reads; it is rewritten when the region closes again.
 
 import torch
 
-from vllm.triton_utils import tl, triton
-
-libdevice = tl.extra.cuda.libdevice
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -25,8 +23,8 @@ def _maximum(x, y):
 @triton.jit
 def _accumulate(numerator, denominator, maximum, key, z):
     updated_max = _maximum(maximum, tl.reduce(z, 0, _maximum))
-    scale = tl.where(denominator > 0, libdevice.exp(maximum - updated_max), 0)
-    weight = libdevice.exp(z - updated_max)
+    scale = tl.where(denominator > 0, tldevice.exp(maximum - updated_max), 0)
+    weight = tldevice.exp(z - updated_max)
     return (
         numerator * scale + weight * key,
         denominator * scale + weight,
