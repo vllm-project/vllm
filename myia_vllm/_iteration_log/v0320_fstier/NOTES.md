@@ -4405,3 +4405,19 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Note harnais** : la présente session a été servie en partie par **MiniMax M3.1 en 3ᵉ repli** (message claudish de retour au Sonnet nominal) — le quota Minimax est donc au fond, ce qui est cohérent avec le repli po-2027 programmé à 17-18Z **vers** Minimax : à confirmer côté hub que la marche existe encore avant la fenêtre.
 
 **Verdict** : 🟢 moteur (20 h, batterie uniforme, 7ᵉ cycle sans préemption, hit 89,7 %) · ⚠⚠ hôte à 97,5 % avec pagefile en extension · ⚠ commit à surveiller avant la fenêtre 17-18Z (le repli po-2027 déchargera le moteur, pas l'hôte). PR #266.
+
+## Reprise post-reboot (29/10 15:57Z) — MAJ Docker + reboot + « slimming » user : moteur sain, commit 97,5 → 58,2 %, Q46 RETIRÉE (markitdown `disabled:true` constaté, 0 instance)
+
+**Contexte** : reboot ai-01 ~15:0x-15:3xZ (MAJ Docker Desktop puis reboot, mandat user, annonce maintenance-13 14:47Z). Checkpoint pré-reboot consigné au cycle 14:1xZ (repo clean @ `f9e5dbddb4`, rien en vol).
+
+**Reprise moteur** : conteneur reparti seul au logon, **`StartedAt=2026-10-29T15:34:06Z`**, RC=0, health 200 **4,2 ms**, 3/3 Up. Probe décodage **200 en 0,60 s**. Watchdog : **765 `OK`** depuis le boot, **aucun fail post-boot** (le seul `fail 1/2` du tail est à 15:19:15Z, PENDANT l'arrêt pour la MAJ Docker — avant le `StartedAt`, segment pré-reboot du journal). VRAM à froid : GPU 0 **21 601** / GPU 1 **20 728** / GPU 2 **45 MiB** — sous la ligne 23 000, conforme au boot 0,73 (le plancher ~23,2 GiB ne s'installe qu'avec la charge, graphs capturés). `/dev/shm` **33G/63G = 51 %** = le tier 32 GiB reconstruit au boot, tmpfs vierge, **aucun orphelin, aucune purge nécessaire**.
+
+**★ Hôte — le « slimming » user porte ses fruits** : commit **97,5 % → 58,2 %** (237,1/**407,8** Go, **170,6 Go libres** ; le CommitLimit est aussi monté à 407,8 Go). La **porte GPU-2 (seuil < 85 %) est grande ouverte** pour CoursIA. C'est la sortie complète de la zone de panne (24/09 = 97,8 %).
+
+**★ Q46 RETIRÉE — retrait constaté** : `markitdown` dans le zoo-config Zoo est passé à **`disabled: true`** (roo-extensions/user pendant la fenêtre), et **0 instance python markitdown** vit sur la machine après réouverture. Le levier de ~11,3 Go est verrouillé **définitivement, par config** — pas de kill. `autoStart` reste à `true` dans le fichier mais `disabled` prime (précédent `jupyter`) ; pas de relance constatée.
+
+**Cron** : `d6ab14d5` a **survécu** à la suspension de session (session-only, prochaine exécution 18:11Z) — vérifié par `CronList`, job unique. La cadence 2 h reprend donc sans re-création.
+
+**En attente au prochain cycle (18:11Z)** : (1) **Q44 — repli po-2027 sous Minimax, fenêtre 17-18Z** : vérifier le geste côté claudish (hub po-2025, non affecté par ce reboot) avant le pic ~19Z ; (2) la re-montée du trafic hub après le reboot ; (3) à rendre au user : IP `82.66.89.184` revenue (6×200 à 14:1xZ), dérive `gh` vers `myia-ai-01` en cours de cycle, fork fichier RSM `workspace-vllm (1).md` reparu 12:28Z.
+
+Aucune action moteur effectuée au redémarrage (autologon + Docker au logon ont tout remonté seuls, comme annoncé par Maintenance).
