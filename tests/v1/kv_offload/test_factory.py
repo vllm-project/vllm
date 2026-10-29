@@ -797,8 +797,9 @@ def _fake_node_groups(monkeypatch, spanning_group: str | None) -> list[str]:
         ([{"type": "example"}], "pcp", True),
     ],
 )
+@pytest.mark.parametrize("on_head", [True, False])
 def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
-    monkeypatch, secondary_tiers, spanning_group, mirrored
+    monkeypatch, secondary_tiers, spanning_group, mirrored, on_head
 ):
     """Secondary tiers on an engine that spans nodes get a region mirror."""
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
@@ -814,24 +815,30 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
     )
     assert isinstance(spec, TieringOffloadingSpec)
     queried = _fake_node_groups(monkeypatch, spanning_group)
-    topology = MagicMock(rank=1, on_head=True)
+    topology = MagicMock(rank=1, on_head=on_head)
     monkeypatch.setattr(tiering_spec_module, "mirror_topology", lambda: topology)
     monkeypatch.setattr(
         tiering_spec_module, "gather_construction_errors", lambda *args: None
     )
     attach = MagicMock()
     monkeypatch.setattr(tiering_spec_module, "attach_region_mirror", attach)
+    region_ctor = MagicMock()
     worker_ctor = MagicMock()
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
 
     worker = spec.create_worker(MagicMock())
 
-    worker_ctor.assert_called_once()
     if mirrored:
         assert worker is attach.return_value
-        assert attach.call_args.args[0] is worker_ctor.return_value
-        assert attach.call_args.args[4] is topology
+        assert attach.call_args.args[5] is topology
+        if on_head:
+            assert attach.call_args.args[0] is worker_ctor.return_value
+        else:
+            # Off the head node GPU blocks go straight to the head region.
+            assert attach.call_args.args[:2] == (None, None)
+            region_ctor.assert_not_called()
+            worker_ctor.assert_not_called()
     else:
         assert worker is worker_ctor.return_value
         attach.assert_not_called()

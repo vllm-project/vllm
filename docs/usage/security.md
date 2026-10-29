@@ -28,7 +28,7 @@ The following options control internode communications in vLLM:
 
 #### 4. **Multi-Node KV Offloading:**
 
-- With `TieringOffloadingSpec` secondary tiers and workers on several nodes, each engine's head node registers its CPU offload region with NIXL, and the workers on other nodes read and write their slots in it with RDMA. Any host on the RDMA network that obtains the head's NIXL metadata can read or write the whole region, and traffic is unencrypted. Keep the nodes' RDMA network isolated.
+- With `TieringOffloadingSpec` secondary tiers and workers on several nodes, each engine's head node registers its CPU offload region with NIXL, and the workers on other nodes register their GPU KV cache and read and write their slots of the region with RDMA. Any host on the RDMA network that obtains an agent's NIXL metadata can read or write the memory it registered, and traffic is unencrypted. Keep the nodes' RDMA network isolated.
 
 ### Notes on PyTorch Distributed
 
