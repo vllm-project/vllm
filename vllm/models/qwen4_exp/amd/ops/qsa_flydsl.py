@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER FlyDSL kernels for the Qwen4Exp QSA indexer and sparse GQA.
 
-Opt-in with ``VLLM_ROCM_QSA_FLYDSL=1``. K1 replaces paged MQA scoring plus
-top-k and writes the same compressed block ids, so the Triton expand kernel
-and the MTP top-k reuse are unchanged. K2 replaces the sparse paged GQA and
-reads the K|V cache views in place. A shape either kernel cannot serve stays
-on the Triton path.
+Opt-in with ``--attention-config.qwen4_exp_qsa_backend flydsl``. K1 replaces
+paged MQA scoring plus top-k and writes the same compressed block ids, so the
+Triton expand kernel and the MTP top-k reuse are unchanged. K2 replaces the
+sparse paged GQA and reads the K|V cache views in place. A shape either kernel
+cannot serve stays on the Triton path.
 """
 
 from __future__ import annotations
 
-import os
 from functools import cache
 from types import ModuleType
 
@@ -23,13 +22,10 @@ from .qsa import _LOGITS_WORKSPACE_BYTES, expand_qsa_block_indices_cuda
 
 logger = init_logger(__name__)
 
-_ENABLED = os.getenv("VLLM_ROCM_QSA_FLYDSL", "0") == "1"
-
 
 @cache
-def _flydsl_qsa() -> ModuleType | None:
-    if not _ENABLED:
-        return None
+def flydsl_qsa() -> ModuleType:
+    """AITER's FlyDSL QSA module. Raises ImportError where AITER has none."""
     from aiter.ops.flydsl import qsa
 
     logger.info_once("Using AITER FlyDSL QSA kernels where the shape is served.")
@@ -51,9 +47,7 @@ def flydsl_select_paged_tokens(
 
     Returns None when K1 cannot serve these tensors.
     """
-    qsa = _flydsl_qsa()
-    if qsa is None:
-        return None
+    qsa = flydsl_qsa()
     reason = qsa.qsa_k1_selection_serves(
         token_topk, compress_ratio
     ) or qsa.qsa_k1_serves(q, k_cache, page_table)
@@ -115,9 +109,7 @@ def flydsl_sparse_paged_attention(
     out: torch.Tensor,
 ) -> bool:
     """Run FlyDSL K2 into ``out``. Returns False when K2 cannot serve it."""
-    qsa = _flydsl_qsa()
-    if qsa is None:
-        return False
+    qsa = flydsl_qsa()
     if not out.is_contiguous() or not logical_indices.is_contiguous():
         logger.warning_once("FlyDSL QSA K2 skipped: strided output or indices.")
         return False

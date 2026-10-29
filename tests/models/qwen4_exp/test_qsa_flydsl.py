@@ -84,7 +84,7 @@ class FakeQSA:
 def fake_qsa(monkeypatch):
     def install(**kwargs):
         fake = FakeQSA(**kwargs)
-        monkeypatch.setattr(qsa_flydsl, "_flydsl_qsa", lambda: fake)
+        monkeypatch.setattr(qsa_flydsl, "flydsl_qsa", lambda: fake)
         expanded = []
 
         def expand(blocks, positions, lengths, token_to_req, ratio, topk, out):
@@ -98,11 +98,15 @@ def fake_qsa(monkeypatch):
     return install
 
 
-def test_disabled_by_default():
-    qsa_flydsl._flydsl_qsa.cache_clear()
-    assert not qsa_flydsl._ENABLED
-    assert qsa_flydsl.flydsl_select_paged_tokens(**_selection_inputs(3)) is None
-    assert not qsa_flydsl.flydsl_sparse_paged_attention(**_attention_inputs(3))
+def test_triton_is_the_default_backend():
+    from vllm.config import AttentionConfig
+
+    assert AttentionConfig().qwen4_exp_qsa_backend == "triton"
+    assert AttentionConfig(qwen4_exp_qsa_backend="flydsl").qwen4_exp_qsa_backend == (
+        "flydsl"
+    )
+    with pytest.raises(ValueError):
+        AttentionConfig(qwen4_exp_qsa_backend="cuda")  # type: ignore[arg-type]
 
 
 def test_k1_selects_through_the_triton_expand(fake_qsa):
@@ -195,6 +199,7 @@ def test_select_trims_the_table_on_prefill_batches(
 
     monkeypatch.setattr(qsa_flydsl, "flydsl_select_paged_tokens", select)
     indexer = SimpleNamespace(
+        use_flydsl=True,
         compressed_key_cache=SimpleNamespace(kv_cache=None),
         token_topk=TOKEN_TOPK,
         compress_ratio=COMPRESS_RATIO,
@@ -213,6 +218,41 @@ def test_select_trims_the_table_on_prefill_batches(
     assert widths == [width]
 
 
+def test_select_stays_on_triton_without_the_flydsl_backend(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd import indexer_qsa
+    from vllm.models.qwen4_exp.amd.indexer_qsa import QSAIndexer
+
+    def flydsl(*args):
+        raise AssertionError("FlyDSL selected without the flydsl backend")
+
+    sentinel = object()
+    monkeypatch.setattr(qsa_flydsl, "flydsl_select_paged_tokens", flydsl)
+    monkeypatch.setattr(
+        "vllm.models.qwen4_exp.amd.ops.qsa.qsa_select_paged_tokens",
+        lambda *args: sentinel,
+    )
+    indexer = SimpleNamespace(
+        use_flydsl=False,
+        compressed_key_cache=SimpleNamespace(kv_cache=None),
+        token_topk=TOKEN_TOPK,
+        compress_ratio=COMPRESS_RATIO,
+    )
+    metadata = SimpleNamespace(
+        block_table=torch.zeros(2, 168, dtype=torch.int32),
+        token_to_req=None,
+        logical_positions=None,
+        seq_lens=None,
+        num_prefills=0,
+        max_seq_len=3000,
+        storage_block_size=392,
+        compress_ratio=COMPRESS_RATIO,
+    )
+    assert QSAIndexer._select(indexer, None, metadata, None) is sentinel
+    assert indexer_qsa  # the module imports without AITER
+
+
 def test_missing_aiter_raises(monkeypatch):
     import builtins
 
@@ -223,11 +263,10 @@ def test_missing_aiter_raises(monkeypatch):
             raise ImportError(name)
         return real_import(name, *args, **kwargs)
 
-    qsa_flydsl._flydsl_qsa.cache_clear()
-    monkeypatch.setattr(qsa_flydsl, "_ENABLED", True)
+    qsa_flydsl.flydsl_qsa.cache_clear()
     monkeypatch.setattr(builtins, "__import__", no_flydsl)
     try:
         with pytest.raises(ImportError, match="aiter"):
-            qsa_flydsl._flydsl_qsa()
+            qsa_flydsl.flydsl_qsa()
     finally:
-        qsa_flydsl._flydsl_qsa.cache_clear()
+        qsa_flydsl.flydsl_qsa.cache_clear()

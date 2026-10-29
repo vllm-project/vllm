@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+Qwen4ExpQSABackend = Literal["triton", "flydsl"]
 
 
 @config
@@ -44,6 +45,13 @@ class AttentionConfig:
     """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
     back to Triton where the CUTLASS kernel does not support the platform, KV
     cache dtype, or head layout."""
+
+    qwen4_exp_qsa_backend: Qwen4ExpQSABackend = "triton"
+    """Kernels for the Qwen4Exp QSA indexer scoring and top-k and for the sparse
+    GQA on ROCm. "triton" uses the Triton/HIP kernels. "flydsl" uses AITER's
+    FlyDSL kernels where the shape is served and falls back to Triton where it
+    is not; it fails at startup if AITER has no FlyDSL QSA module. Ignored off
+    ROCm."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by

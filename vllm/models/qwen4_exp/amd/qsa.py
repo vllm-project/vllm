@@ -250,6 +250,13 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             sinks,
         )
         self.kv_cache_dtype = real_kv_cache_dtype
+        self.use_flydsl = (
+            get_current_vllm_config().attention_config.qwen4_exp_qsa_backend == "flydsl"
+        )
+        if self.use_flydsl:
+            from .ops.qsa_flydsl import flydsl_qsa
+
+            flydsl_qsa()  # fail at startup if AITER has no FlyDSL QSA module
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         if self.dcp_world_size != 1:
@@ -436,7 +443,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         from .ops.qsa import qsa_sparse_paged_attention
         from .ops.qsa_flydsl import flydsl_sparse_paged_attention
 
-        if flydsl_sparse_paged_attention(
+        if self.use_flydsl and flydsl_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
             value_cache,

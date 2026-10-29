@@ -146,6 +146,11 @@ class QSAIndexer(nn.Module):
                 "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
+        self.use_flydsl = vllm_config.attention_config.qwen4_exp_qsa_backend == "flydsl"
+        if self.use_flydsl:
+            from .ops.qsa_flydsl import flydsl_qsa
+
+            flydsl_qsa()  # fail at startup if AITER has no FlyDSL QSA module
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -372,19 +377,20 @@ class QSAIndexer(nn.Module):
             # full graph, so size both to the longest live request instead.
             tokens_per_page = metadata.storage_block_size * metadata.compress_ratio
             block_table = block_table[:, : cdiv(metadata.max_seq_len, tokens_per_page)]
-        selected = flydsl_select_paged_tokens(
-            q,
-            self.compressed_key_cache.kv_cache,
-            block_table,
-            metadata.token_to_req,
-            metadata.logical_positions,
-            metadata.seq_lens,
-            self.token_topk,
-            self.compress_ratio,
-            out,
-        )
-        if selected is not None:
-            return selected
+        if self.use_flydsl:
+            selected = flydsl_select_paged_tokens(
+                q,
+                self.compressed_key_cache.kv_cache,
+                block_table,
+                metadata.token_to_req,
+                metadata.logical_positions,
+                metadata.seq_lens,
+                self.token_topk,
+                self.compress_ratio,
+                out,
+            )
+            if selected is not None:
+                return selected
         return qsa_select_paged_tokens(
             q,
             self.compressed_key_cache.kv_cache,
