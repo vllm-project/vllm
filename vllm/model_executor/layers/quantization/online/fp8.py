@@ -18,6 +18,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
+    init_wfp8_a16_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
@@ -131,6 +132,12 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
         super().__init__()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        raise ValueError(
+            "Online quantization of a tied lm_head is not supported; remove "
+            "the lm_head from quantization_config.targets."
+        )
 
     def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
         if self.requantization_source is None:
@@ -442,7 +449,8 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
-        expose_input_quant_key(layer, self.fp8_linear)
+        if self.activation_quant_key is not None:
+            expose_input_quant_key(layer, self.fp8_linear)
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
@@ -465,6 +473,43 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             return torch.nn.functional.linear(x, weight_dequant.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+class Fp8PerChannelWeightOnlyOnlineLinearMethod(Fp8PtpcOnlineLinearMethod):
+    """Online per-output-channel FP8 weights with unquantized activations
+    (W8A16). Used for the lm_head, where the logits GEMM keeps full-precision
+    activations."""
+
+    activation_quant_key = None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        OnlineLinearBase.create_weights(
+            self,
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        self.fp8_linear = init_wfp8_a16_linear_kernel(
+            weight_quant_key=self.weight_quant_key,
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
 
 
 # ---------------------------------------------------------------------------

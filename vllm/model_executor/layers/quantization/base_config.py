@@ -308,15 +308,19 @@ def resolve_quant_method(
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        UnquantizedEmbeddingMethod,
+    )
 
     base_quant_method = quant_config.get_quant_method(layer, prefix)
     if quant_config.online_quantization_config is None:
         # No online configuration: retain the checkpoint method.
         return base_quant_method
-    # Online quantization currently supports only LinearBase and RoutedExperts.
-    # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    if not isinstance(layer, (LinearBase, RoutedExperts)):
-        # Online quantization only supports linear and routed MoE layers.
+    # Online quantization supports LinearBase, RoutedExperts, and a
+    # ParallelLMHead selected by quantization_config.targets. Embeddings keep
+    # their checkpoint quantization method.
+    if not isinstance(layer, (LinearBase, RoutedExperts, ParallelLMHead)):
         return base_quant_method
 
     quant_config.online_quantization_config.packed_modules_mapping = (
@@ -328,6 +332,18 @@ def resolve_quant_method(
     online_target = quant_config.online_quantization_config.resolve_quant_method_cls(
         type(layer), prefix
     )
+
+    if isinstance(layer, ParallelLMHead) and online_target is not None:
+        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        if base_quant_method is not None and not isinstance(
+            base_quant_method, unquantized
+        ):
+            raise ValueError(
+                f"{prefix} is already quantized in the checkpoint "
+                f"({type(base_quant_method).__name__}); remove it from "
+                "quantization_config.targets."
+            )
+        return quant_config.online_quantization_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:
         if online_target is None:

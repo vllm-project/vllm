@@ -263,5 +263,9 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
+    - The lm_head (`ParallelLMHead`) is quantized only when a `targets` pattern
+      names it (e.g. `"re:.*lm_head$": "fp8_per_channel"`), only with
+      `fp8_per_channel`, and not when it is tied to the input embeddings. It
+      is quantized weight-only (fp8 weights, full-precision activations).
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.
