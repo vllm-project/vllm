@@ -14,15 +14,23 @@ from tests.v1.attention.test_gdn_metadata_builder import (
     _create_gdn_builder,
 )
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.worker.test_gpu_ubatch_slicing import (
+    _make_buffers,
+    _make_input_batch,
+    _make_ubatch_buffers,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+from vllm.v1.worker.gpu.ubatch_utils import _slice_input_batch, create_ubatch_slices
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -243,6 +251,46 @@ def _prepare_attn_metadata(
         kv_cache_config=Mock(),
     )
     return captured["model_specific_attn_metadata"]
+
+
+def test_prepare_attn_builds_each_microbatch_on_its_requests_state_slots():
+    """DBO decode microbatches use their own builder and their requests' slots."""
+    builders = [_create_gdn_builder(), _create_gdn_builder()]
+    for builder in builders:
+        # Hybrid DBO requires prefix caching off.
+        builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    group = AttentionGroup(
+        backend=GDNAttentionBackend,
+        layer_names=["layer.0"],
+        kv_cache_spec=builders[0].kv_cache_spec,
+        kv_cache_group_id=0,
+        metadata_builders=builders,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], group.kv_cache_spec)],
+    )
+    batch = _make_input_batch([1] * 4, [10, 20, 30, 40], _make_buffers())
+    state_slots = torch.tensor([[7], [3], [9], [5]], dtype=torch.int32)
+    ubatch_buffers = _make_ubatch_buffers()
+
+    for ubatch_idx, ubatch_slice in enumerate(create_ubatch_slices(batch, 2)):
+        ubatch = _slice_input_batch(batch, ubatch_slice, *ubatch_buffers[ubatch_idx])
+        metadata = _mamba_hybrid_state(num_speculative_tokens=0).prepare_attn(
+            input_batch=ubatch,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            block_tables=(state_slots[ubatch_slice.request_slice],),
+            slot_mappings=torch.zeros(1, ubatch.num_tokens, dtype=torch.int64),
+            attn_groups=[[group]],
+            kv_cache_config=kv_cache_config,
+            ubatch_idx=ubatch_idx,
+        )["layer.0"]
+
+        assert metadata.num_decodes == 2 and metadata.num_prefills == 0
+        assert metadata.non_spec_state_indices_tensor.tolist() == (
+            state_slots[ubatch_slice.request_slice, 0].tolist()
+        )
 
 
 def test_prepare_attn_keeps_the_accepted_offset_when_the_batch_drafted_nothing(

@@ -2220,6 +2220,14 @@ class VllmConfig:
             )
 
             self._raise_dbo_thresholds_for_spec_decode()
+            if self.model_config is not None and (
+                self.model_config.is_hybrid or self.model_config.is_attention_free
+            ):
+                # A split prefill would divide one request's recurrent state
+                # between microbatches, so only uniform decodes are split.
+                self.parallel_config.dbo_prefill_token_threshold = (
+                    self.scheduler_config.max_num_batched_tokens + 1
+                )
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -3287,8 +3295,25 @@ class VllmConfig:
             model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
-        if model_config is not None and model_config.is_hybrid:
-            unsupported.append("dual batch overlap with hybrid models")
+        # Recurrent state belongs to whole requests; per-step state hooks and
+        # graph buffers are not split per microbatch.
+        if (
+            model_config is not None
+            and (model_config.is_hybrid or model_config.is_attention_free)
+            and (
+                self.cache_config.mamba_cache_mode != "none"
+                or self.cache_config.use_kda_recoverssm
+                or self.speculative_config is not None
+                or self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                or self.scheduler_config.async_scheduling
+                or parallel_config.decode_context_parallel_size > 1
+            )
+        ):
+            unsupported.append(
+                "dual batch overlap with hybrid models outside --enforce-eager, "
+                "--no-async-scheduling, --no-enable-prefix-caching, DCP=1, no "
+                "speculative decoding and no RecoverSSM"
+            )
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             # DBO captures FULL graphs only.
             unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")

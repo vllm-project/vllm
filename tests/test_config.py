@@ -1943,6 +1943,55 @@ def test_dbo_thresholds_cover_a_request_per_microbatch(threshold, expected):
     assert parallel_config.dbo_prefill_token_threshold == expected
 
 
+def _make_hybrid_dbo_config(
+    *, enforce_eager=True, enable_prefix_caching=False, async_scheduling=False
+):
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+            max_model_len=512,
+            enforce_eager=enforce_eager,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
+        scheduler_config=SchedulerConfig(
+            max_model_len=512,
+            is_encoder_decoder=False,
+            async_scheduling=async_scheduling,
+        ),
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_dbo=True,
+            all2all_backend="nixl_ep",
+            distributed_executor_backend="mp",
+            nnodes=2,
+            enable_expert_parallel=True,
+        ),
+    )
+
+
+def test_hybrid_dbo_splits_only_uniform_decodes(monkeypatch):
+    """A split prefill would divide a request's recurrent state."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = _make_hybrid_dbo_config()
+    assert config.parallel_config.dbo_prefill_token_threshold == (
+        config.scheduler_config.max_num_batched_tokens + 1
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"enforce_eager": False},
+        {"enable_prefix_caching": True},
+        {"async_scheduling": True},
+    ],
+)
+def test_hybrid_dbo_rejects_unsupported_modes(monkeypatch, settings):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="hybrid models outside --enforce-eager"):
+        _make_hybrid_dbo_config(**settings)
+
+
 def test_engram_explicit_config_requires_supported_model():
     """Explicit all-false settings still opt into model validation."""
     with pytest.raises(ValueError, match="requires a model with supported Engram"):

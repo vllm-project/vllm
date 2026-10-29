@@ -41,6 +41,21 @@ EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
+### Hybrid attention/recurrent models
+
+!!! warning "Experimental"
+    Hybrid DBO has static review and component tests only. Model outputs and
+    performance have not been qualified.
+
+With `VLLM_USE_V2_MODEL_RUNNER=1`, hybrid and attention-free models run DBO
+with `--enforce-eager`, `--no-async-scheduling` and
+`--no-enable-prefix-caching`, without speculative decoding or decode context
+parallelism. Recurrent state belongs to whole requests, so only uniform decode
+batches are split: `--dbo-prefill-token-threshold` is raised above
+`--max-num-batched-tokens`, and steps with a prefill run unsplit. Each
+microbatch builds its recurrent metadata with its own builder over its own
+requests' state slots.
+
 ## DBO Components
 
 * GPUModelRunner
