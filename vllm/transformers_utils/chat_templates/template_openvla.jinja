@@ -1,12 +1,19 @@
-{# Image tokens are inserted after BOS by the multimodal processor, so no
-   image placeholder is rendered; a literal one shifts the prompt off the
-   HF reference. Only user text is used by the action-prediction prompt. #}
-{{ bos_token }}{%- for message in messages if message['role'] == 'user' -%}
+{# Mirrors OpenVLA's training prompt, "In: What action should the robot take
+   to {instruction}?\nOut: " with the instruction lowercased. predict_action()
+   appends token 29871 (a trailing space) if missing. The multimodal processor 
+   inserts image tokens after BOS. #}
+{%- set ns = namespace(text='') -%}
+{%- for message in messages if message['role'] == 'user' -%}
     {%- if message['content'] is string -%}
-        {{- message['content'] -}}
+        {%- set ns.text = message['content'] -%}
     {%- else -%}
-        {%- for item in message['content'] if item['type'] == 'text' -%}
-            {{- item['text'] -}}
-        {%- endfor -%}
+        {%- set ns.text = message['content'] | selectattr('type', 'equalto', 'text') | map(attribute='text') | join('') -%}
     {%- endif -%}
 {%- endfor -%}
+{%- set text = ns.text | trim -%}
+{{- bos_token -}}
+{%- if text.startswith('In:') -%}
+    {{- text ~ ' ' -}}
+{%- else -%}
+    {{- 'In: What action should the robot take to ' ~ (text.rstrip('.?!') | lower) ~ '?\nOut: ' -}}
+{%- endif -%}

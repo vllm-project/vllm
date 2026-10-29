@@ -1454,6 +1454,29 @@ def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# OpenVLA
+def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    instruction = "pick up the red block"
+    prompts = [
+        f"In: What action should the robot take to {instruction}?\nOut: "
+        for _ in questions
+    ]
+    engine_args = EngineArgs(
+        model="openvla/openvla-7b",
+        trust_remote_code=True,
+        max_model_len=512,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=7),
+    )
+
+
 # Ovis
 def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2179,6 +2202,7 @@ model_example_map = {
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "openpangu_vl": run_openpangu_vl,
+    "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,
