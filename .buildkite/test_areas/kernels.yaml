@@ -1065,6 +1065,7 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MoRI EP Numerics"
       dind: false
       device: mi355_2
