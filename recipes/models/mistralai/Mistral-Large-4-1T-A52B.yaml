@@ -635,6 +635,18 @@ notes:
       at T=1.5 it raises AL from 2.04 to 2.36–2.53 (+12–22% throughput). At
       T=1.0 with top-p 0.95 both modes give the same acceptance (AL 2.81 vs 2.80
       at c8), and greedy is ~1% faster per step. Both are lossless.
+  - title: "HiSparse: set the TRTLLM all-reduce backend"
+    when:
+      hardware: [gb300, b300, b200]
+      strategies: [single_node_tp]
+    body: |
+      With HiSparse KV offload (`--kv-transfer-config '{"kv_connector":"HiSparseConnector",...}'`),
+      also set `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm`. The default single-node
+      FlashInfer all-reduce (MNNVL) crashes the engine with `CUDA error: unspecified
+      launch failure` once HiSparse spills KV to host
+      ([vllm#64327](https://github.com/vllm-project/vllm/issues/64327); fix in
+      [flashinfer#7782](https://github.com/flashinfer-ai/flashinfer/pull/7782)).
+      TRTLLM decodes ~3% slower. Not needed without HiSparse.
   - title: "H200: two 8-GPU nodes"
     when:
       hardware: [h200]
