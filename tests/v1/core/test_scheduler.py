@@ -79,6 +79,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
+from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
@@ -2840,9 +2841,10 @@ def _run_spec_verify_steps(scheduler, rounds, grammar=None):
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
     if grammar is not None:
-        req.structured_output_request = SimpleNamespace(
-            grammar=grammar, reasoning_ended=True
+        req.structured_output_request = StructuredOutputRequest(
+            params=StructuredOutputsParams(regex="[0-9]+"), reasoning_ended=True
         )
+        req.structured_output_request.grammar = grammar
     for spec, out in rounds:
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
         output = scheduler.schedule()
@@ -2872,7 +2874,7 @@ def test_per_request_spec_decode_detailed_records_per_step():
     assert payload["num_spec_steps"] == 3
 
 
-class _PrefixGrammar:
+class _PrefixGrammar(StructuredOutputGrammar):
     """Grammar that accepts only the first ``num_valid`` draft tokens."""
 
     def __init__(self, num_valid: int) -> None:
@@ -2886,6 +2888,15 @@ class _PrefixGrammar:
 
     def is_terminated(self) -> bool:
         return False
+
+    def rollback(self, num_tokens: int) -> None:
+        pass
+
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        pass
 
 
 def test_per_request_spec_decode_counts_invalid_drafts():

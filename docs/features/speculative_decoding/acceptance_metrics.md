@@ -67,7 +67,7 @@ A `summary` response's `metrics` looks like:
 | `num_accepted_draft_tokens` | Total accepted draft tokens, excluding bonus tokens. |
 | `num_draft_tokens` | Total draft tokens proposed by the draft model. Includes tokens rejected by structured-output grammars or skipped by adaptive verification. |
 | `num_spec_tokens` | Configured `num_speculative_tokens` (`k`), i.e. the maximum draft length per step. |
-| `num_verified_tokens` | Total draft tokens the target model ran a forward pass on. Smaller than `num_draft_tokens` when adaptive verification skips draft tokens, or when synchronous scheduling drops grammar-invalid draft tokens before the forward pass. |
+| `num_verified_tokens` | Total draft tokens the target model ran a forward pass on, excluding bonus tokens. Smaller than `num_draft_tokens` when adaptive verification skips draft tokens, or when synchronous scheduling drops grammar-invalid draft tokens before the forward pass. |
 
 The counts always satisfy `num_draft_tokens >= num_verified_tokens >= num_accepted_draft_tokens`, both in total and at each step.
 
@@ -104,5 +104,3 @@ all-`n == 1` workloads):
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
 | `num_verified_tokens` | `vllm:spec_decode_num_verified_tokens_total` |
-
-Like the per-request field, `vllm:spec_decode_num_verified_tokens_total` excludes bonus tokens. For example, with adaptive verification (`enable_adaptive_verification=True`), a five-token proposal verified at three positions adds five to the draft counter and three to the verified counter.

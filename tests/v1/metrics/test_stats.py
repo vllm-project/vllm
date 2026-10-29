@@ -29,9 +29,7 @@ from vllm.v1.utils import compute_iteration_details
     "verified_lengths, expected_per_pos",
     [([3, 0, 0], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
 )
-def test_adaptive_verified_budget_counter_differs_from_proposals(
-    verified_lengths, expected_per_pos
-):
+def test_verified_counters_differ_from_proposals(verified_lengths, expected_per_pos):
     registry = CollectorRegistry()
     config = SpeculativeConfig(
         method="ngram",  # no weights needed

@@ -2243,7 +2243,7 @@ class Scheduler(SchedulerInterface):
             model_runner_output.prompt_token_id_logprobs_dict
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        num_verified_tokens = model_runner_output.num_verified_tokens_per_req
+        num_verified_tokens_per_req = model_runner_output.num_verified_tokens_per_req
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
@@ -2347,8 +2347,8 @@ class Scheduler(SchedulerInterface):
                         req_id, 0
                     )
                 num_proposed = num_verified + request.num_trimmed_spec_tokens
-                if num_verified_tokens is not None:
-                    num_verified = num_verified_tokens[req_index]
+                if num_verified_tokens_per_req is not None:
+                    num_verified = num_verified_tokens_per_req[req_index]
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_proposed,

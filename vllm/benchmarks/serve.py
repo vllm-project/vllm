@@ -259,7 +259,7 @@ async def fetch_spec_decode_metrics(
                                 )
                         elif "num_accepted_tokens" in metric_name:
                             num_accepted_tokens += int(float(parts[-1]))
-                        elif metric_name.endswith("num_verified_tokens_total"):
+                        elif "num_verified_tokens_total" in metric_name:
                             num_verified_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
@@ -1391,7 +1391,9 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
-        result["spec_decode_verified_tokens"] = spec_decode_stats["verified_tokens"]
+        result["spec_decode_verified_tokens"] = int(
+            spec_decode_stats["verified_tokens"]
+        )
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
@@ -1502,7 +1504,7 @@ async def benchmark(
         )
         print(
             "{:<40} {:<10}".format(
-                "Verified tokens:", spec_decode_stats["verified_tokens"]
+                "Verified tokens:", int(spec_decode_stats["verified_tokens"])
             )
         )
         per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])

@@ -193,7 +193,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
             }
         } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
-        } else if metric_name.ends_with("num_verified_tokens_total") {
+        } else if metric_name.contains("num_verified_tokens_total") {
             num_verified_tokens += val;
         }
     }

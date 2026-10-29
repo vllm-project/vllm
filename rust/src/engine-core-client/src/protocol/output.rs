@@ -204,6 +204,7 @@ pub struct RequestSpecDecodeMetrics {
     #[serde(default)]
     pub per_step_drafted: Vec<u64>,
     /// Total draft tokens the target model ran a forward pass on.
+    #[serde(default)]
     pub num_verified_tokens: u64,
     /// Verified draft count per verify step; empty unless `detailed`.
     #[serde(default)]
