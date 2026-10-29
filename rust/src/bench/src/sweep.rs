@@ -373,10 +373,6 @@ impl SummaryColumn {
 }
 
 /// Parse a comma-separated list of concurrency values.
-///
-/// A zero value is rejected here, before any sweep point runs: it would
-/// otherwise build `Semaphore::new(0)` and hang that point forever (the
-/// same failure as `--max-concurrency 0`; Python rejects it since #54887).
 pub fn parse_concurrency_values(s: &str) -> Result<Vec<usize>> {
     s.split(',')
         .map(|v| {
@@ -574,8 +570,6 @@ mod tests {
 
     #[test]
     fn parse_concurrency_values_rejects_zero() {
-        // Any zero point would hang its sweep run on Semaphore::new(0);
-        // reject the whole list before the first point starts.
         for input in ["0", "0,1", "1,0", "1,0,16"] {
             let err = parse_concurrency_values(input).expect_err("0 must be rejected");
             let msg = err.to_string();

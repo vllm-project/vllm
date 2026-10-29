@@ -246,10 +246,6 @@ impl BenchConfig {
             ));
         }
 
-        // A zero concurrency builds Semaphore::new(0) in benchmark.rs /
-        // multi_turn.rs, on which every request waits forever. Reject it
-        // here, matching Python `vllm bench serve` (since #54887), instead
-        // of hanging with no error.
         if args.max_concurrency == Some(0) {
             return Err(BenchError::Config(
                 "--max-concurrency must be greater than 0".into(),
@@ -1416,8 +1412,6 @@ mod tests {
 
     #[test]
     fn test_zero_max_concurrency_fails() {
-        // Matches Python `vllm bench serve` (since #54887): 0 would build
-        // Semaphore::new(0) and hang forever, so fail fast with its message.
         let args = parse_args(vec![
             "vllm-bench",
             "--model",
@@ -1452,7 +1446,6 @@ mod tests {
 
     #[test]
     fn test_zero_multi_turn_concurrency_fails() {
-        // Same Semaphore::new(0) hang via the multi-turn path.
         let args = parse_args(vec![
             "vllm-bench",
             "--model",
