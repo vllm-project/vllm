@@ -80,6 +80,7 @@ steps:
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
+  - tests/models/test_muse_spark_cuda_loading.py
   commands:
     - >-
       pytest -v -s
@@ -97,6 +98,7 @@ steps:
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/test_muse_spark_cuda_loading.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
