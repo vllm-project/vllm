@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -28,11 +29,12 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_properties, partial_tag_overlap
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -143,6 +145,59 @@ def _unwrap_wrapper_args(
     return args_json
 
 
+def make_param_value_extender(
+    param_start: str,
+    param_close: str,
+    extra_stop_tags: tuple[str, ...] = (),
+) -> Callable[[str], ArgValueExtender | None]:
+    """Build an ``arg_value_extender`` for one DSML parameter dialect.
+
+    ``_dsml_arg_converter`` re-serialises the whole parameter list on every
+    streaming tick, and the engine's ``arg_structural_chars`` gate (``'>'``)
+    drops every delta that carries no tag boundary. A long ``string="true"``
+    value contains no ``'>'`` at all, so it used to be buffered until the
+    closing tag arrived: the client received no bytes for as long as the
+    value took to generate, which for multi-KB values exceeds the client's
+    read timeout.
+
+    The returned extender re-serialises only the value tail, so the engine can
+    emit it immediately. A trailing partial tag is held back until it either
+    completes (``None`` makes the engine fall back to the full converter) or
+    turns out to be ordinary text.
+    """
+    param_open_re = re.compile(
+        rf'{re.escape(param_start)}\s+name="[^"]+"(?:\s+string="[^"]*")?\s*>'
+    )
+    stop_tags = (param_close, param_start, *extra_stop_tags)
+
+    def extender(raw_args: str) -> ArgValueExtender | None:
+        matches = list(param_open_re.finditer(raw_args))
+        if not matches:
+            return None
+        # Only extend while the last parameter's value is still open.
+        if any(tag in raw_args[matches[-1].end() :] for tag in stop_tags):
+            return None
+        # The engine ran a full conversion right before creating this
+        # extender, so the value generated so far has already been streamed.
+        held = ""
+
+        def extend(delta: str) -> str | None:
+            nonlocal held
+            text = held + delta
+            if any(tag in text for tag in stop_tags):
+                return None
+            keep = max(partial_tag_overlap(text, tag) for tag in stop_tags)
+            visible = text[:-keep] if keep else text
+            held = text[len(visible) :]
+            if not visible:
+                return ""
+            return json.dumps(visible, ensure_ascii=False)[1:-1]
+
+        return extend
+
+    return extender
+
+
 @functools.cache
 def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
@@ -238,6 +293,9 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
+        arg_value_extender=make_param_value_extender(
+            DSML_PARAM_START, DSML_PARAM_CLOSE, (DSML_INVOKE_END,)
+        ),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )

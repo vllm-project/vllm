@@ -29,6 +29,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_PARAM_START,
     _dsml_arg_converter,
     _unwrap_wrapper_args,
+    make_param_value_extender,
 )
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -115,6 +116,9 @@ def deepseek_v32_config() -> ParserEngineConfig:
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
+        arg_value_extender=make_param_value_extender(
+            DSML_PARAM_START, DSML_PARAM_CLOSE, (DSML_INVOKE_END,)
+        ),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )

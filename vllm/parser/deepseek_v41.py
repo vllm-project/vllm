@@ -10,6 +10,7 @@ from vllm.parser.deepseek_v4 import (
     _dsml_arg_converter,
     _param_patterns,
     deepseek_v4_config,
+    make_param_value_extender,
 )
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig
 
@@ -46,6 +47,9 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
             _dsml_arg_converter,
             param_re=_PARAM_RE,
             partial_param_re=_PARTIAL_PARAM_RE,
+        ),
+        arg_value_extender=make_param_value_extender(
+            DSML_PARAM_START, DSML_PARAM_CLOSE, (DSML_INVOKE_END,)
         ),
     )
 
