@@ -506,7 +506,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 device=device,
             )
         else:
-            stream = torch.cuda.current_stream()
+            stream = current_stream()
             for m in meta:
                 weight = torch.empty(m.shape, dtype=m.dtype, device=device)
                 self.model_update_group.broadcast(weight, src=src, stream=stream)
