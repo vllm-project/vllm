@@ -1386,6 +1386,19 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_max_concurrency_fails() {
+        let args = parse_args(["vllm-bench", "--max-concurrency", "0"]);
+        let msg = BenchConfig::from_args(&args)
+            .expect_err("--max-concurrency 0 must be rejected")
+            .to_string();
+
+        assert!(
+            msg.contains("--max-concurrency must be greater than 0"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn test_zero_max_model_len_fails() {
         let args = vec![
             "vllm-bench",

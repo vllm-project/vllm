@@ -432,6 +432,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn concurrency_values_reject_zero() {
+        assert!(parse_concurrency_values("0,1").is_err());
+    }
+
+    #[test]
+    fn concurrency_values_parse_positive_list() {
+        assert_eq!(parse_concurrency_values("1, 4,16").unwrap(), vec![1, 4, 16]);
+    }
+
     fn point(result_json: serde_json::Value) -> SweepPoint {
         let ss_request_throughput = ss_f64(&result_json, "request_throughput");
         let ss_output_throughput = ss_f64(&result_json, "output_throughput");
