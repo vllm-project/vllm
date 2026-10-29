@@ -45,15 +45,6 @@ from vllm.v1.worker.mamba_utils import validate_mamba_state_copy_funcs
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
-
-
-@pytest.fixture(autouse=True)
-def _no_breakable_cudagraph_env_leak(monkeypatch):
-    # The Qwen3.5 config below auto-enables breakable cudagraphs via a
-    # process-wide env var; keep it from leaking into other tests.
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-
-
 PRUNED_METADATA_FIELDS = {
     "chunk_indices",
     "chunk_offsets",
