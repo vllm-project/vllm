@@ -139,6 +139,9 @@ def test_ple_metadata_preserves_request_and_token_order(
     assert metadata.num_decodes == sum(query_lens[i] == 1 for i in non_spec_rows)
     assert metadata.num_prefills == sum(query_lens[i] > 1 for i in non_spec_rows)
     if spec_rows:
+        assert metadata.spec_state_indices_tensor is not None
+        assert metadata.num_accepted_tokens is not None
+        assert metadata.spec_query_start_loc is not None
         torch.testing.assert_close(
             metadata.spec_state_indices_tensor[: len(spec_rows)],
             common.block_table_tensor[spec_rows, 0],
