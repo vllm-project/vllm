@@ -12,13 +12,14 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from ..conftest import ImageTestAssets, VllmRunner
 from ..models.registry import HF_EXAMPLE_MODELS
+from ..v1.e2e.spec_decode.utils import compute_acceptance_rate
 
 
 @pytest.mark.distributed(num_gpus=4)
 def test_deepseek_v41_image_pcp(
     vllm_runner: type[VllmRunner], image_assets: ImageTestAssets, monkeypatch
 ):
-    """Read image content across PCP chunks, then reuse it in a mixed batch."""
+    """Draft from image context across PCP chunks and cached mixed batches."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     model = HF_EXAMPLE_MODELS.get_hf_info("DeepseekV41ForCausalLM").default
     image_chat: list[ChatCompletionMessageParam] = [
@@ -31,8 +32,8 @@ def test_deepseek_v41_image_pcp(
                 },
                 {
                     "type": "text",
-                    "text": "Read the prominent English text in the image. "
-                    "Reply with that text only.",
+                    "text": "Read the prominent English text in the image and "
+                    "explain its meaning in one sentence.",
                 },
             ],
         }
@@ -46,6 +47,9 @@ def test_deepseek_v41_image_pcp(
         enable_expert_parallel=True,
         enforce_eager=True,
         compilation_config={"mode": 0, "cudagraph_mode": "NONE"},
+        speculative_config={"method": "dspark", "num_speculative_tokens": 5},
+        async_scheduling=False,
+        disable_log_stats=False,
         attention_backend="FLASHMLA_SPARSE_DSV41",
         moe_backend="humming",
         kv_cache_dtype="fp8_ds_mla",
@@ -67,6 +71,8 @@ def test_deepseek_v41_image_pcp(
         assert cold.prompt_token_ids is not None
         assert cold.prompt_token_ids.count(129264) > 128
         assert re.search(r"\bstop\b", cold.outputs[0].text, re.IGNORECASE)
+        cold_metrics = runner.llm.get_metrics()
+        assert compute_acceptance_rate(cold_metrics) > 0
 
         mixed = runner.llm.chat(
             [
@@ -84,3 +90,4 @@ def test_deepseek_v41_image_pcp(
         assert re.search(r"\b4\b", mixed[1].outputs[0].text)
         assert mixed[0].num_cached_tokens is not None
         assert mixed[0].num_cached_tokens > 0
+        assert compute_acceptance_rate(runner.llm.get_metrics(), cold_metrics) > 0

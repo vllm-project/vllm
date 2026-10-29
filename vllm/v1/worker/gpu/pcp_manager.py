@@ -170,22 +170,13 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
             )
-        if supports_mm_inputs:
-            if not (
-                current_platform.is_cuda()
-                and model_config.architecture == "DeepseekV41ForCausalLM"
-            ):
-                raise NotImplementedError(
-                    "MRV2 PCP supports MM inputs only for DeepSeek-V4.1 on CUDA."
-                )
-            if (
-                vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                or vllm_config.speculative_config is not None
-            ):
-                raise NotImplementedError(
-                    "DeepSeek-V4.1 PCP image inputs require cudagraph_mode=NONE "
-                    "and no speculative decoding."
-                )
+        if supports_mm_inputs and not (
+            current_platform.is_cuda()
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP supports MM inputs only for DeepSeek-V4.1 on CUDA."
+            )
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
