@@ -1026,23 +1026,8 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 
 def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
-    """Return the backbone layers that reuse a previous layer's top-k indices.
-
-    A "shared" indexer layer performs sparse attention with the indices computed
-    by the closest preceding "full" indexer layer, so it does not build its own
-    indexer and its checkpoint indexer weights must be skipped.
-
-    Args:
-        config: The model config.
-
-    Returns:
-        The set of layer indices that share another layer's top-k indices.
-
-    Raises:
-        ValueError: If ``indexer_types`` has the wrong length or an unknown
-            entry, or if ``index_topk_freq`` is not a positive integer.
-
-    """
+    """Backbone layers that reuse the top-k of the closest preceding indexer
+    layer instead of building their own indexer."""
     if not hasattr(config, "index_topk"):
         return set()
 
@@ -1081,25 +1066,33 @@ def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
 
 
 def pp_splits_layer_sharing(
-    num_hidden_layers: int, producers: Iterable[int], consumers: Iterable[int]
+    num_hidden_layers: int, users: Iterable[int], consumers: set[int]
 ) -> bool:
-    """Whether a later PP stage reads cross-layer state before writing it.
-
-    Each consumer layer reads state that the closest preceding producer layer
-    wrote in the same forward pass, so a stage whose first producer-or-consumer
-    layer is a consumer needs that state from an earlier stage.
-    """
+    """Whether a later PP stage's first ``users`` layer is one of ``consumers``,
+    which read state an earlier layer wrote in the same forward pass."""
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
 
-    consumers = set(consumers)
-    users = sorted(consumers.union(producers))
+    users = sorted(users)
     pp_size = get_pp_group().world_size
     for rank in range(1, pp_size):
         start, _ = get_pp_indices(num_hidden_layers, rank, pp_size)
         if next((layer for layer in users if layer >= start), None) in consumers:
             return True
     return False
+
+
+def pp_topk_buffers(
+    config: "PreTrainedConfig",
+    topk_indices_buffer: torch.Tensor,
+    topk_layers: Iterable[int],
+) -> dict[str, torch.Tensor]:
+    """The shared top-k, if a later PP stage starts on a layer that reuses it."""
+    topk_layers = set(topk_layers)
+    skip_layers = compute_skip_topk_layers(config) & topk_layers
+    if pp_splits_layer_sharing(config.num_hidden_layers, topk_layers, skip_layers):
+        return {"topk_indices": topk_indices_buffer}
+    return {}
 
 
 def copy_pp_buffers(

@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -45,10 +46,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v32.attention import (
-    DeepseekV32Attention,
-    pp_topk_buffers,
-)
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -232,7 +230,9 @@ class DeepseekV32Model(torch.nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.pp_buffers = pp_topk_buffers(config, self.topk_indices_buffer)
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, range(config.num_hidden_layers)
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
         )

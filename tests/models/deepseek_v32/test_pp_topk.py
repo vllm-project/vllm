@@ -9,7 +9,6 @@ from torch import nn
 
 from vllm.distributed import parallel_state
 from vllm.model_executor.models import utils as model_utils
-from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.sequence import IntermediateTensors
 
@@ -25,16 +24,16 @@ def _set_pp_size(monkeypatch, pp_size: int) -> None:
 
 class TestPPSplitsLayerSharing:
     @pytest.mark.parametrize(
-        "num_layers,producers,consumers,pp_size,expected",
+        "num_layers,users,consumers,pp_size,expected",
         [
-            (8, {0, 4}, {1, 2, 3, 5, 6, 7}, 2, False),
-            (8, {0, 3}, {1, 2, 4, 5, 6, 7}, 2, True),
-            (8, {0, 3}, {1, 2, 4, 5, 6, 7}, 1, False),
-            # Layers 4-5 neither produce nor consume, so stage 1 starts at 6.
-            (8, {0, 6}, {1, 2, 3, 7}, 2, False),
-            (8, {0}, {1, 2, 3, 6, 7}, 2, True),
-            (12, {0, 4, 8}, {1, 2, 3, 5, 6, 7, 9, 10, 11}, 3, False),
-            (12, {0, 5, 8}, {1, 2, 3, 4, 6, 7, 9, 10, 11}, 3, True),
+            (8, range(8), {1, 2, 3, 5, 6, 7}, 2, False),
+            (8, range(8), {1, 2, 4, 5, 6, 7}, 2, True),
+            (8, range(8), {1, 2, 4, 5, 6, 7}, 1, False),
+            # Layers 4-5 do not use the state, so stage 1's first user is 6.
+            (8, {0, 1, 2, 3, 6, 7}, {1, 2, 3, 7}, 2, False),
+            (8, {0, 1, 2, 3, 6, 7}, {1, 2, 3, 6, 7}, 2, True),
+            (12, range(12), {1, 2, 3, 5, 6, 7, 9, 10, 11}, 3, False),
+            (12, range(12), {1, 2, 3, 4, 6, 7, 9, 10, 11}, 3, True),
         ],
         ids=[
             "split-on-producer",
@@ -47,11 +46,11 @@ class TestPPSplitsLayerSharing:
         ],
     )
     def test_stage_boundaries(
-        self, monkeypatch, num_layers, producers, consumers, pp_size, expected
+        self, monkeypatch, num_layers, users, consumers, pp_size, expected
     ):
         _set_pp_size(monkeypatch, pp_size)
         assert (
-            model_utils.pp_splits_layer_sharing(num_layers, producers, consumers)
+            model_utils.pp_splits_layer_sharing(num_layers, users, consumers)
             == expected
         )
 
@@ -60,13 +59,13 @@ class TestPPSplitsLayerSharing:
         [(78, True), (76, False)],
         ids=["glm5-default-split", "split-on-group-start"],
     )
-    def test_dsa_topk_buffers(self, monkeypatch, num_layers, expected):
+    def test_topk_buffers(self, monkeypatch, num_layers, expected):
         _set_pp_size(monkeypatch, 2)
         config = SimpleNamespace(
             num_hidden_layers=num_layers, index_topk=8, **GLM5_TOPK
         )
         buffer = torch.empty(4, 8, dtype=torch.int32)
-        buffers = deepseek_v32_attention.pp_topk_buffers(config, buffer)
+        buffers = model_utils.pp_topk_buffers(config, buffer, range(num_layers))
         assert buffers == ({"topk_indices": buffer} if expected else {})
 
 

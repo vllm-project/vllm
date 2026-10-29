@@ -34,7 +34,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (
     compute_skip_topk_layers,
     extract_layer_index,
-    pp_splits_layer_sharing,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
@@ -49,17 +48,6 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
-
-
-def pp_topk_buffers(
-    config: DeepseekV2Config | DeepseekV3Config, topk_indices_buffer: torch.Tensor
-) -> dict[str, torch.Tensor]:
-    """The shared top-k, if a later PP stage starts on a layer that reuses it."""
-    skip_layers = compute_skip_topk_layers(config)
-    producers = set(range(config.num_hidden_layers)) - skip_layers
-    if pp_splits_layer_sharing(config.num_hidden_layers, producers, skip_layers):
-        return {"topk_indices": topk_indices_buffer}
-    return {}
 
 
 class DeepseekV32Indexer(nn.Module):

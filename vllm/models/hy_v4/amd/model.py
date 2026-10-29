@@ -60,7 +60,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
-    pp_splits_layer_sharing,
+    pp_topk_buffers,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -290,14 +290,8 @@ class HYV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        sparse_layers = sparse_layer_ids(config)
-        skip_layers = compute_skip_topk_layers(config) & sparse_layers
-        self.pp_buffers = (
-            {"topk_indices": self.topk_indices_buffer}
-            if pp_splits_layer_sharing(
-                config.num_hidden_layers, sparse_layers - skip_layers, skip_layers
-            )
-            else {}
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, sparse_layer_ids(config)
         )
         if self.enable_ihc:
             # iHC head layer: merge the residual channels into one stream.

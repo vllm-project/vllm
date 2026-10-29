@@ -1504,7 +1504,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         sparse_layers = _sparse_attention_layer_ids(config)
         skip_layers = {i for i in sparse_layers if _should_skip_index_topk(config, i)}
         if pp_splits_layer_sharing(
-            config.num_hidden_layers, sparse_layers - skip_layers, skip_layers
+            config.num_hidden_layers, sparse_layers, skip_layers
         ):
             # The top-k is sharded over TP index heads, so PP cannot send it.
             raise NotImplementedError(
