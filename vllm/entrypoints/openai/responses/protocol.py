@@ -72,7 +72,12 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -81,6 +86,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -443,6 +449,7 @@ class ResponsesRequest(OpenAIBaseModel):
     stop: StopParam = []
     stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
+    thinking_token_budget: ThinkingTokenBudget = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -478,6 +485,7 @@ class ResponsesRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
         from .utils import should_continue_final_message
 
@@ -487,7 +495,9 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
-        reasoning_effort = None if reasoning is None else reasoning.effort
+        reasoning_effort = map_reasoning_effort(
+            None if reasoning is None else reasoning.effort, reasoning_effort_map
+        )
 
         extra_kwargs: dict[str, Any] = dict(
             add_generation_prompt=not continue_final,
@@ -637,6 +647,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
+            thinking_token_budget=self.thinking_token_budget,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=skip_special_tokens,

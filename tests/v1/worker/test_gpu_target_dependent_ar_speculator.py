@@ -88,7 +88,10 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
 
     speculator = object.__new__(_TestSpeculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32)
+    )
+    speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(4, dtype=torch.int64),
@@ -197,6 +200,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
             data_parallel_size=1,
             data_parallel_rank=0,
             decode_context_parallel_size=1,
+            use_ubatching=False,
         ),
     )
 
@@ -229,6 +233,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.draft_model_config = draft_model_config
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
+        speculator.use_draft_logits = False
 
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
@@ -253,6 +258,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -275,6 +281,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -305,6 +312,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.cached_draft_input_embeds = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
@@ -672,3 +680,38 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator._configure_decode_metadata_update()
 
     assert speculator.supports_decode_metadata_update is expected
+
+
+def test_rebuilt_prefill_metadata_uses_target_batch_slots():
+    # Under DBO the target builds only per-microbatch metadata, so the drafter
+    # rebuilds the full batch's on its own builders from the target's slots.
+    speculator = object.__new__(_TestSpeculator)
+    target = ({"draft": "target metadata"}, {"draft": torch.zeros(6)})
+    assert speculator._build_drafter_attn_metadata(None, *target) == target
+
+    speculator.can_reuse_target_attn_metadata = False
+    speculator.attn_groups = [[Mock()]]
+    speculator.model_state = Mock()
+    speculator.model_state.prepare_attn.return_value = {"draft": "metadata"}
+    speculator.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])]
+    )
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.arange(8, dtype=torch.int32).view(4, 2)],
+        slot_mappings=torch.arange(8).view(1, 8),
+    )
+    input_batch = SimpleNamespace(num_reqs_after_padding=2, num_tokens_after_padding=6)
+
+    attn_metadata, slot_mappings = speculator._build_drafter_attn_metadata(
+        input_batch, *target, CUDAGraphMode.FULL
+    )
+
+    assert attn_metadata == {"draft": "metadata"}
+    args = speculator.model_state.prepare_attn.call_args.args
+    batch, cg_mode, (block_table,), target_slots, attn_groups, _ = args
+    assert batch is input_batch and cg_mode == CUDAGraphMode.FULL
+    assert attn_groups is speculator.attn_groups
+    assert block_table.shape == (2, 2)
+    assert target_slots.data_ptr() == speculator.block_tables.slot_mappings.data_ptr()
+    assert target_slots.shape == (1, 6)
+    assert slot_mappings["draft"].tolist() == list(range(6))
