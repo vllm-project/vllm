@@ -1012,6 +1012,27 @@ def _test_completion(
     return results
 
 
+# bf16 noise alone moves top-5 logprobs by up to ~0.5 versus an fp32 reference
+# (observed on granite-3.0-1b-a400m), so compiled vs eager need not match exactly.
+_CLOSE_LOGPROB_ATOL = 0.5
+
+
+def _assert_top_logprobs_close(
+    ref: dict[str, float], other: dict[str, float], model: str
+) -> None:
+    ref_top = max(ref, key=ref.__getitem__)
+    other_top = max(other, key=other.__getitem__)
+    assert ref_top == other_top, (
+        f"Top-1 token for {model=} differs: {ref_top!r} vs {other_top!r}\n"
+        f"{ref=}\n{other=}\n"
+    )
+    for token in ref.keys() & other.keys():
+        assert abs(ref[token] - other[token]) <= _CLOSE_LOGPROB_ATOL, (
+            f"Logprob of {token!r} for {model=} differs: "
+            f"{ref[token]} vs {other[token]}\n{ref=}\n{other=}\n"
+        )
+
+
 def _test_completion_close(
     client: openai.OpenAI,
     model: str,
@@ -1310,6 +1331,12 @@ def compare_all_settings(
                         )
                         del ref_result["embedding"]
                         del compare_result["embedding"]
+                    if method == "generate_close" and "logprobs" in ref_result:
+                        _assert_top_logprobs_close(
+                            ref_result.pop("logprobs"),
+                            compare_result.pop("logprobs"),
+                            model,
+                        )
                     assert ref_result == compare_result, (
                         f"Results for {model=} are not the same.\n"
                         f"{ref_args=} {ref_envs=}\n"
