@@ -568,7 +568,6 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
         (4, (7, 1296), 0, (7, 1296), 0),
         (4, (7, 6, 256), 1, (7, 1536), -1),
         (4, (7, 6400), -1, (7, 6400), -1),
-        # RCCL: no 6-GPU kernel, rows of 24 bytes, empty, above the size cap.
         (6, (7, 6400), -1, None, None),
         (4, (8, 12), 1, None, None),
         (4, (0, 1536), 1, None, None),
