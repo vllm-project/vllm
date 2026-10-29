@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import json
 import logging
 import math
@@ -64,7 +63,7 @@ from vllm.entrypoints.serve.exception_handling.register import (
     init_exception_handler,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import mm_input, tokens_input
+from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
@@ -279,7 +278,7 @@ def test_gemma4_labels_start_the_reply(model_name, reply_start):
 
 
 @pytest.fixture
-def engine_and_renderer(qwen):
+def engine_and_renderer(qwen, request):
     tokenizer, _ = qwen
     model_config = ModelConfig(model="Qwen/Qwen3-0.6B", dtype="float32")
     renderer = HfRenderer(
@@ -300,6 +299,7 @@ def engine_and_renderer(qwen):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
+        trust_request_chat_template=getattr(request, "param", False),
     )
     yield engine, online_renderer
     renderer.shutdown()
@@ -988,8 +988,9 @@ def test_liquid_caps_images_like_the_checkpoint():
 
 
 @pytest.fixture
-def decision_server(qwen):
-    tokenizer, _ = qwen
+def decision_server(engine_and_renderer):
+    _, renderer = engine_and_renderer
+    tokenizer = renderer.renderer.get_tokenizer()
 
     class Engine:
         model_config = SimpleNamespace(
@@ -1035,21 +1036,7 @@ def decision_server(qwen):
                 finished=True,
             )
 
-    class Renderer:
-        renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
-
-        async def preprocess_chat(self, request, messages, **kwargs):
-            await asyncio.sleep(0)
-            ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                enable_thinking=False,
-                tokenize=True,
-                return_dict=False,
-            )
-            return [], [tokens_input(ids)]
-
-    engine, renderer = Engine(), Renderer()
+    engine = Engine()
     strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
     models = OpenAIServingModels(
         engine, [BaseModelPath(name="test-model", model_path="test-model")]
@@ -1093,6 +1080,43 @@ def decision_body(endpoint, count=1):
             for i, q in enumerate(questions)
         },
     )
+
+
+@pytest.mark.parametrize("engine_and_renderer", [False, True], indirect=True)
+@pytest.mark.parametrize(
+    "template_kwargs",
+    [
+        None,
+        {},
+        {"enable_thinking": False},
+        {"chat_template": None},
+        {"chat_template": "{{ 'MARKER-' ~ (6 * 7) ~ '-EVAL' }}"},
+        {"chat_template": ""},
+    ],
+)
+def test_systemone_enforces_request_template_trust(decision_server, template_kwargs):
+    server = decision_server
+    body = decision_body("systemone") | {"chat_template_kwargs": template_kwargs}
+    untrusted = (
+        not server.renderer.trust_request_chat_template
+        and (template_kwargs or {}).get("chat_template") is not None
+    )
+    # Retain the reply framing to exercise a usable template override.
+    if (template_kwargs or {}).get("chat_template"):
+        body["chat_template_kwargs"] = {
+            "chat_template": "{{ 'MARKER-' ~ (6 * 7) ~ '-EVAL' }}"
+            + server.tokenizer.chat_template,
+        }
+    response = server.client.post("/v1/systemone", json=body)
+    invalid = untrusted or template_kwargs == {"chat_template": ""}
+    assert response.status_code == (400 if invalid else 200), response.text
+    if untrusted:
+        assert "--trust-request-chat-template" in response.json()["error"]["message"]
+        assert not server.engine.admitted
+        assert not server.engine.generated
+    elif response.status_code == 200 and (template_kwargs or {}).get("chat_template"):
+        prompt = server.tokenizer.decode(server.engine.generated[0]["prompt_token_ids"])
+        assert prompt.startswith("MARKER-42-EVAL")
 
 
 @pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
