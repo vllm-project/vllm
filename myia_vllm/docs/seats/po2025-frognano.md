@@ -37,8 +37,10 @@
 
 ## Surveillance
 
-- **Cron vigie siège : 4 h à :33** (session-only — CronList d'abord, réarmer si
-  absent après un reboot ; le prompt du cron porte la check-list complète).
+- **Cron vigie siège : 5 h à :17** (`17 */5 * * *`, session-only — CronList
+  d'abord, réarmer si absent après un reboot ; le prompt du cron porte la
+  check-list complète). Cadence relevée de 4 h à **5 h** par le user le 29/10
+  après le reboot de po-2025 (mesure #207).
 - Rapports → **dashboard `workspace-vllm`** (RDV des 3 sièges vllm). DM
   toujours adressés `machine:workspace` (bug RooSync #3960). Escalade
   cross-workspace → dashboard `global` + crossPost.

@@ -1,10 +1,10 @@
 ---
-description: Cycle de surveillance court du siège FrogNano po-2025 (cron 4h) — santé moteur, thermique, gouverneur, compteurs adoption, [DONE] workspace-vllm.
+description: Cycle de surveillance court du siège FrogNano po-2025 (cron 5h) — santé moteur, thermique, gouverneur, compteurs adoption, [DONE] workspace-vllm.
 ---
 
 # VIGIE vllm po-2025 (siège FrogNano-4B, issue jsboige/vllm#70)
 
-Cycle court ~3-5 min. Porté par cron session-only `33 */4 * * *` dont le prompt est une seule ligne invoquant cette commande.
+Cycle court ~3-5 min. Porté par cron session-only `17 */5 * * *` (5 h à :17 — cadence relevée de 4 h à 5 h par le user le 29/10 après le reboot de po-2025) dont le prompt est une seule ligne invoquant cette commande.
 
 ## 1. Lectures (paralléliser autant que possible)
 
@@ -40,4 +40,4 @@ Cycle court ~3-5 min. Porté par cron session-only `33 */4 * * *` dont le prompt
 
 - JAMAIS de restart Docker sans cadre user.
 - Si du travail de code a été fait dans le cycle : commit + push AVANT le rapport [DONE].
-- Fin de cycle : `CronList` → si le cron vigie n'existe plus, re-créer `33 */4 * * *` (recurring, session-only) avec pour prompt une ligne invoquant `/vigie`.
+- Fin de cycle : `CronList` → si le cron vigie n'existe plus, re-créer `17 */5 * * *` (recurring, session-only) avec pour prompt une ligne invoquant `/vigie`.
