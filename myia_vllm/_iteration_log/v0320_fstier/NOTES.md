@@ -4373,3 +4373,35 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Coordination** : inbox 1 non-lu = dispatch **machine-only** `myia-ai-01` d'un worker roo-extensions (#4352, claim g7-repair) — **hors périmètre vllm, non traité** (bug #3960). Dashboard : `myia-po-2023|vllm` (CoursIA) répond à un WAKE-CLAUDE 09:39Z sur **son** incident embeddings — 21 conteneurs relancés ~10:04Z, :8004/:8005 revenus, `:6333` fermé et **aucun conteneur qdrant sur ce siège**, `D:` à **4,64 %** (86,5 Go libres). Information sur leur infra, **aucun geste de notre côté**.
 
 **Verdict** : 🟢 moteur (18 h, batterie au meilleur niveau, préemptions figées au 6ᵉ cycle, zéro restart) · ⚠ hôte à 97,0 % (en légère détente, mais WSL monte) · ⚠ GPU 0 au-dessus d'une ligne d'alerte devenue structurelle à 0,73. PR #265.
+
+## Cycle 14:1xZ (29/10) — 🟢 moteur (batterie 0,60/0,60/0,60 s, hit 2 h 89,7 %, 7ᵉ cycle sans préemption) ; ⚠⚠ hôte remonte à 97,5 % ; ★ le banc Nim a disparu, le hub rebondit à ~85 req/h et l'IP Paris du user revient
+
+**Prod** : health 200 (**10,9 ms**), RC=0, StartedAt stable `2026-10-28T18:20:28Z` (**20 h sans restart**), OOM 0, 3/3 Up, `/dev/shm` **33G/63G = 51 %**. KV GPU **4,96 %**, running 2 / waiting 0 — moteur très léger. **Préemptions 28 (Δ+0, 7ᵉ cycle consécutif)**. GPU 0 **23 202** / GPU 1 **21 786** / GPU 2 **234** MiB (CoursIA libre ; le plancher 0,73 ~23,2 GiB documenté au cycle précédent tient au MiB près).
+
+**Batterie petits appelants** : warm-up 0,58 s puis **0,60 / 0,60 / 0,60 s** — uniforme, aucune lenteur → **🟢**.
+
+**Watchdog** : **quatre `fail 1/2`** sur la fenêtre (12:19:06Z, 12:39:05Z, 13:19:59Z, 13:49:09Z), **tous `RECOVERED` après un seul fail**. Celui de 13:19:59Z a été qualifié **`WEDGE-BUSY`** par le watchdog v6.2 (compteurs p/g avancent pendant la sonde ⇒ moteur au travail, pas de wedge). **Zéro 2/2, zéro restart.**
+
+**Amortissement des préfixes — retour au régime sain** : cumulé **205,24 M hits / 325,44 M queries = 63,0 %** (60,6 % au cycle précédent). **Delta 2 h : +25,0 M hits sur +27,9 M queries = 89,7 %** (contre 65,0 % à 12:1xZ). Tier externe cumulé **94,63 M / 120,20 M = 78,7 %** (80,2 %), delta externe **+0,46 M / +2,84 M = 16,2 %** : les hits de la fenêtre viennent massivement du **cache GPU** (préfixes chauds), le meilleur des deux mondes — le tier ne sert que le fond de grenier. La dilution du cycle précédent était bien le banc Nim, pas le moteur.
+
+**★ Le banc « Nim » a DISPARU** : **0 requête `Python-urllib` sur les 2 h** (287 au cycle précédent). Soit le banc est terminé, soit son propriétaire a réagi au post `machine` — aucune réponse sur le dashboard à l'heure de ce cycle. Charge rendue, rien à réclamer.
+
+**★ Le hub rebondit** : par heure (total / dont Bun=hub) : 12h 206/**90** · 13h 223/**82** · 14h (partiel) 86/**54** — contre **23/h à 11h**. Fenêtre 2 h : 515 requêtes. Attribution : **po-2023 92** (le plus gros consommateur interne du moment), po-2024 10, po-2027 5 (cohérent avec son repli programmé 17-18Z). po-2028 toujours absent (repli effectif depuis 06:09Z).
+
+**400 window+1 : 9/2 h** — po-2023 ×5, **po-2027 ×3 (retour dans la signature)**, po-2024 ×1. Corps 921 K → **1 054 K o**. Les trois machines de l'écosystème haiku y passent maintenant ; rien de nouveau à demander à claudish (#431 en attente de leur côté).
+
+**401 : 21/2 h** — poller Go `1f7f6080cb65` + quelques sans clé. Bruit connu.
+
+**Sécurité (7 h)** : **aucune IP nouvelle avec des 200** — MAIS **`82.66.89.184` (poste Paris du user, Q13) REVIENT** : **6 requêtes, toutes 200**, alors que son trafic était arrêté depuis le 01/10. IP **sur la carte connue** donc pas une alerte intrusion ; à rendre au user pour qu'il sache que cette IP a resservi le moteur (probablement lui). Le reste : hairpin `90.65.170.144` 421/469, web1 16/16, web2 4/4, 1 141 directes sans XFF dont 1 128 × 200 (watchdog + sk-agent).
+
+**⚠⚠ Hôte : commit 97,5 %** (380,4/**390,0** Go, 9,6 Go libres) — **remontée de 0,5 pt** depuis 97,0 %. Détail : le **CommitLimit a grandi de 386,4 → 390,0 Go** (le pagefile s'est étendu de ~3,6 Go — le système se défend), `vmmemWSL` privé **plat à 174,6 Go** mais WS **93,3 Go (+5,0)**, RAM libre hôte **31,2 Go** (23,4). La panne du 24/09 était à 97,8 % : **0,3 pt de marge**. Aucun travail lourd lancé ; le pagefile qui s'étend est le signe que la pression est réelle, pas cosmétique.
+
+**Condensation** : propre — clients reconstruits 12:15/12:48/12:51/14:09Z, **aucun refus depuis 08:06Z**. `Tool call SLOW: roosync_dashboard` (12:51Z) isolé sous charge, sans suite.
+
+**⚠ Périmètre RSM (à relayer, pas à traiter)** : `[dashboard-reconcile] 1 file(s) AHEAD of PG — workspace-vllm (1).md` (12:28:18Z) — **le fork de fichier du dashboard reparu** (celui réparé par merge à 04:1xZ). Le daemon dit « left untouched, the insert pass owns that direction » : il ne touche pas, l'insert pass gère la direction. À signaler à roo-extensions (suivi #3230) si ça persiste au prochain cycle.
+
+**nbaudit** : `ok:true`, rc 0/0, **14:06:09Z**, vague 2 `Image/` en cours. G: **608 Go libres** (610), écriture OK. Prouveur : aucune passe.
+
+**Note harnais** : la présente session a été servie en partie par **MiniMax M3.1 en 3ᵉ repli** (message claudish de retour au Sonnet nominal) — le quota Minimax est donc au fond, ce qui est cohérent avec le repli po-2027 programmé à 17-18Z **vers** Minimax : à confirmer côté hub que la marche existe encore avant la fenêtre.
+
+**Verdict** : 🟢 moteur (20 h, batterie uniforme, 7ᵉ cycle sans préemption, hit 89,7 %) · ⚠⚠ hôte à 97,5 % avec pagefile en extension · ⚠ commit à surveiller avant la fenêtre 17-18Z (le repli po-2027 déchargera le moteur, pas l'hôte). PR #266.
