@@ -353,6 +353,11 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     # conv weight; vLLM's loaders end with this hook.
     for layer in layers.values():
         layer.process_weights_after_loading(vllm_config.model_config.dtype)
+    # The AITER layer runs f_b and g_b as one batched GEMM over the weights loading
+    # filled; the stock layer, the reference below, runs them one at a time.
+    fused_gate_b = layers["fused"]._gate_b_weight
+    assert stock._gate_b_weight is None and fused_gate_b is not None
+    assert layers["fused"].g_b_proj.weight.data_ptr() == fused_gate_b[1].data_ptr()
     # get_state_shape orients the conv state by the process-wide layout: (dim,
     # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
     conv_shape, state_shape = stock.get_state_shape()
