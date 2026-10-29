@@ -21,10 +21,13 @@ use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
-    EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
+    DataParallelRendezvous, EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage,
+    HandshakeParallelConfig, ReadyMessage,
 };
 use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
 use crate::protocol::{decode_msgpack, encode_msgpack};
+
+mod dp_rendezvous;
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.
@@ -176,6 +179,13 @@ pub async fn connect_handshake(
     } else {
         None
     };
+    // Coordinated (MoE) DP ranks form cross-rank process groups and need one
+    // rendezvous; the in-process coordinator runs exactly in that case.
+    let parallel_config = HandshakeParallelConfig {
+        data_parallel_rendezvous: enable_inproc_coordinator
+            .then(|| DataParallelRendezvous::allocate(local_host, engine_count))
+            .transpose()?,
+    };
 
     // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
     //    identities, and startup order does not matter.
@@ -215,6 +225,7 @@ pub async fn connect_handshake(
                     &input_address,
                     &output_address,
                     coordinator.as_ref(),
+                    &parallel_config,
                 )
                 .await?;
                 debug!(handshake_address, ?engine_id, "sent INIT to engine");
@@ -476,6 +487,7 @@ async fn send_init_message(
     input_address: &str,
     output_address: &str,
     coordinator: Option<&CoordinatorBootstrap>,
+    parallel_config: &HandshakeParallelConfig,
 ) -> Result<()> {
     let init_message = HandshakeInitMessage {
         addresses: HandshakeAddresses {
@@ -485,7 +497,7 @@ async fn send_init_message(
             coordinator_output: coordinator.map(|c| c.output_address.clone()),
             frontend_stats_publish_address: None,
         },
-        parallel_config: Default::default(),
+        parallel_config: parallel_config.clone(),
     };
     let payload = encode_msgpack(&init_message)?;
     let message = ZmqMessage::try_from(vec![engine_id.to_frame(), Bytes::from(payload)])
