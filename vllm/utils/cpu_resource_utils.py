@@ -115,6 +115,16 @@ def get_cgroup_memory_usage() -> int | None:
     return None
 
 
+def get_available_memory() -> int:
+    """Return available host memory, honoring cgroup limits."""
+    available = psutil.virtual_memory().available
+    cgroup_limit = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return available
+    cgroup_usage = get_cgroup_memory_usage()
+    return min(available, max(0, cgroup_limit - (cgroup_usage or 0)))
+
+
 def check_cgroup_memory_available(
     required_bytes: int,
     allocation_name: str,
