@@ -31,6 +31,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.compressor import _get_c128_boundary
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
@@ -244,8 +245,13 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         eps=1e-20,
         head_dim=512,
     )
+    # metadata is a SimpleNamespace stub of the attention metadata.
     DeepseekV4Attention._fused_qnorm_rope_kv_insert(
-        attention, q, local_kv, local_positions, {"swa": metadata}
+        attention,
+        q,
+        local_kv,
+        local_positions,
+        {"swa": metadata},  # type: ignore[dict-item]
     )
 
     torch.testing.assert_close(
@@ -794,6 +800,157 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
     check(1)
 
 
+@triton.jit
+def _per_token_nvfp4_gather_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    block_stride: tl.constexpr,
+):
+    """Reference for the tiled NVFP4 gather: one token per iteration, with
+    the e2m1 grid decoded arithmetically."""
+    batch_idx = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+    d = tl.arange(0, 512)
+    for i in range(tl.program_id(1), gather_len, tl.num_programs(1)):
+        pos = start_pos + i
+        physical_block_idx = tl.load(
+            block_table_ptr + batch_idx * max_blocks_per_seq + pos // cache_block_size
+        )
+        page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_ptr = page + (pos % cache_block_size) * 288
+        packed = tl.load(token_ptr + tl.arange(0, 256))
+        codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
+        mag_code = codes & 7
+        e = (mag_code >> 1).to(tl.float32)
+        m = (mag_code & 1).to(tl.float32)
+        mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
+        vals = tl.where(codes >= 8, -mag, mag)
+        sf = tl.load(token_ptr + 256 + tl.arange(0, 32))
+        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        dequant = tl.reshape(tl.reshape(vals, (32, 16)) * scale[:, None], (512,))
+        out_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        tl.store(out_row_ptr + d, dequant.to(tl.bfloat16))
+
+
+def _per_token_nvfp4_gather(
+    out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+):
+    _per_token_nvfp4_gather_kernel[(seq_lens.shape[0], 128)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        seq_lens,
+        block_table,
+        offset,
+        gather_lens,
+        max_blocks_per_seq=block_table.shape[-1],
+        cache_block_size=block_size,
+        block_stride=k_cache.stride(0),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "block_size,num_reqs", [(64, 1), (128, 3), (64, 17), (128, 64)]
+)
+@pytest.mark.parametrize("partial", [False, True])
+def test_v41_nvfp4_gather_ragged_batch(block_size, num_reqs, partial):
+    """The NVFP4 gather writes the same bits as the per-token reference on
+    arbitrary cache bytes (NaN, subnormal and negative scales included) for
+    ragged batches: empty requests, partial last blocks and a long context, a
+    shuffled block table holding -1 in every slot the gather must not read,
+    and an offset into a wider strided workspace."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+
+    torch.manual_seed(19)
+    device = "cuda"
+    if num_reqs == 1:
+        seq_lens_list = [65_541]
+    else:
+        edges = [0, 1, block_size - 1, block_size, block_size + 1, 3 * block_size + 5]
+        seq_lens_list = (edges + torch.randint(0, 5000, (num_reqs,)).tolist())[
+            :num_reqs
+        ]
+    gather_lens_list = (
+        [int(torch.randint(0, n + 1, ())) for n in seq_lens_list] if partial else None
+    )
+    offset = 7 if partial else 0
+
+    blocks_per_req = [math.ceil(n / block_size) for n in seq_lens_list]
+    num_blocks = sum(blocks_per_req) + 1
+    # Padded pages, so the block stride is not block_size * 288.
+    page_bytes = block_size * 288 + 512
+    backing = torch.randint(
+        0, 256, (num_blocks, page_bytes), dtype=torch.uint8, device=device
+    )
+    cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
+    pages = iter(torch.randperm(num_blocks).tolist())
+    block_table = torch.full((num_reqs, max(blocks_per_req) + 2), -1, dtype=torch.int32)
+    for req, seq_len in enumerate(seq_lens_list):
+        start = 0 if gather_lens_list is None else seq_len - gather_lens_list[req]
+        for block in range(start // block_size, blocks_per_req[req]):
+            block_table[req, block] = next(pages)
+    block_table = block_table.to(device)
+    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
+    gather_lens = (
+        None
+        if gather_lens_list is None
+        else torch.tensor(gather_lens_list, dtype=torch.int32, device=device)
+    )
+
+    width = max(seq_lens_list) + offset
+    storage = torch.full(
+        (num_reqs, width + 9, 512), -123.0, dtype=torch.bfloat16, device=device
+    )
+    args = (cache, seq_lens, gather_lens, block_table)
+    dequantize_and_gather_k_cache(
+        storage[:, :width], *args, block_size=block_size, offset=offset
+    )
+    expected = torch.full_like(storage, -123.0)
+    _per_token_nvfp4_gather(expected[:, :width], *args, block_size, offset)
+    assert torch.equal(storage.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_nvfp4_gather_decodes_every_code_and_scale():
+    """Every (packed byte, e4m3 scale byte) pair: token t holds the bytes
+    0..255, and scale byte t for all of its 32 groups."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+
+    device, block_size = "cuda", 64
+    codes = torch.arange(256, device=device).to(torch.uint8)
+    records = torch.empty(256, 288, dtype=torch.uint8, device=device)
+    records[:, :256] = codes
+    records[:, 256:] = codes[:, None]
+    args = (
+        records.view(256 // block_size, block_size, 288),
+        torch.tensor([256], dtype=torch.int32, device=device),
+        None,
+        torch.arange(4, dtype=torch.int32, device=device)[None],
+        block_size,
+        0,
+    )
+    out = torch.empty(1, 256, 512, dtype=torch.bfloat16, device=device)
+    expected = torch.empty_like(out)
+    dequantize_and_gather_k_cache(out, *args)
+    _per_token_nvfp4_gather(expected, *args)
+    assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="The V4.1 records are SM100-only",
@@ -1262,6 +1419,7 @@ def test_v41_pcp_ring_links_match_request_positions(
     )
     builder = SimpleNamespace(
         capacity=capacity,
+        tail_size=1,
         device=torch.device("cpu"),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
@@ -1324,8 +1482,11 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
-def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
-    """Pairs split across PCP chunks and decode owner changes keep exact latents."""
+@pytest.mark.parametrize("num_speculative_tokens", [0, 5, 9])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
+    pcp_size, num_speculative_tokens, monkeypatch
+):
+    """Cross-rank pairs and rejection rollback preserve the reference latents."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import compressor as compressor_module
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
@@ -1339,35 +1500,52 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     torch.manual_seed(42)
     device = torch.device("cuda")
     norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    capacity = max(8, 1 << (num_speculative_tokens + 1).bit_length())
     # Block 0 is reserved as the null block; requests use physical blocks 1/2.
-    reference_state = torch.zeros(3, 8, 1024, device=device)
+    reference_state = torch.zeros(3, capacity, 1024, device=device)
     rank_states = [reference_state.clone() for _ in range(pcp_size)]
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
-        speculative_config=None,
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens
+        else None,
     )
     spec = CircularBufferSpec(
-        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+        block_size=capacity,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
     )
     starts = np.zeros(2, dtype=np.int32)
-    for lengths, prefilling in [
+    steps = [
         ([7, 3], [True, True]),
         ([9, 1], [True, False]),
         ([1, 1], [False, False]),
         ([1, 1], [False, False]),
-    ]:
+    ]
+    if num_speculative_tokens:
+        steps[2:] = [([num_speculative_tokens + 1] * 2, [False, False])] * 4
+    for step, (lengths, prefilling) in enumerate(steps):
+        request_order = np.array([1, 0] if step % 2 else [0, 1])
         lengths = np.array(lengths, dtype=np.int32)
         query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
         qsl = torch.from_numpy(query_start).to(device)
         positions = torch.cat(
-            [torch.arange(s, s + n, device=device) for s, n in zip(starts, lengths)]
+            [
+                torch.arange(starts[r], starts[r] + n, device=device)
+                for r, n in zip(request_order, lengths)
+            ]
         )
         req_ids = torch.repeat_interleave(
             torch.arange(2, device=device, dtype=torch.int32),
             torch.from_numpy(lengths).to(device),
         )
-        slots = (req_ids.long() + 1) * 8 + positions % 8
+        physical_reqs = torch.tensor(request_order, device=device)[req_ids.long()]
+        slots = (physical_reqs + 1) * capacity + positions % capacity
         raw = torch.randn(sum(lengths), 1024, device=device)
         expected = torch.empty(sum(lengths), 512, dtype=torch.bfloat16, device=device)
         fused_save_compress_norm(
@@ -1387,9 +1565,10 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
         for rank in range(pcp_size):
             manager = PCPManager(pcp_size, rank, device, shard_decode_requests=True)
             segments, counts = manager._build_batch_layout(
-                lengths, starts, np.array(prefilling), query_start
+                lengths, starts[request_order], np.array(prefilling), query_start
             )
             width = max(counts)
+            assert manager._padded_gather_idx is not None
             local_indices = manager._padded_gather_idx[
                 rank * width : (rank + 1) * width
             ]
@@ -1403,9 +1582,9 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
                 num_reqs=len(local_reqs),
                 num_actual_tokens=counts[rank],
                 max_query_len=max(local_lengths),
-                max_seq_len=int(max(starts + lengths)),
+                max_seq_len=int(max(starts[request_order] + lengths)),
                 block_table_tensor=torch.tensor(
-                    np.array(local_reqs) + 1, dtype=torch.int32, device=device
+                    request_order[local_reqs] + 1, dtype=torch.int32, device=device
                 ).unsqueeze(1),
                 slot_mapping=torch.full((width * pcp_size,), -1, device=device),
                 positions=positions[local_indices],
@@ -1467,7 +1646,12 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
             )
         for state in rank_states[1:]:
             torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
-        starts += lengths
+        starts[request_order] += lengths
+        if num_speculative_tokens and step >= 2:
+            # Alternate odd/even accepted prefixes, including first-draft rejection.
+            starts[request_order] -= lengths - np.array(
+                [1, 2] if step % 2 == 0 else [3, 1]
+            )
 
 
 def _on_gfx950() -> bool:
@@ -2761,7 +2945,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_full_pipeline():
+def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     """_forward_csa2_full: one fork, then K write and q-side after the join.
 
     The default chain must run first on the current stream, the compressor
@@ -2807,8 +2991,8 @@ def test_v41_rocm_csa2_full_pipeline():
         streams["insert_cache"] = torch.cuda.current_stream()
         main_cache.fill_(5)
 
-    compressor.forward = compressor_forward
-    compressor.insert_cache = compressor_insert
+    monkeypatch.setattr(compressor, "forward", compressor_forward)
+    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")

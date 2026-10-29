@@ -17,10 +17,12 @@ from transformers import Qwen3_5MoeTextConfig
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
@@ -30,7 +32,10 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
-from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.models.utils import (
+    get_fused_shared_expert_layers,
+    maybe_fuse_shared_experts,
+)
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
@@ -147,13 +152,15 @@ class _StubGlm5NextAttention(nn.Module):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__()
         self.o_proj = SimpleNamespace(reduce_results=True)
+        # GLM5Next's MTP predictor reads this attribute from MLA layers.
+        self.mla_attn = SimpleNamespace()
 
 
 def get_fse_test_model_config(
     model_type: str,
     quantization_config: dict[str, Any],
-) -> tuple[object, type[nn.Module]]:
-    config: object
+) -> tuple[Any, type[nn.Module]]:
+    config: Any
     if model_type == "minimax_m3":
         config = MiniMaxM3TextConfig(
             hidden_size=128,
@@ -165,24 +172,29 @@ def get_fse_test_model_config(
             head_dim=128,
             num_local_experts=2,
             num_experts_per_tok=1,
-            moe_layer_freq=[0, 1],
+            moe_layer_freq=[1, 1],
             sparse_attention_config=None,
             rotary_dim=64,
             quantization_config=quantization_config,
         )
         return config, minimax_m3_model.MiniMaxM3Model
-    if model_type == "deepseek_v4":
-        from vllm.models.deepseek_v4.amd.model import DeepseekV4Model
+    if model_type in ("deepseek_v4", "deepseek_v4_cpu"):
+        if model_type == "deepseek_v4":
+            from vllm.models.deepseek_v4.amd.model import DeepseekV4Model
+        else:
+            from vllm.models.deepseek_v4.cpu.model import DeepseekV4Model
 
         config = SimpleNamespace(
+            model_type="deepseek_v4",
             vocab_size=256,
             hidden_size=128,
-            num_hidden_layers=1,
+            num_hidden_layers=2,
             num_attention_heads=1,
             head_dim=128,
             max_position_embeddings=128,
             sliding_window=None,
-            layer_types=["sliding_attention"],
+            layer_types=["sliding_attention", "sliding_attention"],
+            mlp_layer_types=[],
             compress_rates={},
             rope_theta=10000.0,
             compress_rope_theta=10000.0,
@@ -213,13 +225,13 @@ def get_fse_test_model_config(
             quantization_config=quantization_config,
         )
         return config, DeepseekV4Model
-    if model_type == "qwen3_5":
-        from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
+    if model_type in ("qwen3_next", "qwen3_5", "alice_ai"):
+        from transformers import Qwen3NextConfig
 
-        config = Qwen3_5MoeTextConfig(
+        common = dict(
             vocab_size=256,
             hidden_size=128,
-            num_hidden_layers=1,
+            num_hidden_layers=2,
             num_attention_heads=1,
             num_key_value_heads=1,
             head_dim=128,
@@ -231,20 +243,113 @@ def get_fse_test_model_config(
             shared_expert_intermediate_size=32,
             num_experts_per_tok=1,
             num_experts=2,
-            layer_types=["full_attention"],
+            layer_types=["full_attention", "full_attention"],
             quantization_config=quantization_config,
         )
-        return config, Qwen3_5Model
-    if model_type == "deepseek_v2":
-        from transformers import DeepseekV2Config
+        if model_type == "qwen3_next":
+            from vllm.model_executor.models.qwen3_next import Qwen3NextModel
 
-        from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+            return Qwen3NextConfig(**common), Qwen3NextModel
+        if model_type == "qwen3_5":
+            from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 
-        config = DeepseekV2Config(
+            return Qwen3_5MoeTextConfig(**common), Qwen3_5Model
+        from vllm.model_executor.models.alice_ai import AliceAIModel
+
+        config = Qwen3NextConfig(**common, linear_conv_kernel_dim=4)
+        # AliceAI requires the AttnRes grouping metadata.
+        config.block_attn_res_block_size = 1
+        return config, AliceAIModel
+    if model_type == "qwen4_exp":
+        from transformers import Qwen4ExpTextConfig
+
+        config = Qwen4ExpTextConfig(
+            vocab_size=256,
+            hidden_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            head_dim=128,
+            linear_key_head_dim=64,
+            linear_value_head_dim=64,
+            linear_num_key_heads=1,
+            linear_num_value_heads=1,
+            moe_intermediate_size=32,
+            shared_expert_intermediate_size=32,
+            num_experts_per_tok=1,
+            num_experts=2,
+            layer_types=["full_attention", "full_attention"],
+            eos_token_id=1,
+            hc_count=2,
+            hc_lowrank=4,
+            ple_layer_ids=[],
+            quantization_config=quantization_config,
+        )
+        from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
+
+        return config, Qwen4ExpModel
+    if model_type == "AXK1":
+        from transformers import AXK1Config
+
+        from vllm.model_executor.models.AXK1 import AXK1Model
+
+        config = AXK1Config(
             vocab_size=256,
             hidden_size=128,
             intermediate_size=32,
-            num_hidden_layers=1,
+            moe_intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            n_shared_experts=1,
+            n_routed_experts=2,
+            num_experts_per_tok=1,
+            n_group=1,
+            topk_group=1,
+            first_k_dense_replace=0,
+            q_lora_rank=0,
+            kv_lora_rank=0,
+            qk_nope_head_dim=0,
+            qk_rope_head_dim=0,
+            v_head_dim=0,
+            quantization_config=quantization_config,
+        )
+        return config, AXK1Model
+    if model_type == "glm4_moe_lite":
+        from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
+
+        from vllm.model_executor.models.glm4_moe_lite import Glm4MoeLiteModel
+
+        config = Glm4MoeLiteConfig(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            num_experts_per_tok=1,
+            q_lora_rank=0,
+            kv_lora_rank=32,
+            qk_nope_head_dim=32,
+            qk_rope_head_dim=16,
+            v_head_dim=32,
+            dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+        )
+        config.first_k_dense_replace = 0
+        config.num_nextn_predict_layers = 1
+        return config, Glm4MoeLiteModel
+    if model_type in ("deepseek_v2", "deepseek_v32"):
+        from transformers import DeepseekV2Config
+
+        common = dict(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            num_hidden_layers=2,
             num_attention_heads=1,
             num_key_value_heads=1,
             head_dim=128,
@@ -262,7 +367,18 @@ def get_fse_test_model_config(
             v_head_dim=0,
             quantization_config=quantization_config,
         )
-        return config, DeepseekV2Model
+        config = DeepseekV2Config(**common)
+        if model_type == "deepseek_v2":
+            from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+
+            # Needed to build the DeepSeek-V2 MTP draft model in this test.
+            config.num_nextn_predict_layers = 1
+            return config, DeepseekV2Model
+        from vllm.models.deepseek_v32.amd.model import DeepseekV32Model
+
+        config.index_topk = 1
+        config.num_nextn_predict_layers = 1
+        return config, DeepseekV32Model
     if model_type == "glm4_moe":
         from transformers.models.glm4_moe import Glm4MoeConfig
 
@@ -272,7 +388,7 @@ def get_fse_test_model_config(
             vocab_size=256,
             hidden_size=128,
             intermediate_size=32,
-            num_hidden_layers=1,
+            num_hidden_layers=2,
             num_attention_heads=1,
             num_key_value_heads=1,
             head_dim=128,
@@ -294,14 +410,14 @@ def get_fse_test_model_config(
             hidden_size=128,
             intermediate_size=32,
             moe_intermediate_size=32,
-            num_hidden_layers=1,
+            num_hidden_layers=2,
             num_attention_heads=1,
             num_key_value_heads=1,
             n_routed_experts=2,
             n_shared_experts=1,
             num_experts_per_tok=1,
-            layer_types=["linear_attention"],
-            mlp_layer_types=["sparse"],
+            layer_types=["linear_attention", "linear_attention"],
+            mlp_layer_types=["sparse", "sparse"],
             index_topk=1,
             index_kpool=1,
             pad_token_id=None,
@@ -310,6 +426,8 @@ def get_fse_test_model_config(
             mhc=False,
             quantization_config=quantization_config,
         )
+        config.mla_use_nope = False
+        config.num_nextn_predict_layers = 1
         return config, Glm5NextModel
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
@@ -401,9 +519,18 @@ def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     ]
 
 
-def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
+@pytest.mark.parametrize(
+    ("reason", "enable_ep"),
+    [
+        ("shared experts are excluded", False),
+        ("expert parallelism is enabled", True),
+    ],
+)
+def test_resolve_layer_fused_shared_expert_logs_skip_reason(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    reason: str,
+    enable_ep: bool,
 ) -> None:
     monkeypatch.setattr(
         fused_moe_utils.rocm_aiter_ops,
@@ -413,13 +540,20 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     monkeypatch.setattr(
         fused_moe_utils,
         "is_shared_expert_quant_fse_compatible",
-        lambda *_, **__: (False, "shared experts are excluded"),
+        lambda *_, **__: (False, reason),
     )
+    monkeypatch.setattr(
+        "vllm.config.get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_expert_parallel=enable_ep)
+        ),
+    )
+    _print_warning_once.cache_clear()
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        ExpertsInt8Config(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp", disable_under_ep=enable_ep
     )
-    assert "shared experts are excluded" in caplog.text
+    assert reason in caplog.text
 
 
 def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
@@ -458,6 +592,92 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 
     assert compatible
     assert reason is None
+
+
+def test_deepseek_v41_quant_config_rejects_fp8_mtp_shared_expert_fse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp4",
+        quantization_config={
+            "quant_method": "quark",
+            "global_quant_config": {
+                "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+            },
+            "layer_quant_config": {
+                r"re:mtp\.0\.ffn\.shared_experts\.w1": {"weight": {"dtype": "fp8_e4m3"}}
+            },
+            "exclude": [],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    )
+
+    assert not compatible
+    assert (
+        reason
+        == "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts are not MXFP4"
+    )
+
+
+def test_deepseek_v41_fp8_experts_keep_fp8_fse_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp8",
+        quantization_config={
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    ) == (True, None)
 
 
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
@@ -797,45 +1017,409 @@ def test_aiter_fused_moe_validates_shared_expert_arguments() -> None:
     assert validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, 0)
 
 
-def test_is_model_fused_shared_expert_compatible() -> None:
-    class MoE(nn.Module):
-        def __init__(self, enabled: bool) -> None:
-            super().__init__()
-            self.is_fused_shared_expert_enabled = enabled
+def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
+    """Mixed and all-excluded DSV4 checkpoints map shared experts correctly."""
+    from vllm.models.deepseek_v4.amd.model import (
+        _make_deepseek_v4_weights_mapper,
+        _redirect_shared_expert_name,
+    )
 
-    class Layer(nn.Module):
-        def __init__(self, enabled: bool) -> None:
-            super().__init__()
-            self.mlp = MoE(enabled)
+    tensor = torch.empty(0)
+    fuse_by_layer = frozenset({6})
+    # Mixed: any fused layer puts the mapper in fused mode, which leaves the
+    # checkpoint .w2 names untouched; the loader redirects per layer.
+    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=True)
+    for raw, expected in [
+        (
+            "layers.5.ffn.shared_experts.w2.weight",
+            "model.layers.5.ffn.shared_experts.down_proj.weight",
+        ),
+        (
+            "layers.5.ffn.shared_experts.w2.scale",
+            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
+        ),
+        (
+            "layers.6.ffn.shared_experts.w2.weight",
+            "model.layers.6.ffn.experts.4.w2.weight",
+        ),
+        (
+            "layers.6.ffn.shared_experts.w2.scale",
+            "model.layers.6.ffn.experts.4.w2.weight_scale_inv",
+        ),
+    ]:
+        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
+        assert _redirect_shared_expert_name(mapped, fuse_by_layer, 4) == expected
 
-    enabled_layers = nn.ModuleList([Layer(True)])
-    disabled_layers = nn.ModuleList([Layer(False)])
-    mixed_layers = nn.ModuleList([Layer(True), Layer(False)])
-    empty_layers = nn.ModuleList()
-    pipeline_layers = nn.ModuleList([Layer(True), PPMissingLayer()])
+    # All layers excluded (fused_shared_expert_layers == frozenset()) selects
+    # the unfused mapper, which renames .w2 -> .down_proj itself.
+    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=False)
+    for raw, expected in [
+        (
+            "layers.5.ffn.shared_experts.w2.weight",
+            "model.layers.5.ffn.shared_experts.down_proj.weight",
+        ),
+        (
+            "layers.5.ffn.shared_experts.w2.scale",
+            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
+        ),
+    ]:
+        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
+        assert _redirect_shared_expert_name(mapped, frozenset(), 4) == expected
 
-    assert fused_moe_utils.is_model_fused_shared_expert_compatible(
-        enabled_layers, MoE, "mlp"
+
+class _FakeMoE(nn.Module):
+    def __init__(self, enabled: bool) -> None:
+        super().__init__()
+        self.is_fused_shared_expert_enabled = enabled
+
+
+def _make_fake_moe_model(
+    layer_names: list[str], enabled: list[bool], use_dict: bool
+) -> nn.Module:
+    layers = []
+    for flag in enabled:
+        layer = nn.Module()
+        layer.mlp = _FakeMoE(flag)
+        layers.append(layer)
+    model = nn.Module()
+    model.layers = (
+        nn.ModuleDict(dict(zip(layer_names, layers, strict=True)))
+        if use_dict
+        else nn.ModuleList(layers)
     )
-    assert not fused_moe_utils.is_model_fused_shared_expert_compatible(
-        disabled_layers, MoE, "mlp"
-    )
-    assert not fused_moe_utils.is_model_fused_shared_expert_compatible(
-        empty_layers, MoE, "mlp"
-    )
-    assert fused_moe_utils.is_model_fused_shared_expert_compatible(
-        pipeline_layers, MoE, "mlp"
-    )
-    with pytest.raises(NotImplementedError, match="1 enabled and 1 disabled layers"):
-        fused_moe_utils.is_model_fused_shared_expert_compatible(
-            mixed_layers, MoE, "mlp"
+    return model
+
+
+def test_fused_shared_expert_layers_matches_container_index_space() -> None:
+    """The fused-layer set follows the module tree, not a hard-coded offset.
+
+    ``nn.ModuleList`` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
+    while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
+    layer index. Both must redirect without a per-loader offset.
+    """
+    list_model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
+    dict_model = _make_fake_moe_model(["28", "29"], [False, True], use_dict=True)
+    list_layers = get_fused_shared_expert_layers(list_model, _FakeMoE)
+    dict_layers = get_fused_shared_expert_layers(dict_model, _FakeMoE)
+    assert list_layers == frozenset({0})
+    assert dict_layers == frozenset({29})
+
+    weight = torch.arange(8.0).reshape(4, 2)
+
+    def redirected(name: str, fused_shared_expert_layers: frozenset[int]) -> bool:
+        [(out_name, _)] = list(
+            maybe_fuse_shared_experts(
+                [(name, weight)],
+                n_routed_experts=4,
+                n_shared_experts=1,
+                fused_shared_expert_layers=fused_shared_expert_layers,
+                ckpt_prefix="mlp.shared_expert",
+            )
         )
+        return ".experts." in out_name
+
+    # ModuleList: 0-based names, including the Qwen4 Exp MTP case where the
+    # quant-config prefix uses an absolute index but the weight names do not.
+    assert redirected("layers.0.mlp.shared_expert.down_proj.weight", list_layers)
+    assert not redirected("layers.1.mlp.shared_expert.down_proj.weight", list_layers)
+    # ModuleDict: absolute names, including the MTP layer offset.
+    assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_layers)
+    assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
+
+
+@pytest.mark.parametrize(
+    ("enable_expert_parallel", "match"),
+    [
+        (True, "expert parallelism is not tested"),
+        (False, "nixl_ep"),
+    ],
+)
+def test_mixed_fused_shared_experts_rejected_with_ep_or_nixl_ep(
+    enable_expert_parallel: bool, match: str
+) -> None:
+    """Mixed FSE must be rejected with EP or a shared-workspace all2all backend.
+
+    With EP, per-layer geometry differences are not validated. ``nixl_ep``
+    additionally keeps a single process-wide buffer initialized from the first
+    MoE layer's ``num_experts_per_rank`` and ignores later geometries. A mixed
+    model has fused layers with ``n_routed + n_shared`` experts and non-fused
+    layers with ``n_routed``, so reusing that buffer would silently map experts
+    to the wrong slots. Construction must fail cleanly instead of running the
+    untested mixed path.
+    """
+    model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
+    vllm_config.parallel_config.data_parallel_size = 2
+    vllm_config.parallel_config.all2all_backend = "nixl_ep"
+
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match=match),
+    ):
+        get_fused_shared_expert_layers(model, _FakeMoE)
+
+
+def _assert_mtp_fused_shared_expert_redirect(
+    mtp: nn.Module, ckpt_prefix: str, moe: nn.Module, n_routed_experts: int
+) -> None:
+    """Load a fused MTP shared expert and verify it lands in the appended slot.
+
+    The MTP loaders see different name/index spaces (0-based ``ModuleList`` or
+    absolute ``ModuleDict``); using the live module map must redirect either.
+    """
+    packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
+    down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
+    mtp.load_weights(
+        [
+            (f"{ckpt_prefix}.down_proj.weight", packed_down),
+            (f"{ckpt_prefix}.down_proj.weight_scale", down_scale),
+        ]
+    )
+    torch.testing.assert_close(
+        moe.experts.routed_experts.w2_weight[n_routed_experts][:128, :16].float(),
+        packed_down.float(),
+    )
+
+
+def _assert_mtp_shared_expert_not_fused(
+    mtp: nn.Module, ckpt_prefix: str, moe: nn.Module, n_routed_experts: int
+) -> None:
+    """Load an unfused MTP shared expert and verify no fused slot is appended.
+
+    Without AITER the shared expert stays a separate MLP, so the routed tensor must
+    keep exactly ``n_routed_experts`` rows.
+    """
+    packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
+    down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
+    mtp.load_weights(
+        [
+            (f"{ckpt_prefix}.down_proj.weight", packed_down),
+            (f"{ckpt_prefix}.down_proj.weight_scale", down_scale),
+        ]
+    )
+    assert moe.experts.routed_experts.w2_weight.shape[0] == n_routed_experts
+
+
+def _make_deepseek_v4_shared_expert_checkpoint(
+    layer: nn.Module, idx: int, fused: bool, exclude: bool
+) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]]:
+    """Build DSV4's FP8 shared-expert / MXFP4 routed-slot checkpoint pairs."""
+    ffn = layer.ffn
+    if not fused:
+        dtype = torch.bfloat16 if exclude else torch.float8_e4m3fn
+        hidden = ffn.shared_experts.gate_up_proj.weight.shape[1]
+        intermediate = ffn.shared_experts.down_proj.weight.shape[1]
+        gate_up = torch.full((2 * intermediate, hidden), idx + 1, dtype=dtype)
+        down = torch.full((hidden, intermediate), idx + 1, dtype=dtype)
+        return (
+            [
+                (f"layers.{idx}.ffn.shared_experts.gate_up_proj.weight", gate_up),
+                (f"layers.{idx}.ffn.shared_experts.down_proj.weight", down),
+            ],
+            [
+                (ffn.shared_experts.gate_up_proj.weight, gate_up),
+                (ffn.shared_experts.down_proj.weight, down),
+            ],
+        )
+
+    routed = ffn.experts.routed_experts
+    slot = routed.w13_weight.shape[0] - 1
+    w13_rows, hidden_half = routed.w13_weight[slot].shape
+    intermediate = w13_rows // 2
+    hidden = hidden_half * 2
+    w1 = torch.full((intermediate, hidden_half), idx + 1, dtype=torch.uint8)
+    w3 = torch.full((intermediate, hidden_half), idx + 1, dtype=torch.uint8)
+    w2 = torch.full((hidden, intermediate // 2), idx + 1, dtype=torch.uint8)
+    return (
+        [
+            (f"layers.{idx}.ffn.shared_experts.w1.weight", w1),
+            (f"layers.{idx}.ffn.shared_experts.w3.weight", w3),
+            (f"layers.{idx}.ffn.shared_experts.w2.weight", w2),
+        ],
+        [
+            (routed.w13_weight[slot].chunk(2, dim=0)[0], w1),
+            (routed.w13_weight[slot].chunk(2, dim=0)[1], w3),
+            (routed.w2_weight[slot], w2),
+        ],
+    )
+
+
+def _build_mtp_model(
+    mtp_cls: Any,
+    vllm_config: VllmConfig,
+    config: object,
+    *,
+    with_text_config: bool = False,
+    with_target_model: bool = False,
+) -> nn.Module:
+    draft_model_config: dict[str, object] = {"hf_config": config}
+    if with_text_config:
+        draft_model_config["hf_text_config"] = config
+    speculative_config: dict[str, object] = {
+        "draft_model_config": SimpleNamespace(**draft_model_config),
+        "method": "mtp",
+        "parallel_drafting": False,
+        "enable_adaptive_verification": False,
+        "use_dspark": lambda: False,
+    }
+    if with_target_model:
+        speculative_config["target_model_config"] = vllm_config.model_config
+    vllm_config.speculative_config = SimpleNamespace(**speculative_config)
+    return mtp_cls(vllm_config=vllm_config)
+
+
+_MTP_FACTORIES: dict[str, tuple[str, str, dict[str, bool]]] = {
+    "deepseek_v4": ("vllm.models.deepseek_v4.amd.mtp", "DeepSeekV4MTP", {}),
+    "glm4_moe": (
+        "vllm.model_executor.models.glm4_moe_mtp",
+        "Glm4MoeMTP",
+        {},
+    ),
+    "glm4_moe_lite": (
+        "vllm.model_executor.models.glm4_moe_lite_mtp",
+        "Glm4MoeLiteMTP",
+        {},
+    ),
+    "deepseek_v32": (
+        "vllm.models.deepseek_v32.amd.mtp",
+        "DeepseekV32MTP",
+        {},
+    ),
+    "glm5_next": (
+        "vllm.models.glm5next.common.mtp",
+        "Glm5NextMTP",
+        {"with_text_config": True},
+    ),
+    "deepseek_v2": (
+        "vllm.model_executor.models.deepseek_mtp",
+        "DeepSeekMTP",
+        {},
+    ),
+    "qwen3_next": (
+        "vllm.model_executor.models.qwen3_next_mtp",
+        "Qwen3NextMTP",
+        {"with_text_config": True, "with_target_model": True},
+    ),
+    "qwen3_5": (
+        "vllm.model_executor.models.qwen3_5_mtp",
+        "Qwen3_5MoeMTP",
+        {"with_text_config": True, "with_target_model": True},
+    ),
+}
+
+
+def _build_mtp_for_model(
+    model_type: str,
+    vllm_config: VllmConfig,
+    config: object,
+    enabled: bool,
+) -> nn.Module | None:
+    factory = _MTP_FACTORIES.get(model_type)
+    if not enabled or factory is None:
+        return None
+    module_name, class_name, kwargs = factory
+    module = importlib.import_module(module_name)
+    return _build_mtp_model(getattr(module, class_name), vllm_config, config, **kwargs)
+
+
+# TODO: move to conftest.py.
+class _SingleRankGroup:
+    """No-op single-rank stand-in for a compiled ``GroupCoordinator``."""
+
+    world_size = 1
+    rank_in_group = 0
+    local_rank = 0
+    is_first_rank = True
+    is_last_rank = True
+
+    @property
+    def device_group(self):
+        return self
+
+    @property
+    def cpu_group(self):
+        return self
+
+    @property
+    def device_communicator(self):
+        return self
+
+    def rank(self) -> int:
+        return 0
+
+    def size(self) -> int:
+        return 1
+
+    def all_reduce(self, input_: torch.Tensor, *args: Any, **kwargs: Any):
+        return input_
+
+    def all_gather(self, input_: torch.Tensor, dim: int = 0):
+        return input_
+
+    def all_gatherv(self, inputs: Any, dim: int = 0, sizes: Any = None):
+        return inputs
+
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = 0):
+        return input_
+
+    def reduce_scatterv(self, input_: Any, dim: int = 0, sizes: Any = None):
+        return input_
+
+    def broadcast(self, input_: torch.Tensor, src: int = 0):
+        return input_
+
+    def send(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def recv(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def barrier(self) -> None:
+        return None
+
+    def destroy(self) -> None:
+        return None
+
+
+@pytest.fixture
+def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
+    """Single rank parallel groups without initializing a process group.
+
+    This is faster than the `dist_init` fixture.
+    """
+    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
+        monkeypatch.setattr(
+            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
+        )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
 
 
 @pytest.mark.parametrize(
     "model_type",
-    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2", "glm5_next"],
+    [
+        "minimax_m3",
+        "deepseek_v4",
+        "deepseek_v4_cpu",
+        "qwen3_next",
+        "qwen3_5",
+        "alice_ai",
+        "glm4_moe",
+        "deepseek_v2",
+        "AXK1",
+        "glm4_moe_lite",
+        "deepseek_v32",
+        "glm5_next",
+        "qwen4_exp",
+    ],
 )
+@pytest.mark.parametrize("shared_expert_precision", ["all_mxfp4", "mixed"])
 @pytest.mark.parametrize(
     ("use_fse", "exclude"),
     [
@@ -846,17 +1430,82 @@ def test_is_model_fused_shared_expert_compatible() -> None:
 )
 def test_models_fse_init(
     model_type: str,
+    shared_expert_precision: str,
     use_fse: bool,
     exclude: list[str],
-    dist_init: None,
+    single_rank_parallel_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model construction resolves FSE consistently with Quark quantization."""
-    quantization_config: dict[str, Any] = (
-        get_deepseek_v4_quark_config(["layers.0.ffn.shared_experts"] if exclude else [])
-        if model_type == "deepseek_v4"
-        else {**_QUARK_FSE_CONFIG, "exclude": exclude}
+    """Construction and loading preserve each shared expert's precision."""
+    _print_warning_once.cache_clear()
+    per_layer_fse = model_type != "deepseek_v4_cpu"
+    moe_attr = {
+        "minimax_m3": "block_sparse_moe",
+        "deepseek_v4": "ffn",
+    }.get(model_type, "mlp")
+    shared_name = (
+        "shared_experts"
+        if model_type
+        in {
+            "minimax_m3",
+            "deepseek_v4",
+            "glm4_moe",
+            "deepseek_v2",
+            "AXK1",
+            "glm4_moe_lite",
+            "deepseek_v32",
+            "glm5_next",
+        }
+        else "shared_expert"
     )
+    if shared_expert_precision == "mixed" and not per_layer_fse:
+        pytest.skip(
+            "The mixed Quark two-layer setup does not apply to this architecture"
+        )
+    quantization_config: dict[str, Any] = (
+        get_deepseek_v4_quark_config(
+            [f"layers.{idx}.ffn.shared_experts" for idx in range(2)] if exclude else []
+        )
+        if model_type == "deepseek_v4"
+        else {**deepcopy(_QUARK_FSE_CONFIG), "exclude": exclude}
+    )
+    if shared_expert_precision == "mixed":
+        mxfp8_config = deepcopy(quantization_config["global_quant_config"])
+        mxfp8_config["input_tensors"].update(
+            dtype="fp8_e4m3",
+            symmetric=True,
+            scale_type=None,
+            scale_format=None,
+            scale_calculation_mode=None,
+            observer_cls="PerGroupMinMaxObserver",
+            zero_point_type="int32",
+        )
+        mxfp8_config["weight"].update(
+            dtype="fp8_e4m3",
+            qscheme="per_block",
+            ch_axis=None,
+            group_size=None,
+            block_size=[1, 32],
+            symmetric=True,
+            scale_type="float8_e8m0fnu",
+            scale_format=None,
+            scale_calculation_mode=None,
+            observer_cls="PerBlock2DMinMaxObserver",
+            zero_point_type="int32",
+        )
+        if model_type == "deepseek_v4":
+            quantization_config.setdefault("layer_quant_config", {})[
+                "layers.1.ffn.shared_experts.w1"
+            ] = deepcopy(mxfp8_config)
+        else:
+            quantization_config.setdefault("layer_quant_config", {}).update(
+                {
+                    f"model.layers.1.{moe_attr}.{shared_name}.{projection}": deepcopy(
+                        mxfp8_config
+                    )
+                    for projection in ("gate_proj", "up_proj", "down_proj")
+                }
+            )
 
     config, model_constructor = get_fse_test_model_config(
         model_type, quantization_config
@@ -874,11 +1523,12 @@ def test_models_fse_init(
         quantization_config=None,
         runner_type="generate",
         is_moe=True,
+        use_mla=False,
         logits_processors=None,
         rswa_window=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v4_cpu"):
         from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
         vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
@@ -888,6 +1538,10 @@ def test_models_fse_init(
         )
     else:
         vllm_config.quant_config = QuarkConfig(quantization_config)
+        if per_layer_fse:
+            vllm_config.quant_config.packed_modules_mapping = {
+                "gate_up_proj": ["gate_proj", "up_proj"]
+            }
     if model_type == "glm5_next":
         from vllm.models.glm5next.common import model as glm5_next_model
 
@@ -898,18 +1552,40 @@ def test_models_fse_init(
         monkeypatch.setattr(
             glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
         )
+        from vllm.models.glm5next.common import mtp as glm5_next_mtp_model
+
+        # The MTP predictor asserts on the concrete MLA attention class and
+        # reads ``mla_attn``, so patch its imported name to the same stub.
+        monkeypatch.setattr(
+            glm5_next_mtp_model, "Glm5NextMLAAttention", _StubGlm5NextAttention
+        )
+    if model_type == "glm4_moe_lite":
+        from vllm.model_executor.models import glm4_moe_lite as glm4_moe_lite_model
+
+        # Only the MoE/shared-expert wiring is under test here; the MLA backend
+        # does not accept this test's default dtype.
+        for attention in ("Glm4MoeLiteAttention", "Glm4MoeLiteMLAAttention"):
+            monkeypatch.setattr(glm4_moe_lite_model, attention, _StubGlm5NextAttention)
+    if model_type == "deepseek_v32":
+        from vllm.models.deepseek_v32.amd import model as deepseek_v32_model
+
+        # The sparse-MLA attention needs a real MLA backend; only the MoE
+        # wiring is under test here.
+        monkeypatch.setattr(
+            deepseek_v32_model, "DeepseekV32MLAAttention", _StubGlm5NextAttention
+        )
+    if model_type == "qwen4_exp":
+        from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
+
+        # Only the MoE/shared-expert wiring is under test here.
+        monkeypatch.setattr(
+            qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
+        )
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if model_type == "deepseek_v4":
-        from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
-
-        warning_logger = deepseek_v4_model.logger
-    elif model_type == "minimax_m3":
-        warning_logger = minimax_m3_model.logger
-    else:
-        warning_logger = fused_moe_utils.logger
+    warning_logger = fused_moe_utils.logger
 
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_ROCM_USE_AITER", str(use_fse))
@@ -923,33 +1599,196 @@ def test_models_fse_init(
         importlib.reload(envs)
         mp.setattr(envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", use_fse)
         rocm_aiter_ops.refresh_env_variables()
+        from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+        mp.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
+        rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
         aiter_fse_enabled = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-        # These AMD-specific models currently use the raw environment flag.
-        # and do not rely on `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`.
-        fse_enabled = use_fse and (
-            aiter_fse_enabled or model_type in {"deepseek_v4", "minimax_m3"}
-        )
+        fse_enabled = use_fse and aiter_fse_enabled
 
         with (
             patch.object(warning_logger, "warning") as warning,
             set_current_vllm_config(vllm_config),
         ):
-            model = model_constructor(vllm_config=vllm_config)
-            mtp = None
-            if model_type == "deepseek_v4" and use_fse and not exclude:
-                from vllm.models.deepseek_v4.amd.mtp import (
-                    DeepSeekV4MTP,
+            model = model_constructor(
+                vllm_config=vllm_config,
+                **({"prefix": "model"} if per_layer_fse else {}),
+            )
+            mtps = {
+                model_type: _build_mtp_for_model(
+                    model_type, vllm_config, config, use_fse and not exclude
                 )
+            }
+            mtp = mtps.get("deepseek_v4")
+        if per_layer_fse:
+            expected_policy = {
+                f"layers.0.{moe_attr}": bool(fse_enabled and not exclude),
+                f"layers.1.{moe_attr}": bool(
+                    fse_enabled
+                    and not exclude
+                    and shared_expert_precision == "all_mxfp4"
+                ),
+            }
+            assert model.fused_shared_expert_layers == frozenset(
+                idx for idx in range(2) if expected_policy[f"layers.{idx}.{moe_attr}"]
+            )
+            if any(expected_policy.values()) and not all(expected_policy.values()):
+                with pytest.raises(NotImplementedError, match="EPLB"):
+                    get_fused_shared_expert_layers(
+                        model,
+                        type(getattr(model.layers[0], moe_attr)),
+                        enable_eplb=True,
+                    )
+            for idx, layer in enumerate(model.layers):
+                fused = expected_policy[f"layers.{idx}.{moe_attr}"]
+                moe = getattr(layer, moe_attr)
+                assert (getattr(moe, shared_name) is None) is fused
+                assert moe.experts.expert_map_manager.num_fused_shared_experts == int(
+                    fused
+                )
+                assert (
+                    moe.experts.moe_config.is_fused_shared_expert_requested
+                    is aiter_fse_enabled
+                )
+                if not fused and not exclude and model_type != "deepseek_v4":
+                    scheme = getattr(moe, shared_name).gate_up_proj.scheme
+                    expected_dtype = (
+                        "mxfp8_e4m3"
+                        if idx == 1 and shared_expert_precision == "mixed"
+                        else "mxfp4"
+                    )
+                    assert scheme.weight_dtype == expected_dtype
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+            checkpoint = []
+            expected_weights = []
+            for idx, layer in enumerate(model.layers):
+                fused = expected_policy[f"layers.{idx}.{moe_attr}"]
+                if model_type == "deepseek_v4":
+                    dsv4_checkpoint, dsv4_expected = (
+                        _make_deepseek_v4_shared_expert_checkpoint(
+                            layer, idx, fused, exclude
+                        )
+                    )
+                    checkpoint.extend(dsv4_checkpoint)
+                    expected_weights.extend(dsv4_expected)
+                    continue
+                high_precision = idx == 1 and shared_expert_precision == "mixed"
+                dtype = (
+                    torch.bfloat16
+                    if exclude
+                    else torch.float8_e4m3fn
+                    if high_precision
+                    else torch.uint8
                 )
-                mtp = DeepSeekV4MTP(vllm_config=vllm_config)
-        assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
+                pack_factor = 1 if exclude or high_precision else 2
+                for projection in ("gate_proj", "up_proj", "down_proj"):
+                    shape = (
+                        (128, 32 // pack_factor)
+                        if projection == "down_proj"
+                        else (32, 128 // pack_factor)
+                    )
+                    weight = torch.full(shape, idx + 1).to(dtype)
+                    name = f"layers.{idx}.{moe_attr}.{shared_name}.{projection}"
+                    checkpoint.append((f"{name}.weight", weight))
+                    if not exclude:
+                        scale_shape = (128, 1) if projection == "down_proj" else (32, 4)
+                        checkpoint.append(
+                            (
+                                f"{name}.weight_scale",
+                                torch.full(scale_shape, 127, dtype=torch.uint8),
+                            )
+                        )
+                    if fused:
+                        routed = getattr(layer, moe_attr).experts.routed_experts
+                        target = (
+                            routed.w2_weight[2]
+                            if projection == "down_proj"
+                            else routed.w13_weight[2].chunk(2, dim=0)[
+                                int(projection == "up_proj")
+                            ]
+                        )
+                    else:
+                        shared = getattr(getattr(layer, moe_attr), shared_name)
+                        target = (
+                            shared.down_proj.weight
+                            if projection == "down_proj"
+                            else shared.gate_up_proj.weight.chunk(2, dim=0)[
+                                int(projection == "up_proj")
+                            ]
+                        )
+                    expected_weights.append((target, weight))
+                if shared_name == "shared_expert":
+                    checkpoint.append(
+                        (
+                            f"layers.{idx}.{moe_attr}.shared_expert_gate.weight",
+                            torch.full((1, 128), idx + 1, dtype=torch.bfloat16),
+                        )
+                    )
+            with set_current_vllm_config(vllm_config):
+                loaded = model.load_weights(checkpoint)
+                base = config.num_hidden_layers
+                mtp_cases = [
+                    (
+                        mtp_model,
+                        f"model.layers.{base}.mlp.{shared}",
+                        mtp_model.model.layers[str(base)].mtp_block.mlp,
+                        getattr(config, "n_routed_experts", 0),
+                    )
+                    for mtp_model, shared in (
+                        (mtps.get("glm4_moe"), "shared_experts"),
+                        (mtps.get("glm4_moe_lite"), "shared_experts"),
+                        (mtps.get("deepseek_v2"), "shared_experts"),
+                        (mtps.get("deepseek_v32"), "shared_experts"),
+                        (mtps.get("glm5_next"), "shared_experts"),
+                    )
+                    if mtp_model is not None
+                ]
+                mtp_cases += [
+                    (
+                        mtp_model,
+                        "mtp.layers.0.mlp.shared_expert",
+                        mtp_model.model.layers[0].mlp,
+                        getattr(config, "num_experts", 0),
+                    )
+                    for mtp_model in (
+                        mtps.get("qwen3_next"),
+                        mtps.get("qwen3_5"),
+                    )
+                    if mtp_model is not None
+                ]
+                for mtp_model, ckpt_prefix, moe, n_routed in mtp_cases:
+                    if fse_enabled and not exclude:
+                        _assert_mtp_fused_shared_expert_redirect(
+                            mtp_model, ckpt_prefix, moe, n_routed
+                        )
+                    else:
+                        _assert_mtp_shared_expert_not_fused(
+                            mtp_model, ckpt_prefix, moe, n_routed
+                        )
+            for idx in range(2):
+                prefix = f"layers.{idx}.{moe_attr}"
+                expected_name = (
+                    f"{prefix}.experts.routed_experts.w2_weight"
+                    if expected_policy[prefix]
+                    else f"{prefix}.{shared_name}.down_proj.weight"
+                )
+                assert expected_name in loaded
+                if shared_name == "shared_expert":
+                    assert f"{prefix}.shared_expert_gate.weight" in loaded
+            for target, weight in expected_weights:
+                torch.testing.assert_close(
+                    target[: weight.shape[0], : weight.shape[1]].float(), weight.float()
+                )
+        elif model_type == "deepseek_v4_cpu":
+            # CPU never supports fused shared experts; the separate MLP is
+            # always built and no routed slot is appended.
+            for layer in model.layers:
+                assert layer.ffn.shared_experts is not None
+                assert (
+                    layer.ffn.experts.expert_map_manager.num_fused_shared_experts == 0
+                )
+        else:
+            assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
         if model_type == "glm5_next":
             assert (model.layers[0].mlp.shared_experts is None) is (
                 fse_enabled and not exclude
@@ -959,21 +1798,53 @@ def test_models_fse_init(
         # so should just raise a warning.
         if mtp is not None:
             assert not mtp.model.layers[
-                "1"
+                str(config.num_hidden_layers)
             ].mtp_block.ffn.is_fused_shared_expert_enabled
+            if aiter_fse_enabled:
+                warning.assert_called_once()
+                assert (
+                    "DeepSeek-V4/V4.1 shared experts at <shared_expert>"
+                    in (warning.call_args.args[1])
+                )
+            else:
+                # Without AITER nothing fuses, so no skip reason is reported.
+                warning.assert_not_called()
+        if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
             warning.assert_called_once()
-            assert (
-                "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"
-                in (warning.call_args.args[1])
-            )
+        if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
+            warning.assert_called_once()
+            if model_type == "deepseek_v4":
+                assert "are not MXFP4" in warning.call_args.args[1]
+            else:
+                assert (
+                    "different quantization configurations" in warning.call_args.args[1]
+                )
+        for mtp_model in (
+            mtps.get("glm4_moe"),
+            mtps.get("deepseek_v2"),
+            mtps.get("glm4_moe_lite"),
+            mtps.get("deepseek_v32"),
+            mtps.get("glm5_next"),
+        ):
+            if mtp_model is not None:
+                assert mtp_model.fused_shared_expert_layers == (
+                    frozenset({config.num_hidden_layers})
+                    if fse_enabled
+                    else frozenset()
+                )
         if aiter_fse_enabled and exclude:
-            warning.assert_called_once()
-            assert (
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-                in (warning.call_args.args[0])
-            )
-            assert "excludes shared experts" in warning.call_args.args[1]
+            if model_type == "deepseek_v4_cpu":
+                # CPU has no FSE path, so the resolver never warns.
+                warning.assert_not_called()
+            else:
+                assert warning.call_count == 1
+                assert (
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+                    in (warning.call_args.args[0])
+                )
+                assert "excludes shared experts" in warning.call_args.args[1]
 
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
 
@@ -1167,6 +2038,40 @@ def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> Non
         False,
         "online shared-expert quantization keys do not match the routed expert keys",
     )
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        ([], True),
+        (["lm_head", "model.embed_tokens"], True),
+        (["*.shared_experts.*"], False),
+        (["model.layers.0.mlp.experts"], False),
+        (["model.layers.0.mlp.experts", "*.shared_experts.*"], True),
+    ],
+)
+def test_modelopt_mxfp8_shared_expert_fse_compatibility(
+    exclude: list[str], expected: bool
+) -> None:
+    """MiniMax-M3 ships MXFP8, whose exclude list decides FSE compatibility."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=exclude,
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible is expected
+    if expected:
+        assert reason is None
+    else:
+        assert reason == (
+            "MXFP8 excludes routed and shared experts inconsistently at "
+            "model.layers.0.mlp.shared_experts"
+        )
 
 
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:

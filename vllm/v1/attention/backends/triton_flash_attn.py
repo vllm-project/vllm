@@ -5,6 +5,7 @@
 import torch
 
 from vllm.config.cache import CacheDType
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.composite import (
     MMPrefixAttentionRouting,
@@ -16,6 +17,13 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
 
 class _FABackend(FlashAttentionBackend):
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        if current_platform.is_xpu():
+            return True
+        # CUDA: Hopper only; Blackwell uses the Triton/FlashInfer composite.
+        return capability.major == 9 and super().supports_compute_capability(capability)
+
     @classmethod
     def supports_combination(
         cls,
@@ -42,6 +50,8 @@ class _FABackend(FlashAttentionBackend):
         )
         if reason is not None:
             return reason
+        if current_platform.is_xpu():
+            return None
         fa_version = get_flash_attn_version(
             head_size=head_size,
             has_sinks=has_sink,
@@ -61,5 +71,4 @@ TritonFlashAttentionBackend = create_composite_attention_backend(
     module=__name__,
     routing_policy=MMPrefixAttentionRouting,
     head_sizes=(256, 512),
-    device_major=9,
 )

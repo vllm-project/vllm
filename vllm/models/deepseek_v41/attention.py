@@ -140,10 +140,10 @@ def _use_v41_mxfp8_kv_record() -> bool:
 
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
-    kv_cache_dtype: CacheDType,
+    kv_cache_dtype: CacheDType | str,
     cache_config: CacheConfig | None,
-    packed_kv_cache_dtype: CacheDType = "fp8_ds_mla",
-) -> tuple[CacheDType, torch.dtype]:
+    packed_kv_cache_dtype: CacheDType | str = "fp8_ds_mla",
+) -> tuple[CacheDType | str, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The
@@ -548,10 +548,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
             and not cache_config.enable_prefix_caching
         ):
-            logger.warning_once(
-                "SWA bounded replay with PCP requires prefix caching; "
-                "decoder-side replay is not supported with PCP."
-            )
+            logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():
             logger.warning_once(
@@ -707,15 +704,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         attn_metadata = get_forward_context().attn_metadata
         qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
         _, _, kv = self._split_qkv_and_norm(qr_kv)
+        cache_positions = positions
         if isinstance(attn_metadata, dict):
             # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
             # the unused query; same as dspark's _insert_context_kv.
             cache = self.swa_cache_layer.kv_cache
+            swa_metadata = cast(
+                "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
+            )
+            cache_kv, slot_mapping = kv, swa_metadata.slot_mapping
+            if self.use_pcp:
+                cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
+                assert swa_metadata.cache_slot_mapping is not None
+                assert swa_metadata.cache_positions is not None
+                slot_mapping = swa_metadata.cache_slot_mapping
+                cache_positions = swa_metadata.cache_positions
             torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                kv,
+                cache_kv,
                 cache,
-                cast(Any, attn_metadata[self.swa_cache_layer.prefix]).slot_mapping,
-                positions,
+                slot_mapping,
+                cache_positions,
                 self.rotary_emb.cos_sin_cache,
                 self.swa_cache_layer.block_size,
                 self._flashinfer_fp8_kv_scale
@@ -725,9 +733,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
         if self.compressor is not None:
             latent = self.compressor(kv_score, positions)
-            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+            if self.use_pcp and latent is not None:
+                latent = get_pcp_group().all_gather(latent, dim=0)
+            self.compressor.insert_cache(latent, cache_positions, self.rotary_emb)
             if self.indexer is not None and self.indexer.owns_k:
-                self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+                self.indexer._produce_k(
+                    latent, cache_positions, self.indexer_rotary_emb
+                )
 
     def bind_gemm_rs(self) -> None:
         """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
@@ -1422,10 +1434,12 @@ class DeepseekV4Indexer(nn.Module):
         )
         self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
-            if not self.use_fp4_kv:
+            # DeepGEMM's sparse kernels (SM100) take either indexer cache;
+            # aiter's ROCm path is MXFP4-only.
+            if current_platform.is_rocm() and not self.use_fp4_kv:
                 raise ValueError(
-                    "attention_config.indexer_sparse_logits requires the MXFP4 "
-                    "indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
+                    "attention_config.indexer_sparse_logits on ROCm requires the "
+                    "MXFP4 indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
@@ -1456,9 +1470,13 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_write=candidate_write,
             )
         # The fused Q kernel writes the per-head weights in the dtype the
-        # scoring kernels take, so no cast runs per step.
+        # scoring kernels take, so no cast runs per step. Its FP8 path emits
+        # fp32 only (the Q scale is folded in); the sparse layer casts those,
+        # as the dense SM100 path does.
         self.indexer_weights_dtype = (
-            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype
+            if use_sparse_logits and self.use_fp4_kv
+            else torch.float32
         )
 
     def _produce_k(

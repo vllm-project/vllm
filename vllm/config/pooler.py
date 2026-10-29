@@ -83,7 +83,7 @@ class PoolerConfig:
     maximum position embeddings. When enabled, long inputs will be split into
     chunks, processed separately, and then aggregated using weighted averaging.
     This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
+    errors. Multimodal inputs are not supported. Defaults to False.
     """
     max_embed_len: int | None = None
     """
