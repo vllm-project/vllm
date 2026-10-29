@@ -105,8 +105,6 @@ class HiSparseCoordinator:
         *,
         num_reprefillable_tokens: int,
     ) -> None:
-        self.managers = managers
-        self.max_model_len = max_model_len
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
@@ -143,7 +141,6 @@ class HiSparseCoordinator:
                 self.host_manager = manager
                 manager.coordinator = self
                 manager.bind_host_pool(num_host_blocks)
-        self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.transition_watermark = 0
         if self.resident_managers:
@@ -483,7 +480,7 @@ class HiSparseCoordinator:
                 for manager in self.resident_managers
             ):
                 continue
-            if self._plan_page_transfer(request_id, page_idx, after_forward=True):
+            if self._plan_page_transfer(request_id, page_idx):
                 budget -= 1
 
     def publish_when_ready(
@@ -559,7 +556,6 @@ class HiSparseCoordinator:
             self._plan_page_transfer(
                 request_id,
                 (num_computed_tokens - 1) // block_size,
-                after_forward=False,
                 restore=True,
             )
         self._publish_host_blocks_if_ready(request_id)
@@ -569,7 +565,6 @@ class HiSparseCoordinator:
         request_id: str,
         page_idx: int,
         *,
-        after_forward: bool,
         restore: bool = False,
     ) -> bool:
         assert self.host_manager is not None
@@ -599,7 +594,6 @@ class HiSparseCoordinator:
             transfer_id=spill_id,
             host_block_id=host_block.block_id,
             resident_block_ids=tuple(block.block_id for block in blocks),
-            after_forward=after_forward,
             restore=restore,
         )
         self.pending_spills[spill_id] = _PendingSpill(
