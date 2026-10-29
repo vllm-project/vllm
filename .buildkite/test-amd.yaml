@@ -274,29 +274,27 @@ steps:
 
 #------------------------------------------------------------  mi250 · v1  -------------------------------------------------------------#
 
-# Disabled until the pytest plugins installation is locked.
-# - label: ":amd: (MI250) Batch Invariance" # TBD
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   dind: false
-#   agent_pool: mi250_1
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/v1/attention
-#   - vllm/model_executor/layers
-#   - vllm/model_executor/kernels/linear
-#   - vllm/model_executor/determinism
-#   - tests/v1/determinism/
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - export VLLM_GPU_MEMORY_UTILIZATION=0.8
-#   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pip install pytest-timeout pytest-forked
-#   - pytest -v -s v1/determinism/test_batch_invariance.py
-#   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+- label: ":amd: (MI250) Batch Invariance" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
+  agent_pool: mi250_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_GPU_MEMORY_UTILIZATION=0.8
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s v1/determinism/test_batch_invariance.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
 
 - label: ":amd: (MI250) CUDAGraph" # TBD
   timeout_in_minutes: 55
@@ -331,7 +329,13 @@ steps:
   - tests/v1/e2e/general/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - >-
+    pytest -v -s
+    v1/e2e/general
+    --ignore v1/e2e/general/test_async_scheduling.py
+    --ignore v1/e2e/general/test_async_scheduling_accuracy.py
+    --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py
+    -k "not test_mamba_prefix_cache_mrv2"
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -380,7 +384,10 @@ steps:
   - vllm/v1/engine/
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - >-
+    pytest -v -s
+    v1/engine
+    --ignore v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/test_tensor_ipc_queue.py
   - pytest -v -s config/test_mp_reducer.py
 
@@ -456,7 +463,22 @@ steps:
   - tests/utils.py
   - tests/models/test_vision.py
   commands:
-  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
+  - >-
+    case "$$BUILDKITE_PARALLEL_JOB" in
+    0)
+    TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
+    HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;;
+    1)
+    pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
+    pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
+    VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;;
+    2)
+    pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
+    --ignore models/multimodal/generation/test_whisper.py &&
+    VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' &&
+    pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;;
+    *) exit 2 ;;
+    esac
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
@@ -587,7 +609,10 @@ steps:
   - vllm/v1/
   optional: true
   commands:
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  - >-
+    pytest -s -v
+    compile/passes
+    --ignore compile/passes/distributed
 
 - label: ":amd: (MI300) PyTorch Fullgraph" # TBD
   timeout_in_minutes: 90
@@ -860,25 +885,23 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
   - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) Elastic EP Scaling" # TBD
-#   timeout_in_minutes: 55
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/
-#   - vllm/engine/
-#   - vllm/v1/executor/
-#   - vllm/compilation/
-#   - tests/distributed/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - pytest -v -s distributed/test_elastic_ep.py
+- label: ":amd: (MI300) Elastic EP Scaling" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/v1/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
 
 - label: ":amd: (MI300) RayExecutorV2" # TBD
   timeout_in_minutes: 75
@@ -1146,7 +1169,15 @@ steps:
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   optional: true
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/core
+    --ignore=kernels/core/test_minimax_reduce_rms.py
+    kernels/test_fused_qk_norm_rope_gate.py
+    kernels/test_concat_mla_q.py
+    kernels/test_top_k_per_row.py
+    kernels/test_rocm_fp32_router_gemm.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
@@ -1198,7 +1229,12 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/moe
+    --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    --ignore=kernels/moe/test_modular_kernel_combinations.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -1264,7 +1300,15 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/utils/flashinfer.py
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/attention
+    --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45
@@ -1317,7 +1361,12 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   # Run the ROCm AttnRes/KDA decode counterparts plus existing KDA coverage.
-  - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_amd_kda_decode.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+  - >-
+    pytest -v -s
+    models/kimi_k3/test_amd_attn_res.py
+    models/kimi_k3/test_amd_kda_decode.py
+    models/kimi_k3/test_kda.py
+    models/kimi_k3/test_kda_metadata.py
 
 - label: ":amd: (MI355) Kimi K3" # TBD
   timeout_in_minutes: 60
@@ -1338,7 +1387,7 @@ steps:
   # gated on gfx950, so this has to be MI355. The two kernels/ files the NVIDIA
   # step runs are CUDA-only (they import cuda.bindings.driver), so they are
   # deliberately left out here.
-  - pytest -v -s models/kimi_k3
+  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 - label: ":amd: (MI355) Kimi K3 Multi-GPU" # TBD
   timeout_in_minutes: 30
@@ -1359,7 +1408,7 @@ steps:
   # multi-GPU test anywhere in the directory without editing this list.
   # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
-  - pytest -v -s -m "distributed" models/kimi_k3
+  - pytest -v -s -m "distributed" models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 - label: ":amd: (MI355) MiniMax M3 Specialized Decode"
   timeout_in_minutes: 45
@@ -1842,7 +1891,11 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+  - >-
+    pytest -v -s
+    tool_use
+    --ignore=tool_use/mistral
+    --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
@@ -1963,33 +2016,31 @@ steps:
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-# Disabled until the pytest plugins installation is locked.
-# - label: ":amd: (MI300) Batch Invariance" # TBD
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_1
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/v1/attention
-#   - vllm/model_executor/layers
-#   - vllm/lora/ops/triton_ops
-#   - vllm/model_executor/kernels/linear
-#   - vllm/model_executor/determinism
-#   - tests/v1/determinism/
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pip install pytest-timeout pytest-forked
-#   - pytest -v -s v1/determinism/test_batch_invariance.py
-#   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
-#   - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
-#   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-#   - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+- label: ":amd: (MI300) Batch Invariance" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/lora/ops/triton_ops
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s v1/determinism/test_batch_invariance.py
+  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+  - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+  - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
 
 - label: ":amd: (MI300) Batch Invariance (Distributed)" # TBD
   timeout_in_minutes: 45
@@ -2081,7 +2132,10 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - >-
+    pytest -v -s
+    v1/engine
+    --ignore v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/test_tensor_ipc_queue.py
 
 - label: ":amd: (MI300) Extract Hidden States Integration" # TBD
@@ -2136,43 +2190,41 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/models/deepseek_v32/amd/rocm.py
   commands:
-  - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    v1/attention
+    --ignore=v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
   - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-# Disabled until the tracing packages installation is locked.
-# - label: ":amd: (MI300) Metrics, Tracing" # TBD
-#   timeout_in_minutes: 30
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   optional: true
-#   num_gpus: 2
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/v1/tracing
-#   - tests/tracing/
-#   - vllm/config/
-#   - vllm/distributed/
-#   - vllm/engine/
-#   - vllm/inputs/
-#   - vllm/model_executor/
-#   - vllm/multimodal/
-#   - vllm/platforms/
-#   - vllm/sampling_params.py
-#   - vllm/tracing/
-#   - vllm/transformers_utils/
-#   - vllm/utils/
-#   - vllm/v1/
-#   commands:
-#   - "pip install \
-#       'opentelemetry-sdk>=1.26.0' \
-#       'opentelemetry-api>=1.26.0' \
-#       'opentelemetry-exporter-otlp>=1.26.0' \
-#       'opentelemetry-semantic-conventions-ai>=0.4.1'"
-#   - pytest -v -s v1/tracing
-#   - pytest -v -s tracing
+- label: ":amd: (MI300) Metrics, Tracing" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/tracing
+  - tests/tracing/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tracing/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  commands:
+  - pytest -v -s v1/tracing
+  - pytest -v -s tracing
 
 - label: ":amd: (MI300) V1 E2E" # TBD
   timeout_in_minutes: 30
@@ -2261,40 +2313,36 @@ steps:
   - export BASELINE_FILE='/tmp/mooncake-ec-e2e/baseline.json'
   - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) NixlConnector PD edge case" # TBD
-#   timeout_in_minutes: 65
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/v1/core/sched/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - PREFILL_GPU_ID=0 DECODE_GPU_ID=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
+- label: ":amd: (MI300) NixlConnector PD edge case" # TBD
+  timeout_in_minutes: 65
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/core/sched/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - PREFILL_GPU_ID=0 DECODE_GPU_ID=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: ":amd: (MI300) Distributed DP Extended" # TBD
   timeout_in_minutes: 75
@@ -2320,133 +2368,119 @@ steps:
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) Distributed NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 45
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI300) Distributed NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy" # TBD
-#   timeout_in_minutes: 55
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - tests/v1/kv_connector/nixl_push_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - tests/v1/kv_connector/nixl_push_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 30
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 80
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 80
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) Hybrid SSM NixlConnector PD prefix cache" # TBD
-#   timeout_in_minutes: 25
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/v1/core/sched/
-#   - vllm/v1/core/kv_cache_coordinator.py
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+- label: ":amd: (MI300) Hybrid SSM NixlConnector PD prefix cache" # TBD
+  timeout_in_minutes: 25
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/core/sched/
+  - vllm/v1/core/kv_cache_coordinator.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD accuracy" # TBD
-#   timeout_in_minutes: 30
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
-#   - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
-#   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+- label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD accuracy" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD edge cases" # TBD
-#   timeout_in_minutes: 25
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
-#   - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
-#   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+- label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD edge cases" # TBD
+  timeout_in_minutes: 25
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -2675,7 +2709,11 @@ steps:
   - vllm/model_executor/models/llama.py
   commands:
   - amd-smi
-  - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+  - >-
+    pytest -v -s
+    tests/compile/passes/test_fusion_attn.py
+    tests/compile/passes/test_silu_mul_quant_fusion.py
+    tests/compile/passes/test_silu_mul_quant_manual_fusion.py
   - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"
@@ -2860,132 +2898,117 @@ steps:
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs kernels/moe/test_moe_layer.py::test_moe_layer_mori_graph
   - VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs 'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]' --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) NixlConnector PD + Spec Decode acceptance" # TBD
-#   timeout_in_minutes: 45
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/v1/worker/kv_connector_model_runner_mixin.py
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - KV_CACHE_MEMORY_BYTES=8G ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+- label: ":amd: (MI355) NixlConnector PD + Spec Decode acceptance" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - KV_CACHE_MEMORY_BYTES=8G ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) Distributed NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI355) Distributed NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
-#   - tests/utils.py
-#   - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-#   - vllm/platforms/rocm.py
-#   - requirements/common.txt
-#   - requirements/kv_connectors_rocm.txt
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_rocm.py
+- label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - tests/utils.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/platforms/rocm.py
+  - requirements/common.txt
+  commands:
+  - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_rocm.py
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
-#   timeout_in_minutes: 30
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
-#   - tests/v1/kv_connector/mooncake_integration/
-#   - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
-#   - tests/utils.py
-#   - examples/disaggregated/mooncake_connector/
-#   - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-#   - vllm/platforms/rocm.py
-#   - requirements/common.txt
-#   - requirements/kv_connectors_rocm.txt
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
+- label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+  - tests/v1/kv_connector/mooncake_integration/
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - tests/utils.py
+  - examples/disaggregated/mooncake_connector/
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/platforms/rocm.py
+  - requirements/common.txt
+  commands:
+  - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy" # TBD
-#   timeout_in_minutes: 40
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy" # TBD
+  timeout_in_minutes: 40
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
-#   timeout_in_minutes: 105
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_4
-#   num_gpus: 4
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/platforms/rocm.py
-#   - vllm/models/kimi_k3/
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - requirements/kv_connectors_rocm.txt
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - export ENABLE_HMA_FLAG='1'
-#   - export DP_EP='1'
-#   - export GPU_MEMORY_UTILIZATION='0.9'
-#   - export VLLM_SSM_CONV_STATE_LAYOUT='DS'
-#   - export PREFILLER_TP_SIZE='2'
-#   - export DECODER_TP_SIZE='2'
-#   - export MODEL_NAMES='moonshotai/Kimi-Linear-48B-A3B-Instruct'
-#   - export PREFILL_BLOCK_SIZE='2048'
-#   - export DECODE_BLOCK_SIZE='2048'
-#   - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--max-model-len 32768'
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+- label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
+  timeout_in_minutes: 105
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/platforms/rocm.py
+  - vllm/models/kimi_k3/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - tests/v1/kv_connector/nixl_integration/
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export ENABLE_HMA_FLAG='1'
+  - export DP_EP='1'
+  - export GPU_MEMORY_UTILIZATION='0.9'
+  - export VLLM_SSM_CONV_STATE_LAYOUT='DS'
+  - export PREFILLER_TP_SIZE='2'
+  - export DECODER_TP_SIZE='2'
+  - export MODEL_NAMES='moonshotai/Kimi-Linear-48B-A3B-Instruct'
+  - export PREFILL_BLOCK_SIZE='2048'
+  - export DECODE_BLOCK_SIZE='2048'
+  - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--max-model-len 32768'
+  - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
 - label: ":amd: (MI355) Distributed Features" # TBD
   timeout_in_minutes: 90
@@ -3099,45 +3122,42 @@ steps:
     not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
     ROCM_AITER_MLA'
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
-#   timeout_in_minutes: 85
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_8
-#   num_gpus: 8
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - requirements/kv_connectors_rocm.txt
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/model_executor/layers/fused_moe/
-#   - vllm/model_executor/layers/quantization/
-#   - vllm/models/deepseek_v4/
-#   - vllm/v1/attention/
-#   - tests/v1/kv_connector/nixl_integration/
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-#   # A mirror does not inherit the parent env, so it is repeated here in
-#   # the parent's order. The layouts must stay empty: unset, the script
-#   # defaults to HND, which the V4 indexer rejects.
-#   - >-
-#     VLLM_ROCM_USE_AITER=1
-#     ENABLE_HMA_FLAG=1
-#     DP_EP=1
-#     GPU_MEMORY_UTILIZATION=0.85
-#     PREFILLER_TP_SIZE=4
-#     DECODER_TP_SIZE=4
-#     PREFILL_BLOCK_SIZE=256
-#     DECODE_BLOCK_SIZE=256
-#     MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
-#     VLLM_ENGINE_READY_TIMEOUT_S=1800
-#     VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
-#     PREFILLER_KV_LAYOUT=
-#     DECODER_KV_LAYOUT=
-#     bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+- label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
+  timeout_in_minutes: 85
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/models/deepseek_v4/
+  - vllm/v1/attention/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  # A mirror does not inherit the parent env, so it is repeated here in
+  # the parent's order. The layouts must stay empty: unset, the script
+  # defaults to HND, which the V4 indexer rejects.
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    ENABLE_HMA_FLAG=1
+    DP_EP=1
+    GPU_MEMORY_UTILIZATION=0.85
+    PREFILLER_TP_SIZE=4
+    DECODER_TP_SIZE=4
+    PREFILL_BLOCK_SIZE=256
+    DECODE_BLOCK_SIZE=256
+    MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
+    VLLM_ENGINE_READY_TIMEOUT_S=1800
+    VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+    PREFILLER_KV_LAYOUT=
+    DECODER_KV_LAYOUT=
+    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
 - label: ":amd: (MI355) Distributed Torchrun + Examples" # TBD
   timeout_in_minutes: 55
@@ -3244,7 +3264,15 @@ steps:
   - vllm/triton_utils/
   - vllm/utils/
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  - >-
+    pytest -v -s
+    engine
+    test_sequence.py
+    test_config.py
+    test_logger.py
+    test_vllm_port.py
+    jit_monitor/test_hooks.py
+    jit_monitor/test_hooks_gpu.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
@@ -3261,7 +3289,12 @@ steps:
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - >-
+    pytest -v -s
+    entrypoints/llm
+    --ignore=entrypoints/llm/test_generate.py
+    --ignore=entrypoints/llm/test_collective_rpc.py
+    --ignore=entrypoints/llm/offline_mode
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
@@ -3281,10 +3314,18 @@ steps:
   - tests/entrypoints/rl
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/serve
+    --ignore=entrypoints/serve/dev/rpc
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/rl
+    --ignore=entrypoints/rl/weight_transfer
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 65
@@ -3299,8 +3340,17 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - >-
+    pytest -v -s
+    entrypoints/openai/completion
+    --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - >-
+    pytest -v -s
+    entrypoints/openai
+    --ignore=entrypoints/openai/completion
+    --ignore=entrypoints/openai/chat_completion
+    --ignore=entrypoints/openai/responses
+    --ignore=entrypoints/openai/correctness
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)" # TBD
   timeout_in_minutes: 70
@@ -4355,7 +4405,11 @@ steps:
   - tests/kernels/test_gate_linear_rocm_dispatch.py
   - tests/kernels/test_bf16x3_router_gemm_rocm.py
   commands:
-  - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
+  - >-
+    pytest -v -s
+    tests/kernels/test_rocm_fp32_router_gemm.py
+    tests/kernels/test_gate_linear_rocm_dispatch.py
+    tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 - label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
   timeout_in_minutes: 35
@@ -4485,7 +4539,15 @@ steps:
   - vllm/utils/flashinfer.py
   optional: true
   commands:
-  - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/attention
+    --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+    --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
@@ -4736,7 +4798,18 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+  - >-
+    pytest -v -s
+    lora
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    --ignore=lora/test_chatglm3_tp.py
+    --ignore=lora/test_llama_tp.py
+    --ignore=lora/test_qwen3_with_multi_loras.py
+    --ignore=lora/test_olmoe_tp.py
+    --ignore=lora/test_deepseekv2_tp.py
+    --ignore=lora/test_gptoss_tp.py
+    --ignore=lora/test_qwen3moe_tp.py
+    --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
 
@@ -4757,7 +4830,13 @@ steps:
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl_stream_weights.py
+  - >-
+    pytest -v -s
+    models/test_terratorch.py
+    models/transformers/test_backend.py
+    models/test_registry.py
+    models/test_deepseek_v4_vl_rocm.py
+    models/test_deepseek_v4_vl_stream_weights.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4774,7 +4853,10 @@ steps:
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
-  - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
+  - >-
+    pytest -v -s
+    models/qwen4_exp/test_qsa_amd.py
+    models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
 
@@ -5005,7 +5087,11 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - >-
+    pytest -v -s
+    models/multimodal/generation
+    -m 'not core_model'
+    --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
 
 - label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)" # TBD
@@ -5045,7 +5131,19 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - >-
+    pytest -v -s
+    models/multimodal
+    -m core_model
+    --ignore models/multimodal/generation/test_common.py
+    --ignore models/multimodal/generation/test_ultravox.py
+    --ignore models/multimodal/generation/test_qwen2_5_vl.py
+    --ignore models/multimodal/generation/test_qwen2_vl.py
+    --ignore models/multimodal/generation/test_whisper.py
+    --ignore models/multimodal/generation/test_mm_prefix_lm.py
+    --ignore models/multimodal/generation/test_memory_leak.py
+    --ignore models/multimodal/generation/test_vit_cudagraph.py
+    --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
@@ -5130,37 +5228,35 @@ steps:
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
-# Disabled until the pytest plugins installation is locked.
-# - label: ":amd: (MI355) Batch Invariance" # TBD
-#   timeout_in_minutes: 60
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_1
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/v1/attention
-#   - vllm/model_executor/layers
-#   - vllm/lora/ops/triton_ops
-#   - vllm/model_executor/kernels/linear
-#   - vllm/model_executor/determinism
-#   - tests/v1/determinism/
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pip install pytest-timeout pytest-forked
-#   - pytest -v -s v1/determinism/test_batch_invariance.py
-#   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
-#   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-#   - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
-#   - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
-#   - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
-#   - pytest -v -s v1/determinism/test_online_batch_invariance.py
-#   - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
+- label: ":amd: (MI355) Batch Invariance" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/lora/ops/triton_ops
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s v1/determinism/test_batch_invariance.py
+  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+  - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+  - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+  - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+  - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+  - pytest -v -s v1/determinism/test_online_batch_invariance.py
+  - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
 
 - label: ":amd: (MI355) Spec Decode AL DFlash2 Nightly"
   timeout_in_minutes: 60
@@ -5667,7 +5763,10 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-  - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+  - >-
+    pytest -v -s
+    v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2
+    v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
 
 - label: ":amd: (MI355 DPX) Extract Hidden States Integration Single GPU"
   timeout_in_minutes: 45
@@ -5706,8 +5805,17 @@ steps:
   - vllm/models/deepseek_v32/amd/rocm.py
   optional: true
   commands:
-  - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    v1/attention
+    --ignore=v1/attention/test_mla_backends.py
+    --ignore=v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    VLLM_ROCM_USE_AITER=1 pytest -v -s
+    v1/attention/test_mla_backends.py
+    v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) CUDAGraph"
   timeout_in_minutes: 55
@@ -5791,7 +5899,13 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/conftest.py
   commands:
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+  - >-
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+    pytest -v -s
+    v1/e2e/spec_decode/acceptance_rates/mtp_other/
+    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
+    fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
 

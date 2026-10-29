@@ -79,7 +79,6 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                     i_s_name,
                     torch.nn.Parameter(input_scale.max(), requires_grad=False),
                 )
-                setattr(layer, i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, i_zp_name)
 

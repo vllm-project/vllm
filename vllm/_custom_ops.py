@@ -883,6 +883,7 @@ def get_cutlass_moe_mm_data(
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
     is_gated: bool = True,
+    sorted_expert_ids: torch.Tensor | None = None,
 ):
     """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -907,6 +908,8 @@ def get_cutlass_moe_mm_data(
                           blockscale_offsets[E]
     - is_gated: Whether the activation is gated (gate + up). When True, the
                 first GEMM N dimension is 2*n; when False, it is n.
+    - sorted_expert_ids: Optional expert ID for each row after sorting, used to
+                         skip expert-offset searches in MXFP4 conversion.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -920,6 +923,7 @@ def get_cutlass_moe_mm_data(
         k,
         blockscale_offsets,
         is_gated,
+        sorted_expert_ids,
     )
 
 
@@ -1736,6 +1740,7 @@ def mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
@@ -1747,6 +1752,9 @@ def mxfp4_experts_quant(
         blockscale_offsets: [n_experts+1] SF row boundaries per expert
         n_experts: number of experts
         topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
         output_scales: E8M0 blockscales in swizzled layout (uint8 view)
@@ -1783,6 +1791,7 @@ def mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
@@ -1795,9 +1804,24 @@ def silu_and_mul_mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
+
+    Args:
+        input_tensor: [m_topk, 2*k] BF16/FP16 gate||up activations
+        expert_offsets: [n_experts+1] token boundaries per expert
+        blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
+        topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
+    Returns:
+        output: [m_topk, k//2] packed E2M1 values (uint8)
+        output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2
@@ -1827,6 +1851,7 @@ def silu_and_mul_mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     output_scales = output_scales.view(torch.uint8)
     return output, output_scales
@@ -2917,9 +2942,16 @@ def concat_and_cache_mla(
     scale: torch.Tensor,
     skip_scale: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
-    )
+    if current_platform.is_xpu():
+        if skip_scale:
+            raise NotImplementedError("skip_scale is not supported on XPU")
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        )
+    else:
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+        )
 
 
 def concat_and_cache_mla_grouped(
@@ -3145,6 +3177,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     block_table: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
 
@@ -3154,6 +3187,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Per-request token offset into the context to start
+            reading from [num_reqs]; None reads from the first token.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -3162,6 +3197,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table,
         workspace_starts,
         batch_size,
+        seq_starts,
     )
 
 
