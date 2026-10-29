@@ -126,7 +126,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
-    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
+    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
         model="Salesforce/blip2-opt-2.7b",
@@ -1161,7 +1161,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
-    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630 # noqa
+    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
     # model_name = "HwwwH/MiniCPM-V-2"
 
     # 2.5

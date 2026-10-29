@@ -57,7 +57,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501

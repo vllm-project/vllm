@@ -3692,7 +3692,7 @@ class BlazeditDataset(HuggingFaceDataset):
                 continue
 
             # template copied from
-            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
+            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105
             prompt = f"""Given a code file, please apply the change requests and generate the new file.
 
 Original file:

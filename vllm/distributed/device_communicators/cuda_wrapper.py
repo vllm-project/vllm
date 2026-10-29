@@ -66,7 +66,7 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
         ),
-        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
+        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr )
         Function(
             "cudaIpcGetMemHandle",
             cudaError_t,
@@ -90,7 +90,7 @@ class CudaRTLibrary:
         Function("cudaGetLastError", cudaError_t, []),
     ]
 
-    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
+    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html
     cuda_to_hip_mapping = {
         "cudaSetDevice": "hipSetDevice",
         "cudaDeviceSynchronize": "hipDeviceSynchronize",

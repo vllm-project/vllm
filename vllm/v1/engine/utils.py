@@ -600,7 +600,7 @@ class CoreEngineActorManager:
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
-            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
                 physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
