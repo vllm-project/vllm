@@ -35,7 +35,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
+from vllm.platforms.rocm import _ON_GFX950, on_gfx1250, on_rdna
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -139,6 +139,18 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
         )
         return False
     return True
+
+
+# aiter's sparse MLA prefill is slower than gather + OPUS at 128 heads per
+# rank, so prefill takes it only up to 64; decode takes it at any head count.
+_AITER_SPARSE_MLA_PREFILL_MAX_HEADS = 64
+
+
+def _aiter_sparse_mla_prefill_enabled(num_heads: int, has_kv_transfer: bool) -> bool:
+    return (
+        _aiter_sparse_mla_enabled(has_kv_transfer)
+        and num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -747,8 +759,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             dtype=torch.int32,
             device=self.device,
         )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+        # The ragged prefill SWA indices are only read by the aiter prefill, so
+        # build them under the same head-count gate the attention layer uses.
+        self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
+            self.vllm_config.model_config.get_num_attention_heads(
+                self.vllm_config.parallel_config
+            ),
+            self.vllm_config.kv_transfer_config is not None,
         )
 
     def build(
@@ -768,7 +785,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         prefill_ragged_indices = None
         prefill_ragged_indptr = None
         if (
-            self._use_aiter_sparse_mla
+            self._use_aiter_sparse_mla_prefill
             and base.num_prefill_tokens > 0
             and base.prefill_swa_indices is not None
             and base.prefill_swa_lens is not None
@@ -827,7 +844,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4."""
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
-    _use_aiter_sparse_mla = False
 
     def _get_indexer_cls(self, vllm_config: VllmConfig) -> type[DeepseekV4Indexer]:
         if dsa_indexer_uses_fp4(vllm_config):
@@ -859,7 +875,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         else:
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._use_aiter_sparse_mla_decode = _aiter_sparse_mla_enabled(
+            self._has_kv_transfer
+        )
+        self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
+            self.n_local_heads, self._has_kv_transfer
+        )
 
     def _run_sequential_pipeline(
         self,
@@ -1415,7 +1436,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # gather workspace _forward_prefill would; the dequantize / topk
             # / sparse_fwd kernels are skipped this step. The aiter prefill
             # reads the caches in place and never asks for it.
-            if not self._use_aiter_sparse_mla:
+            if not self._use_aiter_sparse_mla_prefill:
                 swa_only = self.compress_ratio <= 1
                 N = (
                     0
@@ -1449,6 +1470,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
+        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
+        # the rotation into the decode reduce would apply it twice. Only the
+        # BF16 einsum path hands its rotation off to the decode.
+        fuse_inv_rope = self._wo_a_fp8_weight is None
+        # The aiter store rotates the prefill rows too.
+        prefill_rotated = fuse_inv_rope and self._use_aiter_sparse_mla_prefill
         if num_prefills > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
@@ -1458,14 +1485,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 output=output[num_decode_tokens:],
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
+                inv_rope=prefill_rotated,
             )
-        # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
-        # the rotation into the decode reduce would apply it twice. Only the
-        # BF16 einsum path hands its rotation off to the decode.
-        fuse_inv_rope = self._wo_a_fp8_weight is None
         rotated = 0
         if num_decodes > 0:
-            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
+            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250() and not on_rdna()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=(
@@ -1485,14 +1509,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ),
             )
         if fuse_inv_rope:
-            # Only the decode reduce rotates its own rows, and only the leading
-            # `rotated` of them; prefill rows and any decode path that did not
-            # fuse still owe the standalone pass. Settle that here rather than
-            # in _o_proj: the split is batch-dependent and _o_proj runs
-            # compiled, where such a value freezes at its trace-time value.
+            # Rows [rotated, end) were not rotated in a kernel's store and owe
+            # the standalone pass. Settle that here rather than in _o_proj: the
+            # split is batch-dependent and _o_proj runs compiled, where such a
+            # value freezes at its trace-time value.
+            end = num_decode_tokens if prefill_rotated else output.shape[0]
             rocm_inverse_rope_rows_(
-                output[rotated:, : self.n_local_heads, :],
-                positions[rotated:],
+                output[rotated:end, : self.n_local_heads, :],
+                positions[rotated:end],
                 self.rotary_emb.cos_sin_cache,
                 self.rope_head_dim,
             )
@@ -1540,7 +1564,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        if self._use_aiter_sparse_mla:
+        if self._use_aiter_sparse_mla_decode:
             assert swa_metadata.decode_swa_ragged_indices is not None
             assert swa_metadata.decode_swa_ragged_indptr is not None
             self._aiter_sparse_mla(
@@ -1552,9 +1576,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 kv_cache,
                 topk_ragged_indices,
                 topk_ragged_indptr,
+                positions=positions,
             )
-            # The aiter kernel leaves the inverse RoPE to the caller.
-            return 0
+            return 0 if positions is None else q.shape[0]
 
         return rocm_sparse_attn_decode(
             q=q,
@@ -1594,8 +1618,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         output: torch.Tensor,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        inv_rope: bool = False,
     ) -> None:
-        if self._use_aiter_sparse_mla:
+        if self._use_aiter_sparse_mla_prefill:
             self._forward_prefill_aiter(
                 q=q,
                 compressed_k_cache=compressed_k_cache,
@@ -1603,8 +1628,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 output=output,
                 attn_metadata=attn_metadata,
                 swa_metadata=swa_metadata,
+                positions=positions if inv_rope else None,
             )
             return
+        assert not inv_rope, "only the aiter prefill rotates its own rows"
 
         swa_only = attn_metadata is None
 
@@ -1735,6 +1762,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         output: torch.Tensor,
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        positions: torch.Tensor | None = None,
     ) -> None:
         """Prefill straight off the paged caches, with no bf16 gather."""
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -1784,6 +1812,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             compressed_k_cache,
             topk_ragged_indices,
             topk_ragged_indptr,
+            positions=None if positions is None else positions[:num_prefill_tokens],
         )
 
     def _aiter_sparse_mla(
@@ -1796,11 +1825,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         compressed_k_cache: torch.Tensor | None,
         topk_indices: torch.Tensor | None,
         topk_indptr: torch.Tensor | None,
+        positions: torch.Tensor | None = None,
     ) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
         # Both fp8 caches are read in place: the SWA window as the main segment,
-        # the top-k compressed tokens as the extra one.
+        # the top-k compressed tokens as the extra one. With positions the
+        # store applies the inverse RoPE.
         rocm_aiter_ops.triton_sparse_mla_fwd(
             q,
             swa_k_cache,
@@ -1812,6 +1843,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             extra_kv_buffer=compressed_k_cache,
             extra_kv_indptr=topk_indptr,
             extra_kv_indices=topk_indices,
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=(
+                None if positions is None else self.rotary_emb.cos_sin_cache
+            ),
         )
 
 

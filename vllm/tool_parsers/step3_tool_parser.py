@@ -70,8 +70,9 @@ class Step3ToolParser(ToolParser):
 
         params: dict[str, str] = {}
         param_matches = re.findall(
-            r'<steptml:parameter name="([^"]+)">([^<]*)</steptml:parameter>',
+            r'<steptml:parameter name="([^"]+)">(.*?)</steptml:parameter>',
             action_text,
+            re.DOTALL,
         )
         for name, value in param_matches:
             params[name] = value.strip()

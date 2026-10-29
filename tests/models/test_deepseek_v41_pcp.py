@@ -174,3 +174,24 @@ def test_pcp_replay_gathers_compacted_routing_ids(monkeypatch):
     values = torch.tensor([3, 7])
     model_module.DeepseekV4Model._run_replay_layers(model, *([values] * 7))
     torch.testing.assert_close(run_layers.call_args.args[3], values.repeat(2))
+
+
+@pytest.mark.parametrize("method,adaptive", [("mtp", False), ("dspark", True)])
+def test_pcp_rejects_speculation_other_than_fixed_length_dspark(method, adaptive):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=SimpleNamespace(
+            use_dspark=lambda: method == "dspark",
+            enable_adaptive_verification=adaptive,
+        ),
+    )
+    with pytest.raises(NotImplementedError, match="fixed-length DSpark"):
+        model_module.DeepseekV4Model(vllm_config=config)

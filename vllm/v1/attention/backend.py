@@ -486,6 +486,14 @@ class CommonAttentionMetadata:
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
 
+    def invalidate_cached_layout(self) -> None:
+        """Drop values cached from query_start_loc and seq_lens.
+
+        Call after updating either in place.
+        """
+        self._num_computed_tokens_cache = None
+        self._token_to_req_indices_cache = None
+
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
         if self._num_computed_tokens_cache is None:
@@ -1036,6 +1044,9 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
     hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
+
+    def get_fp8_ds_mla_row_bytes(self) -> int:
+        return 656
 
     @abstractmethod
     def __init__(

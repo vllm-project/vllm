@@ -99,6 +99,8 @@ def _speculator(temp: float, seed: int):
     s._draft_scatter_buf = None
     s.use_fp64_gumbel = False
     s.draft_logits = torch.zeros(MAX_REQS, N_SPEC, VOCAB, dtype=bf16, device=dev)
+    s.draft_logits_num_shards = 1
+    s.draft_logits_shard_idx = 0
     s.temperature = torch.full((MAX_REQS,), temp, dtype=torch.float32, device=dev)
     s.seeds = torch.randint(0, 2**62, (MAX_REQS,), generator=g, device=dev)
     s._step_cols = torch.arange(N_SPEC, dtype=torch.int32, device=dev)

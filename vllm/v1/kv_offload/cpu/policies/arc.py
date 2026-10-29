@@ -63,7 +63,9 @@ class ARCCachePolicy(CachePolicy):
         return self.t1.get(key) or self.t2.get(key)
 
     @override
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
         self.t1[key] = chunk
         self.b1.pop(key, None)
         self.b2.pop(key, None)

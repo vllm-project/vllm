@@ -449,6 +449,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
 
 def test_index_conversion_warmup_uses_physical_block_stride():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(
             max_model_len=1024,

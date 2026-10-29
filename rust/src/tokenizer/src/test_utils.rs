@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{DecodedText, Result, Tokenizer, TokenizerError};
+use crate::{DecodedText, IncrementalDecoder, Result, Tokenizer, TokenizerError};
 
 const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
 
@@ -305,6 +305,46 @@ pub fn decode_ids(tokenizer: &dyn Tokenizer, token_ids: &[u32]) -> DecodedText {
         decoder.push_token(token_id).unwrap();
     }
     decoder.flush(None).unwrap().1
+}
+
+/// Tokenizer that panics on any encode, decode or token lookup, for tests that
+/// prove a path never tokenizes or detokenizes.
+#[derive(Debug)]
+pub struct PanickingTokenizer;
+
+impl Tokenizer for PanickingTokenizer {
+    fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+        panic!("unexpected tokenizer call: encode")
+    }
+
+    fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
+        panic!("unexpected tokenizer call: encode_ordinary")
+    }
+
+    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+        panic!("unexpected tokenizer call: decode")
+    }
+
+    fn token_to_id(&self, _token: &str) -> Option<u32> {
+        panic!("unexpected tokenizer call: token_to_id")
+    }
+
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        panic!("unexpected tokenizer call: id_to_token")
+    }
+
+    fn is_special_id(&self, _token_id: u32) -> bool {
+        panic!("unexpected tokenizer call: is_special_id")
+    }
+
+    fn create_decode_stream(
+        &self,
+        _prompt_token_ids: &[u32],
+        _skip_special_tokens: bool,
+        _min_bytes_to_buffer: usize,
+    ) -> Box<dyn IncrementalDecoder + '_> {
+        panic!("unexpected tokenizer call: create_decode_stream")
+    }
 }
 
 #[cfg(test)]

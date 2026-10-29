@@ -239,13 +239,17 @@ class NixlBaseConnectorWorker:
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group, dtype=np.int32)
             spec_type = self._group_spec_types[i]
+            # Hybrid regions are keyed by base address, so some hold only
+            # another group's layers (e.g. KDA-only or scratch-only tensors).
+            # Reading them for this group would only re-read aliased bytes.
+            group_regions = (
+                self._group_region_indices[i] if self._group_region_indices else None
+            )
             if _is_attention_spec(spec_type):
-                # A scratch cache lives only in its own regions; every other
-                # attention group spans all of them.
                 fa_region_ids = (
-                    np.asarray(self._scratch_region_indices, dtype=np.int32)
-                    if spec_type is CircularBufferSpec
-                    else np.arange(self.num_regions, dtype=np.int32)
+                    np.arange(self.num_regions, dtype=np.int32)
+                    if group_regions is None
+                    else np.asarray(group_regions, dtype=np.int32)
                 )[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
@@ -258,11 +262,23 @@ class NixlBaseConnectorWorker:
                 # num_fa_descs offset must be computed per-engine since
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
-                ssm_region_ids = (
-                    np.arange(num_ssm_regions, num_ssm_regions + 1, dtype=np.int32)
-                    if i == self._ple_group_index
-                    else np.arange(num_ssm_regions, dtype=np.int32)
-                )[:, None]
+                if i == self._ple_group_index:
+                    ssm_region_ids = np.arange(
+                        num_ssm_regions, num_ssm_regions + 1, dtype=np.int32
+                    )
+                elif group_regions is None:
+                    ssm_region_ids = np.arange(num_ssm_regions, dtype=np.int32)
+                else:
+                    # Each SSM layer owns ssm_regions_per_layer consecutive
+                    # descs, in _ssm_region_indices order.
+                    ssm_slots = np.flatnonzero(
+                        np.isin(self._ssm_region_indices, group_regions)
+                    ).astype(np.int32)
+                    ssm_region_ids = (
+                        ssm_slots[:, None] * ssm_regions_per_layer
+                        + np.arange(ssm_regions_per_layer, dtype=np.int32)
+                    ).ravel()
+                ssm_region_ids = ssm_region_ids[:, None]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
@@ -1000,10 +1016,10 @@ class NixlBaseConnectorWorker:
         self._region_is_mla = list[bool]()
         self._head_sharded_draft_regions = set[int]()
         self._ssm_region_indices = list[int]()
-        # Regions holding a scratch cache (the CSA compressor circular buffer).
-        # Tracked explicitly because a scratch page shares its address with the
-        # page it overlays, so its regions cannot be recovered from spec type.
-        self._scratch_region_indices = list[int]()
+        # Per transfer group, the regions holding its layers (None: all). Tracked
+        # explicitly because aliased layers share a region keyed by address, so
+        # e.g. a scratch page lands in the region of the page it overlays.
+        self._group_region_indices = list[list[int] | None]()
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
@@ -1542,7 +1558,7 @@ class NixlBaseConnectorWorker:
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
         self._ssm_region_indices = []
-        self._scratch_region_indices = []
+        region_groups: list[set[int]] = []
         self._ple_block_len = None
         self._ple_region_index = None
 
@@ -1754,12 +1770,14 @@ class NixlBaseConnectorWorker:
                         self.region_num_blocks[region_index] = num_blocks
                     if self.region_group_ids[region_index] != group_id:
                         self.region_group_ids[region_index] = _SHARED_REGION_GROUP_ID
+                    region_groups[region_index].add(group_id)
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
+                    region_groups.append({group_id})
                     self.region_names.append(layer_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
@@ -1779,11 +1797,6 @@ class NixlBaseConnectorWorker:
                         self._ple_block_len = block_len
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
-                elif (
-                    isinstance(layer_spec, CircularBufferSpec)
-                    and region_index not in self._scratch_region_indices
-                ):
-                    self._scratch_region_indices.append(region_index)
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1817,7 +1830,10 @@ class NixlBaseConnectorWorker:
             == len(self.region_num_blocks)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
-        self._scratch_region_indices.sort()
+        self._group_region_indices = [
+            [r for r, groups in enumerate(region_groups) if group_id in groups] or None
+            for group_id in range(len(self.kv_cache_config.transfer_groups))
+        ]
         self._head_sharded_draft_regions = self._get_head_sharded_draft_regions()
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses

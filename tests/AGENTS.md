@@ -33,4 +33,7 @@
   selects never runs, which looks like passing. Check that the step's
   `commands` and pytest markers (`core_model`, `slow_test`, `distributed`)
   select the test and its `source_file_dependencies` cover the changed files;
-  update the step if not.
+  update the step if not. When a command names more than one test path
+  (including `--ignore` / `--deselect`), write it as a `>-` block with
+  `pytest -v -s` on the first line and one path per line, so concurrent PRs
+  adding tests do not conflict on the same line.

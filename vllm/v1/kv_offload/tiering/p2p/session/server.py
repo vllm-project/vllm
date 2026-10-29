@@ -726,7 +726,7 @@ class ServerRole:
         No more submit_store calls will arrive for this id. Any blocks
         the peer demanded but we never stored will never come; tell the
         peer to stop waiting (TransferDoneMsg success=False) instead of
-        letting it hit _LOAD_TIMEOUT_S.
+        letting it hit its load timeout.
 
         Also drops any in-flight lookups for this kv_request_id and
         queues their ctxs for ``parent.on_request_finished`` so the
@@ -1214,7 +1214,7 @@ class ServerRole:
             # the elif branch in collect_results. If nothing else is in
             # flight, finalize now so the peer and the local store jobs
             # don't wait for finish_request or for _STORE_TIMEOUT_S /
-            # _LOAD_TIMEOUT_S.
+            # the consumer's load timeout.
             rnd.finishing = True
             st = self._requests.get(kv_request_id)
             if (

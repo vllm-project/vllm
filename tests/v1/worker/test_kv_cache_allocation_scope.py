@@ -11,6 +11,7 @@ import torch
 import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -60,6 +61,9 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
                 )
             ]
 
+        monkeypatch.setattr(
+            hisparse_binding, "get_hisparse_backend", CUDAHiSparseBackend
+        )
         monkeypatch.setattr(
             hisparse_binding,
             "get_hisparse_host_pool",
