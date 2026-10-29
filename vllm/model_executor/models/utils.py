@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -502,13 +502,88 @@ class AutoWeightsLoader:
                 )
 
 
+def get_fused_shared_expert_layers(
+    module: nn.Module,
+    moe_cls: type[nn.Module],
+    enable_eplb: bool = False,
+) -> frozenset[int]:
+    """Resolve fused-shared-expert layer indices from the live module tree.
+
+    The index is taken from each MoE module's qualified name, so it follows the
+    same index space as the caller's weight names: 0-based for modules stored in
+    an ``nn.ModuleList``, and absolute for ``nn.ModuleDict`` MTP layers keyed by
+    layer index. No loader needs to hard-code an offset.
+
+    Also rejects mixed fusion when EPLB is enabled or the ``nixl_ep`` all2all
+    backend is selected, and logs the resolved policy.
+    """
+    fused_layers: set[int] = set()
+    moe_layers: set[int] = set()
+    for name, mod in module.named_modules():
+        if not isinstance(mod, moe_cls):
+            continue
+        idx = extract_layer_index(name)
+        moe_layers.add(idx)
+        if getattr(mod, "is_fused_shared_expert_enabled", False):
+            fused_layers.add(idx)
+
+    # EPLB bookkeeping is per rank/model: `EplbState` builds each model's
+    # `expert_weights`/`num_moe_layers` from the local `MixtureOfExperts` (one
+    # pipeline stage here), while main and draft models have separate
+    # `EplbModelState`s keyed by model config. The uniformity requirement is
+    # therefore stage/model-local by design: mixed within a stage is rejected,
+    # mixed across PP stages (or main vs draft) is allowed.
+    if 0 < len(fused_layers) < len(moe_layers):
+        if enable_eplb:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion within a pipeline "
+                "stage/model is not supported with EPLB"
+            )
+        vllm_config = get_current_vllm_config_or_none()
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion with expert parallelism is "
+                "not tested. Please open an issue if you need this combination."
+            )
+        # These backends size one shared buffer from the first MoE layer's
+        # geometry (all2all.py NixlEPAll2AllManager._init_buffer/get_handle).
+        all2all_backend = (
+            parallel_config.all2all_backend if parallel_config is not None else None
+        )
+        if all2all_backend == "nixl_ep":
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion is not supported with "
+                f"all2all_backend={all2all_backend!r}"
+            )
+
+    if fused_layers:
+        logger.info(
+            "AITER fused shared experts: enabled on MoE layer(s) %s; "
+            "disabled on MoE layer(s) %s.",
+            sorted(fused_layers),
+            sorted(moe_layers - fused_layers) or "none",
+        )
+    elif moe_layers:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            logger.info(
+                "AITER fused shared experts: disabled on all %d MoE layer(s).",
+                len(moe_layers),
+            )
+    return frozenset(fused_layers)
+
+
 def maybe_fuse_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
     n_routed_experts: int,
     n_shared_experts: int,
+    fused_shared_expert_layers: frozenset[int],
     ckpt_prefix: str = "mlp.shared_experts",
-    enabled: bool | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
@@ -524,21 +599,16 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
-        enabled: Whether AITER fused-shared-experts is active. Defaults to
-            `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`; pass an
-            explicit value only when the model gates on something more (e.g.
-            quant-spec compatibility) and it must match its construction-time
-            decision.
+        fused_shared_expert_layers: Layer indices whose shared expert was fused
+            at construction time, as returned by
+            `get_fused_shared_expert_layers`. Only weights belonging to these
+            layers are routed to fused slots.
 
     Yields:
         `(name, tensor)` pairs with shared experts routed to fused slots.
 
     """
-    if enabled is None:
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-    if not enabled:
+    if not fused_shared_expert_layers:
         yield from weights
         return
 
@@ -547,6 +617,9 @@ def maybe_fuse_shared_experts(
     prefix = f"{ckpt_prefix}."
     for name, loaded_weight in weights:
         if prefix not in name:
+            yield name, loaded_weight
+            continue
+        if extract_layer_index(name) not in fused_shared_expert_layers:
             yield name, loaded_weight
             continue
         # gate/up split on the output dim; down_proj on the input dim.
