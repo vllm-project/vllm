@@ -23,6 +23,10 @@ from vllm.v1.outputs import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        HiddenStatesRequest,
+        StepHiddenStates,
+    )
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -45,6 +49,9 @@ class KVConnector:
         self, finished_req_ids: set[str], defer_finalize: bool = False
     ) -> KVConnectorOutput | None:
         return None
+
+    def save_hidden_states(self, hidden_states: "StepHiddenStates") -> None:
+        pass
 
     def finalize_step(self) -> None:
         pass
@@ -177,6 +184,10 @@ class ActiveKVConnector(KVConnector):
         if self._reports_mrope_position_deltas and not self._disabled:
             self._mrope_position_deltas[req_id] = delta
 
+    def save_hidden_states(self, hidden_states: "StepHiddenStates") -> None:
+        if not self._disabled:
+            self.kv_connector.save_hidden_states(hidden_states)
+
     def finalize_step(self) -> None:
         if self._disabled:
             return
@@ -200,6 +211,22 @@ class ActiveKVConnector(KVConnector):
 
 
 NO_OP_KV_CONNECTOR = KVConnector()
+
+
+def get_required_hidden_states(
+    vllm_config: VllmConfig,
+) -> "HiddenStatesRequest | None":
+    """The hidden states the configured KV connector receives each step."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
+        return None
+    from vllm.distributed.kv_transfer.kv_connector.factory import (
+        KVConnectorFactory,
+    )
+
+    return KVConnectorFactory.get_connector_class(
+        kv_transfer_config
+    ).get_required_hidden_states(vllm_config)
 
 
 def get_kv_connector(

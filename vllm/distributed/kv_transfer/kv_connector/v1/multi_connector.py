@@ -14,12 +14,14 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
+    HiddenStatesRequest,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
+    StepHiddenStates,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -417,6 +419,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.wait_for_save()
 
+    def save_hidden_states(self, hidden_states: StepHiddenStates) -> None:
+        for c in self._connectors:
+            c.save_hidden_states(hidden_states)
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
@@ -742,6 +748,23 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 f"All connectors must use the same layout."
             )
         return next(iter(layouts), None)
+
+    @classmethod
+    def get_required_hidden_states(
+        cls, vllm_config: "VllmConfig"
+    ) -> HiddenStatesRequest | None:
+        """The one request of the children that ask for hidden states."""
+        requests = {
+            request
+            for connector_cls, temp_config in cls._get_connector_classes_and_configs(
+                vllm_config
+            )
+            if (request := connector_cls.get_required_hidden_states(temp_config))
+            is not None
+        }
+        if len(requests) > 1:
+            raise ValueError(f"Connectors ask for different hidden states: {requests}")
+        return next(iter(requests), None)
 
     @classmethod
     def build_kv_connector_stats(

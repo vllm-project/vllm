@@ -33,6 +33,9 @@ The class provides the following primitives:
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - submits saves and performs required synchronization
 
+        save_hidden_states() - receives the step's hidden states, for a
+            connector whose get_required_hidden_states() asks for them
+
         get_transfer_results() - returns async send/receive completions and
             receive failures in one snapshot.
         build_connector_worker_meta() - builds metadata to be sent
@@ -56,6 +59,8 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
@@ -97,6 +102,56 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class HiddenStatesRequest:
+    """The hidden states a connector receives each step; see
+    ``KVConnectorBase_V1.get_required_hidden_states``."""
+
+    layers: tuple[int, ...] | None = None
+    """Residual-stream positions: ``k`` is the residual stream after ``k``
+    decoder layers, as for EAGLE-3 auxiliary hidden states. ``None`` takes the
+    layers of a running drafter that uses auxiliary hidden states, or else the
+    model's default EAGLE-3 layers. ``()`` asks for the final hidden state
+    only."""
+
+
+@dataclass
+class StepHiddenStates:
+    """One step's hidden states, handed to ``save_hidden_states``.
+
+    Rows are the step's scheduled tokens, grouped by request in batch order.
+    Device tensors may be padded past ``num_tokens`` and are only valid during
+    the call: read them on the current stream, or call ``record_stream`` on a
+    tensor another stream reads.
+    """
+
+    req_ids: list[str]
+    query_start_loc: "np.ndarray"
+    """[num_reqs + 1], on the CPU: request ``i`` has the rows
+    ``query_start_loc[i]:query_start_loc[i + 1]``."""
+    num_tokens: int
+    input_ids: torch.Tensor
+    """[num_tokens] the input token of each row."""
+    positions: torch.Tensor
+    """[num_tokens] the position of each row."""
+    layers: tuple[int, ...]
+    """The residual-stream positions of ``aux_hidden_states``."""
+    aux_hidden_states: list[torch.Tensor]
+    """One ``[num_tokens, hidden_size]`` tensor per entry of ``layers``."""
+    hidden_states: torch.Tensor
+    """``[num_tokens, hidden_size]`` final hidden states, the input of the LM
+    head."""
+    sampled_token_ids: torch.Tensor
+    """``[num_reqs, max_num_sampled]`` tokens sampled this step; the first
+    ``num_sampled[i]`` of row ``i`` are valid."""
+    num_sampled: torch.Tensor
+    """[num_reqs] tokens sampled per request; 0 for a prefill chunk that is
+    not the request's last."""
+    num_rejected: torch.Tensor
+    """[num_reqs] draft tokens rejected per request: the request's last
+    ``num_rejected[i]`` rows."""
 
 
 class SupportsHMA(ABC):
@@ -438,6 +493,21 @@ class KVConnectorBase_V1(ABC):
         to the scheduler. Otherwise, wait for saves to finish before returning.
         """
         pass
+
+    def save_hidden_states(self, hidden_states: StepHiddenStates) -> None:
+        """Receive this step's hidden states, when
+        ``get_required_hidden_states`` asked for them.
+
+        Called on every rank after sampling and before ``wait_for_save``, with
+        the step's metadata bound; the hidden states are replicated across
+        tensor-parallel ranks. Must not block: start the copies it needs and
+        return.
+
+        Args:
+            hidden_states (StepHiddenStates): the step's hidden states.
+
+        """
+        return
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -783,6 +853,22 @@ class KVConnectorBase_V1(ABC):
 
         """
         return False
+
+    @classmethod
+    def get_required_hidden_states(
+        cls, vllm_config: "VllmConfig"
+    ) -> HiddenStatesRequest | None:
+        """The hidden states this connector receives each step through
+        ``save_hidden_states``, or None (the default) for none.
+
+        Asked before the model is loaded, so the requested layers become part
+        of the compiled forward. Pipeline parallelism is not supported.
+
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        """
+        return None
 
     def get_finished_count(self) -> int | None:
         """Get the count of requests expected to complete send/receive operations

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,9 @@ from vllm.model_executor.models.interfaces import (
     get_eagle_decoder,
     supports_eagle3,
 )
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import HiddenStatesRequest
 
 logger = init_logger(__name__)
 
@@ -37,6 +40,47 @@ def set_eagle3_aux_hidden_state_layers(
     if use_pp:
         assert spec_config.method is not None
         verify_supports_aux_hidden_states_over_pp(model, spec_config.method)
+
+
+def get_aux_hidden_state_layers(model: nn.Module) -> tuple[int, ...]:
+    """The auxiliary hidden state layers set on ``model``, in output order."""
+    decoder = get_eagle_decoder(model)
+    return () if decoder is None else tuple(decoder.aux_hidden_state_layers)
+
+
+def set_connector_aux_hidden_state_layers(
+    model: nn.Module,
+    request: "HiddenStatesRequest",
+    speculator_uses_aux_hidden_states: bool,
+) -> tuple[int, ...]:
+    """Set the auxiliary layers a KV connector asks for, and return the layers
+    its ``save_hidden_states`` receives."""
+    if request.layers == ():
+        return ()
+    if speculator_uses_aux_hidden_states:
+        # One model, one set of auxiliary outputs: the drafter's.
+        layers = get_aux_hidden_state_layers(model)
+        if request.layers is not None and tuple(sorted(set(request.layers))) != layers:
+            raise ValueError(
+                f"The KV connector asks for hidden state layers {request.layers}, "
+                f"but the drafter uses {list(layers)}; ask for None to receive "
+                "the drafter's layers."
+            )
+        return layers
+    if not supports_eagle3(model):
+        raise ValueError(
+            f"The KV connector asks for auxiliary hidden states, which "
+            f"{type(model).__name__} cannot output (it does not implement "
+            "SupportsEagle3)."
+        )
+    eagle3_model = cast(SupportsEagle3, model)
+    eagle3_model.set_aux_hidden_state_layers(
+        request.layers
+        if request.layers is not None
+        else eagle3_model.get_eagle3_default_aux_hidden_state_layers()
+    )
+    reserve_aux_intermediate_tensor_slots(model)
+    return get_aux_hidden_state_layers(model)
 
 
 def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> None:
