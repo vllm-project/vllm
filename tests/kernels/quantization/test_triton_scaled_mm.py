@@ -248,9 +248,9 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
     reason="Requires FP8 and CUDA/ROCm graph support",
 )
 @pytest.mark.parametrize("tuned", [False, True])
-@pytest.mark.parametrize("use_gfx1201_heuristic", [False, True])
+@pytest.mark.parametrize("use_heuristic", [False, True])
 def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
-    per_token_fp8_configs, tuned, use_gfx1201_heuristic
+    per_token_fp8_configs, tuned, use_heuristic
 ):
     """Compiled prefill/decode and graph replay must preserve current inputs."""
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
@@ -271,7 +271,7 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
 
     def run(a, sa):
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            a, b, sa, sb, torch.bfloat16, None, tuned, use_gfx1201_heuristic
+            a, b, sa, sb, torch.bfloat16, None, tuned, use_heuristic
         )
 
     compiled = torch.compile(run, fullgraph=True, dynamic=True)

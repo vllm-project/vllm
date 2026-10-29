@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RDNA4 per-token FP8 launch choices and specialized contiguous kernels."""
+"""Per-token FP8 launch heuristics and specialized contiguous kernels."""
 
 from typing import Any
 
