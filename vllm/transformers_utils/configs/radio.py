@@ -127,14 +127,14 @@ class RadioConfig(PreTrainedConfig):
         # model), so the model consumes a single canonical schema.
         unique_teachers = {t["name"] for t in self.teachers}
         self.num_cls_tokens = len(unique_teachers) if self.cls_token_per_teacher else 1
-        if self.register_multiple:
+        if self.cpe_num_registers:
+            # An explicit register count wins, matching the reference ClsToken.
+            # C-RADIOv3 carries its count here and sets register_multiple=0.
+            self.num_registers = self.cpe_num_registers
+        elif self.register_multiple:
             self.num_registers = self.register_multiple - (
                 self.num_cls_tokens % self.register_multiple
             )
-        elif self.cpe_num_registers:
-            # C-RADIOv3 sets register_multiple=0 and carries its register count
-            # in cpe_num_registers; without this the CPE token count is short.
-            self.num_registers = self.cpe_num_registers
         else:
             self.num_registers = 0
         # None (no teachers) means no explicit selection -> keep all class
