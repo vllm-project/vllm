@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from dataclasses import dataclass
-from functools import partial
 from itertools import accumulate
 from types import SimpleNamespace
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 from torch import nn
 from torch.nn import functional as F
 from transformers import Qwen4ExpTextConfig
@@ -19,6 +20,14 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
@@ -31,10 +40,10 @@ from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
 )
+from vllm.models.qwen4_exp.common.ops.ple import ple_conv
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
-    compute_ple_shard_overlap,
-    copy_ple_embedding_shard_,
+    PLEVocabParallelEmbedding,
 )
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
@@ -130,6 +139,9 @@ def test_ple_metadata_preserves_request_and_token_order(
     assert metadata.num_decodes == sum(query_lens[i] == 1 for i in non_spec_rows)
     assert metadata.num_prefills == sum(query_lens[i] > 1 for i in non_spec_rows)
     if spec_rows:
+        assert metadata.spec_state_indices_tensor is not None
+        assert metadata.num_accepted_tokens is not None
+        assert metadata.spec_query_start_loc is not None
         torch.testing.assert_close(
             metadata.spec_state_indices_tensor[: len(spec_rows)],
             common.block_table_tensor[spec_rows, 0],
@@ -210,12 +222,23 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
     return module
 
 
+def _make_test_ple_embedding(tp_start: int, tp_end: int) -> PLEVocabParallelEmbedding:
+    """Create an embedding with only the state needed for shard loading."""
+    embedding = PLEVocabParallelEmbedding.__new__(PLEVocabParallelEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.shard_indices = SimpleNamespace(
+        org_vocab_start_index=tp_start,
+        org_vocab_end_index=tp_end,
+    )
+    return embedding
+
+
 def _set_test_embedding_weight_loader(embedding) -> None:
-    embedding.weight.weight_loader = partial(
-        copy_ple_embedding_shard_,
+    loader = _make_test_ple_embedding(
         tp_start=embedding.shard_indices.org_vocab_start_index,
         tp_end=embedding.shard_indices.org_vocab_end_index,
     )
+    embedding.weight.weight_loader = loader.weight_loader
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -244,19 +267,16 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
 
 
 def test_ple_shard_overlap_and_copy() -> None:
-    overlap = compute_ple_shard_overlap(
-        checkpoint_start=2, checkpoint_rows=5, tp_start=4, tp_end=8
-    )
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
+    overlap = embedding._compute_shard_overlap(checkpoint_start=2, checkpoint_rows=5)
     assert overlap == PLEShardOverlap(source_start=2, destination_start=0, row_count=3)
 
     destination = torch.full((4, 2), -1.0)
     loaded = torch.arange(10, dtype=torch.float64).reshape(5, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         loaded,
         checkpoint_start=2,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 3
@@ -265,13 +285,12 @@ def test_ple_shard_overlap_and_copy() -> None:
 
 
 def test_ple_shard_copy_is_a_noop_without_overlap() -> None:
+    embedding = _make_test_ple_embedding(tp_start=4, tp_end=8)
     destination = torch.ones(4, 2)
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         destination,
         torch.zeros(2, 2),
         checkpoint_start=10,
-        tp_start=4,
-        tp_end=8,
     )
 
     assert copied == 0
@@ -704,17 +723,44 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     )
 
 
-def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        pytest.param(ModelOptNvFp4Config(exclude_modules=[]), id="modelopt-nvfp4"),
+        pytest.param(
+            OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor")),
+            id="online-fp8",
+        ),
+        pytest.param(
+            CompressedTensorsConfig(
+                target_scheme_map={
+                    "re:.*ngram_embedding": {
+                        "weights": QuantizationArgs(num_bits=8, type="int"),
+                    },
+                },
+                ignore=[],
+                quant_format="int-quantized",
+            ),
+            id="compressed-tensors",
+        ),
+    ],
+)
+def test_ple_embedding_falls_back_for_unsupported_quantization_configs(
+    quant_config: QuantizationConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warn when global quantization falls back to an unquantized PLE table."""
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
-    nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
-    with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
-
-    online_fp8_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="fp8_per_tensor")
+    test_logger = logging.getLogger("test.ple_fallback")
+    monkeypatch.setattr(ngram_embedding_module, "logger", test_logger)
+    caplog.set_level(logging.WARNING, logger=test_logger.name)
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
-    with pytest.raises(NotImplementedError, match="OnlineQuantizationConfig"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(online_fp8_config, prefix)
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "Falling back to unquantized PLE" in caplog.text
 
 
 def test_ple_embedding_respects_modelopt_exclusion() -> None:
@@ -741,8 +787,10 @@ def test_ple_embedding_respects_inc_layer_config() -> None:
     )
 
     quant_config.extra_config = None
-    with pytest.raises(NotImplementedError, match="INCConfig"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
 
 
 def test_ple_embedding_is_unquantized_under_quark() -> None:
@@ -926,12 +974,10 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     loaded_weight = (
         torch.arange(12, dtype=torch.float32).reshape(4, 3).to(storage_dtype)
     )
-    copied = copy_ple_embedding_shard_(
+    copied = embedding._copy_embedding_shard_(
         embedding.weight,
         loaded_weight,
         checkpoint_start=0,
-        tp_start=0,
-        tp_end=4,
     )
     input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
     output = embedding._lookup(input_ids)
@@ -988,12 +1034,10 @@ def test_pinned_embedding_start_prefetch_allocates_lazily(
 
     loaded_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     loaded_weight = loaded_weight.to(torch.bfloat16)
-    copy_ple_embedding_shard_(
+    embedding._copy_embedding_shard_(
         embedding.weight,
         loaded_weight,
         checkpoint_start=0,
-        tp_start=0,
-        tp_end=4,
     )
 
     ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
@@ -1012,8 +1056,18 @@ def test_pinned_embedding_start_prefetch_allocates_lazily(
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+@pytest.mark.parametrize(
+    "exclude_pattern",
+    [
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding",
+        "*.ngram_embedding",
+    ],
+)
+def test_ple_fp8_embedding_supports_mixed_precision_config(
+    exclude_pattern: str,
+) -> None:
     prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    nvfp4_prefix = "model.language_model.layers.2.ple.ple_embedding.ngram_embedding"
     quant_config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
@@ -1022,6 +1076,7 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
                 "group_size": 16,
                 "quantized_layers": {
                     prefix: {"quant_algo": "FP8"},
+                    nvfp4_prefix: {"quant_algo": "NVFP4"},
                     "model.language_model.layers.2.moe.gate_proj": {
                         "quant_algo": "MXFP8"
                     },
@@ -1034,12 +1089,29 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
-    # A quant_algo the PLE table cannot load must not fall back to unquantized.
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            quant_config,
+            "model.language_model.layers.3.ple.ple_embedding.ngram_embedding",
+        ),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, nvfp4_prefix),
+        Qwen4ExpPLENvFp4EmbeddingMethod,
+    )
+    # An explicitly unsupported PLE format must not fall back to unquantized.
     with pytest.raises(ValueError, match="Unsupported quant_algo 'MXFP8'"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
             "model.language_model.layers.2.moe.gate_proj",
         )
+
+    quant_config.exclude_modules = [exclude_pattern]
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
@@ -1959,6 +2031,7 @@ def _make_conv_metadata(
         ),
         max_prefill_query_len=max(case.prefill_query_lens, default=0),
         num_spec_decodes=num_spec_reqs,
+        checkpoint=None,
     )
     return metadata, token_offset
 
@@ -2117,6 +2190,120 @@ def test_fused_conv_correctness(
             residual_kernel[num_real_tokens:],
             residual_reference[num_real_tokens:],
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _ConvBatchCase(num_decodes=1, prefill_query_lens=(200, 130)),
+            id="decode-prefill",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(3, 4),
+                num_accepted=(2, 4),
+                num_decodes=1,
+                prefill_query_lens=(200, 130),
+                spec_query_len=4,
+            ),
+            id="mixed",
+        ),
+    ],
+)
+def test_prefill_exports_conv_window_at_checkpoint(
+    case: _ConvBatchCase, state_layout: str
+) -> None:
+    """A checkpoint holds the conv state of the prefill stopped at its offset.
+
+    In the mixed batch the prefills' tokens are reached through the non-spec
+    token map. Nothing else in the cache changes, including the checkpoint
+    block's speculative columns.
+    """
+    device = torch.device("cuda")
+    metadata, num_real_tokens = _make_conv_metadata(case, device)
+    module = object.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (case.kernel_size - 1) * case.dilation
+    module.short_conv_dilation = case.dilation
+    module._checkpoint_exporter = MambaPrefillCheckpointExporter(
+        state_len=module.conv_state_len
+    )
+    rng, _, conv_state, weights = _make_conv_case(
+        device,
+        seed=num_real_tokens,
+        channels=case.channels,
+        kernel_size=case.kernel_size,
+        dilation=case.dilation,
+        state_layout=state_layout,
+        spec_query_len=case.spec_query_len,
+    )
+    inputs = torch.randn(
+        metadata.num_actual_tokens,
+        case.channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
+    )
+    without_checkpoint = conv_state.clone()
+
+    # One row per non-spec request; the prefills checkpoint mid-query.
+    offsets = [0] * case.num_decodes + [64, 128]
+    checkpoint_slots = [NULL_BLOCK_ID] * case.num_decodes + [
+        _KERNEL_STATE_BLOCKS - 1,
+        _KERNEL_STATE_BLOCKS - 2,
+    ]
+    metadata.checkpoint = MambaPrefillCheckpointMetadata(
+        torch.tensor(offsets, dtype=torch.int32, device=device),
+        torch.tensor(checkpoint_slots, dtype=torch.int32, device=device),
+    )
+    for state, checkpoint in (
+        (conv_state, metadata.checkpoint),
+        (without_checkpoint, None),
+    ):
+        metadata.checkpoint = checkpoint
+        module._short_conv_dilated_dispatch(
+            inputs=inputs,
+            residual=torch.zeros_like(inputs),
+            outer_residual=None,
+            metadata=metadata,
+            conv_state=state,
+            conv_weights=weights,
+        )
+
+    query_start_loc = metadata.non_spec_query_start_loc.tolist()
+    token_map = metadata.non_spec_token_indx
+    state_len = module.conv_state_len
+    for row in range(case.num_decodes, len(offsets)):
+        tokens = torch.arange(
+            query_start_loc[row], query_start_loc[row] + offsets[row], device=device
+        )
+        if token_map is not None:
+            tokens = token_map[tokens]
+        stopped = without_checkpoint.clone()
+        scratch = torch.tensor([checkpoint_slots[row]], device=device)
+        ple_conv(
+            inputs[tokens].contiguous(),
+            torch.zeros_like(inputs[tokens]),
+            stopped,
+            weights,
+            scratch,
+            None,
+            mode="prefill",
+            dilation=case.dilation,
+            query_start_loc=torch.tensor(
+                [0, offsets[row]], dtype=torch.int32, device=device
+            ),
+            has_initial_states=torch.tensor([False], device=device),
+        )
+        slot = checkpoint_slots[row]
+        assert torch.equal(
+            conv_state[slot, :, :state_len], stopped[slot, :, :state_len]
+        )
+        conv_state[slot, :, :state_len] = without_checkpoint[slot, :, :state_len]
+    assert torch.equal(conv_state, without_checkpoint)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")

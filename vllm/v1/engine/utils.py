@@ -55,16 +55,21 @@ def get_engine_process_shutdown_timeout(
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. ROCm teardown can take longer than the generic best-effort
-    window, and force-killing during teardown can leave VRAM resident.
+    force-killed. An explicitly set ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS``
+    sets that window on every platform. Otherwise ROCm gets a fixed window:
+    its teardown can take longer than the generic best-effort window, and
+    force-killing during teardown can leave VRAM resident.
 
     ``process_timeout`` may be a remaining budget computed by an outer process
     manager. Keep it unchanged unless both values are zero: a zero remaining
     budget for a positive request timeout must not receive a fresh grace period
     because EngineCore relies on that deadline to enforce request draining.
     """
-    if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
-        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+    if request_timeout == 0 and process_timeout == 0:
+        if envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
+            return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+        if current_platform.is_rocm():
+            return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
     return process_timeout
 
 
@@ -345,7 +350,7 @@ class CoreEngineProcManager:
             )
             if process_timeout != timeout:
                 logger.info(
-                    "[shutdown] EngineCore process manager: using %ss ROCm "
+                    "[shutdown] EngineCore process manager: using %ss "
                     "cleanup grace after immediate request abort",
                     process_timeout,
                 )
