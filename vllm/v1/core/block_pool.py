@@ -522,12 +522,20 @@ class BlockPool:
                 continue
             block_start = block_idx * block_size
             block_end = min(block_start + block_size, num_cached_tokens)
-            block_hash = self._get_partial_block_hash(request, block_end)
-            if not self.cached_block_hash_to_block.contain(
-                make_block_hash_with_group_id(block_hash, kv_cache_group_id),
-                block.block_id,
-            ):
-                # EAGLE may shorten the hit to an unregistered hash boundary.
+            # EAGLE can reuse less than the registered entry covers.
+            max_block_end = min(
+                block_start + block_size,
+                len(request.block_hashes) * self.hash_block_size,
+            )
+            for stored_end in range(block_end, max_block_end + 1, self.hash_block_size):
+                block_hash = self._get_partial_block_hash(request, stored_end)
+                if self.cached_block_hash_to_block.contain(
+                    make_block_hash_with_group_id(block_hash, kv_cache_group_id),
+                    block.block_id,
+                ):
+                    block_end = stored_end
+                    break
+            else:
                 continue
             parent_hash = (
                 request.block_hashes[block_start // self.hash_block_size - 1]

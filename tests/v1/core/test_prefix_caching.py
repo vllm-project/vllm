@@ -4316,7 +4316,7 @@ def test_eagle_identical_prompt_hit(
 def test_emit_cached_block_events_for_sparse_mamba_hit(
     num_hit_tokens: int, dcp_world_size: int, use_eagle: bool
 ):
-    """Report sparse/partial hits and omit unregistered EAGLE proof boundaries."""
+    """Report registered residency without changing the shorter reusable hit."""
     hash_block_size = 16
     block_size = 64
     manager = make_kv_cache_manager(
@@ -4344,7 +4344,7 @@ def test_emit_cached_block_events_for_sparse_mamba_hit(
         )
     manager.free(producer)
     manager.new_step_starts()
-    manager.take_events()
+    stored_events = manager.take_events()
 
     consumer = make_request("consumer", token_ids, hash_block_size, sha256)
     consumer.kv_cache_report_mode = "full"
@@ -4360,8 +4360,8 @@ def test_emit_cached_block_events_for_sparse_mamba_hit(
     attention_ends = list(
         range(attention_block_size, num_hit_tokens + 1, attention_block_size)
     )
-    if num_hit_tokens % attention_block_size and not use_eagle:
-        attention_ends.append(num_hit_tokens)
+    if num_hit_tokens % attention_block_size:
+        attention_ends.append(num_hit_tokens + (hash_block_size if use_eagle else 0))
     hashes = [kv_cache_utils.maybe_convert_block_hash(h) for h in consumer.block_hashes]
     assert [h for event in attention_events for h in event.block_hashes] == [
         hashes[end // hash_block_size - 1] for end in attention_ends
@@ -4371,6 +4371,12 @@ def test_emit_cached_block_events_for_sparse_mamba_hit(
         if attention_ends[-1] % attention_block_size
         else attention_block_size
     )
+    if use_eagle:
+        assert attention_events[-1] == next(
+            event
+            for event in reversed(stored_events)
+            if isinstance(event, BlockStored) and event.group_idx == 0
+        )
     (event,) = [event for event in events if event.group_idx == 1]
     event_block_size = hash_block_size if num_hit_tokens % block_size else block_size
     event_start = num_hit_tokens - event_block_size
