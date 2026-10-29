@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -325,6 +326,7 @@ class MiniMaxText01LinearAttention(LinearAttention):
         output[:num_actual_tokens], _ = self.out_proj(hidden)
 
 
+@eager_break_during_capture
 def linear_attention(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -11,18 +12,21 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     create_speculative_draft_watermarker,
 )
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
+    build_slot_mappings_by_layer,
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -31,15 +35,17 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.batch_shard import batch_sharded_sampling_enabled
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
-    from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 logger = init_logger(__name__)
 
@@ -92,16 +98,21 @@ class BaseSpeculator(ABC):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Draft prefill runs on the target's batch, so it can reuse the target
+    # forward's attention metadata. Otherwise the drafter rebuilds it.
+    can_reuse_target_attn_metadata: bool = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -115,7 +126,6 @@ class DraftModelSpeculator(BaseSpeculator):
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -142,6 +152,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        if vllm_config.parallel_config.use_ubatching:
+            # A microbatched target forward builds only per-microbatch metadata.
+            self.can_reuse_target_attn_metadata = False
 
         self.eplb_state: EplbState | None = None
 
@@ -151,7 +164,7 @@ class DraftModelSpeculator(BaseSpeculator):
             device=device,
         )
         self.idx_mapping = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            self.max_num_reqs, dtype=torch.int64, device=device
         )
         self.temperature = torch.zeros(
             self.max_num_reqs, dtype=torch.float32, device=device
@@ -175,20 +188,12 @@ class DraftModelSpeculator(BaseSpeculator):
         self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
 
-        self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
-            # Pre-temperature logits, cached from the previous decode step.
-            dtype, fill = self.draft_logits_spec(vllm_config)
-            self.draft_logits = torch.full(
-                (
-                    self.max_num_reqs,
-                    self.num_speculative_steps,
-                    self.vocab_size,
-                ),
-                fill,
-                dtype=dtype,
-                device=device,
-            )
+        # Pre-temperature logits, cached from the previous decode step.
+        # Allocated in load_model. See _init_draft_logits.
+        self.draft_logits: DraftLogitsCache | None = None
+        self.use_draft_logits = (
+            self.speculative_config.draft_sample_method == "probabilistic"
+        )
 
         self.draft_watermarker: DraftWatermarker | None = None
         watermark_config = getattr(vllm_config, "watermark_config", None)
@@ -206,6 +211,14 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+        # Whether every draft attention builder can refresh its decode metadata
+        # in place, so the refresh can be recorded in the draft CUDA graph.
+        self.supports_decode_metadata_update = False
+
+    @property
+    def max_model_len(self) -> int:
+        # Auto-fit can reduce the limit after the speculator is built.
+        return self.vllm_config.model_config.max_model_len
 
     @abstractmethod
     def load_draft_model(
@@ -223,6 +236,8 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
+        if self.use_draft_logits:
+            self._init_draft_logits(target_model)
 
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
@@ -257,6 +272,37 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.device,
             )
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        """Whether every draft logits write on this speculator's path honors
+        DraftLogitsCache.row_mapping."""
+        return False
+
+    def _init_draft_logits(self, target_model: nn.Module) -> None:
+        """Allocate the draft logits cache.
+
+        Under batch-sharded sampling, the rank that verifies a request is the
+        only one that reads its draft logits, so each TP rank keeps just the
+        rows of the requests it owns. See DraftLogitsCache.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        dtype, fill = self.draft_logits_spec(self.vllm_config)
+        self.draft_logits = DraftLogitsCache(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.vocab_size,
+            dtype=dtype,
+            fill=fill,
+            device=self.device,
+            sharded=(
+                batch_sharded_sampling_enabled(self.vllm_config, target_model)
+                # PCPManager.sync_drafts indexes the draft logits by request
+                # state, so it must see every request's logits.
+                and parallel_config.prefill_context_parallel_size == 1
+                and self.draft_watermarker is None
+                and self.supports_batch_sharded_draft_logits()
+            ),
+        )
+
     def set_eplb_state(self, eplb_state: EplbState) -> None:
         """Inject EPLB state after construction."""
         self.eplb_state = eplb_state
@@ -273,7 +319,16 @@ class DraftModelSpeculator(BaseSpeculator):
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
         speculators whose attention mode differs from the target's."""
-        return self.vllm_config
+        # Shallow copies instead of apply_draft_overrides: its replace()
+        # rebuilds each sub-config and drops engine-resolved init=False state
+        # such as cache_config.kv_cache_layout.
+        config = copy.copy(self.vllm_config)
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self.speculative_config, src)) is not None:
+                sub_config = copy.copy(getattr(config, config_name))
+                setattr(sub_config, dst, value)
+                setattr(config, config_name, sub_config)
+        return config
 
     def set_attn(
         self,
@@ -298,6 +353,59 @@ class DraftModelSpeculator(BaseSpeculator):
         # builders and buffers.
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
+        self._configure_decode_metadata_update()
+
+    def _build_drafter_attn_metadata(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        for_capture: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+        """Attention metadata and slot mappings for draft prefill on the target
+        batch: the target forward's when reusable, else rebuilt on the draft
+        builders from the block tables and slot mappings the target prepared.
+        Must run before draft decode steps overwrite the slot mappings.
+        """
+        if self.can_reuse_target_attn_metadata:
+            return attn_metadata, slot_mappings
+        block_tables = tuple(
+            block_table[: input_batch.num_reqs_after_padding]
+            for block_table in self.block_tables.input_block_tables
+        )
+        target_slot_mappings = self.block_tables.slot_mappings[
+            :, : input_batch.num_tokens_after_padding
+        ]
+        attn_metadata = self.model_state.prepare_attn(
+            input_batch,
+            cg_mode,
+            block_tables,
+            target_slot_mappings,
+            self.attn_groups,
+            self.kv_cache_config,
+            for_capture=for_capture,
+        )
+        return attn_metadata, build_slot_mappings_by_layer(
+            target_slot_mappings, self.kv_cache_config
+        )
+
+    def _configure_decode_metadata_update(self) -> None:
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_groups in self.attn_groups
+                for attn_group in attn_groups
+                if not attn_group.supports_draft_decode_metadata_update
+            }
+        )
+        self.supports_decode_metadata_update = not unsupported_backends
+        if unsupported_backends:
+            logger.info_once(
+                "Attention backend(s) %s cannot update draft decode metadata in "
+                "place; falling back to rebuilding attention metadata eagerly.",
+                ", ".join(unsupported_backends),
+            )
 
     def _build_attn_metadata(
         self,
@@ -367,12 +475,13 @@ class DraftModelSpeculator(BaseSpeculator):
                 if dcp_local_seq_lens is None
                 else dcp_local_seq_lens[:num_reqs_padded]
             ),
-            max_seq_len=self.draft_max_seq_len,
+            max_seq_len=min(self.draft_max_seq_len, self.max_model_len),
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            positions=self.input_buffers.positions[:num_tokens],
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
@@ -421,20 +530,16 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
+        draft_logits: DraftLogitsCache | None,
         spec_step_idx: int = 0,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
-        if draft_logits is not None:
-            sampler = (
-                gumbel_sample
-                if self.draft_watermarker is None
-                else self.draft_watermarker.sample
-            )
-            sampled = sampler(
+        if draft_logits is not None and self.draft_watermarker is not None:
+            sampled = self.draft_watermarker.sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -442,9 +547,24 @@ class DraftModelSpeculator(BaseSpeculator):
                 sample_src_positions,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=draft_logits,
+                logits_cache=draft_logits.values,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
+                num_steps=num_steps,
+            )
+        elif draft_logits is not None:
+            sampled = gumbel_sample(
+                logits,
+                idx_mapping,
+                temperature,
+                seeds,
+                sample_src_positions,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=draft_logits.values,
+                logits_cache_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
+                logits_cache_row_mapping=draft_logits.row_mapping,
             )
         else:
             sampled = logits.argmax(dim=-1)
@@ -479,7 +599,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def prepare_watermarking(
         self,
-        sampler: "GPUWatermarkSampler",
+        sampler: GPUWatermarkSampler,
         idx_mapping: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
@@ -491,6 +611,24 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler.req_states.prompt_len.gpu,
             sampler.req_states.total_len.gpu,
         )
+
+    def prepare_propose(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        sampler: "Sampler",
+    ) -> None:
+        """Per-step work between verifying the last drafts and the next
+        `propose`."""
+        self.observe_verification(input_batch.idx_mapping, num_sampled, num_rejected)
+        if isinstance(sampler, GPUWatermarkSampler):
+            self.prepare_watermarking(sampler, input_batch.idx_mapping)
+        if self.draft_logits is not None:
+            # Verification read the previous step's draft logits.
+            self.draft_logits.assign(
+                input_batch.idx_mapping, input_batch.idx_mapping_np
+            )
 
     def _copy_request_inputs(
         self,
@@ -523,20 +661,21 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def _build_uniform_batch_dp_sync(
         self,
-        target_dp_sync: DPSyncState,
+        target_dp_sync_state: DPSyncState,
         num_reqs: int,
         num_query_per_req: int = 1,
     ) -> tuple[DPSyncState, int]:
-        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        num_batch_tokens = target_dp_sync_state.num_reqs * num_query_per_req
         assert num_reqs * num_query_per_req <= num_batch_tokens, (
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync,
+            target_dp_sync_state,
             num_tokens_across_dp=torch.full_like(
-                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+                target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
+            max_query_len=num_query_per_req,
             eager=False,
         ), num_batch_tokens
 
@@ -560,3 +699,19 @@ class DraftModelSpeculator(BaseSpeculator):
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
+
+    def _update_draft_decode_metadata(
+        self, attn_metadata: dict[str, Any], num_reqs: int
+    ) -> None:
+        if self.block_tables.cp_size > 1:
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.block_tables.cp_size,
+                self.block_tables.cp_rank,
+                self.block_tables.cp_interleave,
+            )
+        for groups in self.attn_groups:
+            for group in groups:
+                group.update_draft_decode_metadata(attn_metadata)

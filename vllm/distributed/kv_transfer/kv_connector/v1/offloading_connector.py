@@ -13,7 +13,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -45,6 +48,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -141,6 +145,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids)
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        results = super().get_transfer_results(finished_req_ids)
+        assert self.connector_worker is not None
+        results.failed_recving = self.connector_worker.take_failed_recving()
+        return results
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         if self.connector_worker is not None:
             return self.connector_worker.build_connector_worker_meta()
@@ -178,6 +190,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         )
         bound = min(per_group_hits[group_id] for group_id in self._bounding_group_ids)
         return max(0, bound - num_computed_tokens)
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

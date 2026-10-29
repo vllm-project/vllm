@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from pydantic import TypeAdapter, ValidationError
 
 from tests.utils import large_gpu_mark
 from tests.v1.sample.utils import (
@@ -20,7 +21,7 @@ from tests.v1.sample.utils import (
     compute_correct_cumulative_logprob,
     get_test_batch,
 )
-from vllm import SamplingParams
+from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
@@ -88,6 +89,7 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
 def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
     return SimpleNamespace(
         max_logprobs=max_logprobs,
+        max_model_len=16,
         logits_processors=None,
         is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
@@ -443,27 +445,65 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
         )
 
 
-def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
-    """The candidate count is bounded by max_logprobs."""
+def test_prompt_logprob_token_ids_validation():
+    """Rows may be ragged (-1 padded); the width is bounded by max_logprobs."""
     model_config = _model_config(vocab_size=100, max_logprobs=4)
 
     def verify(**kwargs):
-        SamplingParams(**kwargs).verify(
+        params = SamplingParams(**kwargs)
+        params.verify(
             model_config,
             speculative_config=None,
             structured_outputs_config=None,
             tokenizer=None,
         )
+        return params.prompt_logprob_token_ids
 
-    verify(prompt_logprob_token_ids=[1, 2, 3, 4])
+    assert verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]]).tolist() == [
+        [-1] * 4,
+        [1, -1, -1, -1],
+        [4, 3, 2, 1],
+    ]
+    # Any integer layout is normalized to what the worker uploads:
+    # C-contiguous native int32.
+    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
+    ids = verify(prompt_logprob_token_ids=odd)
+    assert ids.dtype == np.int32 and ids.flags.c_contiguous
+    assert ids.tolist() == [[1, 2], [3, -1]]
+    # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
+    adapter = TypeAdapter(SamplingParams)
+    for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
+        with pytest.raises(ValidationError):
+            adapter.validate_json(f'{{"prompt_logprob_token_ids": {bad}}}')
 
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=np.array([1, 2]))
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=[1, 2])
+    for bad_ids in ([[None]], [[2**63]], [[[1]]], [[[1], 2]]):
+        with pytest.raises(VLLMValidationError, match="integer token ids"):
+            verify(prompt_logprob_token_ids=bad_ids)
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
     # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
-        verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
-
+        verify(prompt_logprob_token_ids=[[1], [1, 2, 3, 4, 5]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [100]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [-2]])
+    with pytest.raises(VLLMValidationError, match="non-empty"):
+        verify(prompt_logprob_token_ids=[[], []])
+    # Rows are bounded by max_model_len before the table is padded.
+    with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
+        verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
-    with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprobs or"):
         verify(prompt_logprob_start=3)
+    # It also offsets top-K prompt logprobs.
+    verify(prompt_logprobs=1, prompt_logprob_start=3)
+    with pytest.raises(VLLMValidationError, match="non-negative"):
+        verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
 def test_prompt_logprob_token_ids_require_v2_model_runner():
@@ -482,8 +522,9 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         structured_outputs_config=None,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
-    params = SamplingParams(prompt_logprob_token_ids=[1, 2])
+    params = SamplingParams(prompt_logprob_token_ids=[[1, 2]])
     with patch.object(SamplingParams, "verify"):
         with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
@@ -491,6 +532,14 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+
+        # Top-K prompt logprobs only honor prompt_logprob_start on the V2 runner.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
+        InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.use_v2_model_runner = False
+        with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
 
 
@@ -1369,7 +1418,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
 
 
 def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
-    """Fixed-ID scores stay row-aligned across chunked prefill and preemption."""
+    """Per-row scores stay row-aligned across chunked prefill and preemption."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     prompts = [
@@ -1380,14 +1429,9 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     ] + [f"Tell me about the number {i}: " for i in range(32)]
 
     start = 2
-    candidate_ids = [10, 100, 1000, 10000]
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=40,
-        min_tokens=20,
-        prompt_logprob_token_ids=candidate_ids,
-        prompt_logprob_start=start,
-    )
+
+    def candidate_ids(j):
+        return [10 + j, 100 + j, 1000 + j, 10000 + j]
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",
@@ -1398,21 +1442,64 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         disable_log_stats=False,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        token_prompts = [
+            TokensPrompt(prompt_token_ids=tokenizer(p).input_ids) for p in prompts
+        ]
+
+        def make_params(row_ids):
+            return [
+                SamplingParams(
+                    temperature=0.0,
+                    max_tokens=40,
+                    min_tokens=20,
+                    prompt_logprob_token_ids=[
+                        row_ids(j)
+                        for j in range(len(p["prompt_token_ids"]) - 1 - start)
+                    ],
+                    prompt_logprob_start=start,
+                )
+                for p in token_prompts
+            ]
+
         metrics_before = vllm_model.llm.get_metrics()
-        outputs = vllm_model.llm.generate(prompts, sampling_params)
+        full_params = make_params(candidate_ids)
+        for params in full_params:  # the array form, as a top-k tensor would be
+            params.prompt_logprob_token_ids = np.array(params.prompt_logprob_token_ids)
+        outputs = vllm_model.llm.generate(token_prompts, full_params)
 
         for i, output in enumerate(outputs):
             scores = output.prompt_token_id_logprobs
-            assert scores is not None, f"Output {i} missing fixed-ID scores"
+            assert scores is not None, f"Output {i} missing per-row scores"
             expected_shape = (
                 len(output.prompt_token_ids) - 1 - start,
-                len(candidate_ids),
+                4,
             )
             assert scores.shape == expected_shape, (
                 f"Output {i} scored {scores.shape}, expected {expected_shape}"
             )
             assert math.isfinite(float(scores.min()))
             assert float(scores.max()) <= 1e-3, "logprobs must be <= 0"
+
+        # Ragged rows: each row keeps a prefix of the candidates and must
+        # reproduce that prefix of the full scores, with -inf padding. On ROCm
+        # the second generate call picks its own kernels, which moves bf16
+        # tails by up to 0.19; a misaligned row is off by nats either way.
+        ragged_atol = 0.2 if current_platform.is_rocm() else 1e-2
+        ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
+        ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
+        for output, ragged_output in zip(outputs, ragged_outputs):
+            expected = np.full_like(output.prompt_token_id_logprobs, -np.inf)
+            for j in range(len(expected)):
+                n = 1 + j % 4
+                expected[j, :n] = output.prompt_token_id_logprobs[j, :n]
+            np.testing.assert_allclose(
+                ragged_output.prompt_token_id_logprobs, expected, atol=ragged_atol
+            )
+
+        # The row count is checked against the prompt at admission.
+        with pytest.raises(VLLMValidationError, match="scored rows"):
+            vllm_model.llm.generate(token_prompts[0], ragged_params[1])
 
         metrics_after = vllm_model.llm.get_metrics()
         preemptions_before = next(
@@ -1429,64 +1516,84 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     # unchunked, unpreempted run of the same requests. Batch composition moves
     # bf16 tail logprobs by a few percent; a misaligned row differs by nats.
     with VllmRunner(
-        "Qwen/Qwen3-0.6B",
-        max_model_len=512,
-        max_logprobs=64,
-        gpu_memory_utilization=0.25,
+        "Qwen/Qwen3-0.6B", max_model_len=512, gpu_memory_utilization=0.25
     ) as reference:
-        reference_outputs = reference.llm.generate(prompts, sampling_params)
-        own_ids = [list(dict.fromkeys(o.prompt_token_ids)) for o in reference_outputs]
+        reference_outputs = reference.llm.generate(token_prompts, full_params)
         self_scored = reference.llm.generate(
-            prompts,
+            token_prompts,
             [
                 SamplingParams(
-                    max_tokens=1, prompt_logprobs=0, prompt_logprob_token_ids=ids
+                    max_tokens=1,
+                    prompt_logprobs=0,
+                    prompt_logprob_token_ids=[[t] for t in p["prompt_token_ids"][1:]],
                 )
-                for ids in own_ids
+                for p in token_prompts
             ],
         )
     for output, ref in zip(outputs, reference_outputs):
         np.testing.assert_allclose(
-            output.prompt_token_id_logprobs, ref.prompt_token_id_logprobs, rtol=0.1
+            output.prompt_token_id_logprobs,
+            ref.prompt_token_id_logprobs,
+            rtol=0.1,
+            atol=0.2,
         )
-    for output, ids in zip(self_scored, own_ids):
-        scores = output.prompt_token_id_logprobs
+    for output in self_scored:
+        scores = output.prompt_token_id_logprobs[:, 0]
         for row, target in enumerate(output.prompt_token_ids[1:]):
             expected = output.prompt_logprobs[row + 1][target].logprob
-            assert scores[row, ids.index(target)] == pytest.approx(expected, abs=1e-3)
+            assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
-    """A prefill that starts past the first scored row returns no scores.
-
-    Such a prefill (here a prefix-cache hit the caller opted back into) never
-    computes the leading rows, so emitting the buffer would return values the
-    model never produced for them.
-    """
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score, for both fixed-ID
+    scores and top-K prompt logprobs offset by prompt_logprob_start."""
+    start = 17
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Cached and uncached prefills have different execution shapes; batch
+    # invariance makes their scores comparable bit for bit.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-    prompt = "The capital of France is Paris. " * 20
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=1,
-        prompt_logprob_token_ids=[10, 100, 1000],
-        skip_reading_prefix_cache=False,
-    )
+    text = "The capital of France is Paris. " * 20
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",
         max_model_len=512,
         enable_prefix_caching=True,
+        block_size=16,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
+        token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            prompt_logprobs=2,
+            prompt_logprob_start=start,
+            prompt_logprob_token_ids=np.tile(
+                [10, 100, 1000], (len(token_ids) - 1 - start, 1)
+            ),
+            skip_reading_prefix_cache=True,
+        )
+
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+        # Top-K prompt logprobs start at the same row: position p is predicted
+        # by row p - 1, so positions up to and including start are None.
+        assert first.prompt_logprobs is not None
+        assert len(first.prompt_logprobs) == len(token_ids)
+        assert all(lp is None for lp in first.prompt_logprobs[: start + 1])
+        assert all(first.prompt_logprobs[start + 1 :])
 
-        # The re-send is served from the prefix cache, so its prefill starts
-        # past row 0 and the leading rows are never computed.
+        sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert second.prompt_token_id_logprobs is None
+        assert second.num_cached_tokens == 16
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 1 - start, 3)
+        np.testing.assert_array_equal(
+            second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
+        )
+        assert second.prompt_logprobs == first.prompt_logprobs
 
 
 @large_gpu_mark(min_gb=24)
@@ -1521,3 +1628,85 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+def test_trace_replay_with_spec_decode(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    prompt = "Hello world " * 50
+    llm_kwargs = dict(
+        max_model_len=512,
+        max_logprobs=5,
+        seed=42,
+        enable_trace_replay=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.25,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    def replay(runner, traces):
+        outputs = runner.llm.generate(
+            [prompt] * len(traces),
+            [
+                SamplingParams(
+                    trace_decode_token_ids=trace, max_tokens=len(trace), logprobs=3
+                )
+                for trace in traces
+            ],
+        )
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            assert completion.logprobs is not None
+            results.append((list(completion.token_ids), completion.logprobs))
+        return results
+
+    with VllmRunner("Qwen/Qwen3-0.6B", **llm_kwargs) as ref_runner:
+        sampled = ref_runner.llm.generate(
+            [prompt, prompt],
+            [
+                SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
+                SamplingParams(temperature=1.0, seed=7, max_tokens=32, ignore_eos=True),
+            ],
+        )
+        greedy_trace = list(sampled[0].outputs[0].token_ids)
+        sampled_trace = list(sampled[1].outputs[0].token_ids)
+        diverged_trace = greedy_trace[:10] + sampled_trace[10:20] + greedy_trace[20:]
+        traces = [greedy_trace, sampled_trace, diverged_trace]
+        ref_results = replay(ref_runner, traces)
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        disable_log_stats=False,
+        **llm_kwargs,
+    ) as spec_runner:
+        spec_results = replay(spec_runner, traces)
+        num_accepted = sum(
+            m.value
+            for m in spec_runner.llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+    assert num_accepted > 0
+
+    for trace, (ref_ids, ref_lps), (spec_ids, spec_lps) in zip(
+        traces, ref_results, spec_results
+    ):
+        assert ref_ids == trace
+        assert spec_ids == trace
+        assert len(ref_lps) == len(trace)
+        assert len(spec_lps) == len(trace)
+        for token_id, ref_lp, spec_lp in zip(trace, ref_lps, spec_lps):
+            assert math.isclose(
+                ref_lp[token_id].logprob,
+                spec_lp[token_id].logprob,
+                rel_tol=5e-2,
+                abs_tol=2.5e-1,
+            )

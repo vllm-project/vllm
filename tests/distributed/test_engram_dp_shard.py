@@ -39,9 +39,16 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
+)
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
+    EngramBatch,
     EngramLayout,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
@@ -93,27 +100,37 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    "architecture,options,edp_ranks,etp_ranks",
+    "architecture,options,tp_size,edp_ranks,etp_ranks",
     [
-        ("DeepseekV41ForCausalLM", {}, [0, 2], [0, 1]),
-        ("Qwen4ExpForCausalLM", {}, None, [0, 1]),
+        ("DeepseekV41ForCausalLM", {}, 2, [0, 2], [0, 1]),
+        # GPU tables span every DP rank only with embedding_across_dp.
+        ("DeepseekV41ForCausalLM", {"cpu_offload": False}, 1, [0, 1], [0]),
+        (
+            "DeepseekV41ForCausalLM",
+            {"cpu_offload": False, "embedding_across_dp": True},
+            1,
+            [0, 1, 2, 3],
+            [0, 1, 2, 3],
+        ),
+        ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
         (
             "Qwen4ExpForCausalLM",
             {"embedding_across_dp": True},
+            2,
             None,
             [0, 1, 2, 3],
         ),
-        ("Qwen4ExpForConditionalGeneration", {}, None, [0, 1]),
+        ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
-    monkeypatch, architecture, options, edp_ranks, etp_ranks
+    monkeypatch, architecture, options, tp_size, edp_ranks, etp_ranks
 ):
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture=architecture, is_moe=False),
         parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            data_parallel_size=2,
+            tensor_parallel_size=tp_size,
+            data_parallel_size=4 // tp_size,
             distributed_executor_backend="mp",
         ),
         engram_config=EngramConfig(**options),
@@ -134,7 +151,8 @@ def test_engram_group_creation_honors_model_and_options(
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+    # Two ranks per node.
+    monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
 
     def make_group(group_ranks, *args, **kwargs):
         ranks = next(ranks for ranks in group_ranks if 0 in ranks)
@@ -142,10 +160,13 @@ def test_engram_group_creation_honors_model_and_options(
 
     monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
     with set_current_vllm_config(config):
-        initialize_model_parallel(tensor_model_parallel_size=2, backend="nccl")
+        initialize_model_parallel(tensor_model_parallel_size=tp_size, backend="nccl")
     group = get_engram_dp_group()
     assert (group.ranks if group is not None else None) == edp_ranks
     assert parallel_state.get_etp_group().ranks == etp_ranks
+    # A group with the DP group's ranks reuses its communicators.
+    full_dp = edp_ranks is not None and len(edp_ranks) == 4 // tp_size
+    assert (group is parallel_state._DP) == full_dp
 
 
 def _worker(rank: int, tp_size: int, port: int) -> None:
@@ -177,7 +198,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
     # Supply the resolved Engram settings without constructing a full model.
     vllm_config.engram_config = EngramConfig()
     vllm_config.model_config = SimpleNamespace(
-        architecture="DeepseekV41ForCausalLM", is_moe=True
+        architecture="DeepseekV41ForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     try:
         init_distributed_environment()
@@ -192,6 +215,13 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
 
+        # GPU peer reads need NVLink P2P, which CI's L4s lack.
+        p2p = current_platform.is_fully_connected(
+            [
+                current_platform.visible_device_id_to_physical_device_id(i)
+                for i in range(WORLD_SIZE)
+            ]
+        )
         # Reuse the processes and communication groups across storage modes.
         for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
             [(False, False), (True, False), (True, True)],
@@ -204,9 +234,78 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 dp_shared_memory,
                 n_heads,
                 sequence_parallel,
+                p2p,
             )
+        if tp_size == 1 and p2p:
+            # Without NVLink P2P, GPU tables keep the DP collectives.
+            _check_table(vllm_config, False, False, 8, False, p2p=False)
+        if tp_size == 1:
+            _check_fp8_batch(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_fp8_batch(vllm_config):
+    """MXFP8 staging matches the tables across peer/all-to-all slots, idle
+    replicas and graph replays."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    layers = []
+    for index in range(2):
+        weight, scale = _full_table(sum(HEAD_SIZES))
+        weight = (weight.float() * (1 - 2 * index)).to(torch.float8_e4m3fn)
+        table = ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=True
+        )
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+        staged = torch.empty(0, device="cuda")
+        reference = (weight.cuda(), scale.cuda())
+        layers.append(SimpleNamespace(embed_tokens=table, staged_rows=staged))
+        layers[-1].layer_hash_index, layers[-1].reference = index, reference
+    batch = EngramBatch(layers, 257)
+
+    def check(ids):
+        tokens = ids.shape[0]
+        for layer in layers:
+            x = batch.wkv_input(layer, tokens)
+            sf = convert_swizzled_to_linear(x.scale, tokens, x.data.shape[1], BLOCK)
+            actual = dequant_mxfp8_to_bf16(x.data, sf).unflatten(-1, (-1, DIM))
+            weight, scale = layer.reference
+            expected = _reference(weight, scale, ids[:, layer.layer_hash_index])
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    for counts in ((7, 0, 5, 1), (127,) * 4, (128,) * 4, (257, 0, 129, 1)):
+        tokens = counts[dp_rank]
+        seed = 700 + 10 * dp_rank
+        ids = torch.stack([_make_ids(HEAD_SIZES, tokens, seed + i) for i in (0, 1)], 1)
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=tokens,
+            num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
+        ):
+            batch.prepare_embeddings(ids)
+            check(ids)
+            for capture in ("full", "breakable") if len(set(counts)) == 1 else ():
+                warmup = torch.cuda.Stream()
+                warmup.wait_stream(torch.cuda.current_stream())
+                if capture == "full":
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=warmup):
+                        batch.prepare_embeddings(ids)
+                else:
+                    graph = BreakableCUDAGraphCapture()
+                    with torch.cuda.stream(warmup), graph:
+                        batch.prepare_embeddings(ids)
+                torch.cuda.current_stream().wait_stream(warmup)
+                for step in (2, 3):
+                    replay_ids = _make_ids(HEAD_SIZES, tokens, seed + step)
+                    ids.copy_(torch.stack([replay_ids] * 2, 1))
+                    graph.replay()
+                    check(ids)
+                del graph
 
 
 def _check_shared_storage_lifetime_and_failures(failure):
@@ -307,7 +406,7 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
 
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel
+    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel, p2p
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -360,6 +459,9 @@ def _check_table(
                 init_patch.setattr(
                     engram_ops, "get_current_vllm_config", lambda: component_config
                 )
+                init_patch.setattr(
+                    engram_ops.current_platform, "is_fully_connected", lambda _: p2p
+                )
                 engram = Engram(
                     config,
                     quant_config=None,
@@ -381,13 +483,17 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            # Shared host tables and GPU peer reads look up only local tokens.
+            local = layer.dp_size == 1
+            assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
                 assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+            if local:
 
                 def unexpected_collective(*args, **kwargs):
-                    raise AssertionError("shared lookup must not use DP collectives")
+                    raise AssertionError("local lookups must not use DP collectives")
 
                 m.setattr(get_engram_dp_group(), "all_gather", unexpected_collective)
 
@@ -407,12 +513,8 @@ def _check_table(
                 num_tokens=num_tokens,
                 num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
             ):
-                gathered = gather_engram_hashes(
-                    ids, dp_shared_memory=layer.dp_shared_memory
-                )
-                expected_tokens = (
-                    num_tokens if dp_shared_memory else max(counts) * dp_size
-                )
+                gathered = gather_engram_hashes(ids, dp_shared_memory=local)
+                expected_tokens = num_tokens if local else max(counts) * dp_size
                 assert gathered.shape[0] == expected_tokens
                 engram.prepare_embeddings(gathered)
                 looked_up = engram.embed(ids)
@@ -450,16 +552,18 @@ def _check_table(
                 and not dp_shared_memory
                 and sequence_parallel == (tp_size > 1)
             )
+            or layer.peer_rows > 0
         )
         if replay:
-            captures = ("full", "breakable")
+            # Peer reads have no eager breaks to count.
+            captures = ("full",) if layer.peer_rows else ("full", "breakable")
             for capture in captures:
                 _check_prefetch_replay(
                     engram,
                     head_sizes,
                     weight,
                     scale_inv,
-                    dp_shared_memory,
+                    local,
                     capture,
                 )
         if dp_shared_memory and n_heads == 7 and sequence_parallel == (tp_size > 1):
@@ -472,9 +576,14 @@ def _check_table(
 def _check_dummy_hash_model_forward(
     vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
 ):
-    """A metadata-less replica joins DP sharding but skips a shared lookup."""
+    """A metadata-less replica looks up dead rows, so it joins DP sharding and
+    the memory profile sees the Engram activations."""
     from vllm.models.deepseek_v41.common.engram import NgramHashState
-    from vllm.models.deepseek_v41.nvidia import model as model_ops
+
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd import model as model_ops
+    else:
+        from vllm.models.deepseek_v41.nvidia import model as model_ops
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     if dp_shared_memory and dp_rank != 1:
@@ -495,25 +604,24 @@ def _check_dummy_hash_model_forward(
         # **kwargs absorbs the decoder's keyword-only flags.
         def __call__(self, hidden, positions, input_ids, *args, **kwargs):
             hashes, keep = args[-2:]
-            if dp_shared_memory and dp_rank == 1:
-                assert hashes is None and keep is None
-                output = hidden.new_zeros(
-                    tokens, len(head_sizes), DIM, dtype=torch.bfloat16
-                )
-            else:
-                assert hashes is not None and keep is not None
-                assert bool(keep.all()) == (dp_rank != 1)
-                if dp_rank == 1:
-                    assert torch.all(hashes == engram_ops.DEAD_ID)
-                output = engram.embed(hashes[:, 0])
-            # Trailing None is previous_aux; this stub captures no aux states.
-            return output, hidden, hidden, hidden, hidden, None
+            assert hashes is not None and keep is not None
+            assert bool(keep.all()) == (dp_rank != 1)
+            if dp_rank == 1:
+                assert torch.all(hashes == engram_ops.DEAD_ID)
+            output = engram.embed(hashes[:, 0])
+            # Trailing None is the NVIDIA layer's previous_aux; this stub
+            # captures no aux states.
+            outputs = (output, hidden, hidden, hidden, hidden, None)
+            return outputs[:5] if current_platform.is_rocm() else outputs
 
     model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
     torch.nn.Module.__init__(model)
+    model.parallel_config = vllm_config.parallel_config
+    model.use_native_mega_moe = False
     model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
+    model.engram_batch = None
     model.engram_hash = state
     model.engram_swa_prefix = "swa"
     model.engram_dp_shared_memory = dp_shared_memory
@@ -523,6 +631,7 @@ def _check_dummy_hash_model_forward(
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
     model.aux_hidden_state_layers = ()
+    model.mhc_post = lambda hidden, *args: hidden
     metadata = (
         None
         if dp_rank == 1
@@ -541,7 +650,9 @@ def _check_dummy_hash_model_forward(
                 is_last_rank=False,
             ),
         )
-        patch.setattr(model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden)
+        patch.setattr(
+            model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden, raising=False
+        )
         with set_forward_context(
             metadata,
             vllm_config,
