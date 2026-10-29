@@ -108,6 +108,10 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
+# Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
+# stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
+# regression was at 272 tokens (27B BF16 TP8).
+_BA_PROJ_OVERLAP_MAX_TOKENS = 256
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
@@ -634,13 +638,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if (
             overlap_ba_proj
             and current_platform.is_cuda()
-            and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.lora_config is None
         ):
             self._ba_stream = aux_stream()
             self._ba_events = (torch.cuda.Event(), torch.cuda.Event())
-            self._ba_max_tokens = envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -1156,12 +1158,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """in_proj_qkvz and in_proj_ba, with the tiny ba GEMM hidden on the aux
         stream. Only during CUDA graph capture (eagerly the stream switch costs
-        more host time than it saves) and up to the token threshold (beyond it
-        the qkvz GEMM is compute-bound and leaves nothing to overlap).
+        more host time than it saves) and up to _BA_PROJ_OVERLAP_MAX_TOKENS.
+        ba is enqueued first: enqueuing qkvz first regressed block-FP8 qkvz.
         """
         if (
             self._ba_stream is None
-            or hidden_states.shape[0] > self._ba_max_tokens
+            or hidden_states.shape[0] > _BA_PROJ_OVERLAP_MAX_TOKENS
             or not torch.cuda.is_current_stream_capturing()
         ):
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
