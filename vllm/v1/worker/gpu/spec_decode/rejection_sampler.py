@@ -294,6 +294,10 @@ class RejectionSampler:
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
         )
+        if self.sampler.trace_replay_state is not None:
+            self.sampler.trace_replay_state.apply_trace_to_verified(
+                sampled, num_sampled, verify_draft_sampled, cu_num_logits, idx_mapping
+            )
         return processed_logits, sampled, num_sampled
 
     def _verify_in_chunks(
