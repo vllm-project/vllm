@@ -1882,8 +1882,8 @@ class VllmConfig:
             self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
-            if not current_platform.is_cuda():
-                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if current_platform.get_hisparse_backend_cls() is None:
+                raise ValueError("The current platform does not support HiSparse.")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
             if self.parallel_config.decode_context_parallel_size > 1:
@@ -2203,6 +2203,8 @@ class VllmConfig:
                 f"{', '.join('--all2all-backend=' + b for b in supported_backends)}"
                 " and install the matching kernels."
             )
+
+            self._raise_dbo_thresholds_for_spec_decode()
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -3220,12 +3222,35 @@ class VllmConfig:
                 f"{'; '.join(blockers)}."
             )
 
+    def _raise_dbo_thresholds_for_spec_decode(self) -> None:
+        """The speculative counterpart of ParallelConfig's DBO threshold check.
+
+        A uniform decode batch below one request per microbatch cannot be split
+        on a request boundary, and an idle DP rank's one-request dummy batch
+        must stay below the thresholds too. Such batches gain nothing from
+        microbatching, so raise the thresholds rather than reject the config.
+        """
+        parallel_config = self.parallel_config
+        min_ubatch_tokens = parallel_config.num_ubatches * self.uniform_decode_query_len
+        for name in ("dbo_decode_token_threshold", "dbo_prefill_token_threshold"):
+            threshold = getattr(parallel_config, name)
+            if threshold < min_ubatch_tokens:
+                logger.warning_once(
+                    "Raising %s from %d to %d, the number of microbatches times "
+                    "the decode query length.",
+                    name,
+                    threshold,
+                    min_ubatch_tokens,
+                )
+                setattr(parallel_config, name, min_ubatch_tokens)
+
     def _get_dbo_unsupported_features(self) -> list[str]:
         """Collect what the V2 model runner cannot combine with DBO.
 
-        The V2 runner microbatches a plain decoder forward pass. Anything that
-        slices or replays the batch differently (drafting, adapters, pipeline
-        stages, context parallelism, encoders) is not handled yet.
+        The V2 runner microbatches a decoder forward pass (drafting runs whole,
+        after it). Anything else that slices or replays the batch differently
+        (adapters, pipeline stages, prefill context parallelism, encoders) is
+        not handled yet.
         """
         # TODO: DBO with model runner V2 is under development.
         # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
@@ -3239,15 +3264,10 @@ class VllmConfig:
 
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
-        if self.speculative_config is not None:
-            unsupported.append("dual batch overlap with speculative decoding")
         if parallel_config.pipeline_parallel_size > 1:
             unsupported.append("dual batch overlap with pipeline parallelism")
-        if (
-            parallel_config.decode_context_parallel_size > 1
-            or parallel_config.prefill_context_parallel_size > 1
-        ):
-            unsupported.append("dual batch overlap with context parallelism")
+        if parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("dual batch overlap with prefill context parallelism")
         if model_config is not None and (
             model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):
