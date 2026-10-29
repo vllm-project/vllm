@@ -89,6 +89,8 @@ The `reasoning` field contains the reasoning steps that led to the final conclus
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
+With `--reasoning-parser minimax_m3`, streaming extraction waits for buffered text before deciding whether reasoning has ended. For example, excluding stop strings can delay text while token IDs have already arrived. Empty text deltas do not reopen reasoning that has already ended.
+
 ??? console "Json"
 
     ```json

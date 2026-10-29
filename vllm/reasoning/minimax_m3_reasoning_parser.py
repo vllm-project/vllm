@@ -250,6 +250,7 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         if not delta_text:
+            self._pending_marker_streaming = True
             return None
 
         if not previous_text:
