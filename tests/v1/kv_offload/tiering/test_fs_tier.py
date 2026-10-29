@@ -200,6 +200,9 @@ def fs_tier(tmp_path):
         n_read_threads=4,
         n_write_threads=4,
     )
+    # Standalone tier: no manager owns it, but pool workers materialize
+    # promotion jobs under the manager lock.
+    tier.set_manager_lock(threading.Lock())
     yield tier, tensor
     tier.shutdown()
 
@@ -218,6 +221,7 @@ def fs_tier_with_events(tmp_path):
         enable_kv_events=True,
         locality="LOCAL",
     )
+    tier.set_manager_lock(threading.Lock())
     yield tier
     tier.shutdown()
 
@@ -487,6 +491,7 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         n_read_threads=4,
         n_write_threads=4,
     )
+    tier.set_manager_lock(threading.Lock())
     try:
         assert tier._use_o_direct is False
 
@@ -1047,6 +1052,7 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         n_read_threads=2,
         n_write_threads=2,
     )
+    reader.set_manager_lock(threading.Lock())
     try:
         assert reader.file_mapper.base_path == writer_base
         assert reader.file_mapper.get_file_name(key(7)) == writer_path
@@ -1082,7 +1088,7 @@ class TestFSPromotion:
         # load_task's materialize() call is a double call; the worker stashes
         # the RuntimeError and the pool fails the job, then get_finished_jobs()
         # re-raises it instead of reporting a silently failed promotion.
-        with pytest.raises(RuntimeError, match="materialized more than once"):
+        with pytest.raises(AssertionError, match="materialized more than once"):
             drain(tier)
 
     def test_promotion_allocation_failure(self, fs_tier):

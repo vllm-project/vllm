@@ -66,7 +66,6 @@ from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     PromotionTransferJob,
     TieringOffloadingManager,
-    _LockedPrimaryTier,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -294,7 +293,7 @@ class TestPromotionTransferJob:
         assert received["ctx"] is _CTX
 
     def test_materialize_double_call_raises(self):
-        """A second materialize() raises RuntimeError; alloc_fn ran once."""
+        """A second materialize() fails an assert; alloc_fn ran once."""
         call_count = [0]
 
         def counting_alloc(keys, ctx):
@@ -304,7 +303,7 @@ class TestPromotionTransferJob:
         job = _make_deferred_promotion_job(counting_alloc)
         assert job.materialize()
         assert job.is_materialized()
-        with pytest.raises(RuntimeError, match="more than once"):
+        with pytest.raises(AssertionError, match="more than once"):
             job.materialize()
         assert call_count[0] == 1
 
@@ -448,9 +447,7 @@ class TestTieringOffloadingManager:
         job_id = self.manager._next_job_id()
 
         def alloc_fn_impl(keys, ctx):
-            self.manager._metrics.safe_counter_update(
-                0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 2
-            )
+            self.manager._metrics.on_promotion_allocated(0, 2)
             return keys, np.array([0, 1], dtype=np.int32)
 
         job = PromotionTransferJob(
@@ -529,9 +526,7 @@ class TestTieringOffloadingManager:
         job_id = self.manager._next_job_id()
 
         def alloc_fn_impl(keys, ctx):
-            self.manager._metrics.safe_counter_update(
-                0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 1
-            )
+            self.manager._metrics.on_promotion_allocated(0, 1)
             return (keys, np.array([0], dtype=np.int32))
 
         job = PromotionTransferJob(
@@ -2071,11 +2066,9 @@ class TestPromotionAllocation:
         failure_key = TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 0
 
-        # Trigger a failure. The update is buffered by safe_counter_update;
-        # draining applies it to the stats counter.
+        # Trigger a failure.
         result = manager._promotion_allocation(0, to_keys([2]), req_ctx)
         assert result is None
-        manager._metrics.drain_pending_updates()
         assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 1
 
         # Release blocks by completing the store
@@ -2099,9 +2092,6 @@ class TestPromotionAllocation:
         keys_out, chunk_ids_out = result
         assert key in keys_out
         assert len(chunk_ids_out) > 0
-        # Buffered until drained.
-        assert tier_state.primary_write_chunk_count == 0
-        manager._metrics.drain_pending_updates()
         assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
 
     def test_promotion_fails_for_finalized_request(self):
@@ -2127,95 +2117,6 @@ class TestPromotionAllocation:
         assert isinstance(result, CPUPrimaryTierOffloadingManager._RequestFinalized), (
             f"Expected REQUEST_FINALIZED sentinel, got {result!r}"
         )
-
-
-class TestLockedPrimaryTier:
-    """Tests for the _LockedPrimaryTier threading proxy."""
-
-    def test_always_wrapped(self):
-        """primary_tier is always wrapped, since any tier may materialize a
-        promotion job off the scheduler thread."""
-        num_chunks = 4
-        mmap = _mock_mmap_region(num_chunks)
-        primary = CPUPrimaryTierOffloadingManager(
-            num_chunks=num_chunks, mmap_region=mmap
-        )
-        example_tier = ExampleSecondaryTierManager(
-            offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mmap.create_kv_memoryview(),
-            tier_type="example",
-        )
-        manager = TieringOffloadingManager(
-            primary_tier=primary,
-            secondary_tiers=[example_tier],
-        )
-        assert isinstance(manager.primary_tier, _LockedPrimaryTier)
-
-
-class TestProtectedLookupKeys:
-    """Tests for CPUPrimaryTierOffloadingManager._protected_lookup_keys."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        num_chunks = 6
-        self.primary = CPUPrimaryTierOffloadingManager(
-            num_chunks=num_chunks, mmap_region=_mock_mmap_region(num_chunks)
-        )
-
-    def test_protected_lookup_keys_lifecycle(self):
-        """Full lifecycle of _protected_lookup_keys:
-
-        1. HIT lookup adds the key.
-        2. A new request ID clears the set before the next lookup.
-        3. on_schedule_end clears the set.
-        4. Keys in the set are protected from eviction.
-        5. reset_cache clears the set.
-        """
-        # Use a tight 2-chunk primary so eviction pressure is easy to trigger.
-        num_chunks = 2
-        primary = CPUPrimaryTierOffloadingManager(
-            num_chunks=num_chunks, mmap_region=_mock_mmap_region(num_chunks)
-        )
-        setup_ctx = ReqContext(req_id="setup")
-        k1, k2, k3 = to_keys([1])[0], to_keys([2])[0], to_keys([3])[0]
-
-        def store(key):
-            out = primary.prepare_store([key], setup_ctx)
-            assert out is not None
-            primary.complete_store([key], setup_ctx, success=True)
-
-        store(k1)
-        store(k2)  # primary is now full (2/2 chunks)
-
-        # 1. HIT lookup adds the key to the set.
-        r = primary.lookup(k1, ReqContext(req_id="req1"))
-        assert r is LookupResult.HIT
-        assert k1 in primary._protected_lookup_keys
-
-        # 2. New request ID clears the set before serving the new request.
-        primary.lookup(k2, ReqContext(req_id="req2"))
-        assert k1 not in primary._protected_lookup_keys
-        assert k2 in primary._protected_lookup_keys
-
-        # 3. on_schedule_end clears the set.
-        primary.on_schedule_end(
-            ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
-        )
-        assert not primary._protected_lookup_keys
-
-        # 4. Re-protect k1
-        primary.lookup(k1, ReqContext(req_id="req3"))
-        assert k1 in primary._protected_lookup_keys
-
-        result = primary.prepare_store([k3], ReqContext(req_id="evict"))
-        if result is not None:
-            assert primary._policy.get(k1) is not None, (
-                "k1 was evicted despite being in _protected_lookup_keys"
-            )
-
-        # 5. reset_cache clears the protection set.
-        primary.reset_cache()
-        assert not primary._protected_lookup_keys
 
 
 def test_tiering_manager_reports_one_config_info_series_for_each_tier():
@@ -2510,12 +2411,6 @@ class TestTieringOffloadingManagerWithFsTier:
             with open(path, "wb") as f:
                 f.write(bytes(64))
 
-    def test_locked_primary_tier_wrapping(self, fs_manager_setup):
-        """The FS tier materializes promotions on its worker thread, so the
-        primary tier is served through the _LockedPrimaryTier proxy."""
-        manager, _, _ = fs_manager_setup
-        assert isinstance(manager.primary_tier, _LockedPrimaryTier)
-
     def test_one_fs_tier_promotion(self, fs_manager_setup):
         """Store keys in FS, verify all lookups return HIT_PENDING, wait for
         promotion to finish (with a timeout), then verify all keys are loaded."""
@@ -2594,9 +2489,9 @@ class TestTieringOffloadingManagerWithFsTier:
 
     def test_deferred_promotion_chunk_counts_return_to_zero(self, fs_manager_setup):
         """A deferred promotion's chunk count nets to zero once the job
-        finishes: the worker buffers the allocation increment via
-        safe_counter_update, and _complete_promotion buffers the matching
-        decrement, so assert_idle holds once drained.
+        finishes: the worker records the allocation increment when it
+        materializes the job, and the matching decrement is applied when
+        the job is reaped, so assert_idle holds.
         """
         manager, _, fs_tier = fs_manager_setup
         keys = to_keys(range(3))

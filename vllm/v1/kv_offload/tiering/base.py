@@ -235,6 +235,18 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
+        # manager_lock when the tiers need to call the Manager level
+        # functions. For example, deferred CPU block allocation by the
+        # FS tier.
+        # manager_lock should materialize when the manager materializes.
+        self.manager_lock: threading.Lock | None = None
+
+    def set_manager_lock(self, lock: threading.Lock) -> None:
+        """Called by the TieringOffloadingManager::__init__()."""
+        assert self.manager_lock is None, (
+            f"tier {self.tier_type} already has a manager lock"
+        )
+        self.manager_lock = lock
 
     @property
     def block_size_bytes(self) -> int:

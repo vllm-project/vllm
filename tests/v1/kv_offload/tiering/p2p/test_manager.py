@@ -133,6 +133,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr.tier_type = "p2p"
+    mgr.manager_lock = None
     mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
@@ -608,9 +609,7 @@ class TestPromotionLatency:
         )
 
         def primary_alloc_fn(keys, ctx):
-            tiering_manager._metrics.safe_counter_update(
-                0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 1
-            )
+            tiering_manager._metrics.on_promotion_allocated(0, 1)
             return (list(keys), np.array([0]))
 
         job = PromotionTransferJob(

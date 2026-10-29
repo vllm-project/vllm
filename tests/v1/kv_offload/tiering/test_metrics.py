@@ -38,11 +38,7 @@ def create_promotion_job(
     """Build a PromotionTransferJob that materializes to the given chunk ids."""
 
     def primary_alloc_fn(keys, ctx):
-        tracker.safe_counter_update(
-            tier_idx,
-            TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
-            len(chunk_ids),
-        )
+        tracker.on_promotion_allocated(tier_idx, len(chunk_ids))
         return (list(keys), np.array(chunk_ids, dtype=np.int32))
 
     return PromotionTransferJob(job_id, _CTX, keys, alloc_fn=primary_alloc_fn)
@@ -403,7 +399,6 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     # records the chunk count.
     job.transfer_job.materialize()
     assert job.transfer_job.is_materialized()
-    tracker.drain_pending_updates()
     assert state.primary_write_chunk_count == 3
 
     tracker.on_job_finished(
@@ -414,40 +409,9 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     tracker.assert_idle()
 
 
-def test_drain_pending_updates_semantics():
-    """Drain applies buffered chunk counts and failures to the right
-    counters, resets the buffer, and nets negative deltas to zero."""
-    tracker = TieringMetricsTracker(
-        tier_types=["fs", "p2p"], num_primary_chunks=5, primary_chunk_size=16
-    )
-    tracker.safe_counter_update(0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 3)
-    tracker.safe_counter_update(1, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 2)
-    tracker.safe_counter_update(
-        0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, -3
-    )
-    tracker.safe_counter_update(
-        0, TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES, 1
-    )
-
-    tracker.drain_pending_updates()
-    assert tracker._tier_states[0].primary_write_chunk_count == 0
-    assert tracker._tier_states[1].primary_write_chunk_count == 2
-    stats = tracker.take_stats()
-    assert stats is not None
-    values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
-
-    tracker.safe_counter_update(
-        1, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, -2
-    )
-    tracker.drain_pending_updates()
-    tracker.assert_idle()
-
-
-def test_buffered_increment_drained_before_finished_job_decrement():
-    """on_job_finished drains before decrementing, so an increment buffered
-    by a tier worker (recorded before the job was reported finished) cannot
-    drive the counter negative."""
+def test_promotion_chunk_count_nets_to_zero_after_finish():
+    """The chunk count a promotion records at acquisition is removed when
+    the job finishes, so assert_idle holds."""
     keys = to_keys(range(3))
     tracker = TieringMetricsTracker(
         tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
@@ -457,12 +421,10 @@ def test_buffered_increment_drained_before_finished_job_decrement():
         create_promotion_job(1, keys, [0, 1, 2], tracker=tracker, tier_idx=0), 0
     )
     tracker.on_job_registered(job, is_job_materialized=False)
-    # Worker redeems the claim and buffers the chunk count; no drain yet.
     job.transfer_job.materialize()
     assert job.transfer_job.is_materialized()
-    assert tracker._tier_states[0].primary_write_chunk_count == 0
+    assert tracker._tier_states[0].primary_write_chunk_count == 3
 
-    # Counter update drain happens here.
     tracker.on_job_finished(
         job, JobResult(job_id=1, success=True), is_job_materialized=True
     )
