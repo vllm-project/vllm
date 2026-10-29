@@ -688,6 +688,9 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
+  - vllm/v1/core/kv_cache_planning.py
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/kv_cache_interface.py
   - vllm/model_executor/models/
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
@@ -716,6 +719,9 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
+      - vllm/v1/core/kv_cache_planning.py
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/kv_cache_interface.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
       - vllm/v1/attention/backends/
