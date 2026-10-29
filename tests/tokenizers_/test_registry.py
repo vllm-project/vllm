@@ -281,3 +281,11 @@ def test_config_hf_backed_tokenizer_preserves_code_revision(
     _load_config_tokenizer(loader, config, **overrides)
     assert len(config_tokenizer_backend) == 1
     assert config_tokenizer_backend[0]["code_revision"] == expected
+
+
+def test_hub_id_tokenizer_class_survives_local_snapshot():
+    # transformers picks TokenizersBackend for this checkpoint by its Hub ID;
+    # the class declared on the Hub (LlamaTokenizerFast) drops every space
+    tokenizer = get_tokenizer("deepseek-ai/deepseek-coder-1.3b-base")
+    text = "key 96727 value 4922"
+    assert tokenizer.decode(tokenizer.encode(text, add_special_tokens=False)) == text
