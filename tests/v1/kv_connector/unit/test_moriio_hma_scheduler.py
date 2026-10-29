@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import threading
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1005,6 +1006,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         layer_to_spec={},
         backend_name="TRITON_ATTN",
         side_channel_port=6301,
+        _stop_event=threading.Event(),
         tp_rank=0,
         dp_rank=0,
         is_producer=False,
