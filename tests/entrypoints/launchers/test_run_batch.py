@@ -40,6 +40,8 @@ from vllm.entrypoints.launchers.run_batch import (
     validate_batch,
     validate_run_batch_args,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -135,6 +137,32 @@ INPUT_BATCH = "\n".join(
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
+            },
+        },
+    ]
+)
+
+INPUT_COMPLETIONS_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": "Hello world!",
+                "max_tokens": 10,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": ["The capital of France is", "One plus one is"],
+                "max_tokens": 10,
             },
         },
     ]
@@ -527,6 +555,52 @@ def test_completions():
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
             BatchRequestOutput.model_validate_json(line)
+
+
+def test_completions_endpoint():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        # A chat line rides along: /v1/chat/completions and /v1/completions
+        # share their last URL segment, so each must reach its own handler.
+        chat_line = json.dumps(
+            json.loads(INPUT_BATCH.strip().split("\n")[0]) | {"custom_id": "chat-1"}
+        )
+        input_file.write(INPUT_COMPLETIONS_BATCH + "\n" + chat_line)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                CHAT_MODEL_NAME,
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        outputs = {
+            output.custom_id: output
+            for output in map(
+                BatchRequestOutput.model_validate_json, contents.strip().split("\n")
+            )
+        }
+        assert len(outputs) == 3
+        for output in outputs.values():
+            assert output.error is None
+        assert isinstance(outputs["request-1"].response.body, CompletionResponse)
+        # A list prompt returns one choice per prompt.
+        completion = outputs["request-2"].response.body
+        assert isinstance(completion, CompletionResponse)
+        assert len(completion.choices) == 2
+        assert isinstance(outputs["chat-1"].response.body, ChatCompletionResponse)
 
 
 def test_completions_invalid_input():
