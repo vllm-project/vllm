@@ -79,6 +79,11 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
 )
 from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.attention import INDEXER_CHECKPOINT_MAPPING
+from vllm.models.deepseek_v4.common.hyper_connection import (
+    DeepseekV4HyperConnection,
+    DeepseekV4HyperConnectionHead,
+)
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
@@ -846,68 +851,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = DeepseekV4ROCMAiterMLAAttention(
+        self.self_attn = DeepseekV4ROCMAiterMLAAttention(
             vllm_config,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        self.ffn = DeepseekV4MoE(
+        self.mlp = DeepseekV4MoE(
             vllm_config,
-            prefix=f"{prefix}.ffn",
+            prefix=f"{prefix}.mlp",
             fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
         )
 
-        self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
-        self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
+        self.input_layernorm = RMSNorm(self.hidden_size, self.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
-        mix_hc = (2 + self.hc_mult) * self.hc_mult
-        hc_dim = self.hc_mult * self.hidden_size
-        self.hc_attn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_ffn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_attn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_ffn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_attn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_ffn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
+        self.attn_hc = DeepseekV4HyperConnection(self.hc_mult, self.hidden_size)
+        self.ffn_hc = DeepseekV4HyperConnection(self.hc_mult, self.hidden_size)
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
@@ -972,18 +935,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        attn_norm_weight = self.attn_norm.weight if self.fuse_mhc_rmsnorm else None
+        attn_norm_weight = (
+            self.input_layernorm.weight if self.fuse_mhc_rmsnorm else None
+        )
         attn_norm_eps = (
-            self.attn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
+            self.input_layernorm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
         )
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
             x, post_mix, res_mix = self.hc_pre(
                 x,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
+                self.attn_hc.fn,
+                self.attn_hc.scale,
+                self.attn_hc.base,
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
@@ -993,9 +958,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                 residual,
                 post_mix,
                 res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
+                self.attn_hc.fn,
+                self.attn_hc.scale,
+                self.attn_hc.base,
                 self.rms_norm_eps,
                 self.hc_eps,
                 self.hc_eps,
@@ -1006,19 +971,25 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         if not self.fuse_mhc_rmsnorm:
-            x = self.attn_norm(x)
-        x = self.attn(positions, x, None)
+            x = self.input_layernorm(x)
+        x = self.self_attn(positions, x, None)
 
-        ffn_norm_weight = self.ffn_norm.weight if self.fuse_mhc_rmsnorm else None
-        ffn_norm_eps = self.ffn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
+        ffn_norm_weight = (
+            self.post_attention_layernorm.weight if self.fuse_mhc_rmsnorm else None
+        )
+        ffn_norm_eps = (
+            self.post_attention_layernorm.variance_epsilon
+            if self.fuse_mhc_rmsnorm
+            else 0.0
+        )
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
             post_mix,
             res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
+            self.ffn_hc.fn,
+            self.ffn_hc.scale,
+            self.ffn_hc.base,
             self.rms_norm_eps,
             self.hc_eps,
             self.hc_eps,
@@ -1028,8 +999,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=ffn_norm_eps,
         )
         if not self.fuse_mhc_rmsnorm:
-            x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
+            x = self.post_attention_layernorm(x)
+        x = self.mlp(x, input_ids)
         return x, residual, post_mix, res_mix
 
     def _forward_unfused_post_pre(
@@ -1045,18 +1016,18 @@ class DeepseekV4DecoderLayer(nn.Module):
     ]:
         residual = x
         x, post, comb = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            x, self.attn_hc.fn, self.attn_hc.scale, self.attn_hc.base
         )
-        x = self.attn_norm(x)
-        x = self.attn(positions, x, None)
+        x = self.input_layernorm(x)
+        x = self.self_attn(positions, x, None)
         x = self.hc_post(x, residual, post, comb)
 
         residual = x
         x, post, comb = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+            x, self.ffn_hc.fn, self.ffn_hc.scale, self.ffn_hc.base
         )
-        x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
+        x = self.post_attention_layernorm(x)
+        x = self.mlp(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
         return x, None, None, None
 
@@ -1146,25 +1117,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-        self.hc_head_fn = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                self.hc_dim,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_head_base = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_head_scale = nn.Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
-        )
+        self.hc_head = DeepseekV4HyperConnectionHead(self.hc_mult, config.hidden_size)
         self.hc_head_op = HCHeadOp()
         spec_config = vllm_config.speculative_config
         if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
@@ -1279,9 +1232,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         hidden_states = self.hc_head_op(
             hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
+            self.hc_head.hc_fn,
+            self.hc_head.hc_scale,
+            self.hc_head.hc_base,
             self.rms_norm_eps,
             self.hc_eps,
         )
@@ -1293,12 +1246,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
-            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
-            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
+            ("compressor.fused_wkv_wgate", "compressor.kv_proj", 0),
+            ("compressor.fused_wkv_wgate", "compressor.gate_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1331,10 +1284,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
 
         for name, loaded_weight in weights:
-            # Shared-expert fusion: redirect ``.ffn.shared_experts.w{1,2,3}``
-            # into appended routed-expert slot ``.ffn.experts.{n_routed}``
-            # so the MXFP4-quantized shared expert loads through the routed
-            # expert loader (grouped GEMM). Single shared expert only.
+            # Shared-expert fusion: redirect the shared expert into the appended
+            # routed-expert slot so it loads through the routed expert loader.
             name = _redirect_shared_expert_name(name, fuse_by_layer, n_routed)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -1425,27 +1376,31 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
 
+# Checkpoint shared-expert names and the routed-expert names they load as
+_SHARED_EXPERT_SLOT_NAMES = (
+    ("gate_proj", "w1"),
+    ("down_proj", "w2"),
+    ("up_proj", "w3"),
+)
+
+
 def _redirect_shared_expert_name(
     name: str, fuse_by_layer: frozenset[int], n_routed_experts: int
 ) -> str:
-    """Route a DSV4 shared-expert checkpoint name to its final parameter name.
-
-    Fused layers go to the appended routed-expert slot. When any layer is fused
-    the weight mapper leaves the checkpoint ``.w2`` names untouched, so
-    non-fused layers still need the native ``down_proj`` parameter name.
-    """
-    if ".ffn.shared_experts.w" not in name:
+    """Route a fused layer's shared-expert name to its appended routed-expert slot."""
+    if ".mlp.shared_experts." not in name:
         return name
-    if extract_layer_index(name) in fuse_by_layer:
-        return name.replace(
-            ".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w"
+    if extract_layer_index(name) not in fuse_by_layer:
+        return name
+    for ckpt_name, expert_name in _SHARED_EXPERT_SLOT_NAMES:
+        name = name.replace(
+            f".mlp.shared_experts.{ckpt_name}.",
+            f".mlp.experts.{n_routed_experts}.{expert_name}.",
         )
-    return name.replace(".ffn.shared_experts.w2", ".ffn.shared_experts.down_proj")
+    return name
 
 
-def _make_deepseek_v4_weights_mapper(
-    expert_dtype: str, fuse_shared_experts: bool = False
-) -> WeightsMapper:
+def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     if expert_dtype == "fp4":
         # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
         # ``w{1,2,3}_weight_scale`` (no _inv suffix). Native DeepSeek FP8
@@ -1458,37 +1413,29 @@ def _make_deepseek_v4_weights_mapper(
         #    everything else -> ``.weight_scale_inv``.
         scale_regex = {
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
+            re.compile(r"(?<!_hc)\.scale$"): ".weight_scale_inv",
         }
     else:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
         scale_regex = {
-            re.compile(r"\.scale$"): ".weight_scale_inv",
+            re.compile(r"(?<!_hc)\.scale$"): ".weight_scale_inv",
         }
-    # When shared experts are fused into the routed MXFP4 grouped GEMM, the
-    # shared_experts tensors are redirected to routed expert slots ; leave
-    # their names untouched here.
-    orig_to_new_substr: dict[str, str | None] = (
-        {}
-        if fuse_shared_experts
-        else {".shared_experts.w2": ".shared_experts.down_proj"}
-    )
-    orig_to_new_substr["mtp."] = None
+    orig_to_new_substr: dict[str, str | None] = {
+        **INDEXER_CHECKPOINT_MAPPING,
+        "mtp.": None,
+    }
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
-            "embed.": "model.embed.",
+            "embed_tokens.": "model.embed_tokens.",
             "norm.": "model.norm.",
-            "hc_head": "model.hc_head",
+            "hc_head.": "model.hc_head.",
             "mtp.": "model.mtp.",
         },
         orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
-            "head.weight": "lm_head.weight",
-            "embed.weight": "embed_tokens.weight",
-            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
             ".input_scale": ".input_scale_2",
         },
         orig_to_new_substr=orig_to_new_substr,
@@ -1503,8 +1450,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
     packed_modules_mapping = {
-        "gate_up_proj": ["w1", "w3"],
-        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_wqa_wkv": ["q_a_proj", "kv_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1516,11 +1463,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        if expert_dtype != "fp4" or self.model.fused_shared_expert_layers:
-            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
-                expert_dtype,
-                fuse_shared_experts=bool(self.model.fused_shared_expert_layers),
-            )
+        if expert_dtype != "fp4":
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

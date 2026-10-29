@@ -46,7 +46,7 @@ def _dense_prefix_ok(layers) -> bool:
 def _separate_shared_ok(layers) -> bool:
     """Every MoE layer keeps its shared expert as a separate MLP (the kernels then
     run it from that MLP's MXFP8 weights, ``weights.mxfp8_a_tiles``)."""
-    moes = [lyr.block_sparse_moe for lyr in layers if lyr.is_moe_layer]
+    moes = [lyr.mlp for lyr in layers if lyr.is_moe_layer]
     return bool(moes) and all(
         not m.is_fused_shared_expert_enabled
         and getattr(m, "shared_experts", None) is not None

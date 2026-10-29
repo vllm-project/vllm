@@ -32,7 +32,7 @@ K26_IGNORE = [
         # ignored layers (must be skipped -> stay unquantized)
         ("vision_tower.encoder.blocks.0.mlp.fc0", True),
         ("vision_tower.encoder.blocks.16.wo", True),
-        ("mm_projector.linear_1", True),
+        ("mm_projector.in_proj", True),
         ("language_model.model.layers.0.self_attn.o_proj", True),
         ("language_model.model.layers.0.mlp.gate_up_proj", True),
         ("language_model.model.layers.0.mlp.down_proj", True),

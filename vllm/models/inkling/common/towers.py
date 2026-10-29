@@ -143,9 +143,17 @@ def fold_timespace_to_depth(
     return x
 
 
+class InklingVisionEncoderLayer(nn.Module):
+    def __init__(self, in_features: int, out_features: int, use_norm: bool):
+        super().__init__()
+        self.projection = nn.Linear(in_features, out_features, bias=False)
+        self.layer_norm = RMSNorm(out_features) if use_norm else None
+
+
 class HMLPPatchEncoder(nn.Module):
     def __init__(self, config: InklingVisionConfig):
         super().__init__()
+        assert config.decoder_dmodel is not None
         self.decoder_dmodel = config.decoder_dmodel
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
@@ -156,7 +164,7 @@ class HMLPPatchEncoder(nn.Module):
         self.scales: list[tuple[int, int, int, int]] = plan_out_scales(
             self.temporal_patch_size, self.patch_size, self.n_layers, self.n_channels
         )
-        self.layers: nn.ModuleDict = nn.ModuleDict()
+        self.encoder_layers = nn.ModuleList()
         for i, (start_scale, end_scale) in enumerate(
             zip(self.scales[:-1], self.scales[1:])
         ):
@@ -165,19 +173,17 @@ class HMLPPatchEncoder(nn.Module):
                 * (end_scale[1] // start_scale[1])
                 * (end_scale[2] // start_scale[2])
             )
-            if i == self.n_layers - 1:
-                self.layers[f"linear_{i}"] = nn.Linear(
-                    start_scale[3] * shuffle_mult, self.decoder_dmodel, bias=False
+            is_last = i == self.n_layers - 1
+            self.encoder_layers.append(
+                InklingVisionEncoderLayer(
+                    start_scale[3] * shuffle_mult,
+                    self.decoder_dmodel if is_last else end_scale[3],
+                    use_norm=not is_last,
                 )
-            else:
-                self.layers[f"linear_{i}"] = nn.Linear(
-                    start_scale[3] * shuffle_mult, end_scale[3], bias=False
-                )
-                self.layers[f"norm_{i}"] = RMSNorm(end_scale[3])
+            )
 
         self.final_norm: RMSNorm | None = None
         if self.use_vision_norm:
-            assert self.decoder_dmodel is not None
             self.final_norm = RMSNorm(self.decoder_dmodel)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -204,9 +210,10 @@ class HMLPPatchEncoder(nn.Module):
                 H // end_scale[1],
                 W // end_scale[2],
             )
-            x = self.layers[f"linear_{i}"](x)
+            layer = cast(InklingVisionEncoderLayer, self.encoder_layers[i])
+            x = layer.projection(x)
             if i < self.n_layers - 1:
-                norm = cast(RMSNorm, self.layers[f"norm_{i}"])
+                norm = cast(RMSNorm, layer.layer_norm)
                 if fused is not None:
                     # If the NEXT layer starts with a copying fold (spatial
                     # dims still > 1 after folding), store this layer's
@@ -247,12 +254,11 @@ class HMLPPatchEncoder(nn.Module):
         return x
 
 
-class InklingVision(nn.Module):
+class InklingVision(HMLPPatchEncoder):
     def __init__(self, config: InklingVisionConfig, prefix: str = ""):
         del prefix
-        super().__init__()
         assert config.vision_encoder_type == "hmlp"
-        self.vision_encoder = HMLPPatchEncoder(config)
+        super().__init__(config)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -262,13 +268,16 @@ class InklingVision(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def forward(self, vision_features: torch.Tensor) -> torch.Tensor:
-        return self.vision_encoder(vision_features)
-
 
 # ===========================================================================
 # Audio tower (InklingAudio)
 # ===========================================================================
+
+
+class InklingAudioEmbeddings(nn.Module):
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__()
+        self.embed_audio_tokens = nn.Embedding(num_embeddings, embedding_dim)
 
 
 class InklingAudio(nn.Module):
@@ -279,21 +288,25 @@ class InklingAudio(nn.Module):
         self.n_mel_bins = config.n_mel_bins
         self.mel_vocab_size = config.mel_vocab_size
         self.use_audio_norm = config.use_audio_norm
-        self.encoder = nn.Embedding(
+        assert config.decoder_dmodel is not None
+        self.embed_audio_tokens = InklingAudioEmbeddings(
             config.n_mel_bins * config.mel_vocab_size, config.decoder_dmodel
         )
-        self.final_norm: RMSNorm | None = None
+        self.norm: RMSNorm | None = None
         if self.use_audio_norm:
-            assert config.decoder_dmodel is not None
-            self.final_norm = RMSNorm(config.decoder_dmodel, eps=1e-6)
+            self.norm = RMSNorm(config.decoder_dmodel, eps=1e-6)
+
+    @property
+    def embedding(self) -> nn.Embedding:
+        return self.embed_audio_tokens.embed_audio_tokens
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.encoder.weight.dtype
+        return self.embedding.weight.dtype
 
     @property
     def device(self) -> torch.device:
-        return self.encoder.weight.device
+        return self.embedding.weight.device
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         assert audio_features.shape[1] == self.n_mel_bins
@@ -301,10 +314,10 @@ class InklingAudio(nn.Module):
         # dMel bins are integer indices; cast once to int32 on the right device
         # (no float round-trip).
         audio_features = audio_features.to(
-            device=self.encoder.weight.device, dtype=torch.int32
+            device=self.embedding.weight.device, dtype=torch.int32
         )
 
-        weight = self.encoder.weight
+        weight = self.embedding.weight
         if audio_features.is_cuda and weight.dtype == torch.bfloat16:
             # One kernel: per-bin offset + embedding gather + fp32 sum + norm.
             # Skips the [T, n_mel_bins, D] intermediate entirely (bit-exact).
@@ -313,8 +326,8 @@ class InklingAudio(nn.Module):
             return dmel_embed_sum_norm(
                 audio_features.contiguous(),
                 weight,
-                self.final_norm.weight if self.final_norm is not None else None,
-                self.final_norm.variance_epsilon if self.final_norm else 0.0,
+                self.norm.weight if self.norm is not None else None,
+                self.norm.variance_epsilon if self.norm else 0.0,
             )
 
         embedding_indices = (
@@ -323,12 +336,12 @@ class InklingAudio(nn.Module):
         ).unsqueeze(0) + audio_features
 
         hidden_states = (
-            self.encoder(embedding_indices.reshape(-1))
+            self.embedding(embedding_indices.reshape(-1))
             .reshape(audio_features.shape[0], audio_features.shape[1], -1)
             .sum(axis=1)
         )
 
-        if self.final_norm is not None:
-            hidden_states = self.final_norm(hidden_states)
+        if self.norm is not None:
+            hidden_states = self.norm(hidden_states)
 
         return hidden_states

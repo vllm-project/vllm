@@ -180,26 +180,22 @@ class LagunaMoE(nn.Module):
         )
 
         # Shared expert (optional) - passed to FusedMoEFactory for overlap optimization
-        self.shared_expert: LagunaMLP | None
+        self.shared_experts: LagunaMLP | None
         if config.shared_expert_intermediate_size > 0:
-            self.shared_expert = LagunaMLP(
+            self.shared_experts = LagunaMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,  # Reduce after shared+routed combine
-                prefix=f"{prefix}.shared_expert",
+                prefix=f"{prefix}.shared_experts",
             )
         else:
-            self.shared_expert = None
+            self.shared_experts = None
 
-        # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The
-        # checkpoint stores one [num_experts] tensor per MoE layer at
-        # `mlp.experts.e_score_correction_bias`; registering it as a Parameter
-        # on the MoERunner lets the weight loader pick it up and the router
-        # add it during top-k selection. The fused top-k bias router requires
-        # float32 regardless of model dtype.
-        e_score_correction_bias = torch.nn.Parameter(
+        # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The fused
+        # top-k bias router requires float32 regardless of model dtype.
+        self.gate.e_score_correction_bias = torch.nn.Parameter(
             torch.zeros(config.num_experts, dtype=torch.float32),
             requires_grad=False,
         )
@@ -212,7 +208,7 @@ class LagunaMoE(nn.Module):
         # routed_scaling_factor, shared+routed combine, and TP all-reduce
         # internally, so forward() just returns the final hidden states.
         self.experts = FusedMoEFactory(
-            shared_experts=self.shared_expert,
+            shared_experts=self.shared_experts,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -223,7 +219,7 @@ class LagunaMoE(nn.Module):
             scoring_func="sigmoid",
             use_grouped_topk=False,
             apply_router_weight_on_input=bool(config.moe_apply_router_weight_on_input),
-            e_score_correction_bias=e_score_correction_bias,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             routed_scaling_factor=self.routed_scaling_factor,

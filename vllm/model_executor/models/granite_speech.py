@@ -572,9 +572,15 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
-    # Checkpoints saved by Transformers v5 nest the text model one level deeper
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"language_model.model.model.": "language_model.model."}
+        orig_to_new_prefix={
+            # Checkpoints saved by Transformers v5 nest the text model one level deeper
+            "model.language_model.model.": "language_model.model.",
+            "model.language_model.": "language_model.model.",
+            "model.encoder.": "encoder.",
+            "model.projector.": "projector.",
+            "lm_head.": "language_model.lm_head.",
+        }
     )
 
     @classmethod

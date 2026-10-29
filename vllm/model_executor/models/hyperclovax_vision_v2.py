@@ -381,8 +381,11 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     # partial matches
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.vision_model.": "visual.",
+            "model.projector.": "mm_projector.",
             "model.": "",  # Remove model. prefix if present
-            "vision_model.": "visual.",  # HF uses vision_model, we use visual
         },
         orig_to_new_substr={
             # Ignore modules not implemented in vLLM

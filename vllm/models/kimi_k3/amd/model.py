@@ -71,8 +71,8 @@ class KimiK3ForConditionalGeneration(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.layers.": "language_model.model.layers.",
-            "mm_projector.proj.0": "mm_projector.linear_1",
-            "mm_projector.proj.2": "mm_projector.linear_2",
+            "mm_projector.proj.0": "mm_projector.in_proj",
+            "mm_projector.proj.2": "mm_projector.out_proj",
         }
     )
 

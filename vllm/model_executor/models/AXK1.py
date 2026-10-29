@@ -83,6 +83,7 @@ from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
@@ -1066,6 +1067,9 @@ class AXK1MixtureOfExperts(MixtureOfExperts):
 class AXK1ForCausalLM(
     nn.Module, SupportsPP, AXK1MixtureOfExperts, SupportsLoRA, SupportsEagle
 ):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".mlp.post_mlp_layernorm.": ".post_mlp_layernorm."}
+    )
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
@@ -1172,4 +1176,4 @@ class AXK1ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

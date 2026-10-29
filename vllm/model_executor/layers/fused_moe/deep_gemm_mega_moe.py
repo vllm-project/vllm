@@ -533,7 +533,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         """Load one shared-expert checkpoint tensor; return the parameter name."""
         if ".w2." in name or ".down_proj." in name:
             param_name = "shared_l2_weight"
-        elif ".w1." in name or ".w3." in name:
+        elif any(f".{w}." in name for w in ("w1", "w3", "gate_proj", "up_proj")):
             param_name = "shared_l1_weight"
         else:
             raise ValueError(f"Unexpected shared-expert tensor: {name}")
@@ -546,9 +546,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
     def shared_weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
     ) -> None:
-        shard_id = (
-            "w1" if ".w1." in weight_name else "w3" if ".w3." in weight_name else "w2"
-        )
+        if ".w1." in weight_name or ".gate_proj." in weight_name:
+            shard_id = "w1"
+        elif ".w3." in weight_name or ".up_proj." in weight_name:
+            shard_id = "w3"
+        else:
+            shard_id = "w2"
         is_scale = "weight_scale" in weight_name
         self._load_weight(param.data, loaded_weight, shard_id, is_scale)
 

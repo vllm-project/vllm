@@ -30,7 +30,7 @@ def test_rocm_model_exposes_the_upstream_lora_contract() -> None:
 
     assert supports_lora(model_cls)
     assert model_cls.packed_modules_mapping == {
-        "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
+        "qkvr": ["q_proj", "k_proj", "v_proj", "r_proj"],
         "w13": ["w1", "w3"],
     }
     assert model_cls.embedding_modules == {"lm_head": "output_embeddings"}
@@ -51,7 +51,7 @@ def test_lightseek_bundled_adapter_weights_remain_opt_in() -> None:
         )
     )
 
-    assert name == "model.layers.3.attn.qkvr.lora_A.weight"
+    assert name == "model.layers.3.self_attn.qkvr.lora_A.weight"
     assert mapped_weight.shard_id == 0
     assert amd_model._is_peft_adapter_weight(name)
 

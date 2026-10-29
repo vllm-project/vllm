@@ -289,6 +289,8 @@ class MiMoV2MTP(nn.Module):
                 and not name.startswith("lm_head")
             ):
                 continue
+            # Transformers does not rename MiMo-V2 (as opposed to Flash) checkpoints
+            name = name.replace(".attention_sink_bias", ".sinks")
 
             # Fused qkv_proj: the fp8 weight and its block scales arrive as
             # separate tensors and are pre-sharded at `config.num_key_value_heads`

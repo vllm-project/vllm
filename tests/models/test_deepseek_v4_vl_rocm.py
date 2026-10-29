@@ -60,7 +60,7 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
                 parallel_config=ParallelConfig(),
                 kernel_config=default_vllm_config.kernel_config,
             ),
-            prefix="model.layers.0.ffn",
+            prefix="model.layers.0.mlp",
         )
         for parameter in moe.parameters():
             if parameter.is_floating_point():
@@ -180,16 +180,16 @@ def test_vl_mapper_preserves_rocm_weight_mapping() -> None:
         _make_deepseek_v4_vl_weights_mapper,
     )
 
-    text_mapper = _make_deepseek_v4_weights_mapper("fp4", fuse_shared_experts=True)
+    text_mapper = _make_deepseek_v4_weights_mapper("fp4")
     mapper = _make_deepseek_v4_vl_weights_mapper(text_mapper, image_enabled=True)
 
-    assert mapper._map_name("layers.3.attn.wq_a.input_scale") == (
-        "language_model.model.layers.3.attn.wq_a.input_scale_2"
+    assert mapper._map_name("layers.3.self_attn.q_a_proj.input_scale") == (
+        "language_model.model.layers.3.self_attn.q_a_proj.input_scale_2"
     )
-    assert mapper._map_name("layers.3.ffn.shared_experts.w2.weight") == (
-        "language_model.model.layers.3.ffn.shared_experts.w2.weight"
+    assert mapper._map_name("layers.3.mlp.shared_experts.down_proj.weight") == (
+        "language_model.model.layers.3.mlp.shared_experts.down_proj.weight"
     )
-    assert mapper._map_name("head.weight") == "language_model.lm_head.weight"
+    assert mapper._map_name("lm_head.weight") == "language_model.lm_head.weight"
 
 
 def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
@@ -234,8 +234,8 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         kernel_config=KernelConfig(),
     )
 
-    hash_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.0.ffn")
-    regular_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.1.ffn")
+    hash_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.0.mlp")
+    regular_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.1.mlp")
 
     assert hash_moe.gate.tid2eid is not None
     assert regular_moe.gate.tid2eid is None

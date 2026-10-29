@@ -100,7 +100,7 @@ class MonoLayerWeights:
     def from_layer(cls, layer, *, require_cuda: bool = True) -> MonoLayerWeights:
         layer_id = layer.layer_id
         attn = layer.self_attn
-        moe = layer.block_sparse_moe
+        moe = layer.mlp
         runner = moe.experts
         experts = getattr(runner, "routed_experts", runner)
 

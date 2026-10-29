@@ -5,6 +5,7 @@ from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import (
@@ -68,6 +69,17 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
+
+# CLIP and SigLIP towers nest their modules in `vision_model`, Pixtral does not
+LLAVA_VISION_TOWER_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(
+            r"^model\.vision_tower\."
+            r"(?=(embeddings|encoder|pre_layrnorm|post_layernorm|head)\.)"
+        ): "vision_tower.vision_model.",
+    },
+    orig_to_new_prefix={"model.vision_tower.": "vision_tower."},
+)
 
 
 class LlavaImagePixelInputs(TensorSchema):
@@ -502,11 +514,9 @@ class LlavaForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = LLAVA_VISION_TOWER_MAPPER | WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
-            "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
         }

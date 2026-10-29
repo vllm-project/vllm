@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import regex as re
 import torch
 import torch.nn as nn
 from transformers import AriaConfig, AriaTextConfig, BatchFeature
@@ -269,13 +268,8 @@ class AriaTextModel(LlamaModel, SupportsQuant):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    # The fused expert loader expects names without the .weight suffix.
+    # Quantization configs use the original expert module names
     hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_regex={
-            re.compile(r"experts\.fc1\.weight$"): "experts.gate_up_proj",
-            re.compile(r"experts\.fc2\.weight$"): "experts.down_proj",
-        },
-        # Quantization configs also use the expert module names.
         orig_to_new_substr={
             "experts.fc1": "experts.gate_up_proj",
             "experts.fc2": "experts.down_proj",
@@ -381,13 +375,9 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
-            "model.language_model.": "language_model.model.",
+            "model.language_model.": "language_model.",
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
-            # mapping for original checkpoint
-            "language_model.model": "language_model",
-            "language_model.lm_head": "lm_head",
         },
         orig_to_new_suffix={
             "router.weight": "router_weight",

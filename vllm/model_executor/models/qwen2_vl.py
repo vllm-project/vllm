@@ -1291,15 +1291,11 @@ class Qwen2VLForConditionalGeneration(
     SupportsMRoPE,
     SupportsEncoderCudaGraph,
 ):
-    # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
             "model.visual.": "visual.",
-            # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
-            "model.": "language_model.model.",
         }
     )
 

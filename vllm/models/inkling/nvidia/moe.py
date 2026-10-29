@@ -223,12 +223,12 @@ class InklingGate(nn.Module):
         else:
             self.global_scale = None
         if use_gate_bias:
-            self.bias = Parameter(
+            self.e_score_correction_bias = Parameter(
                 torch.empty(n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
             )
         else:
-            self.bias = None
+            self.e_score_correction_bias = None
 
     @staticmethod
     def _load_weight(param: Parameter, loaded_weight: torch.Tensor) -> None:
@@ -250,7 +250,7 @@ class InklingGate(nn.Module):
             self.n_routed_experts,
             self.topk,
             self.n_shared_experts,
-            self.bias,
+            self.e_score_correction_bias,
             self.route_scale,
             self.global_scale,
         )
@@ -314,14 +314,14 @@ class InklingSinkExperts(nn.Module):
             self.w13_weight.data.copy_(weight)
             return [key]
 
-        assert key == "w2_weight"
+        assert key == "down_proj"
         shard = self.w2_weight.shape[1] // self.n_experts
         shard_start = 0 if weight.shape[2] == shard else self.tp_rank * shard
         for expert_idx, expert_weight in enumerate(weight):
             local_weight = expert_weight.narrow(1, shard_start, shard)
             start = expert_idx * shard
             self.w2_weight.data[:, start : start + shard].copy_(local_weight)
-        return [key]
+        return ["w2_weight"]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
         """``sum_e gammas[:, e] * MLP_e(x)`` (TP-partial along d_mlp)."""
@@ -463,7 +463,7 @@ class InklingMoE(nn.Module):
             if get_current_vllm_config().lora_config is not None
             else InklingSinkExperts
         )
-        self.sink_experts = sink_experts_cls(
+        self.shared_experts = sink_experts_cls(
             n_experts=n_shared,
             d_model=config.hidden_size,
             d_mlp=config.intermediate_size,
@@ -518,7 +518,7 @@ class InklingMoE(nn.Module):
 
         out, sink_out = maybe_execute_in_parallel(
             lambda: self.experts(hidden_states=x, router_logits=router_logits),
-            lambda: self.sink_experts(x, gammas),
+            lambda: self.shared_experts(x, gammas),
             self._sink_events[0],
             self._sink_events[1],
             self._sink_stream
@@ -547,13 +547,14 @@ class InklingMoE(nn.Module):
         """Load one checkpoint expert tensor.
 
         ``name`` is relative to the mlp module: ``experts.<t>`` (routed
-        stack) or ``shared_experts.shared_<t>`` (sink experts). Returns the
+        stack) or ``shared_experts.<t>`` (sink experts). Returns the
         loaded param names (relative to this module).
         """
         if name.startswith("shared_experts."):
             key = name.split(".", 1)[1].replace("shared_", "", 1)
             return [
-                f"sink_experts.{p}" for p in self.sink_experts.load_weight(key, weight)
+                f"shared_experts.{p}"
+                for p in self.shared_experts.load_weight(key, weight)
             ]
 
         experts: RoutedExperts = self.experts.routed_experts

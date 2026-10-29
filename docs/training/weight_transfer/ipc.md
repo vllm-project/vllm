@@ -124,7 +124,7 @@ the first `/update_weights` returns 500. Reference:
 
 | Field | Meaning |
 | ----- | ------- |
-| `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes |
+| `names`, `dtype_names`, `shapes` | [Parameter names](README.md#parameter-names), `torch` dtype attribute names (`"bfloat16"`), full shapes |
 | `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer |
 | `tensor_sizes` | Packed only: byte size of each tensor in the chunk, in `names` order |
 

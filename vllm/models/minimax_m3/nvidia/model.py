@@ -1150,8 +1150,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 cache_config=cache_config,
             )
 
-        # Dense layers store the FFN under `mlp`; MoE layers under
-        # `block_sparse_moe` -- matching the checkpoint's naming.
         # Leave the FFN output un-reduced so its all-reduce fuses into the
         # next RMSNorm. MTP blocks add the residual directly and PP sends
         # hidden states across stages, so both must reduce.
@@ -1159,18 +1157,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
             is_mtp_block or vllm_config.parallel_config.pipeline_parallel_size > 1
         )
         self.is_moe_layer = force_moe or _is_moe_layer(config, layer_id)
+        self.mlp: MiniMaxM3MoE | MiniMaxM3MLP
         if self.is_moe_layer:
             use_mega_moe = _use_mega_moe(vllm_config)
             if use_mega_moe and is_mtp_block:
                 raise NotImplementedError(
                     "MiniMax M3 MegaMoE does not support MTP draft layers."
                 )
-            self.block_sparse_moe = MiniMaxM3MoE(
+            self.mlp = MiniMaxM3MoE(
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
                 reduce_results=reduce_results,
-                prefix=f"{prefix}.block_sparse_moe",
+                prefix=f"{prefix}.mlp",
                 use_mega_moe=use_mega_moe,
             )
         else:
@@ -1242,21 +1241,20 @@ class MiniMaxM3DecoderLayer(nn.Module):
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
-        if self.is_moe_layer and self.block_sparse_moe.defers_finalize(
+        if isinstance(self.mlp, MiniMaxM3MoE) and self.mlp.defers_finalize(
             hidden_states.shape[0]
         ):
             # The next layer's input norm finalizes it with the all-reduce.
-            return self.block_sparse_moe.forward_unfinalized(hidden_states), residual
-        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
-        hidden_states = ffn(hidden_states)
+            return self.mlp.forward_unfinalized(hidden_states), residual
+        hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
     @property
     def ffn_all_reduce_deferred(self) -> bool:
         """This layer's FFN output is left un-reduced; the caller fuses the
         all-reduce into the next RMSNorm."""
-        if self.is_moe_layer:
-            return self.block_sparse_moe.ffn_all_reduce_deferred
+        if isinstance(self.mlp, MiniMaxM3MoE):
+            return self.mlp.ffn_all_reduce_deferred
         return not self.mlp.down_proj.reduce_results
 
 
@@ -1356,12 +1354,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
-            layer.block_sparse_moe
+            layer.mlp
             for layer, successor in zip(layers, layers[1:])
             if layer.is_moe_layer
             and successor.fuse_input_allreduce
             and get_input_quant_key(successor.self_attn.qkv_proj) == kMxfp8Dynamic
-            and layer.block_sparse_moe.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
+            and layer.mlp.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
         ]
         if not deferring:
             return
@@ -1497,7 +1495,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if "weight_scale_inv" in name:
                 name = name.replace("weight_scale_inv", "weight_scale")
 
-            if self.use_mega_moe and ".block_sparse_moe.experts." in name:
+            if self.use_mega_moe and ".mlp.experts." in name:
                 converted = _mega_moe_expert_weight(name, loaded_weight)
                 if converted is None:
                     continue
@@ -1505,7 +1503,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if self.use_mega_moe and ".shared_experts." in name:
                 if is_pp_missing_parameter(name, self):
                     continue
-                moe = self.layers[extract_layer_index(name)].block_sparse_moe
+                moe = self.layers[extract_layer_index(name)].mlp
                 if moe.experts.has_fused_shared_experts:
                     name = name.replace(".gate_proj.", ".w1.")
                     name = name.replace(".up_proj.", ".w3.")
@@ -1519,7 +1517,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     continue
                 # Routed experts (w1/w2/w3) are handled below; don't let the
                 # stacked mapping rewrite them.
-                if ("block_sparse_moe.experts." in name) and name not in params_dict:
+                if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
                 if name.endswith(".bias") and name not in params_dict:
@@ -1586,6 +1584,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".mlp.gate.e_score_correction_bias": ".mlp.e_score_correction_bias",
+            ".self_attn.indexer.": ".self_attn.index_",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
@@ -1633,7 +1638,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1667,8 +1672,17 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
-            "patch_merge_mlp.": "vision_tower.patch_merge_mlp.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.vision_tower.embeddings.proj.": (
+                "vision_tower.vision_model.embeddings.patch_embedding."
+            ),
+            "model.vision_tower.layers.": "vision_tower.vision_model.encoder.layers.",
+            "model.vision_tower.": "vision_tower.vision_model.",
+            "model.multi_modal_projector.merge_linear_": (
+                "vision_tower.patch_merge_mlp.linear_"
+            ),
+            "model.multi_modal_projector.": "vision_tower.multi_modal_projector.",
         },
         orig_to_new_substr={
             ".mlp.fc1.": ".fc1.",

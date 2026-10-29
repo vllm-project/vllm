@@ -255,10 +255,9 @@ class HrmTextDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         # Attribute name `self_attn` matches HF's model class. The on-disk
-        # `attn.{gqkv_proj,o_proj}.weight` keys are renamed to
-        # `self_attn.{gqkv_proj,o_proj}.weight` by the `WeightsMapper` in
-        # `HrmTextForCausalLM` so vLLM's standard `AutoWeightsLoader`
-        # handles the rest.
+        # `attn.gqkv_proj.weight` key is renamed to `self_attn.gqkv_proj.weight`
+        # by the `WeightsMapper` in `HrmTextForCausalLM` so vLLM's standard
+        # `AutoWeightsLoader` handles the rest.
         self.self_attn = HrmTextAttention(
             config=config,
             layer_idx_in_stack=layer_idx_in_stack,
@@ -460,14 +459,14 @@ class HrmTextForCausalLM(nn.Module):
     Reference: src/transformers/models/hrm_text/modeling_hrm_text.py
     """
 
-    # On-disk weight key remap: HF stores attention weights as
-    # `attn.{gqkv_proj,o_proj}.weight`; our model uses `self_attn.*`
+    # On-disk weight key remap: HF stores the fused attention weight as
+    # `attn.gqkv_proj.weight`; our model uses `self_attn.*`
     # (matching HF's runtime model class). Both `gqkv_proj` (4-way fused
     # gate/q/k/v) and `mlp.gate_up_proj` (2-way fused gate/up) are loaded
     # directly via MergedColumnParallelLinear's fused-on-disk path; no
     # packed_modules_mapping entries are needed.
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".attn.": ".self_attn."},
+        orig_to_new_substr={".attn.gqkv_proj.": ".self_attn.gqkv_proj."},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

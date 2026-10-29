@@ -154,7 +154,7 @@ def _deployment_error(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | Non
         return "needs tensor parallelism only: no expert or data parallelism"
     if envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
         return "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"
-    experts = getattr(getattr(layer.ffn, "experts", None), "routed_experts", None)
+    experts = getattr(getattr(layer.mlp, "experts", None), "routed_experts", None)
     if experts is not None:  # else not a routed MoE: the layer checks decline it
         backend = getattr(experts.quant_method, "mxfp4_backend", None)
         if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
@@ -177,7 +177,7 @@ def _deployment_error(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | Non
 def _select(layer: "DeepseekV4DecoderLayer", positions, normed, qr) -> None:
     """The layer's compressor -- and a CSA layer's indexer, its top-k into the
     shared top-k buffer -- from K1's normed input and bf16 qr, serial."""
-    attn = layer.attn
+    attn = layer.self_attn
     comp = attn.compressor
     assert comp is not None
     score = torch.mm(normed, comp.fused_wkv_wgate.weight.T, out_dtype=torch.float32)
@@ -217,7 +217,7 @@ class MonoDecodeLayer:
         why = _deployment_error(layer, vllm_config)
         if why is not None:
             raise ValueError(f"--monokernel {why}.")
-        ffn, attn = layer.ffn, layer.attn
+        ffn, attn = layer.mlp, layer.self_attn
         config = vllm_config.model_config.hf_config
         if extract_layer_index(attn.prefix) >= config.num_hidden_layers:
             why = "draft layer"
@@ -260,7 +260,7 @@ class MonoDecodeLayer:
             MonoLayerWeights,
         )
 
-        a, f = layer.attn, layer.ffn
+        a, f = layer.self_attn, layer.mlp
         e, sh = f.experts.routed_experts, f.shared_experts
         # the kernels read vLLM's preshuffled wqkv / wo_b / shared gate_up
         assert a._wqa_wkv_scale is not None and a._wo_b_scale is not None
@@ -270,29 +270,29 @@ class MonoDecodeLayer:
             layer_id=extract_layer_index(a.prefix),
             wqkv=a.fused_wqa_wkv.weight,
             wqkv_scale=_mx_scales(a._wqa_wkv_scale),
-            q_norm=a.q_norm.weight,
+            q_norm=a.q_a_norm.weight,
             kv_norm=a.kv_norm.weight,
-            wq_b=a.wq_b.weight,
-            wq_b_scale=_block_scale(a.wq_b),
-            wo_a=a.wo_a.weight,
-            wo_a_scale=_block_scale(a.wo_a),
-            wo_b=a.wo_b.weight,
+            wq_b=a.q_b_proj.weight,
+            wq_b_scale=_block_scale(a.q_b_proj),
+            wo_a=a.o_a_proj.weight,
+            wo_a_scale=_block_scale(a.o_a_proj),
+            wo_b=a.o_b_proj.weight,
             wo_b_scale=_mx_scales(a._wo_b_scale),
-            attn_sink=a.attn_sink,
+            attn_sink=a.sinks,
             cos_sin=a.rotary_emb.cos_sin_cache,
             ratio=a.compress_ratio,
         )
         attn.check(d)
         self._weights = MonoLayerWeights(
             attn=attn,
-            hc_attn_fn=layer.hc_attn_fn,
-            hc_attn_scale=layer.hc_attn_scale,
-            hc_attn_base=layer.hc_attn_base,
-            attn_norm=layer.attn_norm.weight,
-            hc_ffn_fn=layer.hc_ffn_fn,
-            hc_ffn_scale=layer.hc_ffn_scale,
-            hc_ffn_base=layer.hc_ffn_base,
-            ffn_norm=layer.ffn_norm.weight,
+            hc_attn_fn=layer.attn_hc.fn,
+            hc_attn_scale=layer.attn_hc.scale,
+            hc_attn_base=layer.attn_hc.base,
+            attn_norm=layer.input_layernorm.weight,
+            hc_ffn_fn=layer.ffn_hc.fn,
+            hc_ffn_scale=layer.ffn_hc.scale,
+            hc_ffn_base=layer.ffn_hc.base,
+            ffn_norm=layer.post_attention_layernorm.weight,
             gate_w=f.gate.weight,
             bias=f.gate.e_score_correction_bias,
             w13=e.w13_weight,
@@ -322,7 +322,7 @@ class MonoDecodeLayer:
             return "no forward context", None, None
         fc = get_forward_context()
         md = fc.attn_metadata
-        attn = layer.attn
+        attn = layer.self_attn
         swa: Any = None
         comp: Any = None
         if isinstance(md, dict):
@@ -367,14 +367,14 @@ class MonoDecodeLayer:
     ) -> tuple[torch.Tensor, ...] | None:
         """The layer's outputs (x, residual, post_mix, res_mix) by the mono
         kernels, or None when this step takes the original path."""
-        attn, M = layer.attn, x.shape[0]
+        attn, M = layer.self_attn, x.shape[0]
         first = residual is None
         why, swa, comp = self._decode_step(layer, M)
         tensors = (x,) if first else (x, residual, post_mix, res_mix)
         contiguous = all(t is not None and t.is_contiguous() for t in tensors)
         if why is None and not contiguous:
             why = "non-contiguous layer inputs"
-        hash_route = layer.ffn.gate.tid2eid is not None
+        hash_route = layer.mlp.gate.tid2eid is not None
         if why is None and hash_route and input_ids is None:
             why = "a hash layer without its input ids"
         if why is not None:
@@ -392,7 +392,7 @@ class MonoDecodeLayer:
         route = None
         if hash_route:
             assert input_ids is not None
-            route = layer.ffn.gate.tid2eid[input_ids[:M]].contiguous()
+            route = layer.mlp.gate.tid2eid[input_ids[:M]].contiguous()
         if attn.compress_ratio == HCA:
             topk = comp.c128a_global_decode_topk_indices[:M, 0]
             kw: dict[str, Any] = dict(topk=self.hca_width, global_keys=True)

@@ -160,24 +160,23 @@ class HYV3MoEFused(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.shared_mlp: HYV3FeedForward | None
+        self.shared_experts: HYV3FeedForward | None
         if config.num_shared_experts > 0:
-            self.shared_mlp = HYV3FeedForward(
+            self.shared_experts = HYV3FeedForward(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.expert_hidden_dim * config.num_shared_experts,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}.shared_mlp",
+                prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
             )
         else:
-            self.shared_mlp = None
+            self.shared_experts = None
 
-        self.expert_bias = nn.Parameter(
+        self.e_score_correction_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
         )
         scoring_func = "sigmoid"
-        e_score_correction_bias = self.expert_bias
 
         self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
@@ -194,9 +193,9 @@ class HYV3MoEFused(nn.Module):
             num_expert_group=1,
             topk_group=1,
             routed_scaling_factor=router_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
+            e_score_correction_bias=self.e_score_correction_bias,
             n_shared_experts=config.num_shared_experts,
-            shared_experts=self.shared_mlp,
+            shared_experts=self.shared_experts,
         )
 
     def forward(
@@ -638,9 +637,6 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
-                if "router.gate." in name:
-                    name = name.replace("router.", "")
-
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

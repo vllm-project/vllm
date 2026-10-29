@@ -13,6 +13,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    get_checkpoint_renaming_mapper,
 )
 from vllm.platforms import current_platform
 
@@ -239,3 +240,60 @@ def test_weights_mapper_stacks_one_weight_into_several_shards():
     # Each shard needs its own tensor object, but they alias one allocation.
     assert mapped[0][1] is not mapped[1][1]
     assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr() == weight.data_ptr()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("custom_code", [False, True])
+def test_checkpoint_renaming_mapper(custom_code: bool):
+    """Checkpoint names are renamed as Transformers would, including when the config
+    is custom code, because vLLM still runs its own implementation."""
+    from transformers import MixtralConfig
+
+    config = MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        num_hidden_layers=1,
+        hidden_size=16,
+        intermediate_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_local_experts=2,
+        vocab_size=32,
+    )
+    if custom_code:
+        # Configs loaded with trust_remote_code come from `transformers_modules`
+        config.__class__ = type(
+            "MixtralConfig", (MixtralConfig,), {"__module__": "transformers_modules.x"}
+        )
+    mapper = get_checkpoint_renaming_mapper(config)
+
+    moe = "model.layers.0.block_sparse_moe.gate.weight"
+    renamed = "model.layers.0.mlp.gate.weight"
+    assert mapper.map_name(moe) == renamed
+    assert mapper.map_name(renamed) == renamed
+    norm = "model.norm.LayerNorm.gamma"
+    assert mapper.map_name(norm) == "model.norm.LayerNorm.weight"
+
+
+@pytest.mark.cpu_test
+def test_weights_mapper_map_regex():
+    """Regex quantization targets are written against checkpoint names, so they
+    need the same renamings as the checkpoint, without over-applying them."""
+    from transformers.core_model_loading import WeightRenaming
+
+    mapper = WeightsMapper(
+        orig_to_new_renaming=[
+            WeightRenaming(r"mlp\.shared_expert\.", "mlp.shared_experts."),
+            WeightRenaming(r"\.ffn\.", ".mlp."),
+            WeightRenaming(r"shared_experts\.w1\.", "shared_experts.gate_proj."),
+            WeightRenaming(r"mlp\.experts\.bias", "mlp.gate.bias"),
+        ]
+    )
+    shared = r"re:.*shared_expert\.(gate_proj|up_proj)$"
+    assert mapper.apply_list([shared]) == [r"re:.*shared_experts\.(gate_proj|up_proj)$"]
+    assert mapper.map_regex(r"mtp\.0\.ffn\.experts\.\d+\.w1") == (
+        r"mtp\.0\.mlp\.experts\.\d+\.w1"
+    )
+    assert mapper.map_regex(r".*ffn\.shared_experts\.w1") == (
+        r".*mlp\.shared_experts\.gate_proj"
+    )
+    assert mapper.map_regex(r".*mlp\.experts\..*") == r".*mlp\.experts\..*"

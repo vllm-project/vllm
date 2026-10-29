@@ -28,6 +28,7 @@ from .internvl import (
     BaseInternVLProcessingInfo,
     InternVLChatModel,
 )
+from .utils import WeightsMapper
 
 
 def _add_intern_vit_fields(config: QianfanOCRConfig) -> QianfanOCRConfig:
@@ -90,6 +91,28 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
     solely to register the ``QianfanOCRForConditionalGeneration`` architecture
     name that appears in the model's config.json.
     """
+
+    hf_to_vllm_mapper = InternVLChatModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_substr={
+            ".attention.projection_layer.": ".attn.proj.",
+            ".lambda_1": ".ls1",
+            ".lambda_2": ".ls2",
+            ".layernorm_before.": ".norm1.",
+            ".layernorm_after.": ".norm2.",
+            ".embeddings.cls_token": ".embeddings.class_embedding",
+            ".embeddings.position_embeddings": ".embeddings.position_embedding",
+            ".embeddings.patch_embeddings.projection.": ".embeddings.patch_embedding.",
+        },
+        orig_to_new_prefix={
+            "model.vision_tower.layers.": "vision_model.encoder.layers.",
+            "model.vision_tower.": "vision_model.",
+            "model.multi_modal_projector.layer_norm.": "mlp1.0.",
+            "model.multi_modal_projector.linear_1.": "mlp1.1.",
+            "model.multi_modal_projector.linear_2.": "mlp1.3.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         _add_intern_vit_fields(vllm_config.model_config.hf_config)

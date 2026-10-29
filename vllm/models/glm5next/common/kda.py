@@ -41,6 +41,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
@@ -161,6 +162,43 @@ def _resolve_kda_prefill_backend(
             "and a bounded KDA gate."
         )
     return "flashkda" if supported and backend != "triton" else "triton"
+
+
+class Glm5NextForgetGate(nn.Module):
+    """KDA forget gate. Its ``f_a_proj`` is fused into ``in_proj_qkvbfg_a``."""
+
+    def __init__(
+        self,
+        head_dim: int,
+        num_heads: int,
+        tp_size: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        projection_size = head_dim * num_heads
+        self.f_b_proj = ColumnParallelLinear(
+            head_dim,
+            projection_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.f_b_proj",
+        )
+        self.dt_bias = nn.Parameter(
+            torch.empty(divide(projection_size, tp_size), dtype=torch.float32)
+        )
+        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        self.A_log = nn.Parameter(
+            torch.empty(1, 1, divide(num_heads, tp_size), 1, dtype=torch.float32)
+        )
+
+        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
+        def _a_log_weight_loader(param, loaded_weight):
+            if loaded_weight.dim() == 1:
+                loaded_weight = loaded_weight.view([1, 1, -1, 1])
+            return sharded_weight_loader(2)(param, loaded_weight)
+
+        set_weight_attrs(self.A_log, {"weight_loader": _a_log_weight_loader})
 
 
 def _fused_qkv_conv1d(
@@ -286,18 +324,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
-        self.f_b_proj = ColumnParallelLinear(
+        self.forget_gate = Glm5NextForgetGate(
             self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.f_b_proj",
+            self.num_heads,
+            self.tp_size,
+            self.quant_config,
+            prefix=f"{prefix}.forget_gate",
         )
-        self.dt_bias = nn.Parameter(
-            torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32)
-        )
-
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         self.conv1d = _fused_qkv_conv1d(
             self.conv_size,
@@ -306,11 +339,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.tp_rank,
             prefix=f"{prefix}.conv1d",
         )
-
-        self.A_log = nn.Parameter(
-            torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
-        )
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -332,14 +360,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
-        def _a_log_weight_loader(param, loaded_weight):
-            if loaded_weight.dim() == 1:
-                loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
-
-        self.A_log.weight_loader = _a_log_weight_loader
 
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
@@ -434,8 +454,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim**-0.5,
             out,
             workspace,
-            self.A_log.view(-1),
-            self.dt_bias.view(-1, self.head_dim),
+            self.forget_gate.A_log.view(-1),
+            self.forget_gate.dt_bias.view(-1, self.head_dim),
             self.kda_lower_bound,
             initial_state.contiguous(),
             final_state,
@@ -483,7 +503,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
+        g1 = self.forget_gate.f_b_proj(f_a)[0]
         g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
         g_proj_states = self.g_b_proj(g_a)[0]
@@ -683,8 +703,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 num_accepted_tokens=num_accepted_tokens,
                 out=spec_out,
                 sigmoid_beta=True,
-                a_log=self.A_log,
-                g_bias=self.dt_bias,
+                a_log=self.forget_gate.A_log,
+                g_bias=self.forget_gate.dt_bias,
                 compute_gate=True,
                 lower_bound=lower_bound,
             )
@@ -733,8 +753,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     # Chunk path wants the pre-sigmoided fp32 beta (its
                     # kernels don't sigmoid); beta_ns is raw bf16 from forward.
                     beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
-                    A_log=self.A_log,
-                    g_bias=self.dt_bias,
+                    A_log=self.forget_gate.A_log,
+                    g_bias=self.forget_gate.dt_bias,
                     initial_state=initial_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
@@ -771,8 +791,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 ssm_state_indices=non_spec_state_indices_tensor,
                 out=ns_out,
                 sigmoid_beta=True,
-                a_log=self.A_log,
-                g_bias=self.dt_bias,
+                a_log=self.forget_gate.A_log,
+                g_bias=self.forget_gate.dt_bias,
                 compute_gate=True,
                 lower_bound=lower_bound,
             )

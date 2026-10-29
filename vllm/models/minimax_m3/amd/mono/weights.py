@@ -301,7 +301,7 @@ def build_sparse_layer(
         attn.o_proj, HIDDEN, O_K, f"layer {layer_id} o_proj"
     )
 
-    moe = layer.block_sparse_moe
+    moe = layer.mlp
     # FusedMoEFactory returns a MoERunner wrapping the RoutedExperts module
     experts = getattr(moe.experts, "routed_experts", moe.experts)
     fused = moe.is_fused_shared_expert_enabled

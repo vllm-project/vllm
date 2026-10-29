@@ -37,7 +37,10 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
+from vllm.model_executor.models.llava import (
+    LLAVA_VISION_TOWER_MAPPER,
+    LlavaDummyInputsBuilder,
+)
 from vllm.model_executor.models.llava_next import (
     BaseLlavaNextMultiModalProcessor,
     LlavaNextImageEmbeddingInputs,
@@ -448,13 +451,12 @@ class Granite4VisionForConditionalGeneration(
     # HF: model.language_model.layers.0...
     # vLLM: language_model.model.layers.0...
     # (because GraniteForCausalLM.model = GraniteModel)
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = LLAVA_VISION_TOWER_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             "model.language_model.": "language_model.model.",
             "model.layerwise_projectors.": "layerwise_projectors.",
             "model.spatial_projectors.": "spatial_projectors.",
             "model.image_newline": "image_newline",
-            "model.vision_tower.": "vision_tower.",
             "lm_head.": "language_model.lm_head.",
         }
     )

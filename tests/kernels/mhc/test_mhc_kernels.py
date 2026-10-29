@@ -35,6 +35,9 @@ from vllm.model_executor.layers.mhc import (
     MHCPreDelayedOp,
     MHCPreOp,
 )
+from vllm.models.deepseek_v4.common.hyper_connection import (
+    DeepseekV4HyperConnection,
+)
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
@@ -1725,11 +1728,8 @@ def _make_mhc_decoder_layer(hc_mult: int, hidden_size: int) -> DeepseekV4Decoder
     nn.Module.__init__(layer)
     layer.hc_mult = hc_mult
     layer.hidden_size = hidden_size
-    mix_hc = (2 + hc_mult) * hc_mult
-    layer.hc_attn_fn = nn.Parameter(
-        torch.randn(mix_hc, hc_mult * hidden_size, dtype=torch.float32),
-        requires_grad=False,
-    )
+    layer.attn_hc = DeepseekV4HyperConnection(hc_mult, hidden_size)
+    layer.attn_hc.fn.normal_()
     layer.hc_attn_fn_broadcast = None
     return layer
 
@@ -1752,16 +1752,18 @@ def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
     layer = _make_mhc_decoder_layer(hc_mult=hc_mult, hidden_size=hidden_size)
     _, _, mixes, norm_weight = _mhc_fused_post_pre_inputs(num_tokens, hidden_size)
     _, _, fn, hc_scale, hc_base, *_ = mixes
-    layer.hc_attn_fn.data.copy_(fn)
-    layer.hc_attn_scale, layer.hc_attn_base = hc_scale, hc_base
-    layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base = fn, hc_scale, hc_base
+    layer.ffn_hc = DeepseekV4HyperConnection(hc_mult, hidden_size)
+    for hc in (layer.attn_hc, layer.ffn_hc):
+        hc.fn.data.copy_(fn)
+        hc.scale.data.copy_(hc_scale)
+        hc.base.data.copy_(hc_base)
     norm = SimpleNamespace(weight=norm_weight, variance_epsilon=1e-6)
-    layer.attn_norm = layer.ffn_norm = norm
+    layer.input_layernorm = layer.post_attention_layernorm = norm
     layer.rms_norm_eps, layer.hc_eps, layer.hc_post_alpha = 1e-6, 1e-6, 1.0
     layer.hc_sinkhorn_iters = 20
     layer.use_sequence_parallel = False
-    layer.attn = lambda positions, x, _: x * 0.5
-    layer.ffn = lambda x, input_ids, metadata: x * 2.0
+    layer.self_attn = lambda positions, x, _: x * 0.5
+    layer.mlp = lambda x, input_ids, metadata: x * 2.0
     positions = torch.arange(num_tokens)
 
     x = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
@@ -1795,7 +1797,7 @@ def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     """First finalize (at the end of load_weights) allocates
-    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
+    hc_attn_fn_broadcast as attn_hc.fn summed over hc streams."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1803,14 +1805,14 @@ def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     DeepseekV4Model.finalize_mhc_broadcast_weights(model)
 
     assert layer.hc_attn_fn_broadcast is not None
-    expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
+    expected = layer.attn_hc.fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
 
 
 def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     """Re-finalizing after a weight refit must copy into the existing
     broadcast tensor so its address stays stable for captured CUDA graphs,
-    while picking up the new hc_attn_fn values."""
+    while picking up the new attn_hc.fn values."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1818,11 +1820,11 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     DeepseekV4Model.finalize_mhc_broadcast_weights(model)
     buffer = layer.hc_attn_fn_broadcast
 
-    layer.hc_attn_fn.add_(1.0)
+    layer.attn_hc.fn.add_(1.0)
     DeepseekV4Model.finalize_mhc_broadcast_weights(model)
 
     assert layer.hc_attn_fn_broadcast is buffer
-    expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
+    expected = layer.attn_hc.fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
 
 

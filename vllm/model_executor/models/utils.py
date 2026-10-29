@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -163,18 +164,49 @@ class WeightsMapper:
                 shard_data.shard_id = one_shard_id
                 yield out_name, shard_data
 
+    def map_regex(self, pattern: str) -> str:
+        """Apply the renamings to a regex written against checkpoint names.
+
+        Only renamings between plain names are supported. Their segments must
+        appear whole in `pattern`, except that leading segments shared by the old
+        and new name may instead be covered by a preceding `.*` or `.+`."""
+        literal = re.compile(r"\^?([\w.]|\\\.)+\$?")
+        unescape = lambda s: s.strip("^$").replace("\\.", ".").strip(".")
+        join = lambda segments: r"\\?\.".join(map(re.escape, segments))
+        for renaming in self.orig_to_new_renaming:
+            if len(renaming.source_patterns) != 1 or len(renaming.target_patterns) != 1:
+                continue
+            source, target = renaming.source_patterns[0], renaming.target_patterns[0]
+            if not (literal.fullmatch(source) and literal.fullmatch(target)):
+                continue
+            old, new = unescape(source).split("."), unescape(target).split(".")
+            shared = 0
+            while shared < min(len(old), len(new)) - 1 and old[shared] == new[shared]:
+                shared += 1
+            full = rf"(?<![\w]){join(old)}(?![\w])"
+            pattern = re.sub(full, r"\\.".join(new), pattern)
+            if shared:
+                after_wildcard = rf"(?<=\.[*+]){join(old[shared:])}(?![\w])"
+                pattern = re.sub(after_wildcard, r"\\.".join(new[shared:]), pattern)
+        return pattern
+
+    def _map_target(self, name: str) -> str | None:
+        if name.startswith("re:"):
+            return f"re:{self.map_regex(name[3:])}"
+        return self._map_name(name)
+
     def apply_list(self, values: list[str]) -> list[str]:
         return [
             out_name
             for name in values
-            if (out_name := self._map_name(name)) is not None
+            if (out_name := self._map_target(name)) is not None
         ]
 
     def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
         return {
             out_name: value
             for name, value in values.items()
-            if (out_name := self._map_name(name)) is not None
+            if (out_name := self._map_target(name)) is not None
         }
 
     def get_rename_mapper(self) -> "WeightsMapper":
@@ -197,6 +229,57 @@ class WeightsMapper:
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
         )
+
+
+def get_checkpoint_renaming_mapper(hf_config: "PreTrainedConfig") -> WeightsMapper:
+    """Get the renamings Transformers applies to this checkpoint when loading it.
+
+    These map the checkpoint's names to the current Transformers module names. The
+    Transformers model is created on the meta device so that each sub-model's
+    renamings are scoped exactly as they are in Transformers. If it cannot be
+    created, the unscoped renamings of the `model_type` are used instead."""
+    import transformers
+    from transformers.conversion_mapping import (
+        WeightRenaming,
+        get_checkpoint_conversion_mapping,
+        get_model_conversion_mapping,
+    )
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+    archs = hf_config.architectures or []
+    model_type = hf_config.model_type
+    # vLLM runs its own implementation even when the config is custom code, so
+    # only the model type decides which renamings apply
+    transforms = get_checkpoint_conversion_mapping("legacy")
+    if model_type not in CONFIG_MAPPING_NAMES:
+        archs = []
+    else:
+        mapping = get_checkpoint_conversion_mapping(model_type) or []
+        transforms = mapping + transforms
+    if model_cls := next(
+        (c for a in archs if (c := getattr(transformers, a, None))), None
+    ):
+        # vLLM may replace the config class with one Transformers models can't use
+        config_cls = getattr(transformers, CONFIG_MAPPING_NAMES[model_type])
+        try:
+            if type(hf_config) is config_cls:
+                config = copy.deepcopy(hf_config)
+            else:
+                config = config_cls.from_dict(hf_config.to_dict())
+            with torch.device("meta"):
+                model = model_cls._from_config(config)
+            transforms = get_model_conversion_mapping(model)
+        except Exception as e:
+            logger.warning(
+                "Failed to create %s to get its checkpoint renamings, using those "
+                "of model type %r instead: %s",
+                model_cls.__name__,
+                model_type,
+                e,
+            )
+    # vLLM fuses weights itself, so only the renamings are needed
+    renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
+    return WeightsMapper(orig_to_new_renaming=renamings)
 
 
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:

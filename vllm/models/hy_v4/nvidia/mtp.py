@@ -221,7 +221,7 @@ def _remap_mtp_quant_exclusions(
     """Translate checkpoint-named MTP quant exclusions to draft prefixes.
 
     ``modules_to_not_convert`` / ``exclude_modules`` name MTP modules the way
-    the checkpoint does (``model.mtp_layers.0.self_attn.linear_gate``), while
+    the checkpoint does (``model.mtp_layers.0.self_attn.gate_proj``), while
     the draft model builds them under ``model.layers.<num_hidden_layers + i>``.
     ``is_layer_skipped`` compares prefixes for exact equality, so without this
     translation an excluded MTP module gets a quant method even though its
@@ -816,6 +816,9 @@ class HYV4MTP(nn.Module):
             is_loaded = False
             for param_name, weight_name, shard_id in stacked_mapping:
                 if weight_name not in name or ".experts." in name:
+                    continue
+                # The attention output gate is not stacked
+                if ".self_attn.gate_proj." in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 if name_mapped not in params_dict:

@@ -462,7 +462,7 @@ class HYV4MLAAttention(nn.Module):
             self.indexer = None
 
         self.gated_mla = bool(getattr(config, "gated_mla", False))
-        self.linear_gate: ColumnParallelLinear | None
+        self.gate_proj: ColumnParallelLinear | None
         if self.gated_mla:
             if config.gating_type == "headwise":
                 self.gate_projection_size_per_head = 1
@@ -470,18 +470,18 @@ class HYV4MLAAttention(nn.Module):
                 self.gate_projection_size_per_head = self.v_head_dim
             else:
                 raise ValueError(f"Unknown gating type: {config.gating_type}")
-            self.linear_gate = ColumnParallelLinear(
+            self.gate_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.gate_projection_size_per_head,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.linear_gate",
+                prefix=f"{prefix}.gate_proj",
             )
             self.use_hpc_gated_mla = hpc_gated_mla_supported(
-                config.gating_type, self.linear_gate
+                config.gating_type, self.gate_proj
             )
         else:
-            self.linear_gate = None
+            self.gate_proj = None
             self.use_hpc_gated_mla = False
         self.prefix = prefix
 
@@ -496,12 +496,12 @@ class HYV4MLAAttention(nn.Module):
             enable_sink = sink_backend is not None
             # The kernels require fp32 sinks; the disabled path keeps the
             # checkpoint dtype since the value is never consumed.
-            self.learnable_sink_param = make_attention_sink(
+            self.sinks = make_attention_sink(
                 self.num_local_heads,
                 torch.float32 if enable_sink else torch.bfloat16,
             )
             if enable_sink:
-                sinks = self.learnable_sink_param
+                sinks = self.sinks
                 self._force_sparse_mqa()
 
         extra_impl_args = {} if sinks is None else {"sinks": sinks}
@@ -715,7 +715,7 @@ class HYV4MLAAttention(nn.Module):
             hidden_states, q_c, positions, q, kv_c_normed, k_pe, attn_out
         )
 
-        if self.gated_mla and self.linear_gate is not None:
+        if self.gated_mla and self.gate_proj is not None:
             if self.use_hpc_gated_mla:
                 # Projection, sigmoid and the product in one launch. The gate
                 # is column-parallel and unbiased, so its local weight shard
@@ -723,11 +723,11 @@ class HYV4MLAAttention(nn.Module):
                 assert hidden_states.is_contiguous() and attn_out.is_contiguous()
                 attn_out = hpc_gated_mla_gemm(
                     hidden_states,
-                    self.linear_gate.weight,
+                    self.gate_proj.weight,
                     attn_out,
                 )
             else:
-                gate_score = self.linear_gate(hidden_states)[0]
+                gate_score = self.gate_proj(hidden_states)[0]
                 if self.config.gating_type == "headwise":
                     gate_score = gate_score.unsqueeze(-1)
                     attn_out = attn_out.reshape(

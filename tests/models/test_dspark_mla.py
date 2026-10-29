@@ -307,7 +307,7 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
         model=SimpleNamespace(
             layers=[
                 SimpleNamespace(
-                    ffn=SimpleNamespace(
+                    mlp=SimpleNamespace(
                         use_native_mega_moe=False,
                         use_mega_moe=False,
                         n_redundant_experts=4,
@@ -336,21 +336,21 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
 
 def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
     weights = [
-        ("mtp.0.attn.wkv.weight", torch.arange(4)),
-        ("mtp.1.attn.wq_a.weight", torch.arange(3)),
-        ("mtp.2.attn.wkv.scale", torch.tensor(0.5)),
-        ("mtp.3.attn.wkv.weight", torch.arange(2)),
+        ("mtp.0.self_attn.kv_proj.weight", torch.arange(4)),
+        ("mtp.1.self_attn.q_a_proj.weight", torch.arange(3)),
+        ("mtp.2.self_attn.kv_proj.scale", torch.tensor(0.5)),
+        ("mtp.3.self_attn.kv_proj.weight", torch.arange(2)),
     ]
 
     duplicated = list(dsv4_dspark._duplicate_context_wkv_weights(weights, 3))
 
     assert [name for name, _ in duplicated] == [
-        "mtp.0.attn.wkv.weight",
+        "mtp.0.self_attn.kv_proj.weight",
         "context_wkv_proj.weight",
-        "mtp.1.attn.wq_a.weight",
-        "mtp.2.attn.wkv.scale",
+        "mtp.1.self_attn.q_a_proj.weight",
+        "mtp.2.self_attn.kv_proj.scale",
         "context_wkv_proj.scale",
-        "mtp.3.attn.wkv.weight",
+        "mtp.3.self_attn.kv_proj.weight",
     ]
     assert duplicated[1][1].shard_id == 0
     assert duplicated[4][1].shard_id == 2
@@ -424,10 +424,11 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch, dspark_mod
             return stacked_output
 
     projection = StackedProjection()
-    layers = [
-        SimpleNamespace(attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset))
-        for i in range(3)
+    attns = [
+        SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset) for i in range(3)
     ]
+    # V4 uses the Transformers name, V4.1 the original one
+    layers = [SimpleNamespace(self_attn=attn, attn=attn) for attn in attns]
     model = SimpleNamespace(
         config=SimpleNamespace(head_dim=4),
         context_wkv_proj=projection,

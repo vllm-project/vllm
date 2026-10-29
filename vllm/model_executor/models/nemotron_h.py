@@ -732,6 +732,7 @@ class NemotronHForCausalLM(
     is_non_gated_moe = True
 
     hf_to_vllm_mapper = WeightsMapper(
+        # `backbone` remains in checkpoints Transformers doesn't rename (e.g. Puzzle)
         orig_to_new_prefix={"backbone": "model", "mtp": None},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
         orig_to_new_stacked={

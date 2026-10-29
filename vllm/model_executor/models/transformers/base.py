@@ -30,12 +30,7 @@ import transformers
 from packaging.version import Version
 from torch import nn
 from transformers import AutoModel, PreTrainedConfig
-from transformers.conversion_mapping import (
-    WeightRenaming,
-    WeightTransform,
-    get_checkpoint_conversion_mapping,
-    get_model_conversion_mapping,
-)
+from transformers.conversion_mapping import WeightRenaming, WeightTransform
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -363,14 +358,8 @@ class Base(
         self._maybe_apply_model_mapping()
 
     def _weight_conversions(self) -> list[WeightTransform]:
-        """The Transformers weight conversions that apply to `self.model`."""
-        mappings = get_model_conversion_mapping(self.model)
-        # Ensure layers that are part of the model, but not AutoModel, get their mapping
-        instantiated = {type(m).__name__ for m in self.model.modules()}
-        for arch in self.config.architectures or []:
-            if arch not in instantiated:
-                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
-        return mappings
+        """Transformers weight conversions not already applied by the model loader."""
+        return []
 
     def _tp_plan(self) -> dict:
         """The tensor parallel plan of `self.model`, relative to `self.model`."""

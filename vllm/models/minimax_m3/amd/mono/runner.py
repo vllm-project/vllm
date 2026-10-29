@@ -120,7 +120,7 @@ class MonoDecodeRunner:
             for i in range(n_dense, len(layers))
         ]
         attn0 = layers[n_dense].self_attn
-        moe0 = layers[n_dense].block_sparse_moe
+        moe0 = layers[n_dense].mlp
         self.shared_fp8 = self.sparse[0].shared_fp8
         if any(lw.shared_fp8 != self.shared_fp8 for lw in self.sparse):
             raise MonoUnsupported("shared expert fused in some layers only")

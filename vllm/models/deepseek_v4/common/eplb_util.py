@@ -40,11 +40,11 @@ def collect_moe_layers(
     for layer in layers:
         if not isinstance(layer, decoder_layer_type):
             continue
-        if not isinstance(layer.ffn, moe_type):
+        if not isinstance(layer.mlp, moe_type):
             continue
-        example_moe = layer.ffn
-        moe_model.moe_mlp_layers.append(layer.ffn)
-        moe_model.moe_layers.append(layer.ffn.experts)
+        example_moe = layer.mlp
+        moe_model.moe_mlp_layers.append(layer.mlp)
+        moe_model.moe_layers.append(layer.mlp.experts)
 
     moe_model.num_moe_layers = len(moe_model.moe_layers)
     moe_model.extract_moe_parameters(example_moe)

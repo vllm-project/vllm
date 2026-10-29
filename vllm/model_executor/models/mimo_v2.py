@@ -311,7 +311,7 @@ class MiMoV2Attention(nn.Module):
             },
         )
 
-        self.attention_sink_bias = (
+        self.sinks = (
             make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
 
@@ -340,7 +340,7 @@ class MiMoV2Attention(nn.Module):
                 if fa_backend.is_supported_on_current_device(
                     head_size=self.head_dim,
                     head_size_v=self.v_head_dim,
-                    has_sinks=self.attention_sink_bias is not None,
+                    has_sinks=self.sinks is not None,
                 ):
                     backend_enum = AttentionBackendEnum.FLASH_ATTN_DIFFKV
                 else:
@@ -365,7 +365,7 @@ class MiMoV2Attention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
-            sinks=self.attention_sink_bias,
+            sinks=self.sinks,
             attn_backend=attn_backend,
             head_size_v=self.v_head_dim,
         )
@@ -906,6 +906,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 continue
             if "mtp" in name:
                 continue
+            # Transformers does not rename MiMo-V2 (as opposed to Flash) checkpoints
+            name = name.replace(".attention_sink_bias", ".sinks")
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
