@@ -31,11 +31,10 @@ class _DeepIRNode:
 
 
 @pytest.fixture
-def patched_operator_str():
-    original = OperatorIssue.operator_str
+def patched_operator_str(monkeypatch):
+    monkeypatch.setattr(OperatorIssue, "operator_str", OperatorIssue.operator_str)
     _apply_inductor_operator_str_patch()
-    yield OperatorIssue.operator_str
-    OperatorIssue.operator_str = original
+    return OperatorIssue.operator_str
 
 
 def test_vllm_op_message_is_target_only(patched_operator_str):
