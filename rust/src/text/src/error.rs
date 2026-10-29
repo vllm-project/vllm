@@ -18,15 +18,27 @@ pub enum Error {
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
     #[error(
+        "text request `{request_id}` stop strings require detokenization; enable it or use stop \
+         token IDs"
+    )]
+    StopStringsRequireDetokenize { request_id: String },
+    #[error(
         "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
          and must not contain '@', '/', '\\', or NUL."
     )]
     InvalidCacheSalt,
     #[error(
-        "this model's maximum context length is {max_model_len} tokens, \
-         but the prompt contains {prompt_len} input tokens"
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt contains {prompt_len} input tokens, which exceeds this limit even without \
+         any output tokens. Please reduce the length of the input prompt."
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt fills it with {max_model_len} input tokens, leaving no room for output \
+         tokens. Please reduce the length of the input prompt."
+    )]
+    PromptFillsContext { max_model_len: u32 },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
@@ -66,8 +78,10 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::PromptFillsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::StopStringsRequireDetokenize { .. }
             | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
@@ -86,6 +100,15 @@ impl Error {
             ))
             | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
+        }
+    }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            _ => None,
         }
     }
 }

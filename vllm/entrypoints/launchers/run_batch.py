@@ -40,6 +40,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionResponse,
+)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -174,12 +178,14 @@ class BatchRequestInput(OpenAIBaseModel):
     # supported.
     method: str
 
-    # The OpenAI API relative URL to be used for the request. Currently
-    # /v1/chat/completions is supported.
+    # The OpenAI API relative URL to be used for the request, such as
+    # /v1/chat/completions or /v1/completions.
     url: str
 
-    # The parameters of the request.
-    body: BatchRequestInputBody
+    # The parameters of the request. CompletionRequest is kept out of
+    # BatchRequestInputBody, which an unknown URL is parsed against: its
+    # validator raises VLLMValidationError, which pydantic does not catch.
+    body: BatchRequestInputBody | CompletionRequest
 
     @field_validator("body", mode="plain")
     @classmethod
@@ -188,6 +194,8 @@ class BatchRequestInput(OpenAIBaseModel):
         url: str = info.data["url"]
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/completions":
+            return CompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
         if url.endswith("/score"):
@@ -203,6 +211,7 @@ class BatchRequestInput(OpenAIBaseModel):
 
 AllResponse: TypeAlias = (
     ChatCompletionResponse
+    | CompletionResponse
     | EmbeddingResponse
     | ScoreResponse
     | RerankResponse
@@ -860,6 +869,7 @@ async def build_endpoint_registry(
 
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)
+    openai_serving_completion = getattr(state, "openai_serving_completion", None)
     openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
     openai_serving_translation = getattr(state, "openai_serving_translation", None)
     serving_embedding = getattr(state, "serving_embedding", None)
@@ -869,11 +879,20 @@ async def build_endpoint_registry(
 
     # Registry of endpoint configurations
     endpoint_registry: dict[str, EndpointConfig] = {
-        "completions": {
+        "chat_completions": {
             "url": "/v1/chat/completions",
             "handler_getter": lambda: (
                 openai_serving_chat.create_chat_completion
                 if openai_serving_chat is not None
+                else None
+            ),
+            "wrapper_fn": None,
+        },
+        "completions": {
+            "url": "/v1/completions",
+            "handler_getter": lambda: (
+                openai_serving_completion.create_completion
+                if openai_serving_completion is not None
                 else None
             ),
             "wrapper_fn": None,
@@ -1011,11 +1030,13 @@ async def run_one_request(
     """Route a single line of the batch to its endpoint handler."""
     request = BatchRequestInput.model_validate_json(request_json)
 
-    endpoint_key = request.url.split("/")[-1]
-
+    # Match on the whole URL: /v1/chat/completions and /v1/completions share
+    # their last segment.
     result = None
-    if endpoint_key in endpoint_registry:
-        result = handle_endpoint_request(request, endpoint_registry[endpoint_key])
+    for endpoint in endpoint_registry.values():
+        result = handle_endpoint_request(request, endpoint)
+        if result is not None:
+            break
 
     if result is None:
         result = make_async_error_request_output(
