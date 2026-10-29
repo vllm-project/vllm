@@ -7,10 +7,12 @@ Each batch runs through the real ``_forward_core`` on metadata from the real
 
 * state pool (``prefill_initial_state_mode`` "none"/"all"): FlashInfer reads
   and writes the SSM cache slots in place;
-* gather (forced "mixed"): the caller gathers, masks and scatters states;
+* state pool with fresh rows zeroed (forced "mixed"): the same in-place
+  route for batches that mix cached and fresh rows;
 * the CuteDSL chunk kernel, an independent reference for the whole layer
   (conv, output placement behind peeled decodes, state writes);
-* with internal prefill checkpoints (align mode), pool vs gather.
+* with internal prefill checkpoints (align mode), pool vs the caller
+  gathering, masking and scattering states.
 
 ``core_attn_out`` is allocated uninitialized; it is NaN-poisoned here so any
 actual row the layer fails to write shows up.
@@ -203,7 +205,7 @@ def test_flashinfer_prefill_routes_match(case, state_dtype):
     with set_current_vllm_config(fi_cfg):
         meta = fi_builder.build(common_prefix_len=0, common_attn_metadata=common)
     assert meta.prefill_initial_state_mode == mode
-    meta_gather = dataclasses.replace(meta, prefill_initial_state_mode="mixed")
+    meta_mixed = dataclasses.replace(meta, prefill_initial_state_mode="mixed")
     ref_cfg, ref_builder = _builder("cutedsl")
     with set_current_vllm_config(ref_cfg):
         meta_ref = ref_builder.build(common_prefix_len=0, common_attn_metadata=common)
@@ -211,22 +213,22 @@ def test_flashinfer_prefill_routes_match(case, state_dtype):
     packed = not prefill_seq_lens
     runs = {
         "pool": _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0, packed),
-        "gather": _run(fi_cfg, meta_gather, weights, inputs, conv_state0, ssm_state0),
+        "mixed": _run(fi_cfg, meta_mixed, weights, inputs, conv_state0, ssm_state0),
         "cutedsl": _run(ref_cfg, meta_ref, weights, inputs, conv_state0, ssm_state0),
     }
     for out, _, _ in runs.values():
         assert not out[:num_actual].isnan().any(), "unwritten output rows"
 
     out, conv_state, ssm_state = runs["pool"]
-    # The pool route changes only where FlashInfer reads/writes states.
-    # Outputs are compared over the actual rows only: padding rows behind
-    # num_actual_tokens are uninitialized by contract.
-    gather_out, gather_conv, gather_ssm = runs["gather"]
+    # Treating the batch as mixed (zeroing its fresh rows in the pool) must
+    # not change the result. Outputs are compared over the actual rows only:
+    # padding rows behind num_actual_tokens are uninitialized by contract.
+    mixed_out, mixed_conv, mixed_ssm = runs["mixed"]
     torch.testing.assert_close(
-        out[:num_actual], gather_out[:num_actual], atol=1e-3, rtol=1e-3
+        out[:num_actual], mixed_out[:num_actual], atol=1e-3, rtol=1e-3
     )
-    torch.testing.assert_close(conv_state, gather_conv, atol=0, rtol=0)
-    torch.testing.assert_close(ssm_state, gather_ssm, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(conv_state, mixed_conv, atol=0, rtol=0)
+    torch.testing.assert_close(ssm_state, mixed_ssm, atol=1e-3, rtol=1e-3)
     # Different chunk kernels: tolerances of the kernel-level parity tests.
     tol = 2e-2 if state_dtype == torch.float32 else 6e-2
     ref_out, ref_conv, ref_ssm = runs["cutedsl"]
@@ -292,10 +294,13 @@ def test_flashinfer_checkpointed_prefill_pool_matches_gather(
         patch.object(qwen_gdn_linear_attn, "fi_chunk_gated_delta_rule", fi_chunk),
     ):
         out, conv, ssm = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
-        meta_gather = dataclasses.replace(meta, prefill_initial_state_mode="mixed")
-        ref_out, ref_conv, ref_ssm = _run(
-            fi_cfg, meta_gather, weights, inputs, conv_state0, ssm_state0
-        )
+        # Reference: the caller gathers, masks and scatters the states.
+        with patch.object(
+            qwen_gdn_linear_attn, "_fi_pool_checkpoints_supported", return_value=False
+        ):
+            ref_out, ref_conv, ref_ssm = _run(
+                fi_cfg, meta, weights, inputs, conv_state0, ssm_state0
+            )
     # Actual rows only: padding rows behind num_actual_tokens are
     # uninitialized by contract.
     num_actual = sum(query_lens)

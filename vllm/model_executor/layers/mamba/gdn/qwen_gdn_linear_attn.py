@@ -73,6 +73,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
     fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -308,6 +309,41 @@ def _log_gdn_backend_decision(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
         )
+
+
+@triton.jit
+def _zero_fresh_state_rows_kernel(
+    state_ptr,
+    indices_ptr,
+    has_initial_state_ptr,
+    row_stride,
+    row_numel,
+    BLOCK: tl.constexpr,
+):
+    i = tl.program_id(0)
+    if tl.load(has_initial_state_ptr + i):
+        return
+    row = state_ptr + tl.load(indices_ptr + i).to(tl.int64) * row_stride
+    for start in range(0, row_numel, BLOCK):
+        offsets = start + tl.arange(0, BLOCK)
+        tl.store(row + offsets, 0, mask=offsets < row_numel)
+
+
+def _zero_fresh_state_rows(
+    state: torch.Tensor, indices: torch.Tensor, has_initial_state: torch.Tensor
+) -> None:
+    """Zero ``state[indices[i]]`` wherever ``has_initial_state[i]`` is False."""
+    if indices.numel() == 0:
+        return
+    assert state[0].is_contiguous()
+    _zero_fresh_state_rows_kernel[(indices.numel(),)](
+        state,
+        indices,
+        has_initial_state,
+        state.stride(0),
+        state[0].numel(),
+        BLOCK=1024,
+    )
 
 
 def _fi_pool_checkpoints_supported(state_dtype: torch.dtype) -> bool:
@@ -1998,18 +2034,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         state_indices = attn_metadata.prefill_state_indices
         mode = attn_metadata.prefill_initial_state_mode
         plan = attn_metadata.flashinfer_checkpoint_plan
-        if plan is not None and not _fi_pool_checkpoints_supported(ssm_state.dtype):
-            mode = "mixed"
-        if mode == "mixed":
+        gather = plan is not None and not _fi_pool_checkpoints_supported(
+            ssm_state.dtype
+        )
+        if gather:
             has_initial_state = attn_metadata.prefill_has_initial_state
             assert has_initial_state is not None
             initial_state = ssm_state[state_indices]
             initial_state[~has_initial_state, ...] = 0
             pool_kwargs = {}
         else:
-            # Every row starts from zero or from its own cache slot, so
-            # FlashInfer reads and writes the slots in place instead of the
-            # caller gathering them and scattering the final states back.
+            # FlashInfer reads and writes the cache slots in place instead of
+            # the caller gathering them and scattering the final states back.
+            # Rows without a cached state start from zero.
+            if mode == "mixed":
+                has_initial_state = attn_metadata.prefill_has_initial_state
+                assert has_initial_state is not None
+                _zero_fresh_state_rows(ssm_state, state_indices, has_initial_state)
             initial_state = None if mode == "none" else ssm_state
             pool_kwargs = dict(output_state=ssm_state, state_indices=state_indices)
         if plan is None:
@@ -2026,7 +2067,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 output=output,
                 **pool_kwargs,
             )
-            return core_out, final_state if mode == "mixed" else None
+            return core_out, final_state if gather else None
 
         (state_checkpoints,) = current_workspace_manager().get_simultaneous(
             self._checkpoint_buffer_spec
@@ -2060,7 +2101,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             cu_seqlens=attn_metadata.non_spec_query_start_loc,
             recurrent_rows=plan.rows,
         )
-        return core_out, final_state if mode == "mixed" else None
+        return core_out, final_state if gather else None
 
     def _forward_core_decode_aiter(
         self,
