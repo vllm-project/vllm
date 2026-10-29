@@ -249,13 +249,12 @@ class ScoreQuestion(QuestionType):
             return tuple(names)
         return super().labels(names)
 
-    def prompt(self, question: Question) -> str:
+    def body(self, question: Question) -> str:
         names = tuple(o.name for o in question.options)
         if question.labels != names:
-            return super().prompt(question)
+            return super().body(question)
         # Levels that are their own labels read as the label alone.
-        lines = [f"Question: {question.instructions}"] if question.instructions else []
-        return "\n".join([*lines, *names, self.reply_instruction])
+        return "\n".join([*names, self.reply_instruction])
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
