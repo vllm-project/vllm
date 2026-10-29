@@ -247,10 +247,9 @@ def run_context_prefill_warmup(
 ) -> bool:
     """Run a prefill step over about `num_context_tokens` of cached context.
 
-    A prefill that extends a prefix cache hit attends to KV it did not write.
-    MLA up-projects that context chunk by chunk, a transient that grows with
-    the context and that no step starting from an empty prefix reaches. The
-    queries are kept short: the full-budget step already measured theirs.
+    MLA up-projects a prefix cache hit's context chunk by chunk, a transient
+    that no step starting from an empty prefix reaches. The queries are kept
+    short: the full-budget step already measured theirs.
     """
     query_len = model_runner.decode_query_len + 1
     # Leave room for a sampled token after the prompt; and no request needs
@@ -316,21 +315,47 @@ def run_context_prefill_warmup(
     return True
 
 
+def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
+    """Materialize one prompt-logprobs logits chunk, a shape no step reaches."""
+    model_config = model_runner.model_config
+    if (
+        model_runner.prompt_logprobs_worker is None
+        # The LoRA logits head applies adapters through the per-token mapping
+        # of a scheduled batch, which a standalone chunk does not have.
+        or model_runner.lora_config is not None
+        or model_config.max_logprobs == 0
+        or not hasattr(model_runner.model, "compute_logits")
+    ):
+        return
+    hidden_size = model_config.get_hidden_size()
+    if hidden_size <= 0:
+        # Composite configs (e.g. encoder-decoder ASR) expose no head width.
+        return
+    # A chunk never holds more rows than a prompt can have.
+    num_rows = min(PROMPT_LOGPROBS_CHUNK_SIZE, model_runner.max_model_len)
+    hidden_states = torch.zeros(
+        num_rows, hidden_size, dtype=model_config.dtype, device=model_runner.device
+    )
+    logits = model_runner.model.compute_logits(hidden_states)
+    max_logprobs = model_config.max_logprobs
+    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
+    token_ids = torch.zeros(num_rows, dtype=torch.int64, device=model_runner.device)
+    compute_topk_scores(logits, num_logprobs, token_ids)
+
+
+@torch.inference_mode()
 def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
 ) -> None:
     """Run the steps an extensible KV cache measures its transient reserve on.
-
     These size rather than compile, so they run without JIT warmup.
     """
+    _warmup_prompt_logprobs(model_runner)
     if model_runner.is_encoder_decoder:
         return
-    # Profiling ran the full token budget without attention. Run it as a real
-    # step so the measured peak covers the largest prefill the scheduler can
-    # issue: one request of up to the model length, the rest of the budget in
-    # a second, capped to what a block table row can hold.
+    # Profiling skipped attention; measure it on the largest possible prefill.
     scheduler_config = model_runner.scheduler_config
     run_mixed_prefill_decode_warmup(
         model_runner,
@@ -400,34 +425,6 @@ def warmup_kernels(
         acceptance_estimator.warmup()
 
 
-def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
-    """Materialize one prompt-logprobs logits chunk for memory sizing."""
-    model_config = model_runner.model_config
-    if (
-        model_runner.prompt_logprobs_worker is None
-        # The LoRA logits head applies adapters through the per-token mapping
-        # of a scheduled batch, which a standalone chunk does not have.
-        or model_runner.lora_config is not None
-        or model_config.max_logprobs == 0
-        or not hasattr(model_runner.model, "compute_logits")
-    ):
-        return
-    hidden_size = model_config.get_hidden_size()
-    if hidden_size <= 0:
-        # Composite configs (e.g. encoder-decoder ASR) expose no head width.
-        return
-    # A chunk never holds more rows than a prompt can have.
-    num_rows = min(PROMPT_LOGPROBS_CHUNK_SIZE, model_runner.max_model_len)
-    hidden_states = torch.zeros(
-        num_rows, hidden_size, dtype=model_config.dtype, device=model_runner.device
-    )
-    logits = model_runner.model.compute_logits(hidden_states)
-    max_logprobs = model_config.max_logprobs
-    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
-    token_ids = torch.zeros(num_rows, dtype=torch.int64, device=model_runner.device)
-    compute_topk_scores(logits, num_logprobs, token_ids)
-
-
 def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -436,8 +433,6 @@ def _warmup_kernels(
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
-
-    _warmup_prompt_logprobs(model_runner)
 
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
