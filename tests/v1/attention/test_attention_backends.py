@@ -1232,6 +1232,96 @@ def test_flashinfer_varlen_cudagraph_capability(
         assert wrapped_cls.get_varlen_cudagraph_max_query_len(config, spec) is None
 
 
+def _aiter_fa_varlen_group(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+    )
+    from vllm.v1.worker.utils import AttentionGroup
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        classmethod(lambda cls: False),
+    )
+    config = create_vllm_config(
+        max_model_len=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        hf_config_override={
+            "hidden_size": 64,
+            "num_attention_heads": 1,
+            "num_key_value_heads": 1,
+            "head_dim": 64,
+        },
+    )
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=7
+    )
+    spec = create_standard_kv_cache_spec(config)
+    group = AttentionGroup(AiterFlashAttentionBackend, ["target"], spec, 0)
+    group.create_metadata_builders(config, torch.device("cpu"))
+    return config, spec, group
+
+
+def test_aiter_fa_varlen_capture_uses_the_promised_query_width(monkeypatch):
+    config, _, group = _aiter_fa_varlen_group(monkeypatch)
+    builder = group.get_metadata_builder(0)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[32] * 4, query_lens=[1] * 4),
+        config.cache_config.block_size,
+        torch.device("cpu"),
+    )
+
+    eager = builder.build(0, common)
+    captured = builder.build_for_cudagraph_capture(common.replace(max_query_len=8))
+
+    assert eager.decode_metadata is not None
+    assert captured.decode_metadata is not None
+    assert eager.decode_metadata.max_query_len == 1
+    assert captured.decode_metadata.max_query_len == 8
+
+
+def test_aiter_fa_varlen_capability_is_bounded_and_fail_closed(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.worker.gpu.attn_utils import (
+        get_varlen_cudagraph_unsupported_backend,
+    )
+
+    config, spec, group = _aiter_fa_varlen_group(monkeypatch)
+    unsupported = get_varlen_cudagraph_unsupported_backend
+
+    assert unsupported([[group]], config, 8) is None
+    assert unsupported([[group]], config, 9) == (
+        "AiterFlashAttentionBackend",
+        8,
+    )
+
+    config.parallel_config.decode_context_parallel_size = 2
+    assert unsupported([[group]], config, 1) == (
+        "AiterFlashAttentionBackend",
+        None,
+    )
+    config.parallel_config.decode_context_parallel_size = 1
+
+    group.kv_cache_spec = replace(spec, non_causal=True)
+    assert unsupported([[group]], config, 1) == (
+        "AiterFlashAttentionBackend",
+        None,
+    )
+    group.kv_cache_spec = spec
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        classmethod(lambda cls: True),
+    )
+    assert unsupported([[group]], config, 1) == (
+        "AiterFlashAttentionBackend",
+        None,
+    )
+
+
 @pytest.mark.parametrize(
     "use_v2_model_runner,parallel_drafting,expected",
     [

@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
@@ -38,6 +39,7 @@ from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    KVCacheSpec,
     is_quantized_kv_cache,
 )
 
@@ -459,6 +461,22 @@ class AiterFlashAttentionMetadataBuilder(
 
     asm_kv_scale_tables: ClassVar[AsmKvScaleTables] = AsmKvScaleTables()
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+            or vllm_config.parallel_config.decode_context_parallel_size > 1
+            or getattr(kv_cache_spec, "non_causal", False)
+            or rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -583,9 +601,20 @@ class AiterFlashAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
-        return self.build(
+        attn_metadata = self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
+        if attn_metadata.decode_metadata is None:
+            return attn_metadata
+        assert self.reorder_batch_threshold is not None
+        decode_metadata = replace(
+            attn_metadata.decode_metadata,
+            max_query_len=min(
+                common_attn_metadata.max_query_len,
+                self.reorder_batch_threshold,
+            ),
+        )
+        return replace(attn_metadata, decode_metadata=decode_metadata)
 
     def _build_asm_kv_scale_tables(self) -> None:
         # Only for fp8 shuffle kv cache: the asm decode kernel reads a dense
