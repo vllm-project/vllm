@@ -430,9 +430,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
+        # Until the peer acks the handshake, prefill locally rather than wait
+        # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
             session = self._sessions.get(source.peer_id)
-            if session is None:
+            if session is None or not session.ready:
                 return LookupResult.MISS
             result = session.register_lookup(source.kv_request_id, key)
             if result is True:

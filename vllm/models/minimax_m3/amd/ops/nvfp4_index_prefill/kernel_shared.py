@@ -79,7 +79,7 @@ def _fp8_pair(w, sv):
 
 def _mfma_fp8_32x32x64(a8, b8, acc16):
     """v_mfma_f32_32x32x64_f8f6f4 on e4m3; lane (r, h) gets
-    D[8 (i // 4) + 4 h + i % 4][r]."""
+    `D[8 (i // 4) + 4 h + i % 4][r]`."""
     return Vec(
         fx.rocdl.mfma_scale_f32_32x32x64_f8f6f4(
             Vec.make_type(16, fx.Float32), [a8, b8, acc16, 0, 0, 0, 0, 0, 0]
