@@ -138,6 +138,29 @@ def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_inductor_aot_roundtrip(monkeypatch, fresh_vllm_cache):
+    """Stock Inductor reloads without the vLLM backend's deferred finalizer."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "0")
+    disable_envs_cache()
+    x = torch.arange(64).reshape(8, 8).float()
+    expected = reference_fn(x)
+    for warm in (False, True):
+        torch._dynamo.reset()
+        monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", str(int(warm)))
+        disable_envs_cache()
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.DYNAMO_TRACE_ONCE, backend="inductor"
+            )
+        )
+        with use_vllm_config(config):
+            mod = CompiledMod(vllm_config=config)
+            torch.testing.assert_close(mod(x), expected, atol=0, rtol=0)
+            assert mod.was_aot_compile_fn_loaded_from_disk == warm
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdirname, monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
