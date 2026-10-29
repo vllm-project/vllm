@@ -123,6 +123,7 @@ def _track(model: nn.Module, loaded: set[str], quantized: bool) -> str:
 def test_weights_track_reports_missing_quantized_weights():
     # Quantized checkpoints may only omit KV-cache quantization params, empty
     # placeholders, fbgemm_fp8's input_scale_ub and online-quant params.
+    # Params filled through another param's loader count as loaded.
     online = _QuantMethod()
     online.uses_meta_device = True
     model = nn.Module()
@@ -132,10 +133,13 @@ def test_weights_track_reports_missing_quantized_weights():
     model.fbgemm = _layer(_QuantMethod(), weight=(4, 4), input_scale_ub=())
     model.attn = _layer(BaseKVCacheMethod(None), k_scale=(), k_zero_point=())
     model.online = _layer(online, weight=(4, 4))
+    model.csf = _layer(_QuantMethod(), weight_scale=(4, 1), weight_scale_s=(0,))
+    model.csf.weight_scale_s.weight_loader_target = "weight_scale"
     loaded = {"proj.weight", "unquantized.weight", "gptq.qweight", "fbgemm.weight"}
-    error = _track(model, loaded, quantized=True)
+    error = _track(model, loaded | {"csf.weight_scale_s"}, quantized=True)
     assert "proj.weight_scale_inv" in error and "unquantized.bias" in error
-    assert not any(n in error for n in ("gptq", "fbgemm", "attn", "online"))
+    assert not any(n in error for n in ("gptq", "fbgemm", "attn", "online", "csf"))
+    assert "csf.weight_scale" in _track(model, loaded, quantized=True)
 
 
 def test_weights_track_keeps_unquantized_models_unchanged():

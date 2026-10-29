@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import glob
-import json
 import os
 import time
 from collections.abc import Callable, Generator, Iterable
@@ -20,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.csf_scales import decode_csf_scale_streams
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
 )
@@ -52,16 +50,6 @@ logger = init_logger(__name__)
 
 # fbgemm_fp8 builds input_scale_ub from its config; checkpoints do not carry it.
 _CONFIG_BUILT_PARAMS = ("input_scale_ub",)
-
-
-def _indexed_safetensors_files(hf_folder: str, index_file: str) -> list[str]:
-    index_path = os.path.join(hf_folder, index_file)
-    if not os.path.isfile(index_path):
-        return []
-    with open(index_path) as f:
-        weight_map = json.load(f)["weight_map"]
-    files = (os.path.join(hf_folder, name) for name in sorted(set(weight_map.values())))
-    return [f for f in files if os.path.isfile(f)]
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -240,23 +228,6 @@ class DefaultModelLoader(BaseModelLoader):
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-            if (
-                not hf_weights_files
-                and allow_patterns_overrides is None
-                and pattern.endswith(".safetensors")
-            ):
-                # Shards may live in a subdirectory named by the index.
-                if not is_local and glob.glob(
-                    os.path.join(hf_folder, "**", pattern), recursive=True
-                ):
-                    download_safetensors_index_file_from_hf(
-                        model_name_or_path,
-                        index_file,
-                        cache_dir=self.load_config.download_dir,
-                        subfolder=subfolder,
-                        revision=revision,
-                    )
-                hf_weights_files += _indexed_safetensors_files(hf_folder, index_file)
             if len(hf_weights_files) > 0:
                 if pattern.endswith(".safetensors"):
                     use_safetensors = True
@@ -396,10 +367,7 @@ class DefaultModelLoader(BaseModelLoader):
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
-        return (
-            (source.prefix + name, tensor)
-            for (name, tensor) in decode_csf_scale_streams(weights_iterator)
-        )
+        return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
 
     def get_all_weights(
         self,
@@ -562,6 +530,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
+            # A loader that fills another parameter loads that one as well.
+            for name, param in model.named_parameters():
+                target = getattr(param, "weight_loader_target", None)
+                if target is not None and name in loaded_weights:
+                    prefix = name.rpartition(".")[0]
+                    loaded_weights.add(f"{prefix}.{target}" if prefix else target)
             # ignore online quantization scales
             for name, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)

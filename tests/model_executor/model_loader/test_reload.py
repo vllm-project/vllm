@@ -251,6 +251,36 @@ def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
         assert torch.equal(model.proj, torch.full((16,), offset))
 
 
+def test_layerwise_reload_counts_loads_through_target():
+    """A loader that fills another parameter completes that parameter's layer."""
+
+    class StreamModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+            self.scale.weight_loader = default_weight_loader
+            self.stream = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            self.stream.weight_loader = types.MethodType(
+                lambda model, param, weight: model.scale.weight_loader(
+                    model.scale, weight
+                ),
+                self,
+            )
+            self.stream.weight_loader_target = "scale"
+
+    model = StreamModel()
+    model.stream.weight_loader(model.stream, torch.ones(4))
+    kernel_scale = model.scale
+    record_metadata_for_reloading(model)
+
+    initialize_layerwise_reload(model)
+    model.stream.weight_loader(model.stream, torch.full((4,), 2.0))
+    # Processed as soon as the scale is loaded, not deferred to finalize.
+    assert torch.equal(kernel_scale, torch.full((4,), 2.0))
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    assert model.scale.data_ptr() == kernel_scale.data_ptr()
+
+
 def _fp8_reload_unsupported() -> bool:
     """Whether the FP8 reload/online-quantize tests should be skipped.
 

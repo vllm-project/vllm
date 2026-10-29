@@ -138,7 +138,9 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
-        if name in SKIP_LOAD_TENSORS:
+        # A loader that fills another tensor calls that tensor's weight_loader,
+        # whose wrapper buffers and counts the load.
+        if name in SKIP_LOAD_TENSORS or hasattr(tensor, "weight_loader_target"):
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
