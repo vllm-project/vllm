@@ -497,6 +497,20 @@ class MonoDecodeLayer:
         if _on_gfx942():
             self._weights = self._weights_942(layer)
             return self._weights
+        # Prefill fusion above mono: under the heterogeneous fused
+        # shared experts the routed buffers carry one appended (never-read)
+        # shared slot past the routed experts; the mono kernels need the
+        # stock 384-expert views. Any other module keeps its own buffers.
+        views = getattr(e, "mono_stock_moe_views", None)
+        if views is not None:
+            w13, w13_s, w2, w2_s = views()
+        else:
+            w13, w13_s, w2, w2_s = (
+                e.w13_weight,
+                e.w13_weight_scale,
+                e.w2_weight,
+                e.w2_weight_scale,
+            )
         self._weights = MonoLayerWeights(
             attn=None if self.ffn_only else self._attn_weights(a),
             hc_attn_fn=layer.hc_attn_fn,
@@ -509,10 +523,10 @@ class MonoDecodeLayer:
             ffn_norm=layer.ffn_norm.weight,
             gate_w=f.gate.weight,
             bias=f.gate.e_score_correction_bias,
-            w13=e.w13_weight,
-            w13_s=e.w13_weight_scale,
-            w2=e.w2_weight,
-            w2_s=e.w2_weight_scale,
+            w13=w13,
+            w13_s=w13_s,
+            w2=w2,
+            w2_s=w2_s,
             sgu=sh.gate_up_proj.weight,
             sgu_s=_scale_bytes(sh.gate_up_proj.weight_scale),
             sw2=sh.down_proj.weight,

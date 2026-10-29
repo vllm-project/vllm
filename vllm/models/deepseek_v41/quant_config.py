@@ -160,6 +160,20 @@ class DeepseekV4FP8Config(Fp8Config):
             and weight.get("group_size") == 32
         )
 
+    @staticmethod
+    def _is_native_fp8_block32_mxfp4_shared(hf_quant_cfg: dict | None) -> bool:
+        """DeepSeek-native format: FP8-E4M3 [32,32] ue8m0 shared layers +
+        MXFP4 routed experts. Accepts both ``quant_method`` spellings (the
+        raw schema's ``"fp8"`` and the override chain's
+        ``"deepseek_v4_fp8"``). Mirrors the v4 sibling's helper."""
+        return (
+            isinstance(hf_quant_cfg, dict)
+            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+            and hf_quant_cfg.get("weight_block_size") == [32, 32]
+            and hf_quant_cfg.get("scale_fmt") == "ue8m0"
+            and hf_quant_cfg.get("expert_dtype") == "fp4"
+        )
+
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
