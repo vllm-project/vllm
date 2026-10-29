@@ -436,6 +436,13 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(prompt, AsyncGenerator):
+            if (
+                isinstance(params, SamplingParams)
+                and (params.extra_args or {}).get("hidden_state_capture") is not None
+            ):
+                raise VLLMValidationError(
+                    "Hidden capture does not support streaming input"
+                )
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 
@@ -472,6 +479,24 @@ class AsyncLLM(EngineClient):
                 )
             request_params = request.params
             if isinstance(request_params, SamplingParams):
+                from vllm.distributed.aux_output_connector.hidden_states import (
+                    validate_capture_request,
+                )
+
+                validate_capture_request(
+                    request_params,
+                    (
+                        len(request.prompt_token_ids)
+                        if request.prompt_token_ids is not None
+                        else (
+                            request.prompt_embeds.shape[0]
+                            if request.prompt_embeds is not None
+                            else 0
+                        )
+                    ),
+                    self.vllm_config,
+                    request.resumable,
+                )
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
                     request_params,

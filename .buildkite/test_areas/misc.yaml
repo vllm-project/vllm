@@ -85,6 +85,7 @@ steps:
     - vllm/v1/
     - tests/v1/core
     - tests/distributed/aux_output_connector/test_hidden_states.py
+    - tests/v1/engine/test_hidden_capture_admission.py
     - vllm/distributed/aux_output_connector/
     - tests/v1/executor
     - tests/v1/kv_offload
@@ -102,6 +103,7 @@ steps:
       pytest -v -s
       distributed/aux_output_connector/test_hidden_states.py
       v1/worker/test_aux_hidden_states.py
+      v1/engine/test_hidden_capture_admission.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 Core"
