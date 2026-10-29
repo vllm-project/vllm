@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from typing_extensions import override
 
@@ -22,9 +23,26 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
 # Split the shared region into this many shm files so workers pre-fault them
 # in parallel (page-cache inserts are serialized per file).
 _REGION_SEGMENTS = 32
+
+T = TypeVar("T")
+
+
+def _all_workers_group() -> "GroupCoordinator":
+    from vllm.distributed.parallel_state import (
+        get_inner_dp_world_group,
+        get_world_group,
+    )
+
+    try:
+        return get_inner_dp_world_group()
+    except AssertionError:
+        return get_world_group()
 
 
 def _all_workers_barrier() -> None:
@@ -32,16 +50,14 @@ def _all_workers_barrier() -> None:
 
     A superset of the node-local mmap openers suffices: once the barrier
     releases, every worker sharing the region file has mapped it."""
-    from vllm.distributed.parallel_state import (
-        get_inner_dp_world_group,
-        get_world_group,
-    )
+    _all_workers_group().barrier()
 
-    try:
-        group = get_inner_dp_world_group()
-    except AssertionError:
-        group = get_world_group()
-    group.barrier()
+
+def run_on_rank0(fn: Callable[[], T]) -> T:
+    """Run ``fn`` on rank 0 while the other workers wait, and return its
+    result on every worker."""
+    group = _all_workers_group()
+    return group.broadcast_object(fn() if group.rank_in_group == 0 else None)
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -208,6 +224,10 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                calibrate_load_path=bool(
+                    self.extra_config.get("calibrate_load_path", False)
+                ),
+                run_calibration=run_on_rank0,
             )
         except Exception:
             if mmap_region is not None:
