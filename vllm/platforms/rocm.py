@@ -760,7 +760,8 @@ class RocmPlatform(Platform):
             is_hybrid=is_hybrid,
         )
         is_encoder_decoder = (
-            getattr(model_config, "attn_type", None) == "encoder_decoder"
+            getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
+            == "encoder_decoder"
         )
         # ROCM_ATTN still uses a legacy attention layout (KV is the outer
         # dimension) that is incompatible with the encoder backend layouts. The
