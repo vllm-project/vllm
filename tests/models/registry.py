@@ -637,6 +637,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "jinaai/jina-embeddings-v5-text-small",
         trust_remote_code=True,
     ),
+    "Lfm2BidirectionalModel": _HfExamplesInfo(
+        "LiquidAI/LFM2.5-Embedding-350M",
+    ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
@@ -698,7 +701,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
-    "ColUltraVBertForRetrieval": _HfExamplesInfo("athrael-soju/ColUltraVBERT"),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo(
+        "athrael-soju/ColUltraVBERT",
+        # Later revisions declare the UltraVBertModel architecture instead.
+        revision="509adbab61b71da0484b20f3baf718e15219d761",
+    ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ModernVBertModel": _HfExamplesInfo("ModernVBERT/colmodernvbert-merged"),
     "ColQwen3": _HfExamplesInfo(
@@ -1039,14 +1046,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "kakaocorp/kanana-1.5-v-3b-instruct",
         trust_remote_code=True,
     ),
-    "KeyeForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-8B-Preview",
-        trust_remote_code=True,
-    ),
-    "KeyeVL1_5ForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-1_5-8B",
-        trust_remote_code=True,
-    ),
     "MoonshotKimiaForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Audio-7B-Instruct",
         tokenizer_mode="kimi_audio",
@@ -1262,6 +1261,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         hf_overrides={
             "text_config": {"layers_block_type": ["linear_attention", "full_attention"]}
         },
+    ),
+    "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
@@ -1582,6 +1584,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
+    "DSparkMiniMaxDraftModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
@@ -1860,6 +1867,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="nvidia/Nemotron-Super-Placeholder",
         is_available_online=False,
     ),
+    "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        is_available_online=False,
+    ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,
@@ -1907,6 +1919,18 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
+    "TransformersForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+        # TODO: Use a dense model once one opts into the Transformers MTP standard
+        is_available_online=False,
+    ),
+    "TransformersMoEForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+    ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct"
     ),
