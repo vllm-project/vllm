@@ -324,9 +324,18 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         else:
             assert self.topk_indices_buffer is not None
             top_k = self.topk_indices_buffer.shape[-1]
-        combined_topk = round_up(top_k + self.window_size, 128)
+        # One request covers the KV chunk (retained at the tail at runtime) and
+        # the index scratch (taken from the head) side by side.
         current_workspace_manager().get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
+            *self._prefill_index_workspace_specs(top_k),
+        )
+
+    def _prefill_index_workspace_specs(
+        self, top_k: int
+    ) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+        combined_topk = round_up(top_k + self.window_size, 128)
+        return (
             ((self.max_num_batched_tokens, combined_topk), torch.int32),
             ((self.max_num_batched_tokens,), torch.int32),
         )
@@ -424,27 +433,39 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
-        for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
+        index_specs = self._prefill_index_workspace_specs(top_k)
+        for chunk in chunk_plan:
+            chunk_start, chunk_end, chunk_n, chunk_m = chunk
             chunk_size = chunk_end - chunk_start
-            kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            if not swa_only:
-                assert flashmla_metadata is not None
-                dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size, :chunk_n],
-                    self._compressed_kv_cache(),
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=flashmla_metadata.block_table[num_decodes:][
-                        chunk_start:chunk_end
-                    ],
-                    block_size=flashmla_metadata.block_size // self.compress_ratio,
-                    offset=0,
+            kv_spec = ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16)
+            if swa_only:
+                kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
+                    kv_spec, *index_specs
                 )
+            else:
+                assert flashmla_metadata is not None
+                idx_ws, lens_ws = workspace_manager.get_simultaneous(*index_specs)
+                # The chunk's compressed columns stay in the workspace's tail
+                # span, which the scratch of the layers in between leaves
+                # alone. A kv source has just inserted this step's rows, so it
+                # always gathers; the consumers after it in the same forward
+                # reuse its columns while the span still holds this source and
+                # chunk, and rewrite only their SWA columns.
+                kv_ws, intact = workspace_manager.get_retained(
+                    (self.compressed_cache_prefix, chunk), *kv_spec
+                )
+                if self.is_kv_source or not intact:
+                    dequantize_and_gather_k_cache(
+                        kv_ws[:, :chunk_n],
+                        self._compressed_kv_cache(),
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=flashmla_metadata.block_table[num_decodes:][
+                            chunk_start:chunk_end
+                        ],
+                        block_size=flashmla_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
             dequantize_and_gather_k_cache(
                 kv_ws[:chunk_size],
                 self.swa_cache_layer.kv_cache,
