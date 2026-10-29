@@ -616,7 +616,7 @@ class Dots3NoteModel(DeepseekV32Model):
             config, self.topk_indices_buffer, range(config.num_hidden_layers)
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
+            ["hidden_states"], config.hidden_size, self.pp_buffers
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = (

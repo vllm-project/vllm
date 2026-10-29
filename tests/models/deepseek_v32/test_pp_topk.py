@@ -93,7 +93,7 @@ class _TopkReusingLayer(nn.Module):
         num_tokens = hidden_states.shape[0]
         self.seen_topk = self.topk_indices_buffer[:num_tokens].clone()
         self.topk_indices_buffer[:num_tokens] += 10
-        return hidden_states, residual
+        return hidden_states, torch.zeros_like(hidden_states)
 
 
 def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
@@ -111,6 +111,9 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
     )
+    monkeypatch.setattr(
+        deepseek_v32_model, "tensor_model_parallel_all_reduce", lambda t: t
+    )
 
     received_topk = torch.arange(6, dtype=torch.int32).view(3, 2)
     output = model(
@@ -119,7 +122,6 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
         IntermediateTensors(
             {
                 "hidden_states": torch.zeros(3, 4),
-                "residual": torch.zeros(3, 4),
                 "topk_indices": received_topk,
             }
         ),
