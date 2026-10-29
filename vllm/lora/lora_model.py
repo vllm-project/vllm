@@ -211,6 +211,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None = None,
         skip_prefixes: list[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        unsupported_lora_modules: set[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -235,6 +236,9 @@ class LoRAModel:
                 slicing metadata shared across all MoE layers. Non-local
                 expert weights are skipped at read time instead of being
                 loaded and discarded later.
+            unsupported_lora_modules: Full names of model layers that match
+                expected_lora_modules but are not wrapped by LoRA, such as
+                BERT's pooler.dense. LoRA weights on them are unexpected.
 
         Returns:
             Loaded LoRA Model.
@@ -273,6 +277,9 @@ class LoRAModel:
                     peft_helper.modules_to_save or ()
                 ):
                     unexpected_modules.append(module_name)
+
+                elif module_name in (unsupported_lora_modules or ()):
+                    unexpected_modules.append(f"{module_name} (not a LoRA layer)")
 
             if unexpected_modules:
                 raise ValueError(
