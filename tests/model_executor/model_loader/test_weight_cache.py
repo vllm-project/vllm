@@ -288,6 +288,8 @@ def test_ipc_cache_cold_start_and_warm_restart(
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
     """Same as above, with expert parallelism enabled at tp=2."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     # No capfd: a CaptureFixture does not survive the cloudpickle into the
     # child, and this case never reaches the check_flashinfer_cache branch.
     run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path)
