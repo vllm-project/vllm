@@ -66,7 +66,7 @@ def _reserve_attn_logits_workspace(
         vllm_config.model_config.max_model_len,
         current_platform.num_compute_units(),
     )
-    current_workspace_manager().get_simultaneous(
+    current_workspace_manager().reserve(
         ((max_decode_rows, q_num_heads, max_splits, kv_lora_rank + 1), torch.float32),
     )
 

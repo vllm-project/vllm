@@ -97,7 +97,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         )
         # Reserve capacity without retaining a view: a retained view would pin
         # the old buffer when another user grows the shared workspace.
-        current_workspace_manager().get_simultaneous(self._workspace_spec)
+        current_workspace_manager().reserve(self._workspace_spec)
 
     def prepare_metadata(
         self,

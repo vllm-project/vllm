@@ -178,6 +178,20 @@ class WorkspaceManager:
             )
         return workspace
 
+    def reserve(self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]) -> None:
+        """Reserve simultaneous scratch capacity in every ubatch/lane slot.
+
+        Call during construction, before profiling and CUDA graph capture, when
+        no execution slot holds workspace views. Runtime requests must use
+        get_simultaneous so growth only affects the requesting slot.
+        """
+        required_bytes = sum(
+            round_up(_compute_bytes(shape, dtype), 256)
+            for shape, dtype in shapes_and_dtypes
+        )
+        for workspace_id in range(len(self._current_workspaces)):
+            self._ensure_workspace_size(required_bytes, workspace_id)
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
@@ -206,17 +220,21 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def _ensure_workspace_size(
+        self, required_bytes: int, workspace_id: int | None = None
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
             required_bytes: The number of bytes required.
+            workspace_id: Slot to reserve, or the current execution slot.
 
         Returns:
             The current workspace tensor.
 
         """
-        workspace_id = self._get_workspace_id()
+        if workspace_id is None:
+            workspace_id = self._get_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
@@ -247,10 +265,8 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            # Only resize the requesting ubatch/lane workspace. Other slots
-            # resize lazily on their next get_simultaneous call.
-            # Resizing all ubatches here would orphan the other ubatch's
-            # old tensor when it still holds views into it (DBO leak).
+            # Runtime growth must only resize the requesting slot: other
+            # ubatches may still hold views into their workspace (DBO leak).
             self._current_workspaces[workspace_id] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching

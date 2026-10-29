@@ -711,7 +711,7 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
             *(int(plan.layout.nbytes) for plan in self._extend_plans.values()),
         )
 
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((self._scratch_nbytes,), torch.uint8),
         )
 
