@@ -4213,3 +4213,19 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Annexes** : nbaudit **ok** 22:06Z — **vague 2 `Image/` ARMÉE** (`subpath:["19451:Image/"]`, 5 séries, 0 échec). G: OK (694 Go libres). Condensation propre (BaselineManager WARN 22:11:44 = course d'init RSM connue, cosmétique). **ERROR global 21:51Z (po-2025:rsm, condensation truncation) qualifié côté moteur** : 0 non-200 hors 401 dans la fenêtre moteur 21:49-21:56Z, les trois « Connection error » coïncident à la seconde avec le recreate hub drainé 21:49Z (334 s, 4 flux coupés) — artefact du fenêtrage recreate, pas le condenseur ni l'engine. [REPLY] posté sur global.
 
 **Registre** : **Q44 ouverte** (🟠 qualifié : repli siège ou laisser passer la nuit — recommandation : laisser passer la nuit, re-décision demain avant le pic du soir si récidive). Q41/Q43 closes.
+
+## Cycle 00:1xZ (29/10) — 🟡 : le plateau a partiellement cédé (80 % à 23Z) puis rebondi à 88 % — soulagement nocturne PARTIEL ; po-2028 tourne toute la nuit
+
+**Prod** : health 200 (3,8 ms), RC=0, StartedAt stable 18:20:28Z (6 h sans restart), OOM 0, 3/3 Up, `/dev/shm` 33G tenu. Préemptions **23 figées** (Δ+0 depuis 23:0xZ), file 0, running 6. KV GPU **88,1 %** — le creux de 80 % vers 23Z était une respiration, pas la décroissance : la charge du soir s'est prolongée après minuit. Watchdog : 2 `fail 1/2` de plus (23:09, 23:34Z), toujours zéro 2/2, 3 903 OK.
+
+**Attribution 2 h (22:11→00:11Z)** — le mix nocturne confirme le diagnostic du repli : **po-2028 153** (le secrétaire tourne toute la nuit) · po-2027 93 · ai-01 50 · po-2024 32 · po-2023 10. **po-2027 soutient ~90 req/2 h même à minuit** — le repli prévu à 17-18Z today est bien le bon barreau. Pas d'ack claudish encore (normal — fenêtre d'exécution dans la journée).
+
+**VRAM** : GPU 0 **23 230 MiB** (nouveau haut du boot, +80 vs 22:1xZ ; Q41 « tenir en l'état », mécanisme connu desktop+high-water) ; GPU 1 21 786 stable (le +136 de la veille reste un point isolé).
+
+**⚠ Marge commit : 90,7 %** (35,5 Go libres) — la série 89,2 → 90,0 → 90,3 → 90,4 → **90,7** continue de monter lentement. Rien d'alarmant (la panne du 24/09 était à 97,8 %) mais **la pente ne s'inverse pas** : si elle dépasse ~93 %, le signal monte d'un cran au user. Aucun travail lourd (règle ≥90).
+
+**400 window+1 : 2/2 h** (22:32Z 914 K, 23:08Z 1,04 M — Bun). 401 : 22× le poller Go (`1f7f6080cb65`), rien de nouveau. Prefix hits cumulés **83,3 %**.
+
+**Annexes** : nbaudit **ok** 00:05Z (`Image/` vague 2). G: OK. Condensation propre (log roulé sur 20261029, aucun événement).
+
+**Registre** : aucune question ouverte. **Action du jour : repli po-2027 sous Minimax fenêtre 17-18Z** (GO user 28/10 ~23Z, signal claudish posté 23:1xZ) — vérifier l'ack aux cycles suivants et mesurer l'effet sur le pic du soir (barre de comparaison : le plateau 🟠 du 28/10, KV 92-95 % ~100 min, préemptions 19-23).
