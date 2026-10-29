@@ -420,6 +420,73 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
+// Asymmetric K/V head widths. K and V are views of one packed buffer, so they
+// share a head stride and the head-contiguous path below cannot apply; this
+// kernel therefore walks heads explicitly and takes V's width as its one extra
+// argument. It is kept separate so the symmetric kernel's codegen is unchanged.
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void reshape_and_cache_flash_kernel_asym(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, v_head_size]
+    // NHD or HND: [num_blocks, block_size, num_heads, head_size], addressed
+    // through the strides passed by the launcher
+    cache_t* __restrict__ key_cache,
+    cache_t* __restrict__ value_cache,         // same, with v_head_size
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int64_t block_stride, const int64_t page_stride,
+    const int64_t head_stride, const int64_t key_stride,
+    const int64_t value_stride, const int num_heads, const int head_size,
+    const int v_head_size, const int block_size, const float* k_scale,
+    const float* v_scale, const int kv_scale_stride) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+
+  const scalar_t* __restrict__ key_src = key + token_idx * key_stride;
+  const scalar_t* __restrict__ value_src = value + token_idx * value_stride;
+
+  cache_t* __restrict__ key_dst =
+      key_cache + block_idx * block_stride + block_offset * page_stride;
+  cache_t* __restrict__ value_dst =
+      value_cache + block_idx * block_stride + block_offset * page_stride;
+
+  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+
+  const int lane = threadIdx.x & 31;     // 0..31 within warp
+  const int warp_id = threadIdx.x >> 5;  // warp index within block
+  const int warps_per_block = blockDim.x >> 5;
+
+  for (int head = warp_id; head < num_heads; head += warps_per_block) {
+    const scalar_t* __restrict__ k_src_h = key_src + head * head_size;
+    const scalar_t* __restrict__ v_src_h = value_src + head * v_head_size;
+
+    cache_t* __restrict__ k_dst_h =
+        key_dst + static_cast<int64_t>(head) * head_stride;
+    cache_t* __restrict__ v_dst_h =
+        value_dst + static_cast<int64_t>(head) * head_stride;
+
+    float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+                            ? 0.f
+                            : k_scale[head * kv_scale_stride];
+    float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+                            ? 0.f
+                            : v_scale[head * kv_scale_stride];
+
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+
+    vectorize_with_alignment<VEC_SIZE>(k_src_h, k_dst_h, head_size, lane, 32,
+                                       k_op);
+    vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, v_head_size, lane, 32,
+                                       v_op);
+  }
+}
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           bool skip_scale>
 __global__ void concat_and_cache_mla_kernel(
@@ -827,6 +894,20 @@ void reshape_and_cache(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
+#define CALL_RESHAPE_AND_CACHE_FLASH_ASYM(KV_T, CACHE_T, KV_DTYPE)           \
+  vllm::reshape_and_cache_flash_kernel_asym<KV_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                \
+          slot_mapping.const_data_ptr<int64_t>(), block_stride, page_stride, \
+          head_stride, key_stride, value_stride, num_heads, head_size,       \
+          v_head_size, block_size,                                           \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),                \
+          reinterpret_cast<const float*>(v_scale.data_ptr()),                \
+          kv_scale_stride);
+
 #define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)                \
   vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>              \
       <<<grid, block, 0, stream>>>(                                          \
@@ -864,6 +945,7 @@ void reshape_and_cache_flash(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+  int v_head_size = value.size(2);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       key.get_device_index());
@@ -897,8 +979,8 @@ void reshape_and_cache_flash(
   int64_t block_stride = key_cache.stride(0);
   int64_t page_stride = key_cache.stride(1);
   int64_t head_stride = key_cache.stride(2);
-  STD_TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
+  STD_TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
   STD_TORCH_CHECK(k_scale.sizes().equals(v_scale.sizes()),
                   "k_scale and v_scale must have the same shape");
   STD_TORCH_CHECK(k_scale.numel() == 1 || k_scale.numel() == num_heads,
@@ -906,10 +988,31 @@ void reshape_and_cache_flash(
   int kv_scale_stride = (k_scale.numel() > 1) ? 1 : 0;
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size, 512));
-
-  DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
-                             CALL_RESHAPE_AND_CACHE_FLASH);
+  // Only models with v_head_size != head_size take the kernel below; everything
+  // else keeps using the kernel above, so its codegen is untouched.
+  if (v_head_size == head_size) {
+    dim3 block(std::min(num_heads * head_size, 512));
+    DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
+                               CALL_RESHAPE_AND_CACHE_FLASH);
+  } else {
+    // V is a view of K's buffer, so the two must agree on geometry; these
+    // checks stay out of the symmetric path so its host-side work is unchanged.
+    STD_TORCH_CHECK(value_cache.stride(1) == page_stride,
+                    "key_cache and value_cache must share the page stride");
+    STD_TORCH_CHECK(key_cache.size(0) == value_cache.size(0) &&
+                        key_cache.size(1) == value_cache.size(1),
+                    "key_cache and value_cache must share block geometry");
+    STD_TORCH_CHECK(key.size(1) == value.size(1),
+                    "key and value must have the same number of heads");
+    STD_TORCH_CHECK(value_cache.stride(2) == head_stride,
+                    "key_cache and value_cache must share a head stride");
+    // Only the strided walk applies here, and V's width is the single extra
+    // argument. One warp per head, and at least one warp so the head loop
+    // always advances.
+    dim3 block(32 * std::min(num_heads, 16));
+    DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
+                               CALL_RESHAPE_AND_CACHE_FLASH_ASYM);
+  }
 }
 
 // KV_T is the data type of key and value tensors.
