@@ -78,6 +78,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
+from .engram_replacement import EngramReplacement, ReplacementShard
+
 logger = init_logger(__name__)
 
 # Per-rank token slot from which the Engram DP exchange switches from peer
@@ -1622,8 +1624,20 @@ class Engram(nn.Module):
         # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
         # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
         # suffix rule.
-        self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+        engram_config = get_current_vllm_config().engram_config
+        mode = engram_config.mode if engram_config is not None else "ngram"
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+        if mode == "ngram":
+            self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+        else:
+            # Replacement modes read no n-gram table: this stand-in only
+            # carries the shard geometry.
+            self.embed_tokens = ReplacementShard(
+                n_hash_cols,
+                layout.head_dim,
+                get_tensor_model_parallel_world_size(),
+                get_tensor_model_parallel_rank(),
+            )
         # Without sequence parallelism every TP rank holds every token, so
         # shard the output columns instead of replicating the projection.
         self.wkv = ColumnParallelLinear(
@@ -1647,6 +1661,17 @@ class Engram(nn.Module):
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
+        self.replacement: EngramReplacement | None = None
+        if mode != "ngram":
+            assert engram_config is not None
+            self.replacement = EngramReplacement(
+                mode,
+                layout.layer_ids[layer_hash_index],
+                self.embed_tokens,
+                layout.compressed_vocab_size,
+                engram_config.replacement_tables,
+                device=self.staged_rows.device,
+            )
 
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
@@ -1677,11 +1702,19 @@ class Engram(nn.Module):
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
         self._prefetch_done = torch.cuda.Event()
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
+    def prepare_embeddings(
+        self, hash_ids: torch.Tensor, comp_ids: torch.Tensor | None = None
+    ) -> None:
         """Look up, or prefetch from host memory, rows before the decoder layers
-        consume them; DP-sharded tables take the group's gathered hash IDs."""
+        consume them; DP-sharded tables take the group's gathered hash IDs.
+        In the replacement modes the rows come from the replacement instead;
+        ``comp_ids`` is the compressed id of each position's current token
+        (``per_token`` only)."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        if self.replacement is not None:
+            self.replacement.fill(rows, comp_ids)
+            return
         if self._prefetch_stream is None:
             self.embed_tokens.lookup(hash_ids, rows)
         else:
