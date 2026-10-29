@@ -1060,7 +1060,14 @@ class LocalSnapshotTools:
                 command[index : index + 2] == ("-m", "vllm.snapshot.server")
                 for index in range(len(command) - 1)
             ) or not any(
+                # The argv froze the create-side spelling, which may carry
+                # ".." segments the manifest backfill resolves away.
                 command[index : index + 2] == ("--release-file", release_file)
+                or (
+                    command[index : index + 1] == ("--release-file",)
+                    and os.path.normpath(command[index + 1])
+                    == os.path.normpath(release_file)
+                )
                 for index in range(len(command) - 1)
             ):
                 raise SnapshotRestoreError(
@@ -1200,7 +1207,12 @@ class LocalSnapshotTools:
             raise SnapshotRestoreError(f"snapshot work dir is a symlink: {work_dir}")
         if not work_dir.exists():
             try:
+                # Like create_work_dir: no directory under an ancestor
+                # another user can replace.
+                validate_artifact_root(work_dir, creating=True)
                 work_dir.mkdir(mode=0o700)
+            except SnapshotSecurityError as error:
+                raise SnapshotRestoreError(str(error)) from error
             except OSError as error:
                 raise SnapshotRestoreError(
                     f"snapshot work dir cannot be created: {work_dir}: {error}"

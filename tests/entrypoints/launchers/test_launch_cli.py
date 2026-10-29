@@ -1172,6 +1172,35 @@ def test_snapshot_restore_discards_a_temporary_work_dir_when_done(
     assert not work_dir.exists()
 
 
+def test_snapshot_restore_keeps_a_temporary_work_dir_when_it_fails(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(
+        artifact,
+        _manifest(
+            portable=True, work_dir=str(tmp_path / "work"), cleanup_work_dir=True
+        ),
+    )
+    args = argparse.Namespace(
+        snapshot_dir=str(artifact), host="127.0.0.1", port=9000, portable=True
+    )
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+
+    failing = _fake_snapshot_tools()
+    failing.restore.side_effect = SnapshotRestoreError("pin failed")
+
+    with pytest.raises(SnapshotRestoreError, match="pin failed"):
+        restore_snapshot(args, tools=failing)
+
+    # A failed restore leaves the directory behind: a tree the abort could
+    # not signal polls its release marker there, and the marker is the only
+    # signal that directory holds.
+    assert work_dir.is_dir()
+
+
 def test_snapshot_restore_keeps_a_work_dir_the_operator_named(
     tmp_path: Path,
 ):
@@ -1195,7 +1224,25 @@ def test_snapshot_restore_keeps_a_work_dir_the_operator_named(
     assert work_dir.is_dir()
 
 
-def test_snapshot_restore_reuses_a_work_dir_after_a_earlier_run(
+def test_snapshot_restore_refuses_a_work_dir_under_an_untrusted_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    parent = tmp_path / "public"
+    parent.mkdir()
+    parent.chmod(0o777)
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    manifest = _manifest(portable=True, work_dir=str(parent / "work"))
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
+
+    # The restore must not create it under a replaceable ancestor.
+    with pytest.raises(SnapshotRestoreError, match="world-writable ancestor"):
+        tools.restore(artifact, manifest)
+
+
+def test_snapshot_restore_reuses_a_work_dir_after_an_earlier_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _mark_snapshot_pids_free(monkeypatch)
@@ -2493,6 +2540,35 @@ def test_snapshot_manifest_round_trips_attachments(tmp_path: Path):
     (artifact / "manifest.json").write_text(json.dumps(legacy))
 
     assert read_manifest(artifact).attachments == ()
+
+
+def test_snapshot_read_manifest_backfills_a_legacy_in_place_artifact(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    legacy = _manifest().model_dump(mode="json")
+    for key in ("portable", "work_dir", "cleanup_work_dir"):
+        del legacy[key]
+    (artifact / "manifest.json").write_text(json.dumps(legacy))
+
+    # Pre-work-dir artifacts kept their control files in the artifact.
+    manifest = read_manifest(artifact)
+    assert manifest.portable is False
+    assert manifest.work_dir == str(artifact)
+    assert manifest.cleanup_work_dir is False
+
+
+def test_snapshot_read_manifest_refuses_a_partial_work_dir(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    partial = _manifest().model_dump(mode="json")
+    del partial["cleanup_work_dir"]
+    (artifact / "manifest.json").write_text(json.dumps(partial))
+
+    # Some but not all fields: no format the feature ever wrote.
+    with pytest.raises(SnapshotCompatibilityError, match="cleanup_work_dir"):
+        read_manifest(artifact)
 
 
 def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(

@@ -30,6 +30,9 @@ class SnapshotSecurityError(RuntimeError):
 
 
 _MAX_PID = 2**31 - 1
+# Manifest fields _backfill_legacy_fields fills in for artifacts written
+# before the work-dir abstraction existed.
+_WORK_DIR_FIELDS = frozenset({"portable", "work_dir", "cleanup_work_dir"})
 _PositivePid = Annotated[int, Field(gt=0, le=_MAX_PID)]
 _OracleTokenId = Annotated[int, Field(ge=0)]
 
@@ -286,6 +289,20 @@ def write_manifest_atomic(path: Path, manifest: SnapshotManifest) -> None:
         ) from error
 
 
+def _backfill_legacy_fields(payload: object, path: Path) -> dict[str, Any] | None:
+    """Fill in manifest fields an artifact's era predates, or return None.
+
+    An artifact from before the work-dir fields existed kept its control
+    files in the artifact itself. A payload carrying some but not all of
+    the fields is no format the feature ever wrote and returns None.
+    """
+    if not (isinstance(payload, dict) and not _WORK_DIR_FIELDS & payload.keys()):
+        return None
+    payload["work_dir"] = os.path.abspath(path)
+    payload["cleanup_work_dir"] = False
+    return payload
+
+
 def read_manifest(path: Path) -> SnapshotManifest:
     """Read a snapshot published by atomically installing its manifest."""
     path = Path(path)
@@ -302,11 +319,18 @@ def read_manifest(path: Path) -> SnapshotManifest:
         ) from error
     try:
         with os.fdopen(file_descriptor, encoding="utf-8") as manifest_file:
-            payload = manifest_file.read()
+            raw = manifest_file.read()
     except UnicodeDecodeError as error:
         raise SnapshotCompatibilityError("invalid snapshot manifest: JSON") from error
     try:
-        return SnapshotManifest.model_validate_json(payload, strict=True)
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SnapshotCompatibilityError("invalid snapshot manifest: JSON") from error
+    backfilled = _backfill_legacy_fields(payload, path)
+    if backfilled is not None:
+        raw = json.dumps(backfilled)
+    try:
+        return SnapshotManifest.model_validate_json(raw, strict=True)
     except ValidationError as error:
         raise SnapshotCompatibilityError(
             f"invalid snapshot manifest: {_validation_path(error)}"
