@@ -116,42 +116,20 @@ def _slice_input_batch(
 
     query_start_loc = query_start_loc_buf[: num_reqs_padded + 1]
     seq_lens = seq_lens_buf[:num_reqs_padded]
-    if query_start_loc.is_cuda:
-        _slice_query_and_seq_lens_kernel[(triton.cdiv(num_reqs_padded + 1, 128),)](
-            input_batch.query_start_loc,
-            input_batch.seq_lens,
-            query_start_loc,
-            seq_lens,
-            req_start,
-            req_stop,
-            tok_start,
-            tok_stop,
-            BLOCK_SIZE=128,
-        )
-    else:
-        _slice_query_start_loc(
-            input_batch.query_start_loc,
-            query_start_loc,
-            req_start,
-            req_stop,
-            tok_start,
-            num_tokens_padded,
-        )
-        _slice_seq_lens(
-            input_batch.seq_lens,
-            seq_lens,
-            input_batch.query_start_loc,
-            req_start,
-            req_stop,
-            tok_stop,
-        )
+    _slice_query_and_seq_lens(
+        input_batch.query_start_loc,
+        input_batch.seq_lens,
+        query_start_loc,
+        seq_lens,
+        ubatch_slice,
+    )
     query_start_loc_np = np.clip(
         input_batch.query_start_loc_np[req_start : req_stop + 1] - tok_start,
         0,
         num_tokens_padded,
     ).astype(np.int32)
 
-    # Same truncation as `_slice_seq_lens`, on the host-side upper bound.
+    # Same truncation as `_slice_query_and_seq_lens`, on the host-side bound.
     seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
         req_start:req_stop
     ].clone()
@@ -215,7 +193,38 @@ def _slice_input_batch(
     )
 
 
-@triton.jit
+def _slice_query_and_seq_lens(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_start_loc_out: torch.Tensor,
+    seq_lens_out: torch.Tensor,
+    ubatch_slice: UBatchSlice,
+) -> None:
+    """Rebase query_start_loc onto the microbatch's token range and slice
+    seq_lens, shortening the request truncated at the end of the microbatch.
+
+    Only tokens past the end of this microbatch are missing; tokens it owns in
+    an *earlier* microbatch are computed before this one reads them, so they
+    still count. The truncation is read from the device query offsets, not
+    host ints, so this stays valid inside a CUDA graph.
+    """
+    BLOCK_SIZE = 128
+    num_blocks = triton.cdiv(query_start_loc_out.shape[0], BLOCK_SIZE)
+    _slice_query_and_seq_lens_kernel[(num_blocks,)](
+        query_start_loc,
+        seq_lens,
+        query_start_loc_out,
+        seq_lens_out,
+        ubatch_slice.request_slice.start,
+        ubatch_slice.request_slice.stop,
+        ubatch_slice.token_slice.start,
+        ubatch_slice.token_slice.stop,
+        BLOCK_SIZE,
+    )
+
+
+# The slice bounds change every step; specializing on them would recompile.
+@triton.jit(do_not_specialize=["req_start", "req_stop", "tok_start", "tok_stop"])
 def _slice_query_and_seq_lens_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
@@ -227,61 +236,22 @@ def _slice_query_and_seq_lens_kernel(
     tok_stop,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Write rebased query offsets and truncated lengths into persistent buffers."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     num_reqs = req_stop - req_start
     query_start_loc = tl.load(
-        query_start_loc_ptr + req_start + offsets, offsets <= num_reqs, other=0
+        query_start_loc_ptr + req_start + offsets, mask=offsets <= num_reqs
     )
     query_start_loc = tl.minimum(
         tl.maximum(query_start_loc - tok_start, 0), tok_stop - tok_start
     )
-    tl.store(query_start_loc_out_ptr + offsets, query_start_loc, offsets <= num_reqs)
+    tl.store(
+        query_start_loc_out_ptr + offsets, query_start_loc, mask=offsets <= num_reqs
+    )
 
-    seq_lens = tl.load(seq_lens_ptr + req_start + offsets, offsets < num_reqs, other=0)
-    # Only the last request loses tokens; earlier microbatches' tokens still count.
+    seq_lens = tl.load(seq_lens_ptr + req_start + offsets, mask=offsets < num_reqs)
     truncated = tl.maximum(tl.load(query_start_loc_ptr + req_stop) - tok_stop, 0)
     seq_lens -= tl.where(offsets == num_reqs - 1, truncated, 0)
-    tl.store(seq_lens_out_ptr + offsets, seq_lens, offsets < num_reqs)
-
-
-def _slice_query_start_loc(
-    query_start_loc: torch.Tensor,
-    out: torch.Tensor,
-    req_start: int,
-    req_stop: int,
-    tok_start: int,
-    num_tokens_padded: int,
-) -> torch.Tensor:
-    """Rebase query_start_loc onto the microbatch's token range.
-
-    The clamp truncates the requests straddling either boundary to the tokens
-    this microbatch owns.
-    """
-    torch.sub(query_start_loc[req_start : req_stop + 1], tok_start, out=out)
-    return out.clamp_(0, num_tokens_padded)
-
-
-def _slice_seq_lens(
-    seq_lens: torch.Tensor,
-    out: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    req_start: int,
-    req_stop: int,
-    tok_stop: int,
-) -> torch.Tensor:
-    """Slice seq_lens, shortening the request truncated at the boundary.
-
-    Only tokens past the end of this microbatch are missing; tokens it owns in
-    an *earlier* microbatch are computed before this one reads them, so they
-    still count. Deriving the truncation from this microbatch's own query
-    lengths would subtract them twice. It is computed from tensors, not Python
-    ints, so this stays valid inside a CUDA graph.
-    """
-    out.copy_(seq_lens[req_start:req_stop])
-    last = req_stop - req_start - 1
-    out[last] -= (query_start_loc[req_stop] - tok_stop).clamp_(min=0)
-    return out
+    tl.store(seq_lens_out_ptr + offsets, seq_lens, mask=offsets < num_reqs)
 
 
 def slice_model_inputs(
