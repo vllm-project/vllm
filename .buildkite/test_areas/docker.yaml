@@ -9,15 +9,21 @@ steps:
   source_file_dependencies:
     - .buildkite/release-pipeline.yaml
     - .buildkite/scripts/docker-build-metadata-args.sh
+    - .buildkite/scripts/rocm/build-config.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
+    - tests/tools/test_kernel_symbol_map.py
+    - tools/ci/kernel_symbol_map.py
+    - tools/ci/rocm_kernel_symbol_map.py
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py
+    - pytest -v -s tools/test_kernel_symbol_map.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
+      dind: false
       device: mi250_1
       no_gpu: true
       timeout_in_minutes: 35
@@ -31,3 +37,6 @@ steps:
       - docker/ci-rocm.hcl
       - docker/docker-bake-rocm.hcl
       - tests/tools/test_docker_build_metadata_args.py
+      - tests/tools/test_kernel_symbol_map.py
+      - tools/ci/kernel_symbol_map.py
+      - tools/ci/rocm_kernel_symbol_map.py

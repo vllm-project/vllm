@@ -52,6 +52,32 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
+class KvHintAction(msgspec.Struct, frozen=True):
+    action_id: str
+    action_type: str
+    action_version: str
+    payload: dict[str, object]
+
+
+class KvHintsEnvelope(msgspec.Struct, frozen=True):
+    protocol_version: str
+    message_id: str
+    actions: list[KvHintAction]
+
+
+class LoRARequest(
+    msgspec.Struct,
+    omit_defaults=True,
+    array_like=True,
+):
+    lora_name: str
+    lora_int_id: int
+    lora_path: str = ""
+    base_model_name: str | None = None
+    load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -63,7 +89,7 @@ class EngineCoreRequest(
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
     arrival_time: float
-    lora_request: object | None = None
+    lora_request: LoRARequest | None = None
     cache_salt: str | None = None
     data_parallel_rank: int | None = None
     prompt_embeds: object | None = None
@@ -78,6 +104,14 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
+
+
+@dataclass(frozen=True)
+class RequestError:
+    code: str
+    message: str
+    retryable: bool = False
 
 
 class EngineCoreOutput(
@@ -102,6 +136,8 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
+    prompt_token_id_logprobs: object | None = None
+    error: RequestError | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -124,6 +160,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    weight_version: str | None = None
 
 
 request = EngineCoreRequest(
@@ -153,6 +190,18 @@ request = EngineCoreRequest(
     arrival_time=42.5,
     client_index=0,
     session_id="session-1",
+    kv_hints=KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={"key": "value"},
+            )
+        ],
+    ),
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -163,6 +212,30 @@ defaults_request = EngineCoreRequest(
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
     arrival_time=1.0,
+)
+
+# Embedded in a full request so the fixture also pins the `lora_request` slot.
+lora_request = EngineCoreRequest(
+    request_id="req-lora",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=2.0,
+    lora_request=LoRARequest(
+        lora_name="adapter-a",
+        lora_int_id=3,
+        lora_path="/adapters/a",
+        base_model_name="base-model",
+        load_inplace=True,
+        is_3d_lora_weight=True,
+    ),
+)
+inplace_lora_request = LoRARequest(
+    lora_name="adapter-b",
+    lora_int_id=4,
+    lora_path="/adapters/b",
+    load_inplace=True,
 )
 
 multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
@@ -209,10 +282,17 @@ outputs = EngineCoreOutputs(
         EngineCoreOutput(
             request_id="req-1",
             new_token_ids=[7, 8],
-            finish_reason=FinishReason.LENGTH,
+            finish_reason=FinishReason.ERROR,
+            error=RequestError("engine_paused", "Generation is paused.", True),
+            routed_experts=[
+                np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
+                [2, 1, 2],
+                msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
+            ],
         )
     ],
     finished_requests={"req-1"},
+    weight_version="v7",
 )
 
 extended_outputs = EngineCoreOutputs(
@@ -225,6 +305,7 @@ extended_outputs = EngineCoreOutputs(
         )
     ],
     finished_requests=outputs.finished_requests,
+    weight_version=outputs.weight_version,
 )
 extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.
@@ -234,13 +315,9 @@ sampling_mask_wire = [
     [
         "<i4",
         [5],
-        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
     ],
-    [
-        "<i8",
-        [2],
-        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
-    ],
+    None,
     None,
 ]
 outputs_with_sampling_mask = EngineCoreOutputs(
@@ -447,6 +524,7 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -481,6 +559,12 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
 )
 
 nixl_stats = {
@@ -489,8 +573,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [
@@ -503,8 +589,17 @@ mooncake_stats = {
         }
     ]
 }
+mooncake_transfer_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [1],
+    "num_failed_recvs": [],
+    "num_kv_expired_reqs": [1],
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
+    "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
@@ -530,6 +625,9 @@ print(
 )
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
+print(msgspec.msgpack.encode(lora_request).hex())
+print(msgspec.msgpack.encode(inplace_lora_request).hex())

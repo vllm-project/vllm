@@ -6,7 +6,6 @@ Run `pytest tests/kernels/quantization/test_marlin_tile_padding.py`.
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -16,9 +15,11 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     mxfp4_round_up_hidden_size_and_intermediate_size,
 )
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
+    get_marlin_workspace,
     marlin_make_empty,
     marlin_make_workspace_new,
     marlin_moe_padded_intermediate,
@@ -194,36 +195,34 @@ def test_marlin_moe_pad_helpers_shapes():
 @pytest.mark.parametrize("intermediate", [32, 64, 96, 192, 256, 288, 576])
 @pytest.mark.parametrize("act_dtype", [None, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "backend,platform,capability,input_dtype,alignment",
-    [
-        (Mxfp4MoeBackend.MARLIN, "cuda", 90, None, 64),
-        (Mxfp4MoeBackend.MARLIN, "cuda", 89, None, 128),
-        (Mxfp4MoeBackend.MARLIN, "cuda", 120, torch.float8_e4m3fn, 128),
-        (Mxfp4MoeBackend.MARLIN, "cuda", 90, torch.float8_e4m3fn, 128),
-        (Mxfp4MoeBackend.MARLIN, "xpu", None, None, 128),
-        (Mxfp4MoeBackend.BATCHED_MARLIN, "cuda", 90, None, 128),
-    ],
+    "backend", [Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN]
 )
+@pytest.mark.parametrize("input_dtype", [None, "int8", "fp8"])
 def test_mxfp4_marlin_intermediate_allocation(
-    intermediate, act_dtype, backend, platform, capability, input_dtype, alignment
+    intermediate, act_dtype, backend, input_dtype, monkeypatch
 ):
-    """Avoid an extra W4A16 tile without changing unvalidated backends."""
-    module = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-    with (
-        patch(f"{module}.current_platform.is_cuda", return_value=platform == "cuda"),
-        patch(f"{module}.current_platform.is_xpu", return_value=platform == "xpu"),
-        patch(
-            f"{module}.current_platform.is_device_capability",
-            side_effect=lambda cc: capability == cc,
-        ),
-        patch(f"{module}.get_marlin_input_dtype", return_value=input_dtype),
-    ):
-        hidden, padded = mxfp4_round_up_hidden_size_and_intermediate_size(
-            backend, 5119, intermediate, act_dtype=act_dtype
-        )
+    """Check allocation guards using the actual device and user input mode."""
+    if input_dtype is None:
+        monkeypatch.delenv("VLLM_MARLIN_INPUT_DTYPE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", input_dtype)
+    eligible = (
+        backend == Mxfp4MoeBackend.MARLIN
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and act_dtype == torch.bfloat16
+    )
+    if eligible and input_dtype == "fp8":
+        with pytest.raises(ValueError, match="W4A8-FP8 only support SM89 or SM12x"):
+            mxfp4_round_up_hidden_size_and_intermediate_size(
+                backend, 5119, intermediate, act_dtype=act_dtype
+            )
+        return
+    hidden, padded = mxfp4_round_up_hidden_size_and_intermediate_size(
+        backend, 5119, intermediate, act_dtype=act_dtype
+    )
     assert hidden == 5120
-    if act_dtype != torch.bfloat16:
-        alignment = 128
+    alignment = 64 if eligible and input_dtype is None else 128
     assert padded == (intermediate + alignment - 1) // alignment * alignment
     assert _is_tile_aligned(2 * padded, hidden)
     assert _is_tile_aligned(hidden, padded)
@@ -277,7 +276,7 @@ def test_mxfp4_marlin_moe_padded_round_trip(shape, m, monkeypatch):
         )
 
     pw13, pw2, ps13, ps2, _, _ = prepare_moe_mxfp4_layer_for_marlin(
-        SimpleNamespace(params_dtype=dtype),
+        LinearBase(k, 2 * padded_n, params_dtype=dtype, disable_tp=True),
         pad_gate_up(weights[0]),
         torch.nn.functional.pad(weights[1], (0, (padded_n - n) // 2)),
         pad_gate_up(scales[0]),
@@ -302,7 +301,7 @@ def test_mxfp4_marlin_moe_padded_round_trip(shape, m, monkeypatch):
         quant_type_id=scalar_types.float4_e2m1f.id,
     )
     with set_current_vllm_config(VllmConfig()):
-        ref = torch_experts(a, *references, topk_weights, topk_ids)
+        ref = torch_experts(a, references[0], references[1], topk_weights, topk_ids)
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)
 
 
@@ -345,7 +344,7 @@ def test_fp8_marlin_padded_round_trip(shape, use_bias):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
         bias=layer.bias if use_bias else None,
@@ -408,7 +407,7 @@ def test_nvfp4_marlin_padded_round_trip(shape):
         weight=layer.weight,
         weight_scale=layer.weight_scale,
         weight_global_scale=layer.weight_global_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
     )
@@ -512,7 +511,7 @@ def test_fp8_block_marlin_padded_round_trip(shape):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale_inv,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
         bias=None,
@@ -527,7 +526,9 @@ def test_fp8_block_marlin_padded_round_trip(shape):
     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
     reason="FP8 Marlin is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("shape", [(200, 288), (4640, 512)])
+@pytest.mark.parametrize(
+    "shape", [(32, 256), (96, 256), (130, 256), (200, 288), (4640, 512)]
+)
 def test_mxfp8_marlin_padded_round_trip(shape):
     """MXFP8 exercises the e8m0 scale path, where padded 0.0 scales clamp to
     2^-127 instead of zero and must still contribute nothing."""
@@ -560,7 +561,7 @@ def test_mxfp8_marlin_padded_round_trip(shape):
         input=x,
         weight=layer.weight,
         weight_scale=layer.weight_scale,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(layer.weight.device),
         size_n=size_n,
         size_k=size_k,
     )
@@ -641,7 +642,7 @@ def test_check_marlin_supports_layer_allow_tile_padding():
     )
 
     # Tile-misaligned but group-aligned: rejected strictly, allowed w/ padding
-    layer = _FakeLinear(4640, 512, input_size=2048)
+    layer: LinearBase = _FakeLinear(4640, 512, input_size=2048)
     assert not check_marlin_supports_layer(layer, 128)
     assert check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
     assert check_marlin_supports_layer(layer, -1, allow_tile_padding=True)
@@ -876,7 +877,7 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(device),
     )
     with set_current_vllm_config(VllmConfig()):
         ref = torch_experts(
@@ -953,7 +954,7 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        workspace=layer.workspace,
+        workspace=get_marlin_workspace(device),
     )
     with set_current_vllm_config(VllmConfig()):
         ref = torch_experts(

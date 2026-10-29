@@ -15,6 +15,45 @@ from vllm.multimodal.parse import (
 H, W = 480, 640
 
 
+class AudioMetadataParser(MultiModalDataParser):
+    embedding_fields = {
+        "audio": {"audio_embeds": "values", "audio_num_tokens": "metadata"},
+    }
+
+
+@pytest.mark.parametrize("allow_missing", [False, True])
+def test_audio_metadata_requires_ec_consumer(allow_missing):
+    parser = AudioMetadataParser(allow_missing_mm_embeddings=allow_missing)
+    data = {"audio_num_tokens": torch.tensor([[3], [5]])}
+    if not allow_missing:
+        with pytest.raises(ValueError, match="audio_embeds"):
+            parser.parse_mm_data({"audio": data})
+    else:
+        items = parser.parse_mm_data({"audio": data})["audio"]
+        assert len(items) == 2
+        assert items.get(1)["audio_num_tokens"].item() == 5
+        assert items.get_processor_data() == {}
+
+
+@pytest.mark.parametrize("counts", [[0], [-1], [1.5], [True], [[1, 2]]])
+def test_audio_metadata_rejects_invalid_token_counts(counts):
+    parser = AudioMetadataParser(allow_missing_mm_embeddings=True)
+    with pytest.raises(ValueError, match="positive integer"):
+        parser.parse_mm_data({"audio": {"audio_num_tokens": torch.tensor(counts)}})
+
+
+def test_audio_metadata_checks_supplied_embedding_lengths():
+    parser = AudioMetadataParser()
+    data = {
+        "audio_num_tokens": torch.tensor([3, 5]),
+        "audio_embeds": [torch.zeros(3, 8), torch.zeros(5, 8)],
+    }
+    assert len(parser.parse_mm_data({"audio": data})["audio"]) == 2
+    data["audio_num_tokens"] = torch.tensor([3, 4])
+    with pytest.raises(ValueError, match="does not match"):
+        parser.parse_mm_data({"audio": data})
+
+
 @pytest.mark.parametrize(
     "image",
     [

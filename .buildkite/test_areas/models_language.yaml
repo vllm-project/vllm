@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Language Models (Standard)"
   key: language-models-tests-standard
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -11,21 +12,24 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language
   commands:
-    # Test standard language models, excluding a subset of slow tests
+    # Test standard language models, excluding a subset of slow tests.
+    # The exclusion sits in -k so the shard planner reads -m as picking tests.
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and (not slow_test)'
+    - pytest -v -s models/language -m core_model -k 'not slow_test'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Standard)"
+      label: ":amd: (MI355 DPX) Language Models (Standard)"
+      automatic_shard: true
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard)"
   device: h200_35gb
   key: language-models-tests-extra-standard
+  automatic_shard: true
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -36,13 +40,13 @@ steps:
     # Shard slow subset of standard language models tests. Only run when model
     # source is modified, or when specified test files are modified
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+    - pytest -v -s models/language -m 'core_model and slow_test'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extra Standard) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Extra Standard)"
+      automatic_shard: true
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -82,16 +86,16 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Hybrid) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Hybrid) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       commands:
       - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-      - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+      - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 # Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
 # autotuning (https://github.com/vllm-project/vllm/issues/25194). Keep this one
@@ -111,8 +115,29 @@ steps:
     - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
     - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
+      dind: false
+      device: mi355_dpx
+      num_devices: 1
+      timeout_in_minutes: 80
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - "!vllm/distributed/kv_transfer/"
+      - tests/models/language/generation
+      commands:
+      - export GIT_CONFIG_COUNT=1
+      - export GIT_CONFIG_KEY_0=http.version
+      - export GIT_CONFIG_VALUE_0=HTTP/1.1
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Generation)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
   timeout_in_minutes: 80
@@ -130,9 +155,9 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Extended Generation)"
+      label: ":amd: (MI355 DPX) Language Models (Extended Generation)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd
@@ -141,7 +166,7 @@ steps:
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (PPL)"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)"
   key: language-models-test-ppl
   timeout_in_minutes: 30
   device: h200_18gb
@@ -155,20 +180,20 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (PPL)"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
       - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/qwen3_next_mtp.py
-      - vllm/model_executor/layers/fla/ops/
+      - vllm/third_party/flash_linear_attention/ops/
       - vllm/_aiter_ops.py
       - vllm/v1/attention/backends/triton_attn.py
       - vllm/v1/attention/backends/rocm_attn.py
@@ -179,31 +204,38 @@ steps:
       - vllm/platforms/rocm.py
       - tests/models/language/generation_ppl_test
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Pooling)"
   device: h200_35gb
   key: language-models-test-extended-pooling
+  automatic_shard: true
   timeout_in_minutes: 120
-  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    # Per-test timeout: a hung test fails with a stack dump instead of holding
+    # the job until Buildkite cancels it, which also blocks the full run's
+    # coverage collection. A whole shard takes 12-21 minutes.
+    - pytest -v -s models/language/pooling -m 'not core_model' --timeout=900 --timeout-method=thread
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extended Pooling) Shard %N"
+      parallelism: 4
+      commands:
+        - "pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+      label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (MTEB)"
   key: language-models-test-mteb
+  automatic_shard: true
   timeout_in_minutes: 68
-  device: h200_18gb
+  device: h200_35gb
   optional: true
   source_file_dependencies:
   - vllm/
@@ -214,6 +246,8 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (MTEB)"
+      automatic_shard: true
+      dind: false
       device: mi250_1
       timeout_in_minutes: 60
       depends_on:

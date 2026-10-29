@@ -162,6 +162,9 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
     """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    # These tests exercise the V1-interface logits processor; Model Runner V2
+    # rejects V1-interface processors at load time by design.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     set_random_seed(40)
 
     # Choose LLM args based on logitproc source
@@ -217,6 +220,9 @@ def test_custom_logitsprocs_req(monkeypatch):
     """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    # These tests exercise the V1-interface logits processor; Model Runner V2
+    # rejects V1-interface processors at load time by design.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     set_random_seed(40)
     _run_test(
         {"logits_processors": [WrappedPerReqLogitsProcessor]}, logitproc_loaded=True
@@ -261,6 +267,9 @@ def test_rejects_custom_logitsprocs(
 
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # These tests exercise V1-interface rejection and V1 runner internals;
+    # Model Runner V2 rejects V1-interface processors at load time by design.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     set_random_seed(40)
 
     test_params: dict[str, dict[str, Any]] = {

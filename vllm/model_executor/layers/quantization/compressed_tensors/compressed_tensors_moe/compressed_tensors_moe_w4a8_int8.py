@@ -30,7 +30,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_weight_attrs,
+)
 
 logger = init_logger(__name__)
 
@@ -203,47 +208,17 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             )
         )
 
-        # Register packed weights as parameters
-        replace_parameter(
-            layer,
-            "w13_weight_packed",
-            torch.nn.Parameter(w13_packed, requires_grad=False),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_packed",
-            torch.nn.Parameter(w2_packed, requires_grad=False),
-        )
-
-        replace_parameter(
-            layer, "w13_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        )
-        replace_parameter(
-            layer, "w2_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        )
-        replace_parameter(
-            layer,
-            "w13_weight_scale",
-            torch.nn.Parameter(w13_weight_scale, requires_grad=False),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_scale",
-            torch.nn.Parameter(w2_weight_scale, requires_grad=False),
-        )
-
+        # The packed weights (with scales and biases folded in) go into the loaded
+        # weight storage, one param under both names; the rest keep their data.
+        for name, packed in (("w13", w13_packed), ("w2", w2_packed)):
+            replace_parameter(layer, f"{name}_weight", packed)
+            del layer._parameters[f"{name}_weight_packed"]  # never-loaded placeholder
+            move_parameter(layer, f"{name}_weight", f"{name}_weight_packed")
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            retire_parameter(layer, name)
         if self.has_bias:
-            replace_parameter(
-                layer,
-                "w13_bias",
-                torch.nn.Parameter(w13_bias, requires_grad=False),
-            )
-        if self.has_bias:
-            replace_parameter(
-                layer,
-                "w2_bias",
-                torch.nn.Parameter(w2_bias, requires_grad=False),
-            )
+            retire_parameter(layer, "w13_bias")
+            retire_parameter(layer, "w2_bias")
 
         quant_config = self.get_fused_moe_quant_config(layer)
         assert quant_config is not None
@@ -287,6 +262,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(

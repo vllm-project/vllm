@@ -176,6 +176,7 @@ class DFlashGroupedConv(nn.Module):
         block_size: int,
         params_dtype: torch.dtype,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         if hidden_size % group_size:
@@ -195,7 +196,7 @@ class DFlashGroupedConv(nn.Module):
             2 * taps * self.num_groups,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "kernel_projection"),
             return_bias=False,
         )
@@ -254,6 +255,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             # Query tokens per request: the bonus token plus the mask tokens.
             block_size=1 + speculative_config.num_speculative_tokens,
             params_dtype=vllm_config.model_config.dtype,
+            quant_config=quant_config,
         )
         self.attention_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
@@ -294,6 +296,10 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
+    # A request still in chunked prefill anchors on its next prompt token, which
+    # can lie past the draft vocabulary (an audio placeholder, say). Its draft is
+    # discarded, so only keep the codebook lookup in range.
+    anchor_token_ids = anchor_token_ids.clamp(0, predecessor_table.shape[0] - 1)
     successors = successor_table[candidate_ids]
     predecessor_ids = torch.cat(
         (
@@ -397,8 +403,10 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         draft_config = self.config.dflash_config
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
+        # Candidates index the selector codebooks, which have the draft's
+        # vocabulary; the target's vocabulary can be larger.
         self.candidate_logits_processor = LogitsProcessor(
-            vllm_config.model_config.get_vocab_size(),
+            min(vllm_config.model_config.get_vocab_size(), self.config.vocab_size),
             scale=float(draft_config.get("output_multiplier", 1.0)),
             soft_cap=softcap if softcap > 0 else None,
         )

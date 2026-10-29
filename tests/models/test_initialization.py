@@ -1,21 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+from collections.abc import Generator
 from functools import partial
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm import LLM
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
+from vllm.v1.core.kv_cache_planning import (
+    get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
+from ..utils import (
+    create_new_process_for_each_test,
+    requires_spawn_multiprocessing,
+    wait_for_gpu_memory_to_clear,
+    wait_for_memory_to_settle,
+)
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
@@ -23,6 +34,8 @@ from .registry import (
     HfExampleModels,
 )
 from .utils import dummy_hf_overrides
+
+logger = init_logger(__name__)
 
 # This minimal list of model architectures is smaller than the total list of
 # supported models. The intention is that in the "typical" regression testing
@@ -51,6 +64,37 @@ MINIMAL_MODEL_ARCH_LIST = [
 OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
     MINIMAL_MODEL_ARCH_LIST
 )
+
+
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
+    """Reclaim GPU memory left over by each test's forked subprocess.
+
+    These tests are known to leave behind GPU memory (see the comment at
+    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
+    when the subprocess exits, so the leftovers can OOM a later test in this
+    module (observed with the heavier multimodal archs, e.g.
+    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    top-level conftest, but unconditionally for this module.
+    """
+    yield
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    torch.accelerator.empty_cache()
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        wait_for_memory_to_settle()
+        return
+    try:
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(torch.accelerator.device_count())),
+            threshold_ratio=0.1,
+        )
+    except Exception as e:
+        # NVML is not usable on MIG slices (raises NVMLError_NoPermission);
+        # cleanup is best-effort, so never fail a test over it.
+        logger.info("Failed to clean GPU memory: %s", e)
 
 
 @create_new_process_for_each_test()
@@ -87,11 +131,16 @@ def can_initialize(
             self.model_executor.get_supported_kv_cache_layouts(),
             [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(
+            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
+            global_kv_cache_groups,
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
@@ -130,6 +179,20 @@ def can_initialize(
                 f"for FLASHMLA_SPARSE backend. Current device has compute "
                 f"capability {capability.major}.{capability.minor}"
             )
+
+    if model_arch == "Step5ForConditionalGeneration":
+        from vllm.platforms import current_platform
+        from vllm.platforms.interface import DeviceCapability
+
+        if (
+            not current_platform.is_cuda()
+            or current_platform.get_device_capability()
+            not in (
+                DeviceCapability(9, 0),
+                DeviceCapability(10, 3),
+            )
+        ):
+            pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform

@@ -7,22 +7,21 @@ import mmap
 import socket
 import time
 import uuid
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from kvcr import (
     DURATION_METRIC,
     KVCR,
     ROUTER_HINT_CAPABILITIES,
-    ROUTER_HINT_KEY,
     STATE_METRIC,
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
     KVCRBindings,
+    ZmqPeerControlChannel,
 )
 from kvcr.config import (
-    FrameworkDramInput,
     G3Options,
     KeyAdapter,
     KVCRBackendConfigs,
@@ -31,7 +30,6 @@ from kvcr.config import (
     LocalDramOptions,
     RemoteFWDramOptions,
 )
-from kvcr.control_channels import ZmqPeerControlChannel
 from kvcr.policy import (
     FIFOPolicy,
     G3FIFOPolicy,
@@ -43,11 +41,13 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
-    MemDescriptor,
+    KVCRStartupError,
+    MemoryRef,
     OpHandle,
     PinRequestId,
     PinResult,
     QueryStatus,
+    RegionDescriptor,
 )
 from typing_extensions import override
 
@@ -73,6 +73,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_block_hash,
 )
+from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
@@ -82,6 +83,7 @@ from vllm.v1.kv_offload.tiering.base import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
 _REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
@@ -177,7 +179,7 @@ class _FrameworkPinAdapter:
 
     def _resolve_pin(
         self, parent: ParentManager, keys: Collection[BlockKey]
-    ) -> tuple[str, dict[BlockKey, list[MemDescriptor] | None]] | None:
+    ) -> tuple[str, dict[BlockKey, list[MemoryRef] | None]] | None:
         offload_keys = tuple(OffloadKey(bytes(key)) for key in keys)
         request_id = f"kvcr-source:{self._next_request_id}"
         self._next_request_id += 1
@@ -198,20 +200,17 @@ class _FrameworkPinAdapter:
 
             job = parent.create_store_job(hit_keys, req_context)
             job_keys = tuple(job.keys)
-            chunk_ids = tuple(int(chunk_id) for chunk_id in job.chunk_ids)
-            if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
+            if len(job_keys) != len(job.chunk_ids) or (
+                job_keys is not hit_keys and set(job_keys) != set(hit_keys)
+            ):
                 return None
 
-            descriptors: dict[BlockKey, list[MemDescriptor] | None] = {
-                BlockKey(bytes(key)): None for key in offload_keys
-            }
-            descriptors.update(
-                (
-                    BlockKey(bytes(key)),
-                    [self._tier._make_descriptor(chunk_id)],
-                )
-                for key, chunk_id in zip(job_keys, chunk_ids)
+            descriptors: dict[BlockKey, list[MemoryRef] | None] = dict.fromkeys(
+                cast(tuple[BlockKey, ...], offload_keys)
             )
+            make_descriptor = self._tier._make_descriptor
+            for key, chunk_id in zip(job_keys, job.chunk_ids.tolist()):
+                descriptors[BlockKey(key)] = [make_descriptor(chunk_id)]
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
             return pin_handle, descriptors
@@ -257,12 +256,24 @@ class _VllmKeyAdapter:
         return maybe_convert_block_hash(block_hash)
 
 
-# Job ID, remaining blocks, aggregate success, and successful load keys.
-_JobState = tuple[int, int, bool, set[OffloadKey] | None]
+# Job metadata, remaining blocks, aggregate success, and successful load keys.
+_JobState = tuple[TransferJob, int, bool, set[OffloadKey] | None]
+
+
+# Held for the process lifetime after a startup failure that could not stop
+# native work: an export blocks close() and keeps the mapping alive against GC,
+# so nothing can unmap memory NIXL may still be writing into.
+_RETAINED_NATIVE_BUFFERS: list[object] = []
 
 
 class KVCRSecondaryTierManager(SecondaryTierManager):
     """Secondary tier wrapper around the KVCR KV P2P API."""
+
+    # Serves framework pin requests from serve_external_requests(), but only
+    # once per step for now: opting in would also poll the KVCR library from
+    # the tiering manager's polling thread, which it is not yet verified to
+    # tolerate.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     @classmethod
     @override
@@ -295,8 +306,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         g3: dict[str, Any] | None = None,
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
+        backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+        )
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):
             raise ValueError(
@@ -350,12 +364,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         with socket.socket() as _s:
             _s.bind(("", 0))
             _nixl_listen_port = _s.getsockname()[1]
-        self._primary_base_addr = ctypes.addressof(
-            ctypes.c_char.from_buffer(primary_kv_view)
-        )
-        if primary_kv_view.strides is None:
-            raise ValueError("primary KV memoryview must expose strides")
-        self._primary_row_stride = int(primary_kv_view.strides[0])
         if secondary_g2_slots < 0:
             raise ValueError("secondary_g2_slots must be non-negative")
         if (
@@ -375,7 +383,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
             else:
                 local_mapping = mmap.mmap(
-                    -1, secondary_g2_slots * self._primary_row_stride
+                    -1, secondary_g2_slots * self.block_size_bytes
                 )
                 local_dram = LocalDramOptions(
                     pools=[
@@ -408,7 +416,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         try:
             self._kvcr = KVCR(
                 KVCRConfig(
-                    pool_layouts=[("", self._primary_row_stride)],
+                    pool_layouts=[("", self.block_size_bytes)],
                     enable_telemetry=enable_telemetry,
                     operation_timeout_ms=operation_timeout_ms,
                     abandon_timeout_ms=abandon_timeout_ms,
@@ -429,9 +437,15 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     policy=selected_policy,
                 ),
                 KVCRBackendConfigs(
-                    framework_dram=FrameworkDramInput(
-                        self._primary_base_addr, primary_kv_view.nbytes
-                    ),
+                    framework_regions=[
+                        RegionDescriptor(
+                            addr=ctypes.addressof(
+                                ctypes.c_char.from_buffer(primary_kv_view)
+                            ),
+                            size=self.block_size_bytes,
+                            count=len(primary_kv_view),
+                        )
+                    ],
                     local_dram=local_dram,
                     g3=g3_config,
                     remote_fw_dram=RemoteFWDramOptions(
@@ -443,11 +457,22 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 ),
                 guard_config,
             )
-        except BaseException:
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, KVCRStartupError):
+                # Native work may still touch these.
+                _RETAINED_NATIVE_BUFFERS.append(
+                    ctypes.c_char.from_buffer(primary_kv_view)
+                )
+                if local_mapping is not None:
+                    _RETAINED_NATIVE_BUFFERS.append(
+                        ctypes.c_char.from_buffer(local_mapping)
+                    )
+                raise
             control.close()
             if local_mapping is not None:
                 local_mapping.close()
             raise
+        self._nixl_agent_name = self._kvcr.config.nixl_agent_name
         self._local_dram_mmap = local_mapping
         self._finished_jobs: list[JobResult] = []
         self._jobs_by_op: dict[OpHandle, _JobState] = {}
@@ -465,9 +490,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
             for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
+                job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
         }
         if not blocks:
@@ -480,7 +505,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             blocks, request_id=job_metadata.req_context.req_id
         )
         self._jobs_by_op[op_handle] = (
-            job_metadata.job_id,
+            job_metadata,
             len(blocks),
             True,
             set(),
@@ -489,9 +514,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
             for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
+                job_metadata.keys, job_metadata.chunk_ids.tolist(), strict=True
             )
         }
         if not blocks:
@@ -501,7 +526,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             return
         op_handle = self._kvcr.deposit(blocks)
         self._jobs_by_op[op_handle] = (
-            job_metadata.job_id,
+            job_metadata,
             len(blocks),
             True,
             None,
@@ -519,7 +544,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         stats = cast(OffloadingConnectorStats | None, self._kvcr.get_stats())
         if stats is not None:
             # Add the framework namespace only at the vLLM boundary.
-            for metrics in stats.data.values():
+            for metrics in stats.metric_sections():
                 for name in tuple(metrics):
                     metrics[_vllm_metric_name(name)] = metrics.pop(name)
         return stats
@@ -530,14 +555,15 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     def _poll_finished_jobs(self) -> list[JobResult]:
         results: list[JobResult] = []
+        completed_prefixes: list[tuple[ReqContext, int]] = []
         for op_handle, entries in self._kvcr.poll_completed():
             job_state = self._jobs_by_op.get(op_handle)
             if job_state is None:
                 continue
-            job_id, remaining, success, successful_keys = job_state
+            job, remaining, success, successful_keys = job_state
             remaining -= len(entries)
             success = success and all(entry.success for entry in entries.values())
-            if successful_keys is not None:
+            if successful_keys is not None and (remaining > 0 or not success):
                 successful_keys.update(
                     OffloadKey(bytes(key))
                     for key, entry in entries.items()
@@ -545,19 +571,32 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
             if remaining > 0:
                 self._jobs_by_op[op_handle] = (
-                    job_id,
+                    job,
                     remaining,
                     success,
                     successful_keys,
                 )
                 continue
             self._jobs_by_op.pop(op_handle, None)
+            positions = job.req_context._offload_key_positions
+            end_token = max((positions.get(key, -1) for key in job.keys), default=-1)
+            # Preserve ordering across requests, which may share prefix keys.
+            if completed_prefixes and completed_prefixes[-1][0] is job.req_context:
+                end_token = max(end_token, completed_prefixes.pop()[1])
+            completed_prefixes.append((job.req_context, end_token))
             results.append(
                 JobResult(
-                    job_id=job_id,
+                    job_id=job.job_id,
                     success=success,
                     successful_keys=successful_keys if not success else None,
                 )
+            )
+        for req_context, end_token in completed_prefixes:
+            # Include earlier resident keys, even when only the tail transferred.
+            positions = req_context._offload_key_positions
+            self._align_sequence(
+                [key for key, position in positions.items() if position <= end_token],
+                req_context,
             )
         results.extend(self._framework_pin_adapter.take_pin_job_results())
         return results
@@ -575,18 +614,56 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        params = getattr(req_context, "kv_transfer_params", None)
-        if isinstance(params, Mapping):
-            hint = params.get(ROUTER_HINT_KEY)
-            if hint is not None:
-                self._kvcr.submit_hint(
-                    request_id=req_context.req_id,
-                    hints=hint,
-                )
+        if (hint := req_context.kv_hints) is not None:
+            self._kvcr.submit_hint(
+                request_id=req_context.req_id,
+                hints=hint,
+            )
         return RequestOffloadingContext()
 
     @override
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self._align_sequence(keys, req_context, use_current_time=True)
+
+    def _align_sequence(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        use_current_time: bool = False,
+    ) -> None:
+        if not keys:
+            return
+        ordered_keys = order_request_keys((list(keys),), req_context)
+        self._kvcr.align_sequence(
+            [self._key_adapter.encode(key) for key in ordered_keys],
+            use_current_time=use_current_time,
+        )
+
+    @override
     def on_request_finished(self, req_context: ReqContext) -> None:
+        # The scheduler finalizes request recency instead of issuing touches.
+        computed_tokens = req_context.num_computed_tokens
+        in_flight = req_context.num_in_flight_tokens
+        prompt_tokens = req_context.num_prompt_tokens
+        num_tokens = req_context.num_tokens
+        processed_tokens = None
+        if (
+            computed_tokens is not None
+            and in_flight is not None
+            and prompt_tokens is not None
+            and num_tokens is not None
+        ):
+            # Exclude in-flight work and the uncommitted final sampled token.
+            processed_tokens = min(
+                max(0, computed_tokens - in_flight),
+                max(prompt_tokens, num_tokens - 1),
+            )
+        keys = [
+            key
+            for key, position in req_context._offload_key_positions.items()
+            if processed_tokens is None or position <= processed_tokens
+        ]
+        self.touch(keys, req_context)
         self._kvcr.discard_hint(req_context.req_id)
 
     @override
@@ -624,12 +701,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         )
 
-    def _make_descriptor(self, chunk_id: int) -> MemDescriptor:
-        return MemDescriptor(
-            end_point_name=self._kvcr.config.nixl_agent_name,
-            mem_type="DRAM",
-            addr=self._primary_base_addr + chunk_id * self._primary_row_stride,
-            size=self._primary_row_stride,
-            device_Id=0,
-            info="",
+    def _make_descriptor(self, chunk_id: int) -> MemoryRef:
+        return MemoryRef(
+            end_point_name=self._nixl_agent_name,
+            element_index=chunk_id,
         )

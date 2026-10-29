@@ -24,7 +24,7 @@ from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -127,7 +127,9 @@ def circular_qsa_slot_mapping(
         valid = (requests >= 0) & (requests < block_table.shape[0]) & (positions >= 0)
         safe_requests = requests.clamp(0, block_table.shape[0] - 1)
         physical_blocks = block_table[safe_requests, 0].long()
-        valid &= physical_blocks >= 0
+        # Dummy and padding requests own no ring and sit on the null block,
+        # which must never be written.
+        valid &= physical_blocks > 0
         slots = physical_blocks * compressor_state_size + positions.remainder(
             compressor_state_size
         )
@@ -288,7 +290,8 @@ def _build_qsa_metadata_kernel(
             mask=valid,
             other=-1,
         )
-        valid &= physical_block >= 0
+        # Dummy and padding requests own no ring and sit on the null block.
+        valid &= physical_block > 0
         slot = physical_block * circular_buffer_size + (
             logical_position % circular_buffer_size
         )
@@ -815,9 +818,7 @@ class QSAKeyStateCache(_QSAStateCache):
         key_head_size = int(kwargs.pop("head_size"))
         self.key_head_size = key_head_size
         self.cache_rope_positions = bool(cache_rope_positions)
-        self.rope_position_offset = (
-            (key_head_size + self._BF16_PER_INT64 - 1) // self._BF16_PER_INT64
-        ) * self._BF16_PER_INT64
+        self.rope_position_offset = round_up(key_head_size, self._BF16_PER_INT64)
         storage_head_size = key_head_size
         if self.cache_rope_positions:
             storage_head_size = self.rope_position_offset + (
@@ -825,15 +826,18 @@ class QSAKeyStateCache(_QSAStateCache):
             )
         super().__init__(head_size=storage_head_size, **kwargs)
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        qsa_cache = self.kv_cache
-        self.key_cache = qsa_cache[..., : self.key_head_size]
-        if self.cache_rope_positions:
-            position_tail = qsa_cache[..., self.rope_position_offset :]
-            self.rope_position_cache = position_tail.view(torch.int64)
-        else:
-            self.rope_position_cache = None
+    # Derived on access so `kv_cache` stays the only reference to the bound
+    # storage: clearing it (e.g. after CUDA graph memory profiling) must free
+    # the cache, or the freed block stays pinned in the allocator.
+    @property
+    def key_cache(self) -> torch.Tensor:
+        return self.kv_cache[..., : self.key_head_size]
+
+    @property
+    def rope_position_cache(self) -> torch.Tensor | None:
+        if not self.cache_rope_positions:
+            return None
+        return self.kv_cache[..., self.rope_position_offset :].view(torch.int64)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Hold the open group's committed keys plus every row a speculative
@@ -842,7 +846,7 @@ class QSAKeyStateCache(_QSAStateCache):
         # the scheduler block size). Anything narrower lets a rejected draft row
         # overwrite a committed key the next step needs to close the group.
         span = self.compress_ratio + vllm_config.num_speculative_tokens
-        capacity = self.compress_ratio * cdiv(span, self.compress_ratio)
+        capacity = round_up(span, self.compress_ratio)
         assert self.cache_config.block_size % capacity == 0, (
             f"QSA ring capacity {capacity} must divide the attention block "
             f"size {self.cache_config.block_size}"
@@ -879,4 +883,14 @@ __all__ = [
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
     "compressed_qsa_slot_mapping",
+    "qsa_kv_cache_dtype",
 ]
+
+
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
+    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
+        return "auto"
+    return cache_config.cache_dtype

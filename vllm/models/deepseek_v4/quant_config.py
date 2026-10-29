@@ -16,13 +16,44 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
+    kMxfp8Dynamic,
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedConfig
+
+    from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
+    )
+
+
+def align_mtp_quant_config(
+    quant_config: QuantizationConfig | None, config: PreTrainedConfig
+) -> None:
+    """Re-key the quant config's MTP entries onto the draft module prefixes.
+
+    ``_make_deepseek_v4_weights_mapper`` renames the checkpoint's ``mtp.{i}.``
+    layers to ``model.mtp.{i}.``, but the draft modules are built under
+    ``model.layers.{num_hidden_layers + i}.``. Without this remap no per-layer
+    entry matches, so every MTP linear falls back to the global scheme. On a
+    mixed checkpoint (FP8 attention and shared experts, NVFP4 routed experts)
+    that builds NVFP4 parameters for FP8 weights and the load then fails a
+    shape assertion.
+    """
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    if quant_config is None:
+        return
+    quant_config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={
+                f"model.mtp.{i}.": f"model.layers.{config.num_hidden_layers + i}."
+                for i in range(config.num_nextn_predict_layers)
+            }
+        )
     )
 
 
@@ -110,6 +141,11 @@ class DeepseekV4FP8Config(Fp8Config):
                 kv_cache_quant_algo=None,
                 exclude_modules=[],
                 group_size=16,
+                quantization_args=(
+                    self.online_quantization_config.args
+                    if self.online_quantization_config is not None
+                    else None
+                ),
             )
         return self._nvfp4_config
 
@@ -135,15 +171,15 @@ class DeepseekV4FP8Config(Fp8Config):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
+        # Quark checkpoints are always handled by QuarkConfig.
+        if (
+            isinstance(hf_quant_cfg, dict)
+            and hf_quant_cfg.get("quant_method") == "quark"
+        ):
+            return None
         if not (
             isinstance(hf_quant_cfg, dict)
-            and (
-                hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
-                or (
-                    hf_quant_cfg.get("quant_method") == "quark"
-                    and cls._is_quark_mxfp4_ocp(hf_quant_cfg)
-                )
-            )
+            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
         ):
             return None
         model_type = getattr(hf_config, "model_type", None)
@@ -188,7 +224,7 @@ class DeepseekV4FP8Config(Fp8Config):
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,
                     )
-                return Mxfp4MoEMethod(layer.moe_config)
+                return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
