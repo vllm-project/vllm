@@ -122,6 +122,17 @@ class DSparkSpeculator(DFlashSpeculator):
         if setup is not None:
             setup(self)
 
+    def propose(self, *args, **kwargs) -> torch.Tensor:
+        draft_tokens = super().propose(*args, **kwargs)
+        # A model's own sample_sequential kernels can check their health once a
+        # step, on every TP rank (outside the draft's CUDA graph).
+        after_step = getattr(
+            getattr(self.model, "sample_sequential", None), "after_step", None
+        )
+        if after_step is not None:
+            after_step()
+        return draft_tokens
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")

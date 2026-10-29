@@ -10,6 +10,7 @@ last bf16 bit, and a CUDA graph replays to the eager result.
 """
 
 import types
+from typing import Any
 
 import pytest
 import ray
@@ -72,7 +73,7 @@ def _speculator(head, lp, base, base_local, device):
         _sample_logits = DSparkSpeculator._sample_logits
         _maybe_predict_acceptance = DraftModelSpeculator._maybe_predict_acceptance
 
-    s = Spec()
+    s: Any = Spec()
     s.model = Model()
     s.num_speculative_steps = NSPEC
     s._draft_topk = None
@@ -165,13 +166,18 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
                 continue
             sampler.sharded.mode = lambda rows, m=mode: m
             sp.model.sample_sequential = sampler
-            # warm-up: each rank JIT-compiles on its first launch, and a rank
-            # done first may time out waiting for a peer still compiling
+            # compile only, as ShardedMarkovSampler.__init__ does: the first
+            # launch must then compile nothing (a rank compiling mid-call
+            # leaves its peers polling until they give up)
+            sampler._launch(sp, rows, None, warmup=True)
+            torch.distributed.barrier(group=cpu_group)
+            cache = dm._sharded_markov_kernel.device_caches[rank][0]
+            n_compiled = len(cache)
             _set_inputs([sp], rows, g, 1.0, pad_row=False)
             sp._sample_sequential(rows, hidden)
             torch.accelerator.synchronize()
-            torch.distributed.barrier(group=cpu_group)
-            sampler.sharded.ctrl[dm.C_ERR] = 0
+            assert len(cache) == n_compiled, (rows, mode)
+            assert not sampler.sharded.failed()
             for temp in (1.0, 0.6, 0.0):
                 n_tok = n_eq = 0
                 for trial in range(24):

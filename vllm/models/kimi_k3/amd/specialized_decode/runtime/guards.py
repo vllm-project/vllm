@@ -114,7 +114,8 @@ def cache_reasons(caches: Mapping[str, Any]) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (its health word FAILED, ``mono.abi``). Each step queues a D2H copy of
+    wait (``failed``: the mono kernels' health word FAILED, ``mono.abi``, or
+    the sharded DSpark Markov sampler's C_ERR). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next
@@ -123,9 +124,18 @@ class FailStop:
 
     CHECK_EVERY = 16
 
-    def __init__(self, failed: torch.Tensor, rank: int, world: int, group):
+    def __init__(
+        self,
+        failed: torch.Tensor,
+        rank: int,
+        world: int,
+        group,
+        what: str = "Kimi-K3 specialized decode",
+        remedy: str = " (decode_backend=auto runs vLLM's decode)",
+    ):
         self.failed, self.rank, self.world, self.group = failed, rank, world, group
-        self.host = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+        self.what, self.remedy = what, remedy
+        self.host = torch.zeros(1, dtype=failed.dtype, pin_memory=True)
         self.copied: torch.cuda.Event | None = None
         self.seen = False
         self.steps = 0
@@ -149,6 +159,6 @@ class FailStop:
         if votes.any():
             ranks = [r for r, v in enumerate(votes.tolist()) if v]
             raise RuntimeError(
-                f"Kimi-K3 specialized decode: TP ranks {ranks} gave up an in-kernel "
-                "wait; stopping the engine (decode_backend=auto runs vLLM's decode)"
+                f"{self.what}: TP ranks {ranks} gave up an in-kernel wait; "
+                f"stopping the engine{self.remedy}"
             )

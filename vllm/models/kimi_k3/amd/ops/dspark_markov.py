@@ -386,13 +386,14 @@ class ShardedMarkov:
     def sample(
         self, base_logits, base_col, input_ids, anchor_idx, idx_map, sample_pos,
         temperature, seeds, draft_logits, draft_tokens, markov_embeds_out=None,
-        mode=None,
+        mode=None, warmup=False,
     ):  # fmt: skip
         """``base_logits`` [rows, n_spec, Vb] bf16 holds this rank's vocabulary
         row ``voff`` at column ``base_col`` (``voff`` for the full logits, 0
         for the lm_head's local shard). Writes ``draft_tokens`` [rows, n_spec],
         the full-vocabulary ``draft_logits`` rows, and the Markov embeddings
-        into ``markov_embeds_out`` [rows, n_spec, rank] if given."""
+        into ``markov_embeds_out`` [rows, n_spec, rank] if given. ``warmup``:
+        only compile the launches' kernels (no launch, not collective)."""
         rows, n_spec, _ = base_logits.shape
         mode = mode or self.mode(rows)
         ta, tb, nprog, ch = self.geom[mode]
@@ -426,11 +427,14 @@ class ShardedMarkov:
             self.ctrl, self.peers, self.zeros,
             self.rank, self.voff, self.vlocal, self.vocab, nprog,
         )  # fmt: skip
-        if mode == "persistent":
-            _sharded_markov_kernel[(nprog,)](*args, S0=0, S1=n_spec, **common)
-        else:
-            for s in range(n_spec):
-                _sharded_markov_kernel[(nprog,)](*args, S0=s, S1=s + 1, **common)
+        spans = [(0, n_spec)] if mode == "persistent" else [
+            (s, s + 1) for s in range(n_spec)
+        ]  # fmt: skip
+        for s0, s1 in spans:
+            if warmup:
+                _sharded_markov_kernel.warmup(*args, S0=s0, S1=s1, grid=(1,), **common)
+            else:
+                _sharded_markov_kernel[(nprog,)](*args, S0=s0, S1=s1, **common)
 
 
 def _why_not(spec) -> str | None:
@@ -494,12 +498,27 @@ class ShardedMarkovSampler:
     its own loop): the sharded chain fed by the lm_head's local logits."""
 
     def __init__(self, spec, rank, world, cpu_group):
+        from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
+            FailStop,
+        )
+
         model = spec.model
         head = model.model.markov_head
         w1, w2 = head.markov_w1.weight, head.markov_w2.weight
         self.sharded = ShardedMarkov(
             w1, w2, spec.num_speculative_steps, cpu_group, rank, world, w1.device,
             vocab_shard=_lm_head_shard(model),
+        )  # fmt: skip
+        # Compile every row count's kernels now: warm-up runs only some batch
+        # sizes, and eager drafts (decode graphs not FULL) run the unpadded
+        # one. A rank compiling mid-serving would leave its peers polling for
+        # its records until they give up.
+        for rows in range(1, MAX_ROWS_PERSISTENT + 1):
+            self._launch(spec, rows, None, warmup=True)
+        torch.distributed.barrier(group=cpu_group)
+        self.failstop = FailStop(
+            self.sharded.ctrl[C_ERR : C_ERR + 1], rank, world, cpu_group,
+            what="Kimi-K3 DSpark sharded Markov sampling", remedy="",
         )  # fmt: skip
         logger.info(
             "DSpark Markov sampling sharded over %d ranks: vocabulary rows "
@@ -533,35 +552,56 @@ class ShardedMarkovSampler:
             return False
         n_spec = spec.num_speculative_steps
         num_sample = num_reqs * n_spec
-        idx_map = spec.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
-        sample_pos = spec.sample_pos[:num_sample].view(num_reqs, n_spec)
         model = spec.model
         sample_hidden = head_hidden[spec.sample_indices[:num_sample]]
         # this rank's vocabulary shard of the base logits: no all-gather
         base = model.logits_processor(model.lm_head, sample_hidden, skip_gather=True)
         if base.dtype != torch.bfloat16 or base.stride(-1) != 1:
             raise RuntimeError("DSpark sharded Markov sampling needs bf16 base logits")
-        base = base.view(num_reqs, n_spec, base.shape[-1])
+        emb = self._launch(spec, num_reqs, base.view(num_reqs, n_spec, base.shape[-1]))
+        if spec.use_confidence_head:
+            assert emb is not None
+            conf = model.compute_confidence(sample_hidden, emb.flatten(0, 1))
+            spec.draft_token_confidence_probs[:num_reqs] = conf.view(num_reqs, n_spec)
+        return True
+
+    def _launch(self, spec, num_reqs, base, warmup=False):
+        """The chain over ``base`` [num_reqs, n_spec, vlocal] (``warmup``: a
+        stand-in of its layout, compile only); returns the Markov embeddings
+        buffer, or None without the confidence head."""
+        n_spec = spec.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        device = spec.draft_tokens.device
+        if base is None:
+            base = torch.empty(
+                num_reqs, n_spec, self.sharded.vlocal, dtype=torch.bfloat16,
+                device=device,
+            )  # fmt: skip
         emb = None
         if spec.use_confidence_head:
-            w1 = model.model.markov_head.markov_w1.weight
+            w1 = spec.model.model.markov_head.markov_w1.weight
             emb = torch.empty(
-                num_reqs, n_spec, w1.shape[1], dtype=w1.dtype, device=base.device
+                num_reqs, n_spec, w1.shape[1], dtype=w1.dtype, device=device
             )
         self.sharded.sample(
             base,
             0,
             spec.input_buffers.input_ids,
             spec._anchor_idx,
-            idx_map,
-            sample_pos,
+            spec.sample_idx_mapping[:num_sample].view(num_reqs, n_spec),
+            spec.sample_pos[:num_sample].view(num_reqs, n_spec),
             spec.temperature,
             spec.seeds,
             spec.draft_logits,
             spec.draft_tokens,
             emb,
+            warmup=warmup,
         )
-        if spec.use_confidence_head:
-            conf = model.compute_confidence(sample_hidden, emb.flatten(0, 1))
-            spec.draft_token_confidence_probs[:num_reqs] = conf.view(num_reqs, n_spec)
-        return True
+        return emb
+
+    def after_step(self) -> None:
+        """Once per draft step on every TP rank (``DSparkSpeculator.propose``):
+        raises on every rank once a rank gave up waiting for a peer's record.
+        The draft tokens of that call are then unreliable (the rejection
+        sampler keeps the output correct) and the ranks are out of step."""
+        self.failstop.after_step()
