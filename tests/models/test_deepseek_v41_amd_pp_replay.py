@@ -4,7 +4,7 @@
 
 With PP=2 the second stage starts at layer 20 by default, the last KV source
 and the replay cut, so it enters replay with no layer of its own run first.
-Other cuts start it at an Engram layer.
+Other cuts start it at an Engram layer or inside a KV-sharing group.
 """
 
 import pytest
@@ -69,10 +69,11 @@ def test_pp_stage_starting_at_replay_cut(vllm_runner, monkeypatch):
 @pytest.mark.skipif(
     not _on_cdna4_with_two_gpus(), reason="needs two CDNA4 GPUs (ROCm V4.1 path)"
 )
-@pytest.mark.parametrize("partition", ["14,26"])
+@pytest.mark.parametrize("partition", ["14,26", "10,30"])
 def test_pp_partition_matches_default_cut(vllm_runner, monkeypatch, partition):
-    """Stage 1 starting at Engram layer 14 matches the default 20/20 cut, with
-    the decode steps on CUDA graphs."""
+    """Stage 1 starting at Engram layer 14, or inside layer 8's KV-sharing group
+    so the relay carries its KV, index keys and top-k, matches the default 20/20
+    cut, with the decode steps on CUDA graphs."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     reference = _generate(vllm_runner)

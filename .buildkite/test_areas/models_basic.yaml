@@ -452,10 +452,12 @@ steps:
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   - tests/models/test_deepseek_v41_amd_pp_replay.py
+  - tests/kernels/attention/test_rocm_paged_mxfp4_indexer.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
   - pytest -v -s tests/models/test_deepseek_v41_amd_pp_replay.py
+  - pytest -v -s tests/kernels/attention/test_rocm_paged_mxfp4_indexer.py -k pipeline_relay
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd

@@ -324,7 +324,7 @@ def copy_pipeline_cache_rows(
         SCATTER=scatter,
         BLOCK=triton.next_power_of_2(cache.shape[-1]),
         num_warps=4,
-        launch_pdl=False,
+        **({"launch_pdl": False} if current_platform.is_cuda() else {}),
     )
 
 
