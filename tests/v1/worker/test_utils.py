@@ -77,6 +77,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._metrics_event = MagicMock()
     worker._metrics_pending = False
     worker.leader_runtimes = []
+    worker._invalidate_written_slots = MagicMock()
     return worker
 
 
@@ -797,12 +798,10 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     leader = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=True,
-        invalidate_written_slots=MagicMock(),
     )
     follower = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -827,6 +826,8 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker._post_forward_transfers = []
     enqueue_row_dma = MagicMock()
     monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    invalidate_written_slots = MagicMock()
+    monkeypatch.setattr(worker, "_invalidate_written_slots", invalidate_written_slots)
     worker.host_write_event = MagicMock()
     worker._forward_ready_event = MagicMock()
     current_stream = MagicMock()
@@ -838,11 +839,10 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     enqueue_row_dma.assert_called_once_with(
         (0, 1), ready_event=worker._forward_ready_event
     )
-    leader.invalidate_written_slots.assert_called_once()
-    torch.testing.assert_close(
-        leader.invalidate_written_slots.call_args.args[0], dst_slots
-    )
-    follower.invalidate_written_slots.assert_not_called()
+    invalidate_written_slots.assert_called_once()
+    leaders, written_slots, _ = invalidate_written_slots.call_args.args
+    assert leaders == [leader]
+    torch.testing.assert_close(written_slots, dst_slots)
     worker.host_write_event.record.assert_called_once_with(current_stream)
 
 
@@ -851,7 +851,6 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors(monkeypatch):
     runtime = SimpleNamespace(
         eager_host_mirror=False,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -928,7 +927,6 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror(monkeypatch):
     runtime = SimpleNamespace(
         eager_host_mirror=False,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -984,7 +982,6 @@ def test_hisparse_finish_forward_mirrors_standalone_mtp_cache(monkeypatch):
     runtime = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     inactive = SimpleNamespace(
         runtime=runtime,
@@ -1024,7 +1021,6 @@ def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
     leader = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=True,
-        invalidate_written_slots=MagicMock(),
     )
     handle = SimpleNamespace(
         runtime=leader,
@@ -1042,11 +1038,14 @@ def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
     worker._per_layer_mirrored = set()
     enqueue_row_dma = MagicMock()
     monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    invalidate_written_slots = MagicMock()
+    monkeypatch.setattr(worker, "_invalidate_written_slots", invalidate_written_slots)
 
     worker._enqueue_host_mirror()
 
     enqueue_row_dma.assert_not_called()
-    leader.invalidate_written_slots.assert_called_once()
+    invalidate_written_slots.assert_called_once()
+    assert invalidate_written_slots.call_args.args[0] == [leader]
 
 
 def test_hisparse_shared_host_reader_skips_transfer_completion():
