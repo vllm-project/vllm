@@ -622,6 +622,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -1123,6 +1124,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
@@ -1547,6 +1549,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the

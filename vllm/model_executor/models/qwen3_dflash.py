@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    refill_derived,
     weights_already_processed,
 )
 from vllm.multimodal.inputs import NestedTensors
@@ -405,6 +406,10 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
+    # weight-derived, refilled in place on every reload
+    _fused_kv_weight: torch.Tensor | None = None
+    _fused_kv_bias: torch.Tensor | None = None
+    _k_norm_weights: torch.Tensor | None = None
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -537,32 +542,30 @@ class DFlashQwen3Model(nn.Module):
         self._context_q_sizes = [a.q_size for a in layers_attn]
         self._context_kv_proj: ReplicatedLinear | None = None
 
+        # Quantized linear weights may use packed storage that cannot be
+        # consumed by F.linear; then each projection runs through its quant
+        # method and the fused buffers stay None.
+        kv_weight = kv_bias = None
         if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            kv_weight = torch.cat(kv_weights, dim=0)
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-            else:
-                self._fused_kv_bias = None
-        else:
-            # Quantized linear weights may use packed storage that cannot be
-            # consumed by F.linear. Run each projection through its quant method.
-            self._fused_kv_weight = None
-            self._fused_kv_bias = None
-            if not is_weights_pre_processed() and all(
-                _is_mxfp8_linear(proj) for proj in self._context_qkv_projs
-            ):
-                self._context_kv_proj = self._build_mxfp8_context_kv_proj(
-                    layers_attn, has_bias
-                )
+                kv_bias = torch.cat(kv_biases, dim=0)
+        elif not is_weights_pre_processed() and all(
+            _is_mxfp8_linear(proj) for proj in self._context_qkv_projs
+        ):
+            self._context_kv_proj = self._build_mxfp8_context_kv_proj(
+                layers_attn, has_bias
+            )
+        refill_derived(self, "_fused_kv_weight", kv_weight)
+        refill_derived(self, "_fused_kv_bias", kv_bias)
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
+        refill_derived(self, "_k_norm_weights", k_norm.contiguous())
 
     @staticmethod
     def _build_mxfp8_context_kv_proj(

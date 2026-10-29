@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import (
     move_parameter,
+    refill_derived,
     replace_parameter,
     set_kernel_parameter,
 )
@@ -801,15 +802,13 @@ def make_fp8_moe_quant_config(
         assert a1_scale is not None and a2_scale is not None
         g1_alphas = w1_scale * a1_scale
         g2_alphas = w2_scale * a2_scale
-        if layer is not None:
-            layer.register_parameter(
-                "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
-            )
-            layer.register_parameter(
-                "g2_alphas", torch.nn.Parameter(g2_alphas, requires_grad=False)
-            )
-            g1_alphas = layer.g1_alphas
-            g2_alphas = layer.g2_alphas
+        a1_gscale: torch.Tensor | None = 1.0 / a1_scale
+        a2_gscale: torch.Tensor | None = 1.0 / a2_scale
+        if layer is not None:  # kernels read these: a weight reload refills them
+            g1_alphas = replace_parameter(layer, "g1_alphas", g1_alphas)
+            g2_alphas = replace_parameter(layer, "g2_alphas", g2_alphas)
+            a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
+            a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -817,8 +816,8 @@ def make_fp8_moe_quant_config(
             w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            a1_gscale=(1.0 / a1_scale),
-            a2_gscale=(1.0 / a2_scale),
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,

@@ -75,7 +75,11 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -471,13 +475,17 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # Precompute reciprocal scales once here (scales are final after load;
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
-        # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        # launching a per-step reciprocal kernel. A weight reload refills them
+        # in place: captured CUDA graphs keep the startup addresses.
+        for name, scale in (
+            ("_q_scale_inv", self._q_scale),
+            ("_k_scale_inv", self._k_scale),
+        ):
+            inv = scale.reciprocal().reshape(1)
+            if name in self._buffers:
+                refill_derived(self, name, inv)
+            else:
+                self.register_buffer(name, inv, persistent=False)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""

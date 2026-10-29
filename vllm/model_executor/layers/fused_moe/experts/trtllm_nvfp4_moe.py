@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -41,6 +41,15 @@ logger = init_logger(__name__)
 
 class TrtLlmNvFp4ExpertsBase:
     """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
+
+    # process_weights_after_loading registers them as layer parameters; quant
+    # methods that skip it (Quark) keep the constructor's tensors this way
+    kept_constants: tuple[str, ...] = (
+        "g1_scale_c",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+    )
 
     def __init__(
         self,
@@ -155,12 +164,9 @@ class TrtLlmNvFp4ExpertsBase:
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
-        # other expert weights.
-        g1_scale_c = self._compute_g1_scale_c()
-        layer.register_parameter(
-            "g1_scale_c",
-            torch.nn.Parameter(g1_scale_c, requires_grad=False),
-        )
+        # other expert weights. A weight reload refills these parameters in
+        # place: captured CUDA graphs keep their startup addresses.
+        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
         self.g1_scale_c = layer.g1_scale_c
 
         # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
@@ -174,10 +180,7 @@ class TrtLlmNvFp4ExpertsBase:
         clamp_limit = self._gemm1_clamp_limit_unfolded
         if clamp_limit is not None and not self.is_situ:
             gemm1_clamp_limit = clamp_limit / self.quant_config.g1_alphas
-            layer.register_parameter(
-                "gemm1_clamp_limit",
-                torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_clamp_limit", gemm1_clamp_limit)
             self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
         # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
@@ -187,17 +190,11 @@ class TrtLlmNvFp4ExpertsBase:
         beta = self._gemm1_beta_unfolded
         if beta is not None:
             gemm1_beta = beta if self.is_situ else beta / self.quant_config.g1_alphas
-            layer.register_parameter(
-                "gemm1_beta",
-                torch.nn.Parameter(gemm1_beta, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_beta", gemm1_beta)
             self.gemm1_beta = layer.gemm1_beta
 
         if self.gemm1_alpha is not None:
-            layer.register_parameter(
-                "gemm1_alpha",
-                torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_alpha", self.gemm1_alpha)
             self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod

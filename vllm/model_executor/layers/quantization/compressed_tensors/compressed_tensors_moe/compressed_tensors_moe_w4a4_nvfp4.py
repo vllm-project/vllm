@@ -281,8 +281,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        layer.w13_input_scale = a13_scale
-        layer.w2_input_scale = a2_scale
+        # kernels read them: a weight reload refills them in place
+        replace_parameter(layer, "w13_input_scale", a13_scale)
+        replace_parameter(layer, "w2_input_scale", a2_scale)
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -295,6 +296,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:

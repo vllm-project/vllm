@@ -29,6 +29,7 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     materialize_residual_path_constants,
@@ -85,6 +86,9 @@ class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
 @support_torch_compile
 class MuseSparkDSparkModel(DFlashQwen3Model):
     """Muse draft backbone with independently cached context K/V."""
+
+    # weight-derived, refilled in place on every reload
+    _stacked_kv_weight: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -172,13 +176,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
         self._context_pre_norms = tuple(attn.pre_qkv_proj_norm for attn in layers_attn)
-        self._stacked_kv_weight = torch.stack(
-            [
-                attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
-                for attn in layers_attn
-            ],
-            dim=0,
-        )
+        kv = [
+            attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            for attn in layers_attn
+        ]
+        refill_derived(self, "_stacked_kv_weight", torch.stack(kv, dim=0))
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
         self._head_dim = attn0.head_dim
@@ -201,6 +203,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         per_layer_context = torch.stack(
             [norm(fc_output) for norm in self._context_pre_norms], dim=0
         )
+        assert self._stacked_kv_weight is not None
         return torch.bmm(per_layer_context, self._stacked_kv_weight.transpose(1, 2))
 
     def precompute_and_store_context_kv(

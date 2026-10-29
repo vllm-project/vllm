@@ -979,6 +979,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_fp8_moe_quant_config(
@@ -1873,6 +1874,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
@@ -2116,6 +2118,7 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -2398,6 +2401,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

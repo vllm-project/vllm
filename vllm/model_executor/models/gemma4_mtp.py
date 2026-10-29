@@ -44,6 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.sequence import IntermediateTensors
 
 from .gemma4 import Gemma4MLP, _get_text_config
@@ -546,6 +547,12 @@ class Gemma4MTP(nn.Module):
     def _get_full_lm_head_weight(self) -> torch.Tensor:
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
+        lm_head_weight = self._gather_full_lm_head_weight()
+        if get_tensor_model_parallel_world_size() > 1:
+            self._stable_full_lm_head_weight = lm_head_weight
+        return lm_head_weight
+
+    def _gather_full_lm_head_weight(self) -> torch.Tensor:
         assert self.masked_embedding is not None
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
@@ -557,7 +564,6 @@ class Gemma4MTP(nn.Module):
         lm_head_weight = lm_head_weight[: self.masked_embedding.vocab_size]
         if tp_size > 1:
             lm_head_weight = lm_head_weight.contiguous()
-            self._stable_full_lm_head_weight = lm_head_weight
         return lm_head_weight
 
     def compute_logits(
@@ -588,13 +594,22 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        if self._suppress_token_ids:
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # Captured CUDA graphs read the gathered lm_head weight and the suppress
+        # indices at their startup addresses: refill the gather in place, and
+        # build the indices (constant token ids) only once.
+        if self._stable_full_lm_head_weight is not None:
+            refill_derived(
+                self,
+                "_stable_full_lm_head_weight",
+                self._gather_full_lm_head_weight(),
+            )
+        if self._suppress_token_ids and self._suppress_idx is None:
             self._suppress_idx = torch.tensor(
                 self._suppress_token_ids,
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
-        return loaded

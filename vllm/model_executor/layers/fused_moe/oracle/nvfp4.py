@@ -603,6 +603,14 @@ def make_nvfp4_moe_quant_config(
         w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
         w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
+    a1_gscale: torch.Tensor | None = 1.0 / a13_scale
+    a2_gscale: torch.Tensor | None = 1.0 / a2_scale
+    if layer is not None:  # kernels read these: a weight reload refills them
+        from vllm.model_executor.utils import refill_derived
+
+        a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
+        a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
+
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
@@ -610,8 +618,8 @@ def make_nvfp4_moe_quant_config(
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels

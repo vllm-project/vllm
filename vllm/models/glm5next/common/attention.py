@@ -29,7 +29,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.model_executor.utils import maybe_disable_graph_partition, refill_derived
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -294,6 +294,17 @@ class Indexer(nn.Module):
             tail_cache=self.tail_cache,
         )
 
+    def refresh_post_load_cache(self) -> None:
+        """(Re)build the fp32 head-gate projection from the loaded weights, in
+        place once it exists (captured CUDA graphs hold its address)."""
+        wp = (
+            self.wk_weights_proj.weight.data[self.head_dim :, :]
+            .t()
+            .contiguous()
+            .float()
+        )
+        refill_derived(self, "_wp_fp32", wp)
+
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
@@ -305,12 +316,7 @@ class Indexer(nn.Module):
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
         if self._wp_fp32 is None:
-            self._wp_fp32 = (
-                self.wk_weights_proj.weight.data[self.head_dim :, :]
-                .t()
-                .contiguous()
-                .float()
-            )
+            self.refresh_post_load_cache()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(

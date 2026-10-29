@@ -58,7 +58,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.models.muse_spark.common.moe import (  # noqa: F401 re-exported
     MuseSpark1xRouter,
     MuseSparkConsolidatedRoutedExperts,
@@ -466,6 +466,8 @@ class _MuseSparkNvFp4Scales:
     gemm1_clamp_limit: torch.Tensor | None
     gemm1_alpha: torch.Tensor | None
     gemm1_beta: torch.Tensor | None
+    # g1_scale_c is registered below; there is no SwiGLU constant to keep
+    kept_constants: tuple[str, ...] = ()
 
     def _compute_g1_scale_c(self) -> torch.Tensor:
         quant_config = self.quant_config
@@ -483,11 +485,10 @@ class _MuseSparkNvFp4Scales:
             and self.gemm1_alpha is None
             and self.gemm1_beta is None
         ), "MuseSpark NVFP4 MoE does not support SwiGLU clamp/alpha/beta"
-        layer.register_parameter(
-            "g1_scale_c",
-            torch.nn.Parameter(self._compute_g1_scale_c(), requires_grad=False),
+        # a weight reload refills it in place: captured graphs read it
+        self.g1_scale_c = replace_parameter(
+            layer, "g1_scale_c", self._compute_g1_scale_c()
         )
-        self.g1_scale_c = layer.g1_scale_c
 
 
 class MuseSparkTrtLlmNvFp4Experts(_MuseSparkNvFp4Scales, TrtLlmNvFp4ExpertsMonolithic):
@@ -643,15 +644,22 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         # Collapsed to the global max and repeated per expert.
         a13 = a13_scale[0:1]
         a2 = a2_scale[0:1]
-        g1_alphas = (a13 * w13_weight_scale_2[:, 0]).contiguous()
-        g1_scale_c = (a13 * w13_weight_scale_2[:, 1] / a2).contiguous()
-        g2_alphas = (a2 * layer.w2_weight_scale_2.data).contiguous()
+        # Kernels read these: a weight reload refills them in place.
+        g1_alphas = refill_derived(
+            layer, "_g1_alphas", (a13 * w13_weight_scale_2[:, 0]).contiguous()
+        )
+        g1_scale_c = refill_derived(
+            layer, "_g1_scale_c", (a13 * w13_weight_scale_2[:, 1] / a2).contiguous()
+        )
+        g2_alphas = refill_derived(
+            layer, "_g2_alphas", (a2 * layer.w2_weight_scale_2.data).contiguous()
+        )
 
         base_config = nvfp4_moe_quant_config(
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
-            a1_gscale=1.0 / a13,
-            a2_gscale=1.0 / a2,
+            a1_gscale=refill_derived(layer, "_a1_gscale", 1.0 / a13),
+            a2_gscale=refill_derived(layer, "_a2_gscale", 1.0 / a2),
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             # The TRT-LLM kernel rejects swizzled activation scale factors.
@@ -667,6 +675,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         _attach_post_expert_finalize(self)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -724,6 +733,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             backend=NvFp4MoeBackend.MARLIN,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: "MuseSparkRoutedExperts"

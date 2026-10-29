@@ -67,6 +67,13 @@ class PreparedKda:
         self.scalars = tuple(map(cutlass.Float32, scalars))
         self.conv_dim_first, self.kernels = conv_dim_first, {}
 
+    @torch.no_grad()
+    def refresh_weights(self, attention):
+        """Refill the derived conv weight and FP32 norm after a weight reload."""
+        conv_w, norm = self.weights[0], self.weights[5]
+        conv_w.copy_(decode_conv_weight(attention.conv1d.weight))
+        norm.copy_(attention.o_norm.weight)
+
     def _operands(self, caches, projected, slots, out, accepted=None):
         """Kernel tensors in launch order: 13 before the scalars, then F_B (and the
         verify step's accepted counts)."""
