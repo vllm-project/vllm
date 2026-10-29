@@ -10,9 +10,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
-    ParserSelection, RendererSelection, load_model_backends,
+    ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
+use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::{
     HttpListenerMode, TlsConfig,
@@ -24,14 +25,23 @@ use crate::{
 #[derive(Debug)]
 pub struct RenderConfig {
     pub model: String,
+    pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for `model`.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
+    pub hf_config: Option<ModelSource>,
+    pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     pub host: String,
     pub port: u16,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    pub trust_request_chat_template: bool,
+    pub exclude_tools_when_tool_choice_none: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
@@ -67,10 +77,15 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
+            hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: Default::default(),
@@ -83,10 +98,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
-        config.tool_call_parser.clone(),
-        config.reasoning_parser.clone(),
-    );
+    let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
+        .with_parser_selections(
+            config.tool_call_parser.clone(),
+            config.reasoning_parser.clone(),
+        )
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -149,7 +167,12 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
+                tool_strict_level: None,
                 model: "test-model".to_string(),
+                revision: None,
+                tokenizer: None,
+                hf_config: None,
+                hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),
                 port: 8000,
@@ -158,6 +181,8 @@ mod tests {
                 renderer: RendererSelection::Auto,
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                trust_request_chat_template: false,
+                exclude_tools_when_tool_choice_none: false,
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,

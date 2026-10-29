@@ -46,8 +46,9 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -100,6 +101,12 @@ pub(super) fn prepare_completion_request(
         request.max_tokens
     };
     let echo = completion_echo_text(&request, tokenizer)?;
+    let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let logprobs = if logprob_token_ids.is_some() {
+        None
+    } else {
+        logprobs
+    };
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
@@ -115,6 +122,7 @@ pub(super) fn prepare_completion_request(
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,
+            watermarking: request.watermarking,
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
@@ -123,6 +131,8 @@ pub(super) fn prepare_completion_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -133,13 +143,16 @@ pub(super) fn prepare_completion_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: None,
-            logprob_token_ids: None,
+            bad_words_token_ids: None,
+            logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
@@ -154,7 +167,9 @@ pub(super) fn prepare_completion_request(
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
-        reasoning_parser_kwargs: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: Default::default(),
+        reasoning_ended: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
@@ -170,7 +185,7 @@ pub(super) fn prepare_completion_request(
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
             return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
         },
         text_request,
     })
@@ -205,6 +220,8 @@ fn completion_echo_text(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use axum::http::HeaderMap;
     use serde_json::json;
     use validator::Validate;
@@ -394,7 +411,8 @@ mod tests {
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
             "ignore_eos": true,
-            "skip_special_tokens": false
+            "skip_special_tokens": false,
+            "stream_interval": 4
         }))
         .expect("parse request");
 
@@ -430,6 +448,10 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request.sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]
@@ -485,7 +507,7 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]
@@ -637,6 +659,28 @@ mod tests {
             prepared.text_request.prompt,
             Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
+    }
+
+    #[test]
+    fn selected_logprobs_override_completion_top_k_unless_empty() {
+        for ids in [vec![10, 20], vec![]] {
+            let request = serde_json::from_value(json!({
+                "prompt": "hello", "logprobs": 0, "logprob_token_ids": ids,
+            }))
+            .unwrap();
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                &test_tokenizer(),
+            )
+            .unwrap();
+            let params = prepared.text_request.sampling_params;
+            let selected = !ids.is_empty();
+            assert_eq!(params.logprob_token_ids, selected.then_some(ids));
+            assert_eq!(params.logprobs, (!selected).then_some(0));
+            assert_eq!(prepared.options.requested_logprobs, Some(0));
+        }
     }
 
     #[test]

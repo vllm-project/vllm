@@ -1,0 +1,86 @@
+{
+  "offre": "po2025-offre-3-sidecar-stdout",
+  "accord_dm": "msg-20261022T135058-4mb0zx",
+  "accord_utc": "2026-10-22T15:50:58Z",
+  "traite_utc": "2026-10-24T15:50:00Z",
+  "source": {
+    "fichier": "sidecar-stdout-3000-20261022.txt",
+    "taille_octets": 312422,
+    "lignes": 3000,
+    "seq_debut": 9305,
+    "seq_fin": 12304,
+    "seq_contigu": true,
+    "scan_secret_hits": 0,
+    "horodatages_presents": false
+  },
+  "comptes_par_type": {
+    "forward": 3000,
+    "retry": 0,
+    "log_error": 0,
+    "uvicorn_aiohttp": 0,
+    "autres": 0
+  },
+  "distribution_inputs": {
+    "n": 3000,
+    "min": 1,
+    "mediane": 18,
+    "moyenne": 71.41,
+    "p90": 133,
+    "max": 3742,
+    "somme": 214226
+  },
+  "distribution_total_bytes": {
+    "n": 3000,
+    "min": 52,
+    "p10": 348,
+    "mediane": 6609,
+    "p90": 40550,
+    "max": 451185,
+    "somme": 57052460,
+    "somme_mib": 54.4
+  },
+  "timeline_horaire": {
+    "derivable": false,
+    "raison": "aucun horodatage dans l'extrait"
+  },
+  "rejeux": {
+    "groupes_dupliques": 997,
+    "lignes_couvertes": 2654,
+    "motifs_sizes_distincts": 1202,
+    "top": [
+      {"signature": "1 input, size 12, total 97", "occurrences": 27},
+      {"signature": "1 input, size 264, total 348", "occurrences": 17},
+      {"signature": "1 input, size 17, total 102", "occurrences": 14}
+    ],
+    "limite": "le journal ne porte que des tailles : identite de longueur, pas de contenu"
+  },
+  "test_mini": {
+    "modele": "frognano-4b",
+    "agent": "mini-summarizer",
+    "verification": "recompte PowerShell independant avant chaque envoi",
+    "passes": [
+      {"n": 1, "fenetre": "40 lignes completes", "questions": 4,
+       "attendu": {"lignes": 40, "max_inputs": "372@9325", "ge100": 7, "ge50000": 8},
+       "obtenu":  {"lignes": 40, "max_inputs": "385@9325", "ge100": 9, "ge50000": 0},
+       "score": "1/4"},
+      {"n": 2, "fenetre": "40 lignes sans sizes", "questions": 4,
+       "attendu": {"lignes": 40, "max_inputs": "372@9325", "ge100": 7, "ge50000": 8},
+       "obtenu":  {"lignes": 40, "max_inputs": "385@9323", "ge100": 4, "ge50000": 1},
+       "score": "1/4"},
+      {"n": 3, "fenetre": "40 lignes sans sizes", "questions": 1,
+       "attendu": {"ge100": 7}, "obtenu": {"ge100": 9}, "score": "0/1"},
+      {"n": 4, "fenetre": "16 lignes", "questions": 1,
+       "attendu": {"ge100": 3}, "obtenu": {"ge100": 4}, "score": "0/1"},
+      {"n": 5, "fenetre": "40 lignes", "questions": 1,
+       "attendu": {"exact40": 3}, "obtenu": {"exact40": 6}, "score": "0/1"}
+    ],
+    "valeur_fabriquee": 385,
+    "critere_po2023_rappel_95pct": "NON ATTEINT",
+    "verdict": "ne pas integrer sur ce cas d'usage"
+  },
+  "frontiere_affinee": {
+    "tally_categoriel_16_lignes": "fiable (2 delegations exactes le 2026-10-24 : 11 et 16 lignes)",
+    "comparaison_numerique_16_lignes": "echoue (mesure du 2026-10-24, passe 4)",
+    "agregation_arithmetique": "non fiable (connu)"
+  }
+}

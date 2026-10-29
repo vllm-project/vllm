@@ -4,7 +4,21 @@
 # d'évaluation du tier secondaire filesystem, cf. NOTES v0320_fstier) :
 #   1. --kv-offloading-size défaut 8 GiB (CPU primaire VOLONTAIREMENT petit :
 #      l'éviction vers le tier fs doit se produire en quelques centaines de K
-#      tokens de fillers, pas en 1,5M)
+#      tokens de fillers, pas en 1,5M). VAR DÉDIÉE KV_OFFLOAD_GB_FSTIER (21/10) :
+#      ne lit PLUS KV_OFFLOAD_GB_SWIFT15 — le .env de prod porte 32, un boot de
+#      fenêtre via --env-file aurait pris RAM 32 + fs au lieu du 8 validé.
+#      24/10 : défaut 8 -> 24 GiB (Q30=b, GO user). 5 crashs du même assert
+#      amont « Chunk … not found in cache » (vllm#60729 cas 2) ce jour : une
+#      promotion fs->RAM évince un bloc RAM déjà compté HIT. Un primaire plus
+#      grand réduit la pression d'éviction (effet NON mesuré). 200K tokens
+#      ≈ 4,6 GiB en nvfp4 : 8 GiB en tient < 2, 24 GiB ~5.
+#      24/10 19:59Z : --no-scheduler-reserve-full-isl RETIRÉ (Q32, GO user).
+#      Constante héritée du profil Genesis de mai (KV 1,2M, occupation 2-7 % :
+#      le garde-fou ne jouait jamais), jamais réévaluée sur Swift. Désactivé, le
+#      scheduler admet une requête dès que sa 1re tranche (8192) tient, puis
+#      régule par préemption : 5-6 conversations ~200K pour 750K de KV, 66
+#      préemptions en 66 min. Défaut vLLM (True) = admission seulement si le
+#      prompt entier tient ; les autres attendent, contexte au chaud en RAM/fs.
 #   2. --kv-transfer-config : spec_name=TieringOffloadingSpec + secondary_tiers
 #      fs root=/kv-tier-fs — la synthèse _post_init_kv_transfer_config fait un
 #      .update() de kv_connector_extra_config (config/vllm.py:1097) : nos clés
@@ -76,6 +90,19 @@
 # NOTE: KV_OFFLOAD_GB_SWIFT15=0 does NOT disable offload -- config/vllm.py:1039
 # tests `is None`.  ROLLBACK of the offload = remove the two --kv-offloading
 # flags (pin=0 stays: it is the only working offload config on this host).
+# 2026-10-24 evening (user mandate "config au mieux", Q34=a):
+#   gpu-util 0.70 -> 0.73 (KV 750,747 -> ~831K tokens, +10.8%): queued minutes
+#   ran at 80-100% KV, i.e. concurrency is KV-bound (~3.7 conversations of
+#   200K); GPU 0 under load 21,471 MiB -> ~22,200, under the 23,000 alert line.
+#   Rollback: GPU_UTIL_SWIFT15=0.70.  Removed as inert (Q34): NCCL_P2P_DISABLE,
+#   CUDA_DEVICE_MAX_CONNECTIONS, --disable-custom-all-reduce (CUDA reports no
+#   P2P between GPUs 0/1 under WSL2, so NCCL and custom all-reduce never use
+#   it), shm_size (ignored with ipc: host).  KEPT although inert:
+#   --gdn-prefill-backend triton (auto = triton on SM89), VLLM_USE_DEEP_GEMM=0,
+#   VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 -- all three are compile-cache hash factors
+#   (additional_config / envs.compile_factors), so removing them forces a cold
+#   compile (~11 min outage measured 19/10).  Drop them at the next image bump,
+#   which recompiles anyway.
 # ---------------------------------------------------------------------------
 # ⚠ Operator traps (all live incidents): --env-file myia_vllm/.env on EVERY
 # compose command · NO '#' inside the backslash-continued command block ·
@@ -85,7 +112,11 @@
 
 services:
   vllm-medium-swift15-27b:
-    image: ${VLLM_IMAGE_SWIFT15:-vllm/vllm-openai:v0.32.0}
+    # 24/10: overlay = stock v0.32.0 + our fix for the tiering race
+    # "Chunk ... not found in cache" (configs/docker/overlay_v0320_tierpin).
+    # Build: docker build -t vllm-openai-v0320-tierpin:v1 configs/docker/overlay_v0320_tierpin
+    # Rollback: VLLM_IMAGE_SWIFT15=vllm/vllm-openai:v0.32.0 ... up -d --no-deps vllm-medium-swift15-27b
+    image: ${VLLM_IMAGE_SWIFT15:-vllm-openai-v0320-tierpin:v1}
     container_name: myia_vllm-medium-swift15-27b
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -111,7 +142,7 @@ services:
           --tensor-parallel-size 2 \
           --gdn-prefill-backend triton \
           --no-enable-flashinfer-autotune \
-          --gpu-memory-utilization 0.70 \
+          --gpu-memory-utilization ${GPU_UTIL_SWIFT15:-0.73} \
           --max-model-len 262144 \
           --kv-cache-dtype ${KV_DTYPE_SWIFT15:-nvfp4} \
           --dtype auto \
@@ -123,9 +154,9 @@ services:
           --speculative-config '${VLLM_SPEC_CONFIG_SWIFT15:-null}' \
           --performance-mode interactivity \
           --enable-chunked-prefill \
-          --kv-offloading-size ${KV_OFFLOAD_GB_SWIFT15:-8} \
+          --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-24} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
-          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
+          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"TouchOnHitFsTier","module_path":"lru_fs_tier","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
           --enable-prefix-caching \
           --prefix-caching-hash-algo sha256 \
           --prefix-match-unit 16 \
@@ -134,16 +165,13 @@ services:
           --tool-call-parser qwen3_coder \
           --reasoning-parser qwen3 \
           --distributed-executor-backend mp \
-          --disable-custom-all-reduce \
           --async-scheduling \
-          --no-scheduler-reserve-full-isl \
           --default-chat-template-kwargs '{"preserve_thinking":true,"reasoning_effort":"medium"}' \
           --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"repetition_penalty":1.0}' \
           --middleware error_source_capture.ErrorSourceCapture
     labels:
       - "autoheal=False"
     ipc: host
-    shm_size: '16gb'
     deploy:
       resources:
         reservations:
@@ -161,15 +189,13 @@ services:
       - VLLM_USE_DEEP_GEMM=0
       - OMP_NUM_THREADS=1
       - VLLM_LOG_DIR=/logs
-      - PYTHONPATH=/middleware
+      - PYTHONPATH=/middleware:/opt/kv_tier
       - VLLM_MAX_REQUEST_BODY_BYTES=0
       - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
       - VLLM_FLOAT32_MATMUL_PRECISION=high
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-      - NCCL_P2P_DISABLE=1
       - VLLM_USE_FLASHINFER_SAMPLER=0
       - VLLM_WSL2_ENABLE_PIN_MEMORY=0 # VERDICT (fenetre 05/10): cudaHostRegister of the shm offload region is BROKEN under WSL2, chunked or not -- v0.30.0 (monolithic) crashed at is_padding.fill_, v0.31.0+#51081 (chunked, PR tested live) crashed at async_utils copy_event.synchronize. pin=0 = the only working offload config on this host.
-      - CUDA_DEVICE_MAX_CONNECTIONS=8
     volumes:
       - ${VLLM_MODELS_PATH:-./models}:/models:ro
       - type: bind
@@ -185,6 +211,7 @@ services:
       - vllm-compile-cache-swift15-27b-v0320:/root/.cache/vllm
       - ${VLLM_LOG_PATH:-./../../../logs}:/logs
       - ./../../../middleware:/middleware:ro
+      - ./../../../kv_tier:/opt/kv_tier:ro
     ports:
       - "${VLLM_PORT_GLM:-5002}:${VLLM_PORT_GLM:-5002}"
     healthcheck:
@@ -222,9 +249,23 @@ services:
         STARTING_CHURN=0
         STALL_MAX=24
         STARTING_CYCLES=0
+        BUSY_MAX=10
+        BUSY_COUNT=0
+        SNAP_PTOKS=-1
+        SNAP_GTOKS=-1
+        METRICS_KO=0
+        METRICS_KO_MAX=3
 
-        echo "Watchdog v5 for Swift-1.5-27B (wedge + hard-hang + crash-loop + boot-stall)"
-        echo "  Interval: $${INTERVAL}s. Probes host.docker.internal."
+        # Prints "-1 -1" when /metrics cannot be read. A timeout used to print
+        # "0 0", which read as flat counters and restarted a working engine
+        # (2026-10-24 15:18Z: /metrics took >5 s under overload).
+        read_counters() {
+          curl -s --max-time 15 "http://host.docker.internal:$$PORT/metrics" 2>/dev/null \
+            | awk '/^vllm:prompt_tokens_total\{/{p=$$2} /^vllm:generation_tokens_total\{/{g=$$2} END{if (p=="" || g=="") printf "-1 -1"; else printf "%d %d", p, g}'
+        }
+
+        echo "Watchdog v6.2 for Swift-1.5-27B (v5 + prefill-in-flight gate, no restart while counters advance or are unreadable)"
+        echo "  Interval: $${INTERVAL}s (a WEDGE cycle lasts ~2 min). Probes host.docker.internal. BUSY alert every $${BUSY_MAX} cycles."
 
         while true; do
           TS=$$(date '+%Y-%m-%d %H:%M:%S')
@@ -244,28 +285,68 @@ services:
             STARTING_CYCLES=0
             if [ "$$G" = "200" ]; then
               if [ $$WEDGE_FAIL -gt 0 ]; then
-                echo "$$TS RECOVERED (decode ok after $$WEDGE_FAIL wedge fails)"
+                echo "$$TS RECOVERED (decode ok after $$WEDGE_FAIL wedge fails, BUSY streak was $$BUSY_COUNT)"
               elif [ $$WARMUP_LEFT -gt 0 ]; then
                 echo "$$TS OK health=200 decode=200 (warm-up grace consumed — engine is warm)"
               else
                 echo "$$TS OK health=200 decode=200"
               fi
               WEDGE_FAIL=0
+              BUSY_COUNT=0
+              SNAP_PTOKS=-1
+              METRICS_KO=0
               WARMUP_LEFT=0
             elif [ $$WARMUP_LEFT -gt 0 ]; then
               WARMUP_LEFT=$$((WARMUP_LEFT - 1))
               echo "$$TS WARMUP health=200 decode=$$G — post-boot grace, $$WARMUP_LEFT probe(s) left, NOT counted as wedge"
             else
-              WEDGE_FAIL=$$((WEDGE_FAIL + 1))
-              echo "$$TS WEDGE health=200 decode=$$G (fail $$WEDGE_FAIL/$$WEDGE_MAX)"
-              if [ $$WEDGE_FAIL -ge $$WEDGE_MAX ]; then
-                echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck)"
-                docker restart $$CONTAINER
-                WEDGE_FAIL=0
-                WARMUP_LEFT=$$WARMUP_PROBES
-                echo "$$TS Restart issued. Waiting 600s for boot..."
-                sleep 600
-                continue
+              NEWFAIL=$$((WEDGE_FAIL + 1))
+              if [ $$NEWFAIL -ge $$WEDGE_MAX ]; then
+                CT="$$(read_counters)"
+                PT="$${CT%% *}"; GT="$${CT##* }"
+                UNREAD=0
+                if [ "$$PT" -lt 0 ] || [ "$$SNAP_PTOKS" -lt 0 ]; then
+                  UNREAD=1
+                  METRICS_KO=$$((METRICS_KO + 1))
+                fi
+                if [ $$UNREAD -eq 1 ] && [ $$METRICS_KO -lt $$METRICS_KO_MAX ]; then
+                  echo "$$TS WEDGE-UNKNOWN health=200 decode=$$G — counters unreadable (now p=$$PT, snapshot p=$$SNAP_PTOKS), NOT restarting on a missing reading ($$METRICS_KO/$$METRICS_KO_MAX)"
+                  if [ "$$PT" -ge 0 ]; then
+                    SNAP_PTOKS=$$PT
+                    SNAP_GTOKS=$$GT
+                  fi
+                  WEDGE_FAIL=$$((WEDGE_MAX - 1))
+                elif [ $$UNREAD -eq 0 ] && { [ "$$PT" -gt "$$SNAP_PTOKS" ] || [ "$$GT" -gt "$$SNAP_GTOKS" ]; }; then
+                  METRICS_KO=0
+                  BUSY_COUNT=$$((BUSY_COUNT + 1))
+                  echo "$$TS WEDGE-BUSY health=200 decode=$$G — counters ADVANCED (p $$SNAP_PTOKS->$$PT g $$SNAP_GTOKS->$$GT), engine is working, NOT restarting (streak $$BUSY_COUNT, alert every $$BUSY_MAX)"
+                  SNAP_PTOKS=$$PT
+                  SNAP_GTOKS=$$GT
+                  WEDGE_FAIL=$$((WEDGE_MAX - 1))
+                  if [ $$((BUSY_COUNT % BUSY_MAX)) -eq 0 ]; then
+                    echo "$$TS BUSY-LONG ALERT $$CONTAINER busy $$BUSY_COUNT cycles (~$$((BUSY_COUNT * 2)) min) with counters advancing — overload, NOT restarting (a restart empties GPU/RAM caches and does not reduce the incoming load; user arbitration Q29=b, 2026-10-24)"
+                  fi
+                else
+                  if [ $$UNREAD -eq 1 ]; then
+                    echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters unreadable $$METRICS_KO cycles in a row)"
+                  else
+                    echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck, counters flat p=$$PT g=$$GT)"
+                  fi
+                  docker restart $$CONTAINER
+                  WEDGE_FAIL=0
+                  BUSY_COUNT=0
+                  METRICS_KO=0
+                  SNAP_PTOKS=-1
+                  WARMUP_LEFT=$$WARMUP_PROBES
+                  echo "$$TS Restart issued. Waiting 600s for boot..."
+                  sleep 600
+                  continue
+                fi
+              else
+                WEDGE_FAIL=$$NEWFAIL
+                CT="$$(read_counters)"
+                SNAP_PTOKS="$${CT%% *}"; SNAP_GTOKS="$${CT##* }"
+                echo "$$TS WEDGE health=200 decode=$$G (fail $$WEDGE_FAIL/$$WEDGE_MAX; snapshot p=$$SNAP_PTOKS g=$$SNAP_GTOKS)"
               fi
             fi
           else

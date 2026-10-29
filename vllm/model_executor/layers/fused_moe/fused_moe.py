@@ -110,8 +110,7 @@ def fused_moe_kernel_gptq_awq(
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -353,8 +352,7 @@ def fused_moe_kernel(
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -887,9 +885,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -1115,15 +1115,13 @@ def get_moe_configs(
     block_n: int | None = None,
     block_k: int | None = None,
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the fused MoE kernel.
+    """Return optimized configurations for the fused MoE kernel.
 
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
         return None
@@ -1187,6 +1185,7 @@ def _ensure_block_size_k_divisible(
 
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
+
     """
     # Fast path: already valid
     if size_k % block_size_k == 0 and block_size_k % group_size == 0:
@@ -1541,6 +1540,12 @@ direct_register_custom_op(
 )
 
 
+def _weights_host_resident(*weights: torch.Tensor) -> bool:
+    """True when any of the expert weights is read from host memory in place,
+    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
+
+
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1553,14 +1558,18 @@ def _prepare_expert_assignment(
     use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     ignore_invalid_experts: bool = False,
+    weights_host_resident: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # path of the fused_moe_kernel kernel, which reads an expert's weights once
+    # per (token, expert) pair. Not for weights in host memory: there every
+    # repeated read crosses PCIe, so group each expert's tokens instead.
     naive_block_assignment = (
         expert_map is None
+        and not weights_host_resident
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
@@ -1638,8 +1647,7 @@ def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
 ) -> None | torch.dtype | str:
-    """
-    Get the quantization type based on the quantization strategy flags.
+    """Get the quantization type based on the quantization strategy flags.
     We don't have a quant_config at this point so we need to work backwards.
     A return type of None means no quantization is required because the
     input is unquantized or has been quantized prior to calling
@@ -1786,6 +1794,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(

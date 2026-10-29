@@ -60,10 +60,6 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 
-FP8_DTYPE = current_platform.fp8_dtype()
-
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
@@ -111,6 +107,8 @@ AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # Per-token with ChannelWiseTorchFP8ScaledMMLinearKernel
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Static per-tensor: only the aiter quant op is matched by the pass
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, True),
     # Blockwise
     (AiterFp8BlockScaledMMKernel, GroupShape(1, 128), True),
 ]
@@ -201,6 +199,9 @@ class TestModel(torch.nn.Module):
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_group_quant_op()]
+        elif self.group_shape.is_per_tensor():
+            if self.use_aiter_quant_op:
+                return [rocm_aiter_ops.get_per_tensor_quant_op()]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -224,6 +225,17 @@ class TestModel(torch.nn.Module):
                 return [
                     AiterFusedAddRMSFp8GroupQuantPattern.FUSED_OP,
                     AiterRMSFp8GroupQuantPattern.FUSED_OP,
+                ]
+            elif self.group_shape.is_per_tensor():
+                # Static per-tensor aiter fusion
+                from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+                    AiterFusedAddRMSNormStaticQuantPattern,
+                    AiterRMSNormStaticQuantPattern,
+                )
+
+                return [
+                    AiterFusedAddRMSNormStaticQuantPattern.FUSED_OP,
+                    AiterRMSNormStaticQuantPattern.FUSED_OP,
                 ]
             else:
                 # Per-token aiter fusion
@@ -550,7 +562,9 @@ class TestGatedModel(torch.nn.Module):
     """Model that uses RMSNormGated + reshape + group FP8 quant + linear.
 
     Mimics GatedDeltaNetAttention's output projection path where:
-    - RMSNormGated operates on per-head tensors (N*H, D)
+    - RMSNormGated operates on per-head tensors, either (N, H, D) as
+      QwenGatedDeltaNetAttention passes them or flattened to (N*H, D) as
+      OlmoHybridGatedDeltaNetAttention does
     - Output is reshaped to (N, H*D) before group quantization + linear
     """
 
@@ -563,10 +577,12 @@ class TestGatedModel(torch.nn.Module):
         group_shape: GroupShape,
         dtype: torch.dtype,
         use_aiter_quant: bool = True,
+        flatten_heads: bool = True,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.flatten_heads = flatten_heads
         hidden_dim = num_heads * head_dim
 
         self.norm = RMSNormGated(
@@ -599,8 +615,11 @@ class TestGatedModel(torch.nn.Module):
         hidden_dim = num_heads * head_dim
         x = torch.relu(x)
         z = torch.relu(z)
-        x_heads = x.reshape(-1, num_heads, head_dim).reshape(-1, head_dim)
-        z_heads = z.reshape(-1, num_heads, head_dim).reshape(-1, head_dim)
+        x_heads = x.reshape(-1, num_heads, head_dim)
+        z_heads = z.reshape(-1, num_heads, head_dim)
+        if self.flatten_heads:
+            x_heads = x_heads.reshape(-1, head_dim)
+            z_heads = z_heads.reshape(-1, head_dim)
         normed = self.norm(x_heads, z_heads)
         merged = normed.reshape(-1, hidden_dim)
         out = self.fp8_linear(merged)
@@ -638,6 +657,11 @@ class _MockGDNLayer:
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("flatten_heads", [True, False])
+@pytest.mark.parametrize("quant_fp8_op", ["-quant_fp8", "+quant_fp8"])
+# The gated norm is matched either as its native decomposition or as the
+# vllm.fla_rms_norm_gated custom op (ROCm's default for unquantized models).
+@pytest.mark.parametrize("rms_norm_gated_op", ["-rms_norm_gated", "+rms_norm_gated"])
 @pytest.mark.skipif(
     (not current_platform.is_rocm() or not IS_AITER_FOUND),
     reason="Only test on ROCm with aiter package installed",
@@ -648,6 +672,9 @@ def test_aiter_fusion_rmsnorm_gated_quant(
     head_dim: int,
     num_tokens: int,
     eps: float,
+    flatten_heads: bool,
+    quant_fp8_op: str,
+    rms_norm_gated_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     group_shape = GroupShape(1, 128)
@@ -655,7 +682,7 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["-rms_norm", "-silu_and_mul", "-quant_fp8"],
+            custom_ops=["-rms_norm", "-silu_and_mul", quant_fp8_op, rms_norm_gated_op],
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
@@ -688,6 +715,7 @@ def test_aiter_fusion_rmsnorm_gated_quant(
             group_shape=group_shape,
             dtype=dtype,
             use_aiter_quant=True,
+            flatten_heads=flatten_heads,
         )
 
         noop_pass = NoOpEliminationPass(vllm_config)
@@ -708,7 +736,11 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         model_unfused = torch.compile(model, backend=backend2)
         result_unfused = model_unfused(x, z)
 
-        torch.testing.assert_close(result_fused, result_unfused, atol=1e-2, rtol=1e-2)
+        # The opaque AITER quant op preserves a BF16 intermediate in the
+        # unfused path, while the fused kernel normalizes and quantizes
+        # directly. Allow for that extra rounding before the FP8 GEMM.
+        tol = 2e-2 if quant_fp8_op == "+quant_fp8" else 1e-2
+        torch.testing.assert_close(result_fused, result_unfused, atol=tol, rtol=tol)
 
         assert fusion_pass.matched_count == 1
         backend.check_after_ops(model.ops_in_model_after())

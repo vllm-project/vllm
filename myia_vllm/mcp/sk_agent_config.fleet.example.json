@@ -1,0 +1,43 @@
+{
+  "_comment": "Exemple SANITISÉ de config sk-agent pour une machine hors ai-01 consommant Swift. (1) Copier, renommer, remplir SWIFT_BASE_URL (hub models.myia.io/v1 ou LAN http://192.168.0.47:5002/v1 pour exception documentée) et fournir la clé via la variable d'environnement VLLM_API_KEY_SWIFT — JAMAIS en clair ici, ni dans un dépôt, ni sur un dashboard ; distribution uniquement par DM privé à destruction, vérification par empreinte sha256[:12]. (2) Enregistrer : claude mcp add sk-agent --transport stdio -e SK_AGENT_CONFIG=<chemin de ce fichier> -e VLLM_API_KEY_SWIFT=<clé> -- python <repo>/myia_vllm/mcp/sk_agent.py. Presets alignés sur la table de routage de .claude/agents/swift-worker.md.",
+  "model": {
+    "base_url": "https://models.myia.io/v1",
+    "api_key_env": "VLLM_API_KEY_SWIFT",
+    "default_model": "swift-1.5-27b",
+    "vision": true,
+    "sampling": { "temperature": 0.7, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5, "max_tokens": 4096 }
+  },
+  "agents": [
+    {
+      "id": "analyst",
+      "model": "swift-1.5-27b",
+      "system_prompt": "Analyste local. Tu cites tes sources (chemin, ligne, extrait verbatim) et tu marques ce qui est supposé vs vérifié. Sortie en français, structurée, sans remplissage."
+    },
+    {
+      "id": "fast",
+      "model": "swift-1.5-27b-no-thinking",
+      "system_prompt": "Réponds vite et court, en français. Pas de préambule, pas de réserve générique."
+    },
+    {
+      "id": "classifier-local",
+      "model": "swift-1.5-27b-no-thinking",
+      "system_prompt": "Tu classes des items dans les labels fournis par l'appelant. Tu réponds UNIQUEMENT en JSON strict, sans texte autour. Température basse."
+    },
+    {
+      "id": "summarizer-local",
+      "model": "swift-1.5-27b-no-thinking",
+      "system_prompt": "Tu condenses en français dans la forme EXACTE demandée par l'appelant (sections, longueur). Tu ne rajoutes aucune interprétation au-delà de ce qui est demandé."
+    },
+    {
+      "id": "formatter-local",
+      "model": "swift-1.5-27b-no-thinking",
+      "system_prompt": "Tu normalises et reformatte (markdown, dumps) sans changer le sens. Tu signales toute ambiguïté au lieu de trancher."
+    },
+    {
+      "id": "vision-local",
+      "model": "swift-1.5-27b",
+      "system_prompt": "Analyse d'image et OCR : décris précisément, structure ta réponse, indique ton niveau de certitude sur les éléments peu lisibles."
+    }
+  ],
+  "mcps": []
+}

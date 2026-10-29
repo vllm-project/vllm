@@ -1,0 +1,29 @@
+model_name: "Qwen/Qwen3-4B-FP8"
+num_questions: 1319
+num_fewshot: 5
+max_tokens: 256
+use_chat_completions: false
+temperature: 1.0
+seed: 42
+
+# Reference accuracy from the non-watermarked DSpark regression test.
+accuracy_threshold: 0.801
+tolerance: 0.02
+# Measured TP1 acceptance length: 4.115; allow a 0.2 regression.
+min_acceptance_length: 3.915
+
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+server_args: >-
+  --tensor-parallel-size 2
+  --max-model-len 4096
+  --gpu-memory-utilization 0.92
+  --no-enable-prefix-caching
+  --speculative-config.method dspark
+  --speculative-config.model deepseek-ai/dspark_qwen3_4b_block7
+  --speculative-config.num_speculative_tokens 7
+  --speculative-config.draft_sample_method probabilistic
+  --watermark-config.algorithm dual_key_gumbel
+  --watermark-config.key 42
+  --watermark-config.context_width 4
+  --watermark-config.deduplicate_contexts none

@@ -2,7 +2,7 @@
 
 Configuration matérielle et logicielle de la machine de production vLLM.
 
-**Dernière mise à jour** : 2026-02-17
+**Dernière mise à jour** : 2026-10-26 (topologie GPU remise à jour ; le reste du document date de 2026-02-17)
 
 ---
 
@@ -31,8 +31,8 @@ Configuration matérielle et logicielle de la machine de production vLLM.
   - TDP : 450W par GPU
 
 - **Topology** :
-  - GPUs 0 et 1 : Bus PCIe plus rapide → utilisés pour GLM-4.7-Flash (TP=2)
-  - GPU 2 : Bus PCIe plus lent → utilisé pour modèles vision 8B standalone
+  - GPUs 0 et 1 : Bus PCIe plus rapide → **Swift-1.5-Qwen3.8-27B en TP=2** (prod depuis 2026-09-25 ; auparavant GLM-4.7-Flash puis Qwen3.5/3.6-35B-A3B)
+  - GPU 2 : Bus PCIe plus lent → **libéré le 2026-05-01** pour les entraînements CoursIA (plus de modèle résident ; auparavant OmniCoder-9B puis Kokoro TTS, tous deux archivés/migrés)
   - **Pas de NVLink** (limitation RTX 4090)
 
 ### Stockage

@@ -6,17 +6,15 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import torch
-from mistral_common.multimodal import download_image
-from mistral_common.protocol.instruct.chunk import ImageURLChunk
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
-from transformers import AutoProcessor
 
-from vllm import SamplingParams, TextPrompt, TokensPrompt
-from vllm.inputs import MultiModalDataBuiltins
+from vllm import SamplingParams
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.model_executor.models.pixtral import _make_packed_sequence_metadata
+from vllm.model_executor.models.pixtral import (
+    _apply_rotary_emb_vit_complex,
+    _apply_rotary_emb_vit_real,
+    _make_packed_sequence_metadata,
+    precompute_freqs_cis_2d,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -54,59 +52,6 @@ def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
             + [{"type": "image_url", "image_url": {"url": url}} for url in urls],
         }
     ]
-
-
-def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "content": PROMPT,
-                },
-                *({"type": "image", "image": download_image(url)} for url in urls),
-            ],
-        }
-    ]
-
-
-def _create_engine_inputs(urls: list[str]) -> TokensPrompt:
-    msg = _create_msg_format(urls)
-
-    tokenizer = MistralTokenizer.from_model("pixtral")
-
-    request = ChatCompletionRequest(messages=msg)  # type: ignore[type-var]
-    tokenized = tokenizer.encode_chat_completion(request)
-
-    engine_inputs = TokensPrompt(prompt_token_ids=tokenized.tokens)
-
-    images = []
-    for chunk in request.messages[0].content:
-        if isinstance(chunk, ImageURLChunk):
-            images.append(image_from_chunk(chunk))
-
-    mm_data = MultiModalDataBuiltins(image=images)
-    engine_inputs["multi_modal_data"] = mm_data
-
-    return engine_inputs
-
-
-def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
-    msg = _create_msg_format_hf(urls)
-
-    tokenizer = AutoProcessor.from_pretrained("mistral-community/pixtral-12b")
-    prompt = tokenizer.apply_chat_template(msg)
-
-    images = []
-    for chunk in msg[0]["content"]:
-        if chunk["type"] == "image":
-            images.append(chunk["image"])
-
-    mm_data = MultiModalDataBuiltins(image=images)
-    engine_inputs = TextPrompt(prompt=prompt, multi_modal_data=mm_data)
-
-    return engine_inputs
 
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
@@ -155,6 +100,19 @@ def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
         assert max_seqlen.item() == expected_max_seqlen
         assert cu_seqlens.tolist() == [0, 4, 10]
         assert sequence_lengths is None
+
+
+def test_real_rotary_emb_vit_matches_complex() -> None:
+    """The real RoPE used under torch.compile must match the eager one."""
+    num_patches, num_heads, head_dim = 12, 4, 64
+    freqs_cis = precompute_freqs_cis_2d(head_dim, height=3, width=4, theta=1e4)
+    freqs_cis = torch.view_as_real(freqs_cis.reshape(num_patches, head_dim // 2))
+    q, k = torch.randn(2, 1, num_patches, num_heads, head_dim).unbind(0)
+
+    torch.testing.assert_close(
+        _apply_rotary_emb_vit_real(q, k, freqs_cis),
+        _apply_rotary_emb_vit_complex(q, k, freqs_cis),
+    )
 
 
 # For the test author to store golden output in JSON

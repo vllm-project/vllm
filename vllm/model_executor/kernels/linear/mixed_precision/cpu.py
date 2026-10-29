@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -101,11 +102,12 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         else:
             # w4a8 kernel always requires zp, allocate a fake zp
             assert self.w_zp_name
-            packed_zp = torch.nn.Parameter(
+            replace_parameter(
+                layer,
+                self.w_zp_name,
                 torch.ones(group_num, zp_output_size, dtype=torch.int32) * -2004318072,
-                requires_grad=False,
             )
-            setattr(layer, self.w_zp_name, packed_zp)
+            packed_zp = getattr(layer, self.w_zp_name)
 
         # FIXME: some bugs in convert_weight_packed_scale_zp with GPTQ format,
         # repack to AWQ weight
@@ -213,5 +215,10 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
         return "rvv"
+    elif (
+        dtype == torch.bfloat16
+        and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+    ):
+        return "vsx"
     else:
         return "vec"

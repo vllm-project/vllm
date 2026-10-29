@@ -1,0 +1,2 @@
+# Files copied into a Linux image or run by bash: keep LF on every checkout.
+* text eol=lf

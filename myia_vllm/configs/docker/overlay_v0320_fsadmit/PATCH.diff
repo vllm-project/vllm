@@ -1,0 +1,299 @@
+--- a/vllm/v1/kv_offload/tiering/manager.py
++++ b/vllm/v1/kv_offload/tiering/manager.py
+@@ -9,6 +9,11 @@
+ Key Design Principles:
+ 1. Always offload to all tiers — When a chunk is stored to the primary tier,
+    it is cascaded to ALL secondary tiers
++   [myia fs-admit overlay, issue #198] ...except chunks refused by the
++   frequency admission filter for STORAGE (fs/SSD) tiers: a chunk is
++   cascaded there only once it has been found in the primary tier at least
++   MYIA_FS_ADMIT_MIN_HITS times (default 2, 0 = upstream write-through).
++   A refused cascade only costs a recompute later, never wrong output.
+ 2. Primary tier is the gateway — Secondary tiers cannot access GPU memory
+    directly; all data flows through the CPU primary tier
+ 3. Staged promotion — Chunks in secondary tiers must be promoted to the
+@@ -19,6 +24,7 @@
+    protecting chunks from eviction until complete_read() is called
+ """
+ 
++import os
+ import time
+ from collections.abc import Collection, Iterable, Sequence
+ from dataclasses import dataclass, field
+@@ -34,6 +40,7 @@
+ from vllm.v1.kv_offload.base import (
+     LoadStoreSpec,
+     LookupResult,
++    Medium,
+     OffloadingEvent,
+     OffloadingManager,
+     OffloadKey,
+@@ -58,6 +65,61 @@
+ 
+ logger = init_logger(__name__)
+ 
++# --- myia fs-admission overlay (jsboige/vllm#198, Phase 1a) ---------------
++# Upstream tiering is write-through: every primary-tier store is cascaded to
++# every secondary tier. On our production workload this pushed 427.5 GB to
++# the fs tier in 8.9 h of which only 9.3% was ever read back (measured
++# 2026-10-25). Cascades to STORAGE tiers are therefore frequency-gated,
++# after NVIDIA Dynamo's
++# disk-offload filter (DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER is off by default
++# there: CPU->disk only for blocks with frequency >= 2) and SGLang HiCache's
++# write_through_selective. See the overlay README for the full design.
++#
++# Both switches are read once per TieringOffloadingManager construction, so a
++# change needs a container recreate (like MYIA_FS_TOUCH in lru_fs_tier.py).
++_FS_ADMIT_ENV_MIN_HITS = "MYIA_FS_ADMIT_MIN_HITS"
++_FS_ADMIT_ENV_GDN_LATEST = "MYIA_FS_ADMIT_GDN_LATEST"
++# Upper bound on admission bookkeeping entries (hit counters + admitted-key
++# set, together). At the measured ~10^5 distinct chunk keys/day this leaves
++# days of headroom; overflowing clears both structures, which only biases
++# admission toward FEWER fs writes (a refused store costs a recompute, never
++# wrong output), so an unbounded dict is traded for a hard memory ceiling.
++_FS_ADMIT_TRACKER_MAX = 250_000
++
++
++def _read_fs_admit_min_hits() -> int:
++    """MYIA_FS_ADMIT_MIN_HITS, default 2. 0 disables the filter (rollback)."""
++    raw = os.environ.get(_FS_ADMIT_ENV_MIN_HITS, "2")
++    try:
++        value = int(raw)
++    except ValueError:
++        logger.warning(
++            "fs admission: %s=%r is not an int, using the default 2",
++            _FS_ADMIT_ENV_MIN_HITS,
++            raw,
++        )
++        return 2
++    if value < 0:
++        logger.warning(
++            "fs admission: %s=%d is negative, treating as 0 (disabled)",
++            _FS_ADMIT_ENV_MIN_HITS,
++            value,
++        )
++        return 0
++    return value
++
++
++def _read_fs_admit_gdn_latest() -> bool:
++    """MYIA_FS_ADMIT_GDN_LATEST, default off (the rule is a stub, see
++    _gdn_latest_allows)."""
++    return os.environ.get(_FS_ADMIT_ENV_GDN_LATEST, "0").strip().lower() not in (
++        "",
++        "0",
++        "false",
++        "no",
++        "off",
++    )
++
+ 
+ @dataclass
+ class PendingPromotion:
+@@ -204,6 +266,39 @@
+         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
+         self.secondary_tiers = secondary_tiers or []
+ 
++        # myia fs-admission overlay (issue #198): frequency-gated cascades to
++        # STORAGE (fs/SSD) tiers. 0 disables the gate entirely and restores
++        # upstream write-through for every tier. The counters below are
++        # content-addressed facts, deliberately NOT cleared by reset_cache()
++        # (secondary tiers keep their data across resets too).
++        self._fs_admit_min_hits = _read_fs_admit_min_hits()
++        # Number of times each key was found ready (HIT) in the primary tier
++        # by a lookup() walk. The storing request's own walk sees MISS/absent,
++        # so the count starts accruing with the FIRST REUSING request.
++        self._fs_admit_hits: dict[OffloadKey, int] = {}
++        # Keys already written (or queued) to at least one STORAGE tier by
++        # this filter. Prevents repeat cascade submissions after a threshold
++        # crossing; complete_store() still re-admits them so pruned-and-
++        # recomputed content re-persists.
++        self._fs_admitted_keys: set[OffloadKey] = set()
++        self._fs_admit_gdn_latest = _read_fs_admit_gdn_latest()
++        if self._fs_admit_min_hits > 0:
++            logger.info(
++                "fs admission: cascades to STORAGE tiers require >= %d "
++                "primary-tier lookup hit(s) (%s=0 restores write-through)",
++                self._fs_admit_min_hits,
++                _FS_ADMIT_ENV_MIN_HITS,
++            )
++        if self._fs_admit_gdn_latest:
++            logger.warning(
++                "fs admission: %s is set, but the GDN latest-state rule is "
++                "a documented no-op stub at this layer (no conversation-chain "
++                "identity reaches the tiering manager). Frequency admission "
++                "alone applies. See _gdn_latest_allows() and the overlay "
++                "README for where the rule belongs.",
++                _FS_ADMIT_ENV_GDN_LATEST,
++            )
++
+         self._job_id_counter: int = 0
+         # Job tracking: maps job_id to metadata for all in-flight transfers.
+         # TransferJob.is_promotion distinguishes direction:
+@@ -401,6 +496,137 @@
+                 detector.stats,
+             )
+ 
++    # --- myia fs-admission overlay (issue #198, Phase 1a) ------------------
++
++    def _record_fs_admit_hit(
++        self, key: OffloadKey, req_context: ReqContext
++    ) -> None:
++        """Count one upper-tier sighting of ``key`` and admit on crossing.
++
++        Called on every primary-tier (RAM) lookup() HIT — the canonical
++        "found in an upper tier" event; the prepare_load() that follows the
++        same HIT is the same use, not a second one, and is not counted
++        again. Secondary-tier (fs) hits are not counted either: a chunk
++        already on disk needs no disk admission.
++
++        When the count reaches the threshold, the chunk is cascaded to the
++        STORAGE tiers immediately, from inside this lookup: write-through
++        only cascades at store time, and a chunk that stays hot in the
++        primary tier forever (a stable socle) is never re-stored, so a
++        store-time-only gate would never persist it — after every restart
++        the socle would stop reaching the fs entirely.
++        """
++        if self._fs_admit_min_hits <= 0:
++            return
++        count = self._fs_admit_hits.get(key, 0) + 1
++        self._fs_admit_hits[key] = count
++        if count == self._fs_admit_min_hits:
++            self._cascade_key_to_storage_tiers(key, req_context)
++        self._check_fs_admit_overflow()
++
++    def _cascade_key_to_storage_tiers(
++        self, key: OffloadKey, req_context: ReqContext
++    ) -> None:
++        """Admission threshold just crossed while ``key`` is resident and
++        ready in the primary tier: cascade it now to every STORAGE tier.
++
++        No existence probe first: the real fs tier's lookup() is
++        asynchronous (a fresh probe returns RETRY), so probing would defer
++        this write to a re-store that may never come for a chunk that stays
++        hot in the primary tier. The fs tier's store path is idempotent
++        (content-addressed file, temp + os.replace), so the worst case of
++        submitting unconditionally is one redundant rewrite of identical
++        bytes per key per process lifetime (e.g. a socle that survived a
++        restart on disk and re-crossed) — bounded and tiny against the
++        ~47 GB/h write stream this filter exists to cut.
++        """
++        if key in self._fs_admitted_keys:
++            return
++        if self._fs_admit_gdn_latest and not self._gdn_latest_allows(
++            key, req_context
++        ):
++            return
++        submitted = False
++        for tier_idx, tier in enumerate(self.secondary_tiers):
++            if tier.medium is not Medium.STORAGE:
++                continue
++            if not self._should_store_to_tier(tier, 1):
++                continue
++            job_metadata = self.create_store_job([key], req_context, tier_idx)
++            tier.submit_store(job_metadata)
++            submitted = True
++        if submitted:
++            self._fs_admitted_keys.add(key)
++        self._check_fs_admit_overflow()
++
++    def _filter_fs_admitted(
++        self, keys: Collection[OffloadKey], req_context: ReqContext
++    ) -> list[OffloadKey]:
++        """Return the subset of ``keys`` admitted to a STORAGE tier.
++
++        Keys already in _fs_admitted_keys pass unconditionally: membership
++        means admission was earned before, and the re-cascade this allows is
++        what re-persists hot content after the external pruner deleted its
++        fs file (the fs tier's write path is idempotent, content-addressed).
++        """
++        admitted: list[OffloadKey] = []
++        for key in keys:
++            if self._fs_admit_gdn_latest and not self._gdn_latest_allows(
++                key, req_context
++            ):
++                continue
++            if key in self._fs_admitted_keys:
++                admitted.append(key)
++            elif self._fs_admit_hits.get(key, 0) >= self._fs_admit_min_hits:
++                self._fs_admitted_keys.add(key)
++                admitted.append(key)
++        self._check_fs_admit_overflow()
++        return admitted
++
++    def _check_fs_admit_overflow(self) -> None:
++        if len(self._fs_admit_hits) > _FS_ADMIT_TRACKER_MAX:
++            self._fs_admit_hits.clear()
++            self._fs_admitted_keys.clear()
++            logger.warning(
++                "fs admission: tracker exceeded %d entries, cleared — "
++                "admission is temporarily more conservative (fewer fs "
++                "writes) until counters rebuild",
++                _FS_ADMIT_TRACKER_MAX,
++            )
++
++    def _gdn_latest_allows(
++        self, key: OffloadKey, req_context: ReqContext
++    ) -> bool:
++        """STUB (issue #198, Phase 1b): GDN latest-state rule — NOT
++        IMPLEMENTED at this layer, by design.
++
++        Intended semantics: a Gated DeltaNet state snapshot of a
++        conversation must not be cascaded to fs once a newer snapshot of
++        the same chain supersedes it (two thirds of our fs writes are GDN
++        snapshots, ~1.6 per request). Deciding supersession needs two facts
++        the tiering manager does not have:
++
++        1. Which KV group indices are GDN state groups. The group index is
++           recoverable from the key (get_offload_group_idx), but the
++           group-index -> attention-type mapping lives in OffloadingConfig
++           / the scheduler-side connector, never here.
++        2. Conversation-chain identity. Keys are opaque content hashes:
++           two snapshots of one conversation cannot be related at this
++           layer, and ReqContext carries only req_id plus per-request
++           token positions (_offload_key_positions), not which prior
++           request a prompt continues.
++
++        The rule therefore belongs where both facts exist — the
++        scheduler-side offloading connector — which is exactly the shape of
++        upstream's planned TieringAdmissionPolicy (RFC vllm#51240, framework
++        PR vllm#60000: should_admit/on_admitted/on_completed fed per-request)
++        or of Phase 2's branch-point checkpoint work (issue #198). Until
++        then this stub returns True (no exclusion): frequency admission
++        alone applies, and MYIA_FS_ADMIT_GDN_LATEST only logs that the rule
++        was requested. See the overlay README.
++        """
++        return True
++
+     @override
+     def lookup(
+         self,
+@@ -449,6 +675,7 @@
+         )
+         if primary_hit is LookupResult.HIT:
+             self._step_hit_keys.add(key)
++            self._record_fs_admit_hit(key, req_context)
+             return LookupResult.HIT
+         if primary_hit is LookupResult.HIT_PENDING:
+             return LookupResult.HIT_PENDING
+@@ -780,10 +1007,19 @@
+             # LoadStoreSpec AND to increment ref_cnt (protecting chunks from
+             # eviction during the async transfer). One prepare_read() call per
+             # secondary tier.
++            # [myia fs-admit overlay, issue #198] STORAGE tiers receive only
++            # the admitted subset: chunks never found in an upper tier are
++            # skipped (a refused store costs a recompute later, never wrong
++            # output). Other media keep upstream write-through.
+             for tier_idx, tier in enumerate(self.secondary_tiers):
+                 if not self._should_store_to_tier(tier, len(keys)):
+                     continue
+-                job_metadata = self.create_store_job(keys, req_context, tier_idx)
++                tier_keys: Collection[OffloadKey] = keys
++                if self._fs_admit_min_hits > 0 and tier.medium is Medium.STORAGE:
++                    tier_keys = self._filter_fs_admitted(keys, req_context)
++                    if not tier_keys:
++                        continue
++                job_metadata = self.create_store_job(tier_keys, req_context, tier_idx)
+                 tier.submit_store(job_metadata)
+ 
+         # Note: The async transfers are now in flight. Their completion is

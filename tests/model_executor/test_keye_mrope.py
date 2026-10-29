@@ -35,7 +35,9 @@ class DummyConfig:
 
 
 def make_model(config: DummyConfig) -> KeyeForConditionalGeneration:
-    model = object.__new__(KeyeForConditionalGeneration)
+    model = object.__new__(
+        KeyeForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     model.config = config
     return model
 

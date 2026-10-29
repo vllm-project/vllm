@@ -26,7 +26,8 @@ if [ -z "${CI_INFRA_OTEL_RUNTIME_DIR}" ] ||
   [ -z "${_CI_INFRA_OTEL_PYTHON}" ] ||
   [ ! -f "${CI_INFRA_OTEL_DIR}/ci_otel.py" ] ||
   ! mkdir -p "${CI_INFRA_OTEL_SPOOL_DIR}" ||
-  ! PYTHONPATH="${CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+  ! PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="${CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${_CI_INFRA_OTEL_PYTHON}" -c "import ci_otel" >/dev/null 2>&1; then
   echo "vLLM CI OTel: tracing unavailable; test command will run normally" >&2 || :
   if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
@@ -58,10 +59,43 @@ fi
 
 _ci_otel_python() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 2s "${_CI_INFRA_OTEL_PYTHON}" "$@"
+    PYTHONDONTWRITEBYTECODE=1 timeout 2s "${_CI_INFRA_OTEL_PYTHON}" "$@"
   else
-    "${_CI_INFRA_OTEL_PYTHON}" "$@"
+    PYTHONDONTWRITEBYTECODE=1 "${_CI_INFRA_OTEL_PYTHON}" "$@"
   fi
+}
+
+# The Docker test commands run as root, while /workdir is owned by the
+# Buildkite checkout user. Run the GPU sampler as that unprivileged identity so
+# any future project-code import cannot leave root-owned files in the checkout.
+_ci_otel_prepare_gpu_user() {
+  _CI_INFRA_GPU_UID=""
+  _CI_INFRA_GPU_GID=""
+  [ "$(id -u 2>/dev/null || :)" = "0" ] || return 0
+  command -v setpriv >/dev/null 2>&1 || return 1
+
+  _CI_INFRA_OTEL_WORKSPACE_DIR="${CI_INFRA_OTEL_WORKSPACE_DIR:-/workdir}"
+  [ -d "${_CI_INFRA_OTEL_WORKSPACE_DIR}" ] || return 1
+  # The owner fields are numeric and whitespace-free on GNU stat.
+  # shellcheck disable=SC2046
+  set -- $(stat -c '%u %g' -- "${_CI_INFRA_OTEL_WORKSPACE_DIR}" 2>/dev/null || :)
+  [ "$#" -eq 2 ] || return 1
+  case "$1:$2" in
+    *[!0-9:]* | 0:* | *:0) return 1 ;;
+  esac
+
+  _CI_INFRA_GPU_UID="$1"
+  _CI_INFRA_GPU_GID="$2"
+  chown "${_CI_INFRA_GPU_UID}:${_CI_INFRA_GPU_GID}" \
+    "${CI_INFRA_OTEL_SPOOL_DIR}" || return 1
+  chmod 0700 "${CI_INFRA_OTEL_SPOOL_DIR}" || return 1
+  if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
+    # Permit traversal to the private child spool, but not directory listing.
+    chmod 0711 "${CI_INFRA_OTEL_RUNTIME_DIR}" || return 1
+  fi
+  setpriv --reuid="${_CI_INFRA_GPU_UID}" \
+    --regid="${_CI_INFRA_GPU_GID}" --clear-groups --no-new-privs \
+    -- test -w "${CI_INFRA_OTEL_SPOOL_DIR}"
 }
 
 ci_otel_start() {
@@ -82,6 +116,28 @@ ci_otel_start() {
   CI_INFRA_COMMAND_SPAN_ID="${_CI_INFRA_OTEL_COMMAND_SPAN_ID}"
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
   _CI_INFRA_OTEL_ACTIVE=1
+  _CI_INFRA_GPU_PID=""
+  if [ "${CI_INFRA_GPU_SAMPLING:-1}" != "0" ] &&
+    [ -f "${CI_INFRA_OTEL_DIR}/ci_gpu.py" ] &&
+    command -v nvidia-smi >/dev/null 2>&1; then
+    if _ci_otel_prepare_gpu_user; then
+      if [ -n "${_CI_INFRA_GPU_UID}" ]; then
+        PYTHONDONTWRITEBYTECODE=1 setpriv \
+          --reuid="${_CI_INFRA_GPU_UID}" --regid="${_CI_INFRA_GPU_GID}" \
+          --clear-groups --no-new-privs -- \
+          "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" \
+          </dev/null &
+      else
+        PYTHONDONTWRITEBYTECODE=1 \
+          "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" \
+          </dev/null &
+      fi
+      _CI_INFRA_GPU_PID=$!
+    else
+      echo "vLLM CI OTel: non-root GPU sampler unavailable; sampling disabled" \
+        >&2 || :
+    fi
+  fi
 }
 
 ci_otel_finish() {
@@ -93,6 +149,18 @@ ci_otel_finish() {
     "${_CI_INFRA_OTEL_PARENT_SPAN_ID}" "${_CI_INFRA_OTEL_START_NS}" \
     "${_CI_INFRA_OTEL_COMMAND_INDEX}" "${_CI_INFRA_OTEL_COMMAND_STATUS}" \
     "${_CI_INFRA_OTEL_COMMAND_LABEL}" || :
+  if [ -n "${_CI_INFRA_GPU_PID:-}" ]; then
+    kill -TERM "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_WAIT=0
+    while kill -0 "${_CI_INFRA_GPU_PID}" 2>/dev/null &&
+      [ "${_CI_INFRA_GPU_WAIT}" -lt 30 ]; do
+      sleep 0.1
+      _CI_INFRA_GPU_WAIT=$((_CI_INFRA_GPU_WAIT + 1))
+    done
+    kill -KILL "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    wait "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_PID=""
+  fi
   CI_INFRA_TRACE_ID=""
   CI_INFRA_COMMAND_SPAN_ID=""
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
@@ -118,9 +186,11 @@ _ci_otel_on_exit() {
   trap - 0
   ci_otel_finish "${_CI_INFRA_OTEL_EXIT_STATUS}" || :
   if command -v timeout >/dev/null 2>&1; then
-    timeout 4s "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
+    PYTHONDONTWRITEBYTECODE=1 timeout 4s \
+      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   else
-    "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
+    PYTHONDONTWRITEBYTECODE=1 \
+      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   fi
   if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
     rm -rf -- "${CI_INFRA_OTEL_RUNTIME_DIR}" || :

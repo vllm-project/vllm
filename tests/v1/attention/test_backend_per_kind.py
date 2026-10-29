@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for per-KV-group attention backend selection (backend_per_kind)."""
+"""Tests for attention configuration and per-KV-group backend selection."""
+
+from types import SimpleNamespace
 
 import pytest
 
-from vllm.config.attention import AttentionConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
 from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
+from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
 
@@ -26,7 +29,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpecKind
 def test_largest_kernel_block_within(supported_sizes, expected):
     class Backend:
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return supported_sizes
 
     assert _largest_kernel_block_within(Backend, 1024, 1024 * 1536, 2048) == expected
@@ -69,20 +72,70 @@ def test_get_attn_spec_kind_attn_type(attn_type, expected):
 
 
 def test_backend_per_kind_parses_strings():
-    cfg = AttentionConfig(
-        backend_per_kind={
-            "mla_attention": "FLASHINFER_MLA",
-            "sliding_window_mla": "triton_mla",  # case-insensitive
-        }
-    )
+    # The field's before-validator parses backend names from strings.
+    backend_per_kind: dict[str, str] = {
+        "mla_attention": "FLASHINFER_MLA",
+        "sliding_window_mla": "triton_mla",  # case-insensitive
+    }
+    cfg = AttentionConfig(backend_per_kind=backend_per_kind)
     assert cfg.backend_per_kind["mla_attention"] is AttentionBackendEnum.FLASHINFER_MLA
     assert cfg.backend_per_kind["sliding_window_mla"] is AttentionBackendEnum.TRITON_MLA
 
 
 def test_backend_per_kind_rejects_unknown_kind():
+    backend_per_kind: dict[str, str] = {"not_a_kind": "TRITON_MLA"}
     with pytest.raises(ValueError, match="Unknown KV cache group kind"):
-        AttentionConfig(backend_per_kind={"not_a_kind": "TRITON_MLA"})
+        AttentionConfig(backend_per_kind=backend_per_kind)
 
 
 def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
+
+
+def test_hisparse_device_buffer_size_boundaries():
+    vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+        speculative_config=None,
+    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.device_buffer_size == 256
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=127
+    )
+    with pytest.raises(ValueError, match="expected at least 128"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=32768
+    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.device_buffer_size == 32768
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=32769
+    )
+    with pytest.raises(ValueError, match="int16 slot-index limit"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+
+def test_hisparse_device_buffer_covers_speculative_window():
+    vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            parallel_drafting=False,
+        ),
+    )
+
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.device_buffer_size == 5 * 128
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=4 * 128 - 1
+    )
+    with pytest.raises(ValueError, match="expected at least 512"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)

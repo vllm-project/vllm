@@ -12,6 +12,7 @@ import torch
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 _MAX_NUM_Q_HEADS = 64
 _MAX_NUM_KV_HEADS = 4
@@ -22,8 +23,36 @@ _TOPK = 16
 # fixed planner allocation used by the MSA decode kernel.
 _MAX_QUERY_HEAD_ROWS = 65536
 _MAX_DECODE_QUERY_LEN = 32
-# Kernel benchmarks put the CUTLASS crossover at 16 requests for TP1 and TP4.
-_MIN_CUTLASS_BATCH_SIZE = 16
+_DEFAULT_MIN_CUTLASS_BATCH_SIZE = 16
+_B300_EAGLE3_QUERY_HEAD_ROWS = 1024
+_B300_EAGLE3_MAX_QUERY_LEN = 8
+_B300_EAGLE3_HEAD_GEOMETRIES = {(64, 4), (32, 2), (16, 1)}
+
+
+def is_nvfp4_kv_cache(kv_cache_dtype: str) -> bool:
+    return get_kv_quant_mode(kv_cache_dtype).is_nvfp4
+
+
+def nvfp4_kv_cache_views(
+    kv_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return the K data, K scale, V data and V scale views of an NVFP4 cache.
+
+    ``kv_cache`` is uint8 ``[pages, 2 * Hkv, page_size, 72]``; slot
+    ``2 * head + side`` (K = 0, V = 1) is that head's E2M1 data
+    ``[page_size, 64]`` followed by its E4M3 block scales ``[page_size, 8]``,
+    the one page layout ``fmha_sm100`` reads.
+    """
+    from vllm.third_party.fmha_sm100.nvfp4_kv import nvfp4_head_slot_views
+
+    return nvfp4_head_slot_views(*nvfp4_kv_cache_slots(kv_cache))
+
+
+def nvfp4_kv_cache_slots(
+    kv_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the per-head K and V slots of an NVFP4 cache."""
+    return kv_cache[:, 0::2], kv_cache[:, 1::2]
 
 
 @dataclass
@@ -91,6 +120,9 @@ class MSACutlassDecodePlanCache:
             use_fp8_kvcache=True,
             split_prefill_decode=False,
             device=device,
+            # The Q8KV4 route keeps plan-time lengths and its own page offsets,
+            # which this cached plan does not refresh.
+            decode_backend="kv_mode3",
         )
 
         plan_info = plan[3]
@@ -204,6 +236,22 @@ def _supported_head_geometry(num_q_heads: int, num_kv_heads: int) -> bool:
     )
 
 
+def _min_cutlass_batch_size(
+    decode_query_len: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+) -> int:
+    if (
+        not current_platform.is_device_capability((10, 3))
+        or not 1 <= decode_query_len <= _B300_EAGLE3_MAX_QUERY_LEN
+        or (num_q_heads, num_kv_heads) not in _B300_EAGLE3_HEAD_GEOMETRIES
+    ):
+        return _DEFAULT_MIN_CUTLASS_BATCH_SIZE
+    # Use CUTLASS once batch_size * decode_query_len * num_q_heads >= 1024.
+    query_head_rows = decode_query_len * num_q_heads
+    return (_B300_EAGLE3_QUERY_HEAD_ROWS + query_head_rows - 1) // query_head_rows
+
+
 def supports_cutlass_sparse_decode(
     *,
     decode_backend: MiniMaxM3MSADecodeBackend,
@@ -214,11 +262,12 @@ def supports_cutlass_sparse_decode(
     topk_blocks: int,
 ) -> bool:
     """Return whether static model geometry supports CUTLASS sparse decode."""
+    nvfp4 = is_nvfp4_kv_cache(kv_cache_dtype)
     return (
-        decode_backend == "cutlass"
+        (decode_backend == "cutlass" or nvfp4)
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
-        and kv_cache_dtype in ("fp8", "fp8_e4m3")
+        and (kv_cache_dtype in ("fp8", "fp8_e4m3") or nvfp4)
         and _supported_head_geometry(num_q_heads, num_kv_heads)
         and page_size == _PAGE_SIZE
         and topk_blocks == _TOPK
@@ -235,9 +284,14 @@ def should_prepare_decode_metadata(
     kv_cache_dtype: str,
     page_size: int,
     topk_blocks: int,
+    min_batch_size: int | None = None,
 ) -> bool:
     """Return whether a graph shape can use the CUTLASS decode path."""
     total_q = batch_size * decode_query_len
+    if min_batch_size is None:
+        min_batch_size = _min_cutlass_batch_size(
+            decode_query_len, num_q_heads, num_kv_heads
+        )
     return (
         supports_cutlass_sparse_decode(
             decode_backend=decode_backend,
@@ -248,7 +302,7 @@ def should_prepare_decode_metadata(
             topk_blocks=topk_blocks,
         )
         and 1 <= decode_query_len <= _MAX_DECODE_QUERY_LEN
-        and batch_size >= _MIN_CUTLASS_BATCH_SIZE
+        and (batch_size >= min_batch_size or is_nvfp4_kv_cache(kv_cache_dtype))
         and total_q * num_q_heads <= _MAX_QUERY_HEAD_ROWS
     )
 
@@ -292,9 +346,22 @@ def msa_cutlass_sparse_decode(
     q_scale_float: float,
     k_scale_float: float,
     v_scale_float: float,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> None:
-    """Run CUTLASS sparse decode with metadata prepared by the MSA builder."""
-    key, value = kv_cache.split(_HEAD_DIM, dim=-1)
+    """Run CUTLASS sparse decode with metadata prepared by the MSA builder.
+
+    NVFP4 caches are uint8 head-slot pages (see ``nvfp4_kv_cache_views``) and
+    take the device global scales ``k_scale``/``v_scale``.
+    """
+    if kv_cache.dtype == torch.uint8:
+        assert k_scale is not None and v_scale is not None
+        key, value = nvfp4_kv_cache_slots(kv_cache)
+        k_scale_arg: float | torch.Tensor = k_scale
+        v_scale_arg: float | torch.Tensor = v_scale
+    else:
+        key, value = kv_cache.split(_HEAD_DIM, dim=-1)
+        k_scale_arg, v_scale_arg = k_scale_float, v_scale_float
 
     from vllm.third_party.fmha_sm100.api import fmha_sm100
 
@@ -310,7 +377,7 @@ def msa_cutlass_sparse_decode(
         output_o=True,
         sm_scale=scale,
         q_scale=q_scale_float,
-        k_scale=k_scale_float,
-        v_scale=v_scale_float,
+        k_scale=k_scale_arg,
+        v_scale=v_scale_arg,
         o_scale=1.0,
     )
