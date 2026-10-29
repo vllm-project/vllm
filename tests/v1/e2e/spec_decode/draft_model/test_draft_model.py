@@ -25,6 +25,8 @@ from ..utils import (
 )
 
 
+# Tomas R: TODO: Improve naming of this class and
+# assert_draft_model_correctness and move to common SD test utils
 @dataclass
 class ArgsTest:
     target_model: str
@@ -35,6 +37,7 @@ class ArgsTest:
     expected_acceptance_len: float
     expected_gsm8k_accuracy: float = 0.0  # skip by default
     # Defaults
+    method: str = "draft_model"
     enforce_eager: bool = True
     parallel_drafting: bool = False
     target_tensor_parallel_size: int = 1
@@ -44,6 +47,10 @@ class ArgsTest:
     dataset: str = "test_prompts"
     # Doubling 100 to 200 reduces sampling standard error by about 29%.
     num_prompts: int = 200
+    max_num_seqs: int = 100
+    enable_prefix_caching: bool | None = None
+    chat_template_kwargs: dict | None = None
+    reject_full_acceptance: bool = False
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
@@ -150,6 +157,21 @@ def test_draft_model_quantization(
     assert_draft_model_correctness(sd_case, vllm_runner)
 
 
+@single_gpu_only
+def test_draft_model_transformers_backend(vllm_runner):
+    """Ensure that Attention prefixes don't collide between the target and
+    draft models when both models use the Transformers modelling backend."""
+    sd_case = ArgsTest(
+        target_model="allenai/OLMo-2-0425-1B-Instruct",
+        draft_model="allenai/OLMo-2-0425-1B-Instruct",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
+        expected_acceptance_rate=0.98,  # slight epsilon
+    )
+    assert_draft_model_correctness(sd_case, vllm_runner)
+
+
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_tensor_parallelism(vllm_runner):
     """Ensure spec decode works when running with TP > 1."""
@@ -181,9 +203,11 @@ def test_draft_model_engine_args_tensor_parallelism():
     )
     target_config: VllmConfig = engine_args.create_engine_config()
     assert target_config.parallel_config.tensor_parallel_size == 2
+    assert target_config.quant_config is not None
     assert target_config.quant_config.get_name() == "fp8"
 
     speculative_config = target_config.speculative_config
+    assert speculative_config is not None
     draft_config: VllmConfig = replace(
         target_config,
         quant_config=None,
@@ -233,6 +257,7 @@ def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
     so we can test it without instantiating a full proposer."""
     spec_cfg = vllm_config.speculative_config
+    assert spec_cfg is not None
     if spec_cfg.moe_backend is not None:
         return replace(
             vllm_config,
@@ -271,6 +296,7 @@ def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend == "triton"
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -295,6 +321,7 @@ def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -316,6 +343,7 @@ def test_draft_model_moe_backend_default_auto():
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == "auto"
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -341,8 +369,7 @@ def test_draft_model_engine_args_rejects_invalid_tp_argname():
 
 
 def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
-    """Compare the outputs using and not using speculative decoding.
-    In the greedy decoding case, the outputs must match EXACTLY."""
+    """Check speculative decoding acceptance metrics and GSM8K accuracy."""
     test_prompts: list[Messages] = get_messages(
         dataset=args.dataset, n=args.num_prompts
     )
@@ -355,24 +382,29 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         compilation_config=CompilationConfig(),
         speculative_config={
             "model": args.draft_model,
-            "method": "draft_model",
+            "method": args.method,
             "num_speculative_tokens": args.num_speculative_tokens,
             "max_model_len": args.max_model_len,
             "enforce_eager": args.enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
             "parallel_drafting": args.parallel_drafting,
         },
-        max_num_seqs=100,  # limit cudagraph capture runtime
+        max_num_seqs=args.max_num_seqs,  # limit cudagraph capture runtime
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
+        enable_prefix_caching=args.enable_prefix_caching,
     ) as spec_runner:
         spec_llm = spec_runner.llm
 
         # we don't check the outputs, only check the metrics
-        spec_llm.chat(test_prompts, args.sampling_config)
+        spec_llm.chat(
+            test_prompts,
+            args.sampling_config,
+            chat_template_kwargs=args.chat_template_kwargs,
+        )
         metrics = spec_llm.get_metrics()
         acceptance_rate: float = compute_acceptance_rate(metrics)
         acceptance_len: float = compute_acceptance_len(metrics)
@@ -390,7 +422,8 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         )
 
         context = (
-            f"draft_model target={args.target_model}, draft={args.draft_model}, "
+            f"method={args.method} "
+            f"target={args.target_model}, draft={args.draft_model}, "
             f"eager={args.enforce_eager}, "
             f"acceptance_rate={acceptance_rate:.3f}, "
             f"acceptance_len={acceptance_len:.3f}"
@@ -402,7 +435,11 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         assert acceptance_len >= args.expected_acceptance_len, (
             f"{context}; expected acceptance_len >= {args.expected_acceptance_len:.3f}"
         )
-        # draft_model supports async scheduling; assert it is active by default.
+        if args.reject_full_acceptance:
+            assert acceptance_len < args.num_speculative_tokens + 1, (
+                f"{context}; acceptance_len is at its ceiling"
+            )
+        # Assert async scheduling is active by default.
         has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
 
-    assert has_async, "Expected async_scheduling=True for draft_model spec decode"
+    assert has_async, f"Expected async_scheduling=True for {args.method} spec decode"

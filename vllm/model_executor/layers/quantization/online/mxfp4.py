@@ -119,13 +119,15 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp4, weight_scale = mxfp4_quantize(layer.weight.contiguous())
+        weight = self.get_weight_for_quantization(layer)
+        weight_fp4, weight_scale = mxfp4_quantize(weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp4.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -233,8 +235,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
         else:
@@ -267,8 +269,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         # AITER_MXFP4_FP8` to read `self.w13_precision_config`/
         # `self.w2_precision_config` instead of `layer.w13_weight_scale`/
         # `layer.w2_weight_scale`. For those backends,
-        # `convert_weight_to_mxfp4_moe_kernel_format` deletes the latter, so
-        # `getattr` below would raise `AttributeError`. This is currently
+        # `convert_weight_to_mxfp4_moe_kernel_format` empties the latter, so
+        # the scales read below would be empty. This is currently
         # unreachable because `activation_quant_key` is hardcoded to
         # `kMxfp4Dynamic`
         # TODO: When supporting online activation quant key override,
@@ -294,7 +296,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._zero_padding(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._zero_padding(layer, w13_weight, w2_weight)
 
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             layer._already_called_process_weights_after_loading = True
@@ -303,8 +306,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = _quantize_mxfp4_moe_weight(layer.w13_weight)
-        w2, w2_scale = _quantize_mxfp4_moe_weight(layer.w2_weight)
+        w13, w13_scale = _quantize_mxfp4_moe_weight(w13_weight)
+        w2, w2_scale = _quantize_mxfp4_moe_weight(w2_weight)
 
         self._setup_kernel(
             layer,
@@ -315,5 +318,6 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             getattr(layer, "w13_bias", None),
             getattr(layer, "w2_bias", None),
         )
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

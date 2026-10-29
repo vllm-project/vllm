@@ -3,12 +3,10 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import torch
 import torch.nn as nn
-import transformers
-from packaging.version import Version
 from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
 from transformers.models.pixtral import PixtralProcessor
 
@@ -59,10 +57,6 @@ from .utils import (
     maybe_prefix,
 )
 
-TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY = Version(transformers.__version__) >= Version(
-    "5.15.0"
-)
-
 
 class Mistral3ImagePixelInputs(TensorSchema):
     """Dimensions:
@@ -80,6 +74,19 @@ class Mistral3ImagePixelInputs(TensorSchema):
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
     ]
+
+
+class Mistral3ImageEmbeddingInputs(TensorSchema):
+    """Projected features with shape (num_images, feature_size, hidden_size)."""
+
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "ifs", "hs", dynamic_dims={"ifs"}),
+    ]
+
+
+Mistral3ImageInputs: TypeAlias = Mistral3ImagePixelInputs | Mistral3ImageEmbeddingInputs
 
 
 class Mistral3PatchMerger(nn.Module):
@@ -284,13 +291,6 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str | None:
-        # PixtralProcessor supports image-only calls starting in transformers 5.15.
-        # Older releases need dummy text and take the slower tokenization path.
-        if not TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY:
-            return self.dummy_inputs.get_dummy_text(mm_counts)
-        return None
-
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],
@@ -507,7 +507,7 @@ class Mistral3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Mistral3ImagePixelInputs | None:
+    ) -> Mistral3ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -521,8 +521,8 @@ class Mistral3ForConditionalGeneration(
 
     def _process_image_input(
         self,
-        image_input: Mistral3ImagePixelInputs,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        image_input: Mistral3ImageInputs,
+    ) -> MultiModalEmbeddings:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 

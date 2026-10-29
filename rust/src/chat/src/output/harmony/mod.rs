@@ -15,7 +15,7 @@ use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
 use crate::error::{Error, Result};
-use crate::event::AssistantBlockKind;
+use crate::event::{AssistantBlockKind, ChatTokenUsage};
 use crate::output::{
     AssistantEvent, ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream,
     generate_tool_call_id,
@@ -33,7 +33,7 @@ use crate::request::ChatRequest;
 pub struct HarmonyChatOutputProcessor {
     encoding: &'static HarmonyEncoding,
     tool_calls_enabled: bool,
-    parallel_tool_calls: bool,
+    max_tool_calls: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,6 +47,8 @@ struct HarmonyGroupKey {
 struct HarmonyGroup {
     key: HarmonyGroupKey,
     text: String,
+    /// Reasoning tokens attributed to this group's text.
+    reasoning_tokens: usize,
 }
 
 #[derive(Debug)]
@@ -57,6 +59,8 @@ struct OpenHarmonyToolCall {
 struct HarmonyState {
     /// Incremental Harmony parser over assistant token IDs.
     parser: StreamableParser,
+    /// Harmony encoding, used to tell control tokens from content tokens.
+    encoding: &'static HarmonyEncoding,
     /// Whether tool-call content should surface as structured tool events.
     tool_calls_enabled: bool,
     /// Count of completed visible assistant messages for newline insertion.
@@ -67,6 +71,13 @@ struct HarmonyState {
     current_text_group: Option<HarmonyGroupKey>,
     /// The currently open Harmony tool recipient, if any.
     open_tool_call: Option<OpenHarmonyToolCall>,
+    /// Total generated tokens counted as reasoning, reported in the final
+    /// usage.
+    reasoning_tokens: usize,
+    /// Reasoning tokens of the current message not yet attributed to an
+    /// emitted reasoning delta, such as a token whose content delta is still
+    /// empty.
+    unattributed_reasoning_tokens: usize,
 }
 
 impl HarmonyChatOutputProcessor {
@@ -75,7 +86,7 @@ impl HarmonyChatOutputProcessor {
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
-            parallel_tool_calls: request.parallel_tool_calls(),
+            max_tool_calls: request.max_tool_calls(),
         })
     }
 }
@@ -110,26 +121,55 @@ impl ChatOutputProcessor for HarmonyChatOutputProcessor {
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let assistant =
             harmony_assistant_event_stream(decoded, self.encoding, self.tool_calls_enabled);
-        Ok(crate::output::structured::structured_chat_event_stream(
-            assistant,
-            self.parallel_tool_calls,
+        Ok(
+            crate::output::structured::structured_chat_event_stream(assistant, self.max_tool_calls)
+                .boxed(),
         )
-        .boxed())
     }
 }
 
 impl HarmonyState {
     /// Create one fresh Harmony streaming state for a new assistant response.
-    fn new(encoding: HarmonyEncoding, tool_calls_enabled: bool) -> Result<Self> {
+    fn new(encoding: &'static HarmonyEncoding, tool_calls_enabled: bool) -> Result<Self> {
         Ok(Self {
-            parser: StreamableParser::new(encoding, Some(Role::Assistant))
+            parser: StreamableParser::new(encoding.clone(), Some(Role::Assistant))
                 .map_err(harmony_output_parsing_error)?,
+            encoding,
             tool_calls_enabled,
             completed_visible_messages: 0,
             completed_reasoning_messages: 0,
             current_text_group: None,
             open_tool_call: None,
+            reasoning_tokens: 0,
+            unattributed_reasoning_tokens: 0,
         })
+    }
+
+    /// Count the token the parser just consumed as reasoning if it is content
+    /// of an `analysis` message or of a `commentary` message with a recipient,
+    /// excluding Harmony control tokens, like Python's
+    /// `HarmonyParser._is_reasoning_token`.
+    fn count_reasoning_token(&mut self, token_id: u32) {
+        let is_reasoning_channel = match self.parser.current_channel().as_deref() {
+            Some("analysis") => true,
+            Some("commentary") => self.parser.current_recipient().is_some(),
+            _ => false,
+        };
+        if is_reasoning_channel && !self.encoding.tokenizer().is_special_token(token_id) {
+            self.reasoning_tokens += 1;
+            self.unattributed_reasoning_tokens += 1;
+        }
+    }
+
+    /// Take the reasoning tokens not yet attributed if `key` is a reasoning
+    /// text group.
+    fn take_reasoning_tokens_for(&mut self, key: &HarmonyGroupKey) -> usize {
+        match text_block_kind(key.channel.as_deref(), key.recipient.as_deref()) {
+            Some(AssistantBlockKind::Reasoning) => {
+                std::mem::take(&mut self.unattributed_reasoning_tokens)
+            }
+            _ => 0,
+        }
     }
 
     fn process_token_ids(&mut self, token_ids: &[u32]) -> Result<Vec<AssistantEvent>> {
@@ -140,6 +180,7 @@ impl HarmonyState {
             let completed_before = self.parser.messages().len();
             self.parser.process(token_id).map_err(harmony_output_parsing_error)?;
             let completed_after = self.parser.messages().len();
+            self.count_reasoning_token(token_id);
 
             if let Some(delta) = self
                 .parser
@@ -152,14 +193,22 @@ impl HarmonyState {
                     channel: self.parser.current_channel(),
                     recipient: self.parser.current_recipient(),
                 };
+                let reasoning_tokens = self.take_reasoning_tokens_for(&key);
 
                 match pending_group.as_mut() {
-                    Some(group) if group.key == key => group.text.push_str(&delta),
+                    Some(group) if group.key == key => {
+                        group.text.push_str(&delta);
+                        group.reasoning_tokens += reasoning_tokens;
+                    }
                     _ => {
                         if let Some(group) = pending_group.take() {
                             self.emit_group(group, &mut events);
                         }
-                        pending_group = Some(HarmonyGroup { key, text: delta });
+                        pending_group = Some(HarmonyGroup {
+                            key,
+                            text: delta,
+                            reasoning_tokens,
+                        });
                     }
                 }
             }
@@ -215,10 +264,12 @@ impl HarmonyState {
         let final_text = harmony_message_text(final_message);
         let tail = final_text.strip_prefix(&pending_content).unwrap_or(final_text).to_string();
         if !tail.is_empty() {
+            let reasoning_tokens = self.take_reasoning_tokens_for(&pending_key);
             self.emit_group(
                 HarmonyGroup {
                     key: pending_key,
                     text: tail,
+                    reasoning_tokens,
                 },
                 &mut events,
             );
@@ -259,8 +310,6 @@ impl HarmonyState {
                     events.push(AssistantEvent::TextDelta {
                         kind,
                         delta: "\n".to_string(),
-                        // TODO: measure reasoning tokens from native
-                        // analysis-channel token counts.
                         token_count: None,
                     });
                 }
@@ -268,12 +317,12 @@ impl HarmonyState {
                 self.current_text_group = Some(group.key.clone());
             }
 
+            let token_count =
+                (kind == AssistantBlockKind::Reasoning).then_some(group.reasoning_tokens);
             events.push(AssistantEvent::TextDelta {
                 kind,
                 delta: group.text,
-                // TODO: measure reasoning tokens from native
-                // analysis-channel token counts.
-                token_count: None,
+                token_count,
             });
             return;
         }
@@ -308,6 +357,10 @@ impl HarmonyState {
 
     /// Update newline and open-tool state after one Harmony message completes.
     fn handle_completed_message(&mut self, key: HarmonyGroupKey) {
+        // Reasoning tokens of a tool-call message are never attributed to a
+        // delta; they reach the client through the final usage only.
+        self.unattributed_reasoning_tokens = 0;
+
         if self.current_text_group.as_ref() == Some(&key) {
             self.current_text_group = None;
         }
@@ -335,7 +388,7 @@ async fn harmony_assistant_event_stream(
     tool_calls_enabled: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
-    let mut state = HarmonyState::new(encoding.clone(), tool_calls_enabled)?;
+    let mut state = HarmonyState::new(encoding, tool_calls_enabled)?;
     futures::pin_mut!(decoded);
 
     while let Some(event) = decoded.next().await.transpose()? {
@@ -379,7 +432,12 @@ async fn harmony_assistant_event_stream(
 
                 if let Some(finished) = finished {
                     y.yield_ok(AssistantEvent::Done {
-                        usage: finished.usage.into(),
+                        usage: ChatTokenUsage {
+                            engine: finished.usage,
+                            reasoning_tokens: state.reasoning_tokens,
+                        },
+                        timestamps: finished.timestamps,
+                        spec_decode_metrics: finished.spec_decode_metrics,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,

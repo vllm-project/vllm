@@ -18,6 +18,12 @@ You can pass prompt embeddings from Hugging Face Transformers models to the  `'p
 
 [examples/features/prompt_embed/prompt_embed_offline.py](../../examples/features/prompt_embed/prompt_embed_offline.py)
 
+### Prefix caching
+
+Prompt embeddings support [automatic prefix caching](automatic_prefix_caching.md). Enable both with `LLM(enable_prompt_embeds=True, enable_prefix_caching=True)` or `vllm serve --enable-prompt-embeds --enable-prefix-caching`.
+
+For mixed token-ID and embedding inputs, cache identity includes `prompt_is_token_ids`, which selects the source of each embedding row, as well as the token IDs and supplied embeddings. Changing the mask prevents reuse of the affected cache block and subsequent blocks, even if the token IDs and embedding tensor are unchanged. Earlier unchanged prefix blocks and repeated identical requests can still reuse cached KV.
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts prompt embeddings inputs via both the [Completions API](https://platform.openai.com/docs/api-reference/completions) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Both are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
@@ -59,7 +65,25 @@ Prompt embeddings can be included as content parts in chat messages, interleaved
 
 Each `prompt_embeds` content part contains a `data` field with a base64-encoded `torch.Tensor` of shape `(num_tokens, hidden_size)`. Multiple `prompt_embeds` parts can appear in any message, in any position relative to text parts. The server expands each part into the correct number of placeholder tokens during chat template rendering, then splices the pre-computed embeddings into the model's input at the corresponding positions.
 
+For multimodal models, `prompt_embeds` parts can also be mixed with image content parts. Their placeholder token IDs are replaced with safe dummy IDs before model execution; the supplied embeddings replace the dummy embeddings at those positions.
+
 Unlike the Completions API, a `prompt_embeds` content part should encode **only** the content, not a templated conversation. The server wraps the chat template around the embedded content at request time, the same way it would for a plain text `content` string. Embedding a full templated conversation here would double-apply the template and produce incorrect inputs to the model.
+
+Assistant messages can also pass a single `prompt_embeds` part as `reasoning` instead of a string:
+
+```json
+{
+  "messages": [
+    {
+      "role": "assistant",
+      "reasoning": {"type": "prompt_embeds", "data": "<base64_encoded_tensor>"},
+      "content": ""
+    }
+  ]
+}
+```
+
+The tensor represents only the reasoning content. Use a chat template that renders `reasoning` (or its legacy alias `reasoning_content`); the server inserts the reasoning delimiters through the template. This uses the existing Hugging Face chat-template rendering path. The same `--enable-prompt-embeds` flag and tensor shape requirements apply.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.

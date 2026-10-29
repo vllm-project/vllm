@@ -2,14 +2,14 @@
 
 In on-policy distillation, the student records its top-K candidate tokens at
 every response position, and the teacher provides the log probabilities of
-exactly those candidates as the distillation target. The caller passes the
-candidates as `prompt_logprob_token_ids`; the teacher runs a single prefill
-over the prompt plus response and gathers their log probabilities on the GPU at
-every scored row, starting from `prompt_logprob_start` (typically the prompt
-length minus one, so only response positions are scored). The result is a
-`[rows, K]` matrix whose row `i` scores prompt token
-`prompt_logprob_start + i + 1` and whose columns follow the candidate order, so
-it lines up position by position with the student's top-K.
+exactly those candidates as the distillation target. The caller passes one
+candidate list per scored row as `prompt_logprob_token_ids`; the teacher runs a
+single prefill over the prompt plus response and gathers their log
+probabilities on the GPU, starting from `prompt_logprob_start` (typically the
+prompt length minus one, so only response positions are scored). The result is
+a `[rows, K]` matrix whose row `i` scores prompt token
+`prompt_logprob_start + i + 1` and whose columns follow that row's candidate
+order, so it lines up position by position with the student's top-K.
 
 ## Quick start
 
@@ -22,13 +22,13 @@ output = llm.generate(
     TokensPrompt(prompt_token_ids=prompt_ids + response_ids),
     SamplingParams(
         max_tokens=1,
-        prompt_logprob_token_ids=candidate_ids,
+        prompt_logprob_token_ids=student_topk_ids,  # [len(response_ids), K]
         prompt_logprob_start=len(prompt_ids) - 1,
     ),
 )
 scores = output[0].prompt_token_id_logprobs
-# scores.shape == (len(response_ids), len(candidate_ids))
-# scores[i, j] = log p(candidate_ids[j] | prompt_ids + response_ids[:i])
+# scores.shape == (len(response_ids), K)
+# scores[i, j] = log p(student_topk_ids[i][j] | prompt_ids + response_ids[:i])
 ```
 
 The same parameters are accepted by the `/inference/v1/generate` HTTP endpoint
@@ -42,23 +42,31 @@ import numpy as np
 scores = np.load(io.BytesIO(base64.b64decode(response["prompt_token_id_logprobs"])))
 ```
 
-The matrix has `max(prompt_len - 1 - prompt_logprob_start, 0)` rows. With a
-logits `--logprobs-mode`, it holds logits instead of log probabilities.
+`prompt_logprob_token_ids` is an integer array or a list of lists with exactly
+`prompt_len - 1 - prompt_logprob_start` rows; shorter rows are padded with `-1`,
+and every `-1` entry scores `-inf`. Pass an `int32` NumPy array, such as the
+student's top-K IDs, which is sent to the engine without conversion; nested
+lists of Python ints are much slower to copy and serialize. With a logits
+`--logprobs-mode`, the matrix holds logits instead of log probabilities.
 
 ## Requirements
 
 - The V2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
-- `len(prompt_logprob_token_ids)` at most `--max-logprobs`.
+- The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 
-The request skips reading the prefix cache (local and KV connector), since
-cached rows have no logits to score.
+`prompt_logprob_start` also applies to `prompt_logprobs` (top-K prompt
+logprobs, V2 model runner only): positions up to and including
+`prompt_logprob_start` get `None`, and later positions are scored as usual.
+
+Scoring requests skip prefix-cache reads by default. Set
+`skip_reading_prefix_cache=False` to reuse locally cached KV for the rows before
+`prompt_logprob_start`; every scored row is still computed, and the hit is
+block-aligned, so reuse can end a few rows earlier. Without
+`prompt_logprob_start`, every row is scored and nothing is reused. KV connector
+hits are not used for scoring requests; only the local prefix cache is reused.
 
 ## Limitations
 
-- One candidate set per request, shared by every scored row; per-position
-  candidates are planned ([#56860](https://github.com/vllm-project/vllm/issues/56860)).
 - Non-streaming only; `stream=true` requests are rejected.
 - Not exposed through the OpenAI-compatible endpoints.
-- If a prefill starts past the first scored row (e.g. `skip_reading_prefix_cache=False`
-  with a cache hit), the result is `None` rather than a partial matrix.

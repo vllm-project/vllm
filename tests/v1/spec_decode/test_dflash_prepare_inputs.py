@@ -8,13 +8,16 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
+    _prepare_dflash_inputs_kernel,
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires a CUDA device"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA or XPU device",
 )
 
 
@@ -26,8 +29,9 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    num_scheduled_tokens: int = 4,
 ):
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     max_num_reqs = 4
     max_num_tokens = 16
     num_speculative_steps = 3
@@ -35,6 +39,7 @@ def _run_prepare(
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
         positions=torch.full((max_num_tokens,), -1, dtype=torch.int64, device=device),
+        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
         query_start_loc=torch.full(
             (max_num_reqs + 1,), -1, dtype=torch.int32, device=device
         ),
@@ -43,7 +48,7 @@ def _run_prepare(
     input_batch = SimpleNamespace(
         num_reqs=1,
         num_tokens=4,
-        num_scheduled_tokens=np.array([4], dtype=np.int32),
+        num_scheduled_tokens=np.array([num_scheduled_tokens], dtype=np.int32),
         seq_lens_cpu_upper_bound=torch.tensor([target_positions[-1] + 1]),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
@@ -102,7 +107,7 @@ def _run_prepare(
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
             input_block_tables=[block_table],
-            kernel_block_sizes=[4],
+            block_sizes=[4],
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
@@ -177,6 +182,11 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.sample_idx_mapping[:3].tolist() == [2, 2, 2]
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
+    assert not out.input_buffers.is_padding[:3].any()
+    assert out.input_buffers.is_padding[3:].all()
+    assert (out.input_buffers.input_ids[3:] == 0).all()
+    assert (out.input_buffers.positions[3:] == 0).all()
+    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
@@ -212,3 +222,18 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
+    def compiled_variants() -> set:
+        return {
+            key
+            for caches in _prepare_dflash_inputs_kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    kwargs = dict(target_positions=[10, 11, 12, 13], block_table_values=[0, 7, 8])
+    _run_prepare(**kwargs)
+    warmed = compiled_variants()
+    _run_prepare(**kwargs, num_scheduled_tokens=300)
+    assert compiled_variants() == warmed

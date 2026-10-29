@@ -7,6 +7,8 @@ use std::sync::Arc;
 use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_llm::RequestTimestamps;
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
@@ -52,12 +54,16 @@ pub(crate) enum AssistantEvent {
     ToolCallArgumentsDelta { delta: String },
     Done {
         usage: ChatTokenUsage,
+        timestamps: RequestTimestamps,
+        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
-        kv_transfer_params: Option<serde_json::Value>,
+        /// Boxed, like `ec_transfer_params`, to keep the per-token variants of
+        /// this enum small.
+        kv_transfer_params: Option<Box<serde_json::Value>>,
         /// Connector-specific encoder cache transfer parameters for
         /// disaggregated serving.
-        ec_transfer_params: Option<serde_json::Value>,
+        ec_transfer_params: Option<Box<serde_json::Value>>,
     },
 }
 

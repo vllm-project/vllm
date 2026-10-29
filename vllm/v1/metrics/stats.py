@@ -8,8 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.logger import init_logger
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -128,19 +132,42 @@ class PrefixCacheStats(BaseCacheStats):
 
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
+    hits_by_source: dict[CacheHitSource, int] = field(default_factory=dict)
+    """`hits` split by the cache tier that supplied them (connector stats only)."""
 
-    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+    def record(
+        self,
+        num_tokens: int,
+        num_hits: int,
+        preempted: bool,
+        hits_by_source: dict[CacheHitSource, int] | None = None,
+    ) -> None:
         """Aggregate request information into the stats."""
         if preempted:
             # Previously preempted request
             self.preempted_requests += 1
             self.preempted_queries += num_tokens
             self.preempted_hits += num_hits
-        else:
-            # New request
-            self.requests += 1
-            self.queries += num_tokens
-            self.hits += num_hits
+            return
+        # New request
+        self.requests += 1
+        self.queries += num_tokens
+        self.hits += num_hits
+        if hits_by_source is None:
+            return
+        if sum(hits_by_source.values()) != num_hits:
+            logger.warning_once(
+                "Connector attributed %s for %d cached tokens; reporting them as %s.",
+                str(hits_by_source),
+                num_hits,
+                CacheHitSource.EXTERNAL_UNSPECIFIED.value,
+            )
+            hits_by_source = {CacheHitSource.EXTERNAL_UNSPECIFIED: num_hits}
+        for source, num_source_hits in hits_by_source.items():
+            if num_source_hits:
+                self.hits_by_source[source] = (
+                    self.hits_by_source.get(source, 0) + num_source_hits
+                )
 
 
 @dataclass
@@ -182,6 +209,16 @@ class SchedulerIterationDetails:
     is_dummy: bool = False
 
 
+KV_FETCH_WAITING_TO_START = "waiting_to_start"
+KV_FETCH_IN_PROGRESS = "in_progress"
+KV_FETCH_COMPLETED_WAITING = "completed_waiting"
+KV_FETCH_STAGES = (
+    KV_FETCH_WAITING_TO_START,
+    KV_FETCH_IN_PROGRESS,
+    KV_FETCH_COMPLETED_WAITING,
+)
+
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
@@ -191,6 +228,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+
+    num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
@@ -237,6 +276,12 @@ class RequestStateStats:
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
+
+    # Track if this request was sampled with the engine watermark
+    is_watermarked: bool = False
+
+    # Track if this request asked for the watermark but could not use it
+    is_watermark_skipped: bool = False
 
 
 @dataclass
@@ -431,6 +476,10 @@ class IterationStats:
 
     def __init__(self):
         self.iteration_timestamp = time.time()
+        # Read once per iteration: update_from_output runs per request per
+        # step, and each envs attribute access re-reads the environment
+        # in processes that never enable the envs cache (the API server).
+        self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
@@ -440,6 +489,9 @@ class IterationStats:
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
+        self.num_watermarked_reqs: int = 0
+        self.num_watermark_skipped_reqs: int = 0
+        self.num_not_watermarked_reqs: int = 0
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -479,7 +531,7 @@ class IterationStats:
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
         if (
-            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            self.compute_nans_in_logits
             and not req_stats.is_corrupted
             and output.num_nans_in_logits > 0
         ):
@@ -584,6 +636,13 @@ class IterationStats:
         # Count corrupted requests when they finish (only once per request)
         if req_stats.is_corrupted:
             self.num_corrupted_reqs += 1
+
+        if req_stats.is_watermarked:
+            self.num_watermarked_reqs += 1
+        elif req_stats.is_watermark_skipped:
+            self.num_watermark_skipped_reqs += 1
+        else:
+            self.num_not_watermarked_reqs += 1
 
 
 class LoRAStats:

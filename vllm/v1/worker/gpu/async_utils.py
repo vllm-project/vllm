@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    KVConnectorOutput,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
@@ -185,7 +186,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -215,6 +216,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
 
         return self.model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
@@ -260,9 +265,13 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
+
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
-    return x.to("cpu", non_blocking=True).numpy()
+    return x.to("cpu", non_blocking=True, copy=True).numpy()
 
 
 @contextlib.contextmanager
