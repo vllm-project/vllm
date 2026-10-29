@@ -201,8 +201,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
-    "Qwen3_5ForCausalLM": ("qwen3_5", "Qwen3_5ForCausalLM"),
-    "Qwen3_5MoeForCausalLM": ("qwen3_5", "Qwen3_5MoeForCausalLM"),
+    "Qwen3_5ForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5ForCausalLM"),
+    "Qwen3_5MoeForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5MoeForCausalLM"),
     "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
     "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
@@ -546,6 +546,10 @@ _MULTIMODAL_MODELS = {
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        "nemotron3_5_transcribe",
+        "Nemotron3_5TranscribeForConditionalGeneration",
+    ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "MuseSparkForConditionalGeneration": (
@@ -609,9 +613,12 @@ _MULTIMODAL_MODELS = {
         "qwen3_vl_moe",
         "Qwen3VLMoeForConditionalGeneration",
     ),
-    "Qwen3_5ForConditionalGeneration": ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+    "Qwen3_5ForConditionalGeneration": (
+        "vllm.models.qwen3_5",
+        "Qwen3_5ForConditionalGeneration",
+    ),
     "Qwen3_5MoeForConditionalGeneration": (
-        "qwen3_5",
+        "vllm.models.qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
     ),
     "Qwen4ExpForConditionalGeneration": (
@@ -673,6 +680,10 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.deepseek_v41",
         "DSparkDeepseekV4ForCausalLM",
     ),
+    "DSparkMiniMaxDraftModel": (
+        "vllm.models.minimax_m3.common.dspark",
+        "MiniMaxM3DSparkForCausalLM",
+    ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     # Serving under method="dflash" means EAGLEConfig rewrites the draft
@@ -720,6 +731,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "Exaone4_5_MTP": ("exaone4_5_mtp", "Exaone4_5_MTP"),
     "NemotronHMTPModel": ("nemotron_h_mtp", "NemotronHMTP"),
+    "Nemotron3_5TranscribeMTPModel": (
+        "nemotron3_5_transcribe",
+        "Nemotron3_5TranscribeMTP",
+    ),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
@@ -731,8 +746,8 @@ _SPECULATIVE_DECODING_MODELS = {
     "Step5MTP": ("vllm.models.step5", "Step5MTP"),
     "Qwen4ExpMTP": ("vllm.models.qwen4_exp", "Qwen4ExpMTP"),
     "Step3p5MTP": ("step3p5_mtp", "Step3p5MTP"),
-    "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
-    "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
+    "Qwen3_5MTP": ("vllm.models.qwen3_5", "Qwen3_5MTP"),
+    "Qwen3_5MoeMTP": ("vllm.models.qwen3_5", "Qwen3_5MoeMTP"),
     "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
@@ -780,6 +795,9 @@ _TRANSFORMERS_BACKEND_MODELS = {
     # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    # Multi-token prediction draft models
+    "TransformersForMTP": ("transformers", "TransformersForMTP"),
+    "TransformersMoEForMTP": ("transformers", "TransformersMoEForMTP"),
     # Multimodal models
     "TransformersMultiModalForCausalLM": (
         "transformers",

@@ -1257,6 +1257,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
+    "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
@@ -1576,6 +1579,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
+    "DSparkMiniMaxDraftModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
@@ -1854,6 +1862,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="nvidia/Nemotron-Super-Placeholder",
         is_available_online=False,
     ),
+    "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+        is_available_online=False,
+    ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,
@@ -1901,6 +1914,18 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
+    "TransformersForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+        # TODO: Use a dense model once one opts into the Transformers MTP standard
+        is_available_online=False,
+    ),
+    "TransformersMoEForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+    ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct"
     ),
