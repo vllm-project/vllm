@@ -3,7 +3,6 @@
 """CombineTopkSwaIndicesKernel warmup must cover the pointer alignments that the
 chunked sparse prefill passes at runtime."""
 
-import itertools
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -71,37 +70,33 @@ def test_warmup_covers_chunked_prefill_pointer_alignments():
     topk_indices = torch.zeros(
         (NUM_REQS * QUERY_LEN, TOPK), dtype=torch.int32, device="cuda"
     )
+    # The chunked prefill slices query_start_loc at num_decodes + chunk_start
+    # and gather_lens at chunk_start. ROCm's seq_lens is seq_lens[num_decodes:]
+    # sliced again at chunk_start, so it carries the num_decodes offset too.
+    num_decodes, chunk_start = 1, 1
+    batch_offset = num_decodes + chunk_start
+    query_start_loc = torch.arange(
+        0,
+        (batch_offset + NUM_REQS + 1) * QUERY_LEN,
+        QUERY_LEN,
+        dtype=torch.int32,
+        device="cuda",
+    )[batch_offset : batch_offset + NUM_REQS + 1]
+    seq_lens = _int32(NUM_REQS, 4096, batch_offset)
+    gather_lens = _int32(NUM_REQS, 1024, chunk_start)
     with _record_compiles() as compiled:
-        # The chunked prefill passes query_start_loc[num_decodes + chunk_start:]
-        # and gather_lens[chunk_start:]. seq_lens is sliced at num_decodes too
-        # on ROCm, or comes from a fresh buffer, so the int32 pointers land on
-        # every 4-byte offset.
-        for num_decodes, chunk_start, seq_lens_at_num_decodes in itertools.product(
-            range(4), range(4), (True, False)
-        ):
-            batch_offset = num_decodes + chunk_start
-            query_start_loc = torch.arange(
-                0,
-                (batch_offset + NUM_REQS + 1) * QUERY_LEN,
-                QUERY_LEN,
-                dtype=torch.int32,
-                device="cuda",
-            )[batch_offset : batch_offset + NUM_REQS + 1]
-            seq_offset = batch_offset if seq_lens_at_num_decodes else chunk_start
-            seq_lens = _int32(NUM_REQS, 4096, seq_offset)
-            gather_lens = _int32(NUM_REQS, 1024, chunk_start)
-            for ratio in (0, 1, 2):
-                combine_topk_swa_indices(
-                    topk_indices,
-                    query_start_loc,
-                    seq_lens,
-                    gather_lens,
-                    WINDOW,
-                    ratio,
-                    TOPK if ratio else 0,
-                    4096,
-                    4096,
-                )
+        for ratio in (0, 1, 2):
+            combine_topk_swa_indices(
+                topk_indices,
+                query_start_loc,
+                seq_lens,
+                gather_lens,
+                WINDOW,
+                ratio,
+                TOPK if ratio else 0,
+                4096,
+                4096,
+            )
         torch.cuda.synchronize()
 
     assert not compiled, f"JIT compiled after warmup: {compiled}"

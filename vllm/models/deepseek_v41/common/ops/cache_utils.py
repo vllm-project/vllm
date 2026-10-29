@@ -993,7 +993,7 @@ def combine_topk_swa_indices(
 _COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
-# Representative pointer alignment variants for Triton pointer specialization.
+# Representative topk_indices alignment variants for Triton specialization.
 _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
     dict(topk_indices=True),
     dict(topk_indices=False),
