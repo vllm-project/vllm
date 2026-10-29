@@ -97,6 +97,7 @@ def make_request(
     lora_request: LoRARequest | None = None,
     num_hash_lookahead_tokens: int = 0,
     session_id: str | None = None,
+    sampling_params: SamplingParams | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -110,7 +111,8 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
-    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    if sampling_params is None:
+        sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
 
     return Request(
@@ -3043,6 +3045,73 @@ def test_computed_blocks_not_evicted():
     )
     assert blocks is not None and len(blocks.blocks[0]) == 1
     assert blocks.blocks[0][0].block_id == 2
+
+
+@pytest.mark.parametrize(
+    "start,prompt_logprobs,for_connector,expected_hit",
+    [(0, None, False, 0), (5, None, False, 4), (5, 0, False, 4), (5, None, True, 4)],
+)
+def test_fixed_token_scores_reuse_only_unscored_prefix(
+    start, prompt_logprobs, for_connector, expected_hit
+):
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=32,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(16))
+    warm = make_request("warm", tokens, block_size, sha256)
+    assert manager.allocate_slots(warm, len(tokens)) is not None
+    manager.free(warm)
+    scoring = make_request(
+        "scoring",
+        tokens,
+        block_size,
+        sha256,
+        sampling_params=SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (len(tokens) - 1 - start),
+            prompt_logprob_start=start,
+            prompt_logprobs=prompt_logprobs,
+            skip_reading_prefix_cache=False,
+        ),
+    )
+    lookup = (
+        manager.get_computed_blocks_for_connector
+        if for_connector
+        else manager.get_computed_blocks
+    )
+    assert lookup(scoring)[1] == expected_hit
+    if expected_hit:
+        assert lookup(scoring, max_cache_hit_length=len(tokens))[1] == expected_hit
+        assert lookup(scoring, max_cache_hit_length=block_size - 1)[1] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_limit",
+    [
+        ({}, None),
+        ({"skip_reading_prefix_cache": True}, 0),
+        # Prompt scoring skips cache reads by default.
+        ({"prompt_logprobs": 1, "prompt_logprob_start": 5}, 0),
+        ({"prompt_logprobs": 1, "skip_reading_prefix_cache": False}, 0),
+        (
+            {
+                "prompt_logprobs": 1,
+                "prompt_logprob_start": 5,
+                "skip_reading_prefix_cache": False,
+            },
+            5,
+        ),
+    ],
+)
+def test_prefix_cache_hit_limit(kwargs, expected_limit):
+    request = make_request(
+        "req", list(range(16)), 4, sha256, sampling_params=SamplingParams(**kwargs)
+    )
+    assert request.prefix_cache_hit_limit == expected_limit
+    assert request.skip_reading_external_kv == (expected_limit is not None)
 
 
 def test_basic_prefix_caching_disabled():
