@@ -30,6 +30,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -621,6 +622,7 @@ def _record_forwards(worker):
 
     def post(mod, args, out):
         metadata = get_forward_context().attn_metadata[name]
+        assert isinstance(metadata, MiniMaxM3SparseMetadata)
         prefills, decodes = metadata.num_prefills, metadata.num_decodes
         mono = decode is not None and decode.mono_steps > worker._mono_steps
         aux = out[1] if isinstance(out, tuple) else None

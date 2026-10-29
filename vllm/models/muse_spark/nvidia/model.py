@@ -123,6 +123,7 @@ from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     tp_group_spans_nodes,
 )
 from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
+    _norm_quant_megamoe_nvfp4_kernel,
     prepare_megamoe_nvfp4_with_norm,
 )
 from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
@@ -593,6 +594,18 @@ class MuseSpark1xMoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.experts",
             )
+            if (
+                self.is_nvfp4_mega_moe
+                and hidden_size == 4096
+                and vllm_config.model_config.dtype == torch.bfloat16
+            ):
+                norm = self.pre_expert_norm
+                assert norm is not None and norm.weight is not None
+                _norm_quant_megamoe_nvfp4_kernel.register_warmup(
+                    weight_dtype=norm.weight.dtype,
+                    eps=norm.variance_epsilon,
+                    gain_center=norm.fused_gain_center,
+                )
             return
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -1917,13 +1930,12 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(
-            interleaved_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         n_gates = materialize_residual_path_constants(self)
         logger.info(
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
-        return loaded

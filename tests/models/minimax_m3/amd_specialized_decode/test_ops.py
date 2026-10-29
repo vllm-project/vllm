@@ -170,12 +170,18 @@ def _pairs(region, n):
     return region[: n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
 
 
+class _TestFfnRunner(FfnRunner):
+    peer_bufs: list[torch.Tensor]
+
+
 def _runner(weights, s, tp=1, widths=None, **build):
     dev = torch.device("cuda")
     bufs = [torch.zeros(ffn.peer_bytes(tp), dtype=torch.uint8, device=dev)]
     bufs += [torch.zeros_like(bufs[0]) for _ in range(tp - 1)]
     peers = torch.tensor([b.data_ptr() for b in bufs], dtype=torch.int64, device=dev)
-    runner = FfnRunner(tp, 0, bufs[0].data_ptr(), peers, dev, widths or (s,), **build)
+    runner = _TestFfnRunner(
+        tp, 0, bufs[0].data_ptr(), peers, dev, widths or (s,), **build
+    )
     runner.warm(weights)
     runner.peer_bufs = bufs
     return runner
@@ -736,7 +742,7 @@ def _io_rank(rank, port, results):
     w = _io_weights(_weights(rank))
     peer = peer_memory.PeerBuffer(ffn.peer_bytes(4), dist.group.WORLD, rank, 4, dev)
     peer.bytes.zero_()
-    runner = FfnRunner(4, rank, peer.local, peer.addresses, dev, IO_WIDTHS)
+    runner = _TestFfnRunner(4, rank, peer.local, peer.addresses, dev, IO_WIDTHS)
     runner.warm(w)
     runner.peer_bufs = [peer.bytes]
     torch.accelerator.synchronize()

@@ -373,7 +373,11 @@ def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
     decode = object.__new__(SpecializedDecode)
     decode.config = DecodeConfig(q=4)
     decode.runner = SimpleNamespace(kda_prefix="kda")
-    decode.kernels = {w: {1: _Kernel(), 2: _Kernel()} for w in (4, 8)}
+    # Launch-only stand-ins for the GPU kernels.
+    decode.kernels = {
+        w: {1: _Kernel(), 2: _Kernel()}  # type: ignore[dict-item]
+        for w in (4, 8)
+    }
     decode._kv = (1, 2)
     monkeypatch.setattr(SpecializedDecode, "_kv_key", lambda self: (1, 2))
     context = SimpleNamespace(

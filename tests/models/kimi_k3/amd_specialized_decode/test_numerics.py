@@ -708,9 +708,17 @@ def _k1_path(w, taps, rounded: bool, g1=None) -> dict:
                     vgb = [vg[0][t_][hs].clone(), vg[1][t_][hs].clone()]
                     if t_ == jj:
                         vgb[i][0, x] = alt[jj, h, x]
-                    hr = (rest[0][hs], rest[1][hs], *rest[2:])
                     Sb, ob = R.kda_step(
-                        Sb, qk[t_, 0][hs], qk[t_, 1][hs], *vgb, beta[t_][hs], *hr
+                        Sb,
+                        qk[t_, 0][hs],
+                        qk[t_, 1][hs],
+                        vgb[0],
+                        vgb[1],
+                        beta[t_][hs],
+                        rest[0][hs],
+                        rest[1][hs],
+                        rest[2],
+                        rest[3],
                     )
                     allow_S[t_][hs] += (Sb - base_S[t_][hs]).abs()
                     allow_o[t_][hs] += (ob - base_o[t_][hs]).abs()
