@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm import envs
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
@@ -256,3 +257,25 @@ def test_extract_audio_from_videos_rejects_oversized_audio():
 
     assert audio_items == []
     assert has_audio == [False]
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
+        "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+    ],
+)
+@pytest.mark.parametrize(
+    ("requested", "expected"), [("auto", "float32"), ("bfloat16", "bfloat16")]
+)
+def test_omni_mamba_ssm_cache_dtype(model: str, requested: str, expected: str):
+    """Omni archs get the NemotronH float32 SSM-cache default; explicit wins."""
+    vllm_config = EngineArgs(
+        model=model,
+        trust_remote_code=True,
+        mamba_ssm_cache_dtype=requested,
+        max_model_len=4096,
+    ).create_engine_config()
+    assert vllm_config.cache_config.mamba_ssm_cache_dtype == expected

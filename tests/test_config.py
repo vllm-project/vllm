@@ -4081,6 +4081,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     target_config.hf_text_config.model_type = "deepseek_v3"
     target_config.quantization = None
     target_config.max_model_len = 4096
+    target_config.using_transformers_backend.return_value = False
 
     SpeculativeConfig(
         method="mtp",
