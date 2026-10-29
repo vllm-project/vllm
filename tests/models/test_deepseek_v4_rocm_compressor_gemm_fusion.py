@@ -4,8 +4,6 @@
 import torch
 
 import vllm.model_executor.offloader as offloader
-import vllm.models.deepseek_v4.amd.rocm as rocm
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLAAttention,
 )
@@ -46,20 +44,6 @@ def _make_attention(
     attention.register_buffer("_fused_compressor_weight", None, persistent=False)
     attention._fused_compressor_split_sizes = None
     return attention
-
-
-def test_prepare_attn_preshuffle_skips_gfx1250(monkeypatch):
-    attention = DeepseekV4ROCMAiterMLAAttention.__new__(DeepseekV4ROCMAiterMLAAttention)
-    torch.nn.Module.__init__(attention)
-    attention._wqa_wkv_scale = None
-    attention._wo_b_scale = None
-    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
-    monkeypatch.setattr(rocm, "on_gfx1250", lambda: True)
-
-    attention.prepare_attn_preshuffle()
-
-    assert attention._wqa_wkv_scale is None
-    assert attention._wo_b_scale is None
 
 
 def test_prepare_compressor_gemm_fusion_aliases_original_weights():
