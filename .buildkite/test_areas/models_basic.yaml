@@ -79,6 +79,7 @@ steps:
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
+  - tests/models/test_muse_spark_qkvo_reload.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
     - >-
@@ -96,6 +97,7 @@ steps:
       models/test_deepseek_v4_vl_stream_weights.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
+      models/test_muse_spark_qkvo_reload.py
       models/test_muse_spark_rocm_shared_rope.py
   mirror:
     amd:
