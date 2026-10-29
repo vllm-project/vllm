@@ -1454,6 +1454,27 @@ class TestDetectMergeInlineSystem:
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
+    def test_tools_none_check_template_merges(self):
+        """OLMo 3-style ``tools | tojson`` on undefined tools falls back to merge."""
+        template = (
+            "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+
+    def test_tools_loop_template_no_merge(self):
+        """Hermes-style ``for tool in tools`` must not raise in the probe."""
+        template = (
+            "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
+    def test_non_template_error_defaults_merge(self):
+        """A non-TemplateError render failure must not abort startup."""
+        template = "{{ undefined_var | tojson }}"
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+
     @pytest.mark.parametrize(
         ("resolved", "expected"),
         [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
@@ -1485,6 +1506,73 @@ class TestDetectMergeInlineSystem:
             is expected
         )
         assert mock_logger.warning_once.called is expected
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # Renders inline system messages as system turns; merging them
+            # would break prefix caching for Claude Code's per-turn reminders.
+            ("deepseek-ai/DeepSeek-V4.1-Flash", False),
+            # Appends inline system text to the preceding user turn (#46710).
+            ("deepseek-ai/DeepSeek-V4-Flash", True),
+            # Puts a trailing system message after the generation prompt.
+            ("deepseek-ai/DeepSeek-V3.2-Exp", True),
+        ],
+    )
+    def test_probes_non_jinja_renderer(self, model, expected):
+        """Encoder-based renderers are probed by rendering, not registered."""
+        from vllm.config import ModelConfig, VllmConfig
+        from vllm.renderers import renderer_from_config
+        from vllm.renderers.online_renderer import OnlineRenderer
+
+        model_config = ModelConfig(model=model)
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=renderer_from_config(VllmConfig(model_config=model_config)),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+
+    def test_non_jinja_probe_uses_server_chat_template(self):
+        """Renderers that honor --chat-template (e.g. Cohere) probe with it."""
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template="custom",
+            chat_template_content_format="string",
+            default_chat_template_kwargs={"thinking": False},
+        )
+        AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        params = renderer.render_messages.call_args.args[1]
+        assert params.chat_template == "custom"
+        assert params.chat_template_content_format == "string"
+        assert params.chat_template_kwargs == {
+            "thinking": False,
+            "add_generation_prompt": True,
+        }
+
+    def test_non_jinja_merge_warning_omits_chat_template_hint(self, monkeypatch):
+        """--chat-template may not apply to non-jinja renderers (e.g. V4)."""
+        import vllm.entrypoints.anthropic.serving as serving_mod
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            chat_template_content_format="auto",
+            default_chat_template_kwargs={},
+        )
+        assert AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        assert "--chat-template" not in mock_logger.warning_once.call_args.args[0]
 
 
 # ======================================================================

@@ -36,9 +36,10 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-# fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
-FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+# trtllm-gen sparse MLA reads up to ~250 rows from the start of its KV cache
+# whatever the cache's size: https://github.com/flashinfer-ai/flashinfer/issues/6484
+_MIN_STAGED_PREFILL_KV_ROWS = 256
 
 
 def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
@@ -698,10 +699,6 @@ class HiSparseIndexGroup:
         ).to(torch.int16)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
-        # Request ids the resolver reads, built on the copy stream: a
-        # compute-stream write would race with its logical_topk_ready wait.
-        self.row_indices = torch.arange(max_swap_rows, dtype=torch.int32, device=device)
-        self.request_ids = torch.empty_like(self.row_indices)
         self.copy_stream = (
             copy_stream if copy_stream is not None else _create_copy_stream(device)
         )
@@ -854,15 +851,13 @@ class HiSparseRuntime:
             )
         row_width = kv_cache.shape[-1]
 
+        num_blocks = plan.row_ids.shape[1] // plan.block_size
+        min_blocks = cdiv(_MIN_STAGED_PREFILL_KV_ROWS, plan.block_size)
         staged = torch.empty(
-            (
-                plan.row_ids.shape[1] // plan.block_size,
-                plan.block_size,
-                row_width,
-            ),
+            (max(num_blocks, min_blocks), plan.block_size, row_width),
             dtype=kv_cache.dtype,
             device=plan.block_table.device,
-        )
+        )[:num_blocks]
         if plan.gpu_row_ids is not None and resident_cache is not None:
             self.backend.gather_resident_rows(
                 resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
@@ -905,22 +900,6 @@ class HiSparseRuntime:
         )
         device_global_indices.index_copy_(0, state_indices, active_indices)
 
-    def invalidate_written_slots(
-        self,
-        written_slots: torch.Tensor,
-        req_id_per_token: torch.Tensor,
-    ) -> None:
-        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
-        if num_tokens == 0:
-            return
-        assert self.request_state_indices is not None
-        self.cache_ops.hisparse_invalidate_written_slots(
-            self.index_group.device_global_indices,
-            self.request_state_indices,
-            req_id_per_token[:num_tokens],
-            written_slots[:num_tokens],
-        )
-
     def begin_forward(self) -> None:
         self._swap_step = 0
 
@@ -944,6 +923,7 @@ class HiSparseRuntime:
         *,
         resident: HiSparseCacheHandle | None = None,
         req_id_per_token: torch.Tensor,
+        num_valid_rows: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         block_size: int,
@@ -979,8 +959,8 @@ class HiSparseRuntime:
         swap_device_physical_rows = shared.swap_device_physical_rows[shared_rows]
         swap_counts = shared.swap_counts[shared_rows]
 
-        # Padded rows are skipped by the kernel (request_state_indices) and must
-        # come out as -1 so the attention kernel masks them.
+        # Rows past num_valid_rows and rows without request state come out as
+        # -1 so the attention kernel masks them.
         self.cache_ops.hisparse_resolve_residency(
             host_cache,
             hot.cache,
@@ -1009,6 +989,7 @@ class HiSparseRuntime:
             if resident is not None and resident.view is not None
             else 0,
             0,
+            num_valid_rows,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:
@@ -1043,17 +1024,10 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
-            # CUDA-graph padding rows past the batch's tokens map to request 0;
-            # mark them -1 so residency resolution skips them.
-            num_tokens = logical_topk_indices.shape[0]
-            request_ids = group.request_ids[:num_tokens]
-            request_ids.copy_(req_id_per_token)
-            request_ids.masked_fill_(
-                group.row_indices[:num_tokens] >= num_valid_rows, -1
-            )
             self._resolve_residency(
                 resident=resident,
-                req_id_per_token=request_ids,
+                req_id_per_token=req_id_per_token,
+                num_valid_rows=num_valid_rows,
                 block_table=block_table,
                 topk_indices=logical_topk_indices,
                 block_size=block_size,
@@ -1137,6 +1111,43 @@ class HiSparseRuntime:
         return physical_topk_indices
 
 
+class HiSparseSlotInvalidator:
+    """Drop hot copies of rewritten host slots for many index groups at once."""
+
+    def __init__(self, request_state_indices: torch.Tensor) -> None:
+        self.request_state_indices = request_state_indices
+        self._group_tables: dict[tuple[int, ...], torch.Tensor] = {}
+
+    def __call__(
+        self,
+        leaders: list[HiSparseRuntime],
+        written_slots: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
+        if num_tokens == 0 or not leaders:
+            return
+        tables = [leader.index_group.device_global_indices for leader in leaders]
+        key = tuple(table.data_ptr() for table in tables)
+        group_table = self._group_tables.get(key)
+        if group_table is None:
+            if any(table.shape != tables[0].shape for table in tables):
+                raise ValueError("HiSparse index groups must share one hot layout.")
+            group_table = async_tensor_h2d(
+                list(key), self.request_state_indices.device, torch.int64
+            )
+            self._group_tables[key] = group_table
+        num_state_rows, region_stride = tables[0].shape
+        leaders[0].cache_ops.hisparse_invalidate_written_slots(
+            group_table,
+            self.request_state_indices,
+            req_id_per_token[:num_tokens],
+            written_slots[:num_tokens],
+            num_state_rows,
+            region_stride,
+        )
+
+
 def update_hisparse_residency(
     residency: torch.Tensor,
     updates: Mapping[str, SparseKVResidencyUpdate],
@@ -1145,13 +1156,13 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[state rows, resident groups, pages]``: the GPU block of
+    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
         return
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
-    num_groups = residency.shape[1]
+    num_groups = residency.shape[0]
     rows: list[int] = []
     pages: list[int] = []
     block_ids: list[list[int]] = [[] for _ in range(num_groups)]
@@ -1172,7 +1183,7 @@ def update_hisparse_residency(
         host_values, device=request_state_indices.device, dtype=torch.int32
     )
     state_rows = request_state_indices[values[:, 0]]
-    residency[state_rows, :, values[:, 1]] = values[:, 2:]
+    residency[:, state_rows, values[:, 1]] = values[:, 2:].T
 
 
 class HiSparseCacheHandle:
@@ -1197,7 +1208,6 @@ class HiSparseCacheHandle:
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
-        self._batch_block_table: torch.Tensor | None = None
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
         assert self.runtime.is_group_leader
@@ -1206,7 +1216,6 @@ class HiSparseCacheHandle:
 
     def _prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self.dummy_batch = attn_metadata is None
-        self._batch_block_table = None
         self.runtime.begin_forward()
         self.num_actual_tokens = (
             attn_metadata.num_actual_tokens if attn_metadata is not None else 0
@@ -1221,17 +1230,6 @@ class HiSparseCacheHandle:
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
-
-    def batch_block_table(self) -> torch.Tensor:
-        """Resident rows by this step's batch row, for the prefill paths."""
-        if self._batch_block_table is None:
-            assert self.block_table is not None
-            indices = self.runtime.request_state_indices
-            assert indices is not None
-            self._batch_block_table = self.block_table.index_select(
-                0, indices.clamp(min=0)
-            )
-        return self._batch_block_table
 
     def write_target(
         self, num_input_rows: int, num_slot_rows: int
