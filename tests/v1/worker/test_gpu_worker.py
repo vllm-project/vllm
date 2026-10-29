@@ -420,7 +420,8 @@ def test_kv_budget_reserves_workspace_retained_by_graph_setup(
         gpu_worker,
         "current_platform",
         SimpleNamespace(
-            is_cuda_alike=lambda: True, get_process_device_memory_bytes=lambda _: None
+            is_cuda_alike=lambda: True,
+            get_process_device_memory_bytes=lambda _: None,
         ),
     )
     monkeypatch.setattr(
@@ -435,15 +436,19 @@ def test_kv_budget_reserves_workspace_retained_by_graph_setup(
     assert available == GiB_bytes - (graph_estimate if apply_graph_estimate else 0)
 
 
-def test_kv_budget_retained_by_graph_setup_uses_process_counter(monkeypatch):
-    """With a per-process memory counter (ROCm), the retained charge comes from
-    the counter, not from free memory (2 MiB-rounded on ROCm)."""
-    result = _profile_result(MEASURED_DROP)
+@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_kv_budget_uses_process_memory_where_counted(monkeypatch, cudagraph_mode):
+    """With a per-process memory counter (ROCm), the KV budget takes the
+    process's memory as consumed: it covers what graph setup retained and what
+    the process held before the startup snapshot. Free memory is not used, so
+    another process releasing memory meanwhile neither triggers the ROCm
+    fallback nor fails the free-memory check."""
+    result = _profile_result(-RELEASED_BY_OTHERS)
     result.transient_peak_headroom = GiB_bytes
-    result.non_kv_cache_memory = MEASURED_DROP + GiB_bytes
-    # Free memory reports 2 GiB retained; the counter grew by 1 GiB.
+    result.non_kv_cache_memory = -RELEASED_BY_OTHERS + GiB_bytes
+    # Free memory reports 2 GiB retained by graph setup; the counter covers it.
     after_graph_setup = _snapshot(result.after_profile.free_memory - 2 * GiB_bytes)
-    counter = iter([10 * GiB_bytes, 11 * GiB_bytes])
+    process_memory = 5 * GiB_bytes
     worker = SimpleNamespace(
         device="cuda:0",
         init_snapshot=SimpleNamespace(
@@ -457,7 +462,7 @@ def test_kv_budget_retained_by_graph_setup_uses_process_counter(monkeypatch):
             profile_cudagraph_memory=lambda: 0,
         ),
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+            compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode)
         ),
         cache_config=SimpleNamespace(
             kv_cache_memory_bytes=None, gpu_memory_utilization=1.0
@@ -477,13 +482,16 @@ def test_kv_budget_retained_by_graph_setup_uses_process_counter(monkeypatch):
         "current_platform",
         SimpleNamespace(
             is_cuda_alike=lambda: True,
-            get_process_device_memory_bytes=lambda _: next(counter),
+            is_rocm=lambda: True,
+            get_process_device_memory_bytes=lambda _: process_memory,
         ),
     )
 
-    gpu_worker.Worker.determine_available_memory(worker)
+    available = gpu_worker.Worker.determine_available_memory(worker)
 
-    assert worker.total_consumed == MEASURED_DROP + GiB_bytes
+    assert worker.kv_budget_from_process_memory
+    assert worker.total_consumed == process_memory
+    assert available == ANY_FREE_MEMORY - process_memory - GiB_bytes
 
 
 @pytest.fixture

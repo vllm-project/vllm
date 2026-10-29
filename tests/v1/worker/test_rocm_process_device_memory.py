@@ -5,6 +5,8 @@ RocmPlatform.get_process_device_memory_bytes(). The inputs
 are text in the format the amdgpu driver prints, but importing
 vllm.platforms.rocm needs a ROCm GPU."""
 
+import mmap
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -106,9 +108,9 @@ def _write_node(root, name, **props):
     )
 
 
-def test_drm_render_minor_matches_uuid_then_pci(tmp_path, monkeypatch):
+def test_kfd_gpu_node_matches_uuid_then_pci(tmp_path, monkeypatch):
     monkeypatch.setattr(rocm, "_KFD_TOPOLOGY_NODES", str(tmp_path))
-    rocm._drm_render_minor.cache_clear()
+    rocm._kfd_gpu_node_props.cache_clear()
     _write_node(tmp_path, "0", simd_count=0)  # CPU node, skipped
     # A GPU node. unique_id and location_id are independent properties;
     # location_id 0xE300 is PCI bus 0xE3, device 0, function 0.
@@ -123,12 +125,57 @@ def test_drm_render_minor_matches_uuid_then_pci(tmp_path, monkeypatch):
     )
     # torch writes the unique_id as ASCII hex characters in the UUID bytes.
     uuid = b"13a691b49a73a35c".hex()
-    assert rocm._drm_render_minor(uuid, (0, 0x99, 0)) == 132
-    assert rocm._drm_render_minor("not-hex", (0, 0xE3, 0)) == 132
+    for key in (uuid, (0, 0x99, 0)), ("not-hex", (0, 0xE3, 0)):
+        node = rocm._kfd_gpu_node_props(*key)
+        assert node is not None and node["drm_render_minor"] == "132"
     # Same bus and device, function 1. The lookup ignores the function (torch
     # does not report it), so two nodes now match (0, 0xE3, 0); with no UUID
     # match the GPU is ambiguous.
     _write_node(tmp_path, "7", simd_count=64, drm_render_minor=133, location_id=0xE301)
-    rocm._drm_render_minor.cache_clear()
-    assert rocm._drm_render_minor("not-hex", (0, 0xE3, 0)) is None
-    rocm._drm_render_minor.cache_clear()
+    rocm._kfd_gpu_node_props.cache_clear()
+    assert rocm._kfd_gpu_node_props("not-hex", (0, 0xE3, 0)) is None
+    rocm._kfd_gpu_node_props.cache_clear()
+
+
+# KFD topology properties that size each hardware queue's context save area.
+# cwsr_size is a multiple of every page size, so no rounding applies.
+QUEUE_PROPS = {"cwsr_size": str(10 * 65536), "num_xcc": "2"}
+QUEUE_SAVE_AREA = 2 * 10 * 65536
+
+
+def test_queue_save_area_is_cwsr_size_per_xcc_page_aligned():
+    assert rocm._queue_save_area_bytes(QUEUE_PROPS) == QUEUE_SAVE_AREA
+    # Rounded up to the page size; num_xcc is absent on older kernels.
+    assert rocm._queue_save_area_bytes({"cwsr_size": "1"}) == mmap.PAGESIZE
+
+
+def test_process_memory_adds_save_areas_for_the_queue_limit(monkeypatch):
+    platform = rocm.RocmPlatform
+    node = {"drm_render_minor": "128", **QUEUE_PROPS}
+    monkeypatch.setattr(rocm, "_kfd_gpu_node_props", lambda uuid, pci: node)
+    monkeypatch.setattr(rocm, "_sum_fdinfo_vram", lambda texts: 1000)
+    monkeypatch.delenv("GPU_MAX_HW_QUEUES", raising=False)
+    # HIP's default of 4 queues plus two runtime-internal ones.
+    assert platform.get_process_device_memory_bytes("cuda:0") == (
+        1000 + 6 * QUEUE_SAVE_AREA
+    )
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
+    assert platform.get_process_device_memory_bytes("cuda:0") == (
+        1000 + 4 * QUEUE_SAVE_AREA
+    )
+
+
+@pytest.mark.parametrize(
+    "node, fdinfo_vram",
+    [
+        (None, 1000),  # no single KFD node for this GPU
+        ({"drm_render_minor": "128"}, 1000),  # kernel without cwsr_size
+        ({"drm_render_minor": "128", **QUEUE_PROPS}, None),  # no fdinfo VRAM key
+    ],
+)
+def test_process_memory_falls_back_when_a_reading_is_missing(
+    monkeypatch, node, fdinfo_vram
+):
+    monkeypatch.setattr(rocm, "_kfd_gpu_node_props", lambda uuid, pci: node)
+    monkeypatch.setattr(rocm, "_sum_fdinfo_vram", lambda texts: fdinfo_vram)
+    assert rocm.RocmPlatform.get_process_device_memory_bytes("cuda:0") is None

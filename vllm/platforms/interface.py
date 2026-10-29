@@ -1211,12 +1211,13 @@ class Platform:
     @classmethod
     def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
         """Bytes of memory this process holds on ``device``, as reported by the
-        kernel driver after queued device work finishes.
+        kernel driver after queued device work finishes, including what it held
+        before vLLM's startup snapshot.
 
         Includes runtime allocations outside torch's allocator (such as graph
-        buffers), but not other processes' memory. May omit driver-internal
-        memory, such as ROCm queue save areas. Callers use only differences
-        between readings.
+        buffers) and driver memory the process uses (such as ROCm queue save
+        areas), but not other processes' memory. Used both as the memory taken
+        outside the KV cache and for differences between readings.
 
         Returns ``None`` by default or when no per-process counter is available,
         preserving existing behaviour.
