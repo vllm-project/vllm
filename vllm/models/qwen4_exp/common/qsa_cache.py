@@ -100,7 +100,9 @@ def _logical_to_physical_qsa_slots(
     if not all(block_table.shape):
         return torch.full_like(positions, PAD_SLOT_ID)
     physical_blocks = block_table[safe_requests, safe_blocks].long()
-    valid &= physical_blocks >= 0
+    # Block 0 is the reserved null block. Rows with no block of their own point
+    # at it, and it must never be written.
+    valid &= physical_blocks > 0
     slots = physical_blocks * block_size + positions.remainder(block_size)
     return torch.where(valid, slots, PAD_SLOT_ID)
 
@@ -207,7 +209,6 @@ def _metadata_launch_pdl() -> bool:
 def _build_qsa_metadata_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
-    common_slot_mapping_ptr,
     block_table_ptr,
     token_to_req_ptr,
     logical_positions_ptr,
@@ -311,10 +312,7 @@ def _build_qsa_metadata_kernel(
             mask=valid,
             other=-1,
         )
-        valid &= physical_block >= 0
-        valid &= (
-            tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
-        )
+        valid &= physical_block > 0
         slot = physical_block * storage_block_size + (
             compressed_position % storage_block_size
         )
@@ -434,7 +432,6 @@ def build_qsa_metadata_triton(
     _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
         common_attn_metadata.query_start_loc,
         common_attn_metadata.seq_lens,
-        common_attn_metadata.slot_mapping,
         block_table,
         token_to_req,
         logical_positions,
@@ -525,9 +522,6 @@ def _build_qsa_metadata_torch(
             compress_ratio,
             slot_mapping_buffer,
         )
-        slot_mapping.masked_fill_(
-            common_attn_metadata.slot_mapping[:num_tokens] < 0, -1
-        )
     if k_work_metadata_buffer is not None:
         query_lens = (
             common_attn_metadata.query_start_loc[1:]
@@ -609,7 +603,12 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # The side caches are replicated on every DCP rank (the selector
+        # stores the whole group span), so MTP verify rows keep the decode
+        # path under DCP; without the flag DCP forces the threshold to 1.
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=True, supports_dcp_with_varlen=True
+        )
         assert self.reorder_batch_threshold is not None
         self.is_circular_buffer = isinstance(kv_cache_spec, CircularBufferSpec)
         if isinstance(kv_cache_spec, MLAAttentionSpec):
@@ -722,6 +721,17 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> QSAForwardMetadata:
+        attn_metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        # The capture batch is a dummy that never writes the state cache, so an
+        # active work item would read uninitialized positions. Mark every item
+        # inactive; replay fills this buffer with the real work.
+        if self.compress_ratio != 1:
+            attn_metadata.k_work_metadata.fill_(-1)
+        return attn_metadata
 
 
 class QSAStateBackend(AttentionBackend):
@@ -853,6 +863,7 @@ class QSAKeyStateCache(_QSAStateCache):
         )
         return CircularBufferSpec(
             block_size=capacity,
+            dcp_sharded=False,
             num_kv_heads=1,
             head_size=self.head_size,
             head_size_v=0,
@@ -860,17 +871,27 @@ class QSAKeyStateCache(_QSAStateCache):
         )
 
 
+class _QSACompressedKeySpec(MLAAttentionSpec):
+    @property
+    def has_independent_slot_mapping(self) -> bool:
+        return True
+
+
 class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
-        return MLAAttentionSpec(
-            block_size=self.cache_config.block_size,
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        block_size = self.cache_config.block_size * dcp_world_size
+        return _QSACompressedKeySpec(
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            # Every spec reports sharded at world size 1. Above that this cache
+            # is replicated, with its own block table.
+            dcp_sharded=dcp_world_size == 1,
         )
 
 

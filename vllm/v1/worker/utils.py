@@ -258,12 +258,30 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
+def packed_kernel_blocks_are_mappable(
+    spec: KVCacheSpec, kernel_block_size: int, block_stride_bytes: int
+) -> bool:
+    """Whether packed manager blocks can be viewed as kernel blocks."""
+    kernel_rows = spec.get_num_kernel_states(kernel_block_size)
+    return (
+        spec.tokens_per_state > 1
+        and spec.num_heads == 1
+        and spec.block_size % kernel_block_size == 0
+        and kernel_rows > 0
+        # Every manager state must belong to a kernel page.
+        and spec.num_states == (spec.block_size // kernel_block_size) * kernel_rows
+        and block_stride_bytes % (kernel_rows * spec.state_content_size_bytes) == 0
+    )
+
+
 @dataclass(eq=False)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
+    # Row width the runner allocated for this group's block table, in manager blocks.
+    block_table_width: int | None = None
     # Set when the backend needs blocks smaller than the KV cache manager's: its
     # block tables and KV cache views then address kernel blocks, kernel block j
     # of block b being b * kernel_block_stride + j. The stride is set when a
@@ -306,10 +324,15 @@ class AttentionGroup:
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
-            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
-            )
-            width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
+            width = self.block_table_width
+            if width is None:
+                # Groups built outside init_attn_backend have no runner width.
+                max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+                    vllm_config, vllm_config.model_config.max_model_len
+                )
+                width = get_block_table_width(
+                    max_num_blocks, self.kv_cache_spec.block_size
+                )
             if kernel_block_size is not None:
                 width *= self.kv_cache_spec.block_size // kernel_block_size
             if builder_cls.requires_block_table_width:
@@ -386,6 +409,11 @@ class AttentionGroup:
         blocks_per_kv_block = self.kv_cache_spec.block_size // self.kernel_block_size
         rows, cols = block_table.shape
         out = self.kernel_block_table[ubatch_idx, :rows, : cols * blocks_per_kv_block]
+        if out.shape[1] != cols * blocks_per_kv_block:
+            raise ValueError(
+                f"kernel block table row has {out.shape[1]} columns, "
+                f"needs {cols} x {blocks_per_kv_block}"
+            )
         torch.add(
             self.kernel_block_offsets,
             block_table.unsqueeze(-1),
@@ -401,13 +429,10 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
-        # Token and pooled caches are written through manager-block slot
-        # mappings, so only compressed caches (written from their block table)
-        # can be mapped.
-        if (
-            spec.tokens_per_state <= 1
-            or kv_cache.shape[1] != 1
-            or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
+        # Only compressed caches written from their block table can use
+        # virtual kernel pages.
+        if not packed_kernel_blocks_are_mappable(
+            spec, self.kernel_block_size, kv_cache.stride(0) * kv_cache.element_size()
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -420,6 +445,8 @@ class AttentionGroup:
         # spans the other layers' pages between blocks (never addressing them),
         # which ``view`` cannot express.
         page_stride = kernel_rows * kv_cache.stride(-2)
+        if page_stride <= 0 or kv_cache.stride(0) % page_stride:
+            raise ValueError("Packed KV blocks must contain whole kernel pages")
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             kv_cache.shape[-2] // kernel_rows
@@ -615,6 +642,20 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
+        if (
+            kernel_block_size is not None
+            and isinstance(spec, AttentionSpec)
+            and spec.page_size_padded is None
+            and spec.block_size > kernel_block_size
+            and spec.block_size % kernel_block_size == 0
+            and tensor.block_stride > spec.unpadded_page_size_bytes
+            and packed_kernel_blocks_are_mappable(
+                spec, kernel_block_size, tensor.block_stride
+            )
+        ):
+            # Bind the packed compressed page whole. AttentionGroup maps its
+            # kernel blocks afterwards, with the stride between manager blocks.
+            kernel_block_size = None
         views = create_kv_cache_views(
             buf,
             spec,

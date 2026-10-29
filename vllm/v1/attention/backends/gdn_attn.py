@@ -174,7 +174,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
-        self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        # GDN state is not DCP-sharded, so spec-decode rows keep their decode
+        # path under DCP too; without the flag DCP forces the runner-wide
+        # reorder threshold to 1.
+        self._init_reorder_batch_threshold(
+            1, self.use_spec_decode, supports_dcp_with_varlen=True
+        )
 
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()

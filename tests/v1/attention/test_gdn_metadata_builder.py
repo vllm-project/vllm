@@ -150,11 +150,15 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    decode_context_parallel_size: int = 1,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = (
+        decode_context_parallel_size
     )
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
@@ -175,6 +179,16 @@ def _create_gdn_builder(
         vllm_config=vllm_config,
         device=DEVICE,
     )
+
+
+def test_dcp_keeps_spec_decode_reorder_threshold():
+    """GDN state is not DCP-sharded, so under DCP spec-decode rows keep the
+    reorder threshold 1 + num_spec instead of falling back to 1."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3, decode_context_parallel_size=2
+    )
+
+    assert builder.reorder_batch_threshold == 4
 
 
 def _build(
