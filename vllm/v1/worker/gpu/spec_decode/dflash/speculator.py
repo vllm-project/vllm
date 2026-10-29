@@ -621,7 +621,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
-            num_sample_reqs = batch_desc.num_reqs or num_reqs
         else:
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
@@ -635,14 +634,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
-            num_sample_reqs = num_reqs
-        self._sample_after_forward(input_batch, num_sample_reqs)
 
         return self.draft_tokens[:num_reqs]
-
-    def _sample_after_forward(self, input_batch: InputBatch, num_reqs: int) -> None:
-        """Sampling left out of `_generate_draft`; `num_reqs` is the (padded)
-        request count it ran with. Nothing by default."""
 
 
 @triton.jit

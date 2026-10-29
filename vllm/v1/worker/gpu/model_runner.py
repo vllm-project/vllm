@@ -472,8 +472,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     draft_logits=draft_logits,
                 )
                 logger.info("Batch-sharded sampling enabled.")
-                if isinstance(self.speculator, DraftModelSpeculator):
-                    self.speculator.enable_batch_sharded_sampling()
             else:
                 logger.warning_once(
                     "Disabling batch-sharded sampling: %s does not implement "

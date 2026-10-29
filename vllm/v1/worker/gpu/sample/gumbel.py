@@ -304,10 +304,9 @@ def _gumbel_sample_kernel(
     logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
-    # [num_bias_rows, vocab_size]; row bias_rows[token_idx] is added
+    # [num_tokens, vocab_size], added to the logits
     bias_ptr,
     bias_stride,
-    bias_rows_ptr,
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
@@ -331,8 +330,7 @@ def _gumbel_sample_kernel(
     )
     if HAS_BIAS:
         # Rounded to the logits dtype, as `logits + bias` would be.
-        bias_row = tl.load(bias_rows_ptr + token_idx)
-        bias = tl.load(bias_ptr + bias_row * bias_stride + block, mask=mask, other=0.0)
+        bias = tl.load(bias_ptr + token_idx * bias_stride + block, mask=mask, other=0.0)
         logits = (logits.to(tl.float32) + bias.to(tl.float32)).to(logits.dtype)
     logits = logits.to(tl.float32)
 
@@ -408,8 +406,7 @@ def gumbel_sample(
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
-    bias: torch.Tensor | None = None,  # [num_bias_rows, vocab_size]
-    bias_rows: torch.Tensor | None = None,  # [num_tokens]
+    bias: torch.Tensor | None = None,  # [num_tokens, vocab_size]
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -449,7 +446,7 @@ def gumbel_sample(
     if bias is not None:
         # The sum is rounded to the logits dtype: same dtype only.
         assert bias.dtype == logits.dtype and bias.stride(-1) == 1
-        assert bias_rows is not None and bias.shape[-1] == vocab_size
+        assert bias.shape == logits.shape
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
@@ -466,7 +463,6 @@ def gumbel_sample(
         logits.stride(0),
         bias,
         bias.stride(0) if bias is not None else 0,
-        bias_rows,
         expanded_idx_mapping,
         seed,
         pos,
