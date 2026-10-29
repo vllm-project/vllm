@@ -361,6 +361,17 @@ class SimpleCPUOffloadWorker:
             return
         self._flush_and_sync_all()
 
+    def shutdown(self) -> None:
+        """Remove the disk backend's file and stop its IO threads.
+
+        Idempotent; a no-op before register_kv_caches() and in CPU mode.
+        """
+        # Only the disk backend leaves state behind the process (the slot file
+        # on node-local storage). The CPU backend's host buffer and daemon copy
+        # thread go away with the process, so its shutdown is not added here.
+        if isinstance(self._backend, DiskBackend):
+            self._backend.shutdown()
+
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
         for event_idx, event in self._load_events:

@@ -487,6 +487,16 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## Disk files of `SimpleCPUOffloadConnector`
+
+With `"kv_offload_backend": "disk"`, each worker keeps its offloaded blocks in
+`<disk_path>.rank_<N>`, created with mode `0600`. Those blocks are derived from
+prompts, so a graceful shutdown removes the file first, before it waits for the
+IO threads. A file another process has since created at the same path is left
+alone. A process that exits without running Python cleanup (for example
+`SIGKILL` or an OOM kill) leaves its file behind until the next start on that
+node replaces it, or until it is removed by hand.
+
 ## Chunked-local attention with `SimpleCPUOffloadConnector`
 
 For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
