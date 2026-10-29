@@ -237,8 +237,8 @@ mod tests {
 
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
-    use crate::request::{ChatContent, ChatMessage, ChatRequest};
-    use crate::{ParserSelection, RendererSelection};
+    use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
+    use crate::{ChatTool, ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -344,6 +344,72 @@ mod tests {
     }
 
     #[test]
+    fn hf_renderer_selects_named_tokenizer_config_templates_like_transformers() {
+        let config = r#"{"model_type":"llama"}"#;
+        let named_templates = r#"{"chat_template":[
+            {"name":"default","template":"default:{{ messages[0].content }}"},
+            {"name":"tool_use","template":"tool_use:{{ tools[0].function.name }}"}
+        ]}"#;
+        let load = |files, chat_template: Option<&str>| {
+            HfChatBackend::from_resolved_model_files(
+                files,
+                "test-model".to_string(),
+                LoadModelBackendsOptions {
+                    chat_template: chat_template.map(str::to_owned),
+                    ..Default::default()
+                },
+                test_tokenizer(),
+            )
+            .unwrap()
+        };
+
+        let tokenizer_config_only = load(resolved_files(config, named_templates), None);
+        // A configured or dedicated template replaces every named template,
+        // `tool_use` included.
+        let configured = load(
+            resolved_files(config, named_templates),
+            Some("configured:{{ messages[0].content }}"),
+        );
+        let mut files = resolved_files(config, named_templates);
+        let dedicated_path =
+            files.config_path.as_ref().unwrap().with_file_name("chat_template.jinja");
+        std::fs::write(&dedicated_path, "dedicated:{{ messages[0].content }}").unwrap();
+        files.chat_template_path = Some(dedicated_path);
+        let dedicated = load(files, None);
+
+        let request = request_with_user_text("hello");
+        let mut with_tools = request.clone();
+        with_tools.tool_context = ResolvedToolContext::new(
+            &request.messages,
+            vec![ChatTool {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                defer_loading: None,
+            }],
+            None,
+            true,
+        )
+        .unwrap();
+        let rendered = [tokenizer_config_only, configured, dedicated].map(|backend| {
+            [&request, &with_tools].map(|request| {
+                backend.chat_renderer().render(request).unwrap().prompt.into_text().unwrap()
+            })
+        });
+
+        assert_eq!(
+            rendered,
+            [
+                ["default:hello", "tool_use:lookup"],
+                ["configured:hello", "configured:hello"],
+                ["dedicated:hello", "dedicated:hello"],
+            ]
+            .map(|row| row.map(str::to_owned))
+        );
+    }
+
+    #[test]
     fn native_renderer_inherits_deployment_reasoning_below_request_controls() {
         let backend = HfChatBackend::from_resolved_model_files(
             resolved_files(r#"{"model_type":"deepseek_v4"}"#, "{}"),
@@ -374,6 +440,34 @@ mod tests {
             "max"
         );
         assert_eq!(rendered.effective_template_kwargs["thinking"], true);
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_map_rewrites_typed_effort_only() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"deepseek_v4"}"#,
+            "{}",
+        );
+        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("high"));
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "max"
+        );
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.template_kwargs =
+            [("reasoning_effort".to_string(), serde_json::json!("high"))].into();
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "high"
+        );
     }
 
     #[test]
