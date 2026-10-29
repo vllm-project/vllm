@@ -498,7 +498,6 @@ class UBatchRunner:
         )
 
         outputs: dict[int, Any] = {}
-        errors: dict[int, BaseException] = {}
         dtype = self.vllm_config.model_config.dtype
 
         @torch.inference_mode()
@@ -520,9 +519,7 @@ class UBatchRunner:
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
-                # Recorded so the join below can report which microbatch broke.
                 ubatch_context.abort_state.abort(ubatch_context.id, e)
-                errors[ubatch_context.id] = e
 
         # Threads own the forward context; keep it cleared and SMs reserved
         # until finish joins them.
@@ -557,8 +554,6 @@ class UBatchRunner:
                 stack.close()
 
             failure = ubatch_contexts[0].abort_state.failure
-            if failure is None and errors:
-                failure = next(iter(errors.items()))
             if failure is not None:
                 failed, error = failure
                 raise RuntimeError(

@@ -779,7 +779,7 @@ def _run_ubatch_subprocess(target, *args):
         receiver.close()
 
 
-def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
+def _run_ubatch_entry_failures(connection, failed_ubatch):
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     config = _make_dbo_config()
     runner = _make_execution_runner(config)
@@ -791,7 +791,7 @@ def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
             UBatchSlice(slice(2, 4), slice(4, 8)),
         ],
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     connection.send("ready")
     entry_points = {
         "before_registration": "_THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id",
@@ -802,11 +802,7 @@ def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
     }
 
     def run_stage(stage):
-        faults = []
-        returned = []
-        hook_failures = []
-        both_hooks = threading.Barrier(2)
-        secondary_done = threading.Event()
+        faults: list[tuple[bool, bool]] = []
 
         def trace(frame, event, arg):
             function = frame.f_code.co_name
@@ -822,16 +818,8 @@ def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
             if function == "__enter__":
                 context = frame.f_locals["self"]
             else:
-                context = frame.f_locals.get(
-                    "ubatch_context", frame.f_locals.get("context")
-                )
-                if context is None:
-                    return trace
-            if event == "return" and function != "__enter__" and concurrent:
-                returned.append(context.id)
-                if context.id != failed_ubatch:
-                    secondary_done.set()
-            if event == "line" and not concurrent and not faults:
+                context = frame.f_locals["ubatch_context"]
+            if event == "line" and not faults:
                 line = linecache.getline(
                     frame.f_code.co_filename, frame.f_lineno
                 ).strip()
@@ -852,21 +840,6 @@ def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
 
         class Model(torch.nn.Module):
             def forward(self, input_ids, positions, **kwargs):
-                i = dbo_current_ubatch_id()
-                if concurrent:
-                    peer = 1 - i
-
-                    def fail_hook():
-                        both_hooks.wait(timeout=5)
-                        if peer == failed_ubatch:
-                            assert secondary_done.wait(timeout=5)
-                        hook_failures.append(peer)
-                        raise KeyError(f"secondary hook {peer}")
-
-                    dbo_register_recv_hook(fail_hook)
-                dbo_yield()
-                if concurrent and i == failed_ubatch:
-                    raise ValueError("original failure")
                 dbo_yield()
                 return input_ids.float().unsqueeze(-1)
 
@@ -879,37 +852,90 @@ def _run_ubatch_boundaries(connection, failed_ubatch, concurrent):
         finally:
             threading.settrace(None)
         assert isinstance(error.value.__cause__, ValueError)
-        assert str(error.value.__cause__) == (
-            "original failure" if concurrent else "entry failure"
-        )
-        if concurrent:
-            assert sorted(hook_failures) == [0, 1]
-            assert returned == [1 - failed_ubatch, failed_ubatch]
-        else:
-            expected = {
-                "before_registration": (False, False),
-                "registered": (True, False),
-                "barrier": (True, True),
-                "stream": (True, True),
-                "worker": (False, False),
-            }
-            assert faults == [expected[stage]]
+        assert str(error.value.__cause__) == "entry failure"
+        expected = {
+            "before_registration": (False, False),
+            "registered": (True, False),
+            "barrier": (True, True),
+            "stream": (True, True),
+            "worker": (False, False),
+        }
+        assert faults == [expected[stage]]
         _assert_ubatch_cleanup()
         output = runner.run(_YieldingModel([]), inputs, state)
         assert torch.equal(output, inputs["input_ids"].float().unsqueeze(-1) * 3)
         _assert_ubatch_cleanup()
 
-    for stage in ("concurrent",) if concurrent else entry_points:
+    for stage in entry_points:
         run_stage(stage)
     connection.send("recovered")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 @pytest.mark.parametrize("failed_ubatch", [0, 1])
-@pytest.mark.parametrize("concurrent", [False, True], ids=["entry", "concurrent"])
-def test_ubatch_initialization_and_concurrent_failures(failed_ubatch, concurrent):
-    """Release broken startup barriers and retain roots across concurrent cleanup."""
-    _run_ubatch_subprocess(_run_ubatch_boundaries, failed_ubatch, concurrent)
+def test_ubatch_runner_unwinds_partial_entry(failed_ubatch):
+    """Release startup waiters and unregister partially entered contexts."""
+    _run_ubatch_subprocess(_run_ubatch_entry_failures, failed_ubatch)
+
+
+def _run_ubatch_concurrent_cleanup(connection, failed_ubatch):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    config = _make_dbo_config()
+    runner = _make_execution_runner(config)
+    inputs = _make_model_inputs(8, torch.device("cuda:0"))
+    state = _make_ubatch_state(
+        config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+    torch.accelerator.synchronize()
+    connection.send("ready")
+    workers = {}
+    hook_failures = []
+    both_hooks = threading.Barrier(2)
+
+    class Model(torch.nn.Module):
+        def forward(self, input_ids, positions, **kwargs):
+            i = dbo_current_ubatch_id()
+            workers[i] = threading.current_thread()
+            peer = 1 - i
+
+            def fail_hook():
+                both_hooks.wait(timeout=5)
+                if peer == failed_ubatch:
+                    # Let the sibling record its cleanup error before the
+                    # original worker reaches its outer exception handler.
+                    workers[1 - failed_ubatch].join(timeout=5)
+                    assert not workers[1 - failed_ubatch].is_alive()
+                hook_failures.append(peer)
+                raise KeyError(f"secondary hook {peer}")
+
+            dbo_register_recv_hook(fail_hook)
+            dbo_yield()
+            if i == failed_ubatch:
+                raise ValueError("original failure")
+            dbo_yield()
+            return input_ids.float().unsqueeze(-1)
+
+    with pytest.raises(RuntimeError, match=f"Microbatch {failed_ubatch}") as error:
+        runner.run(Model(), inputs, state)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert str(error.value.__cause__) == "original failure"
+    assert hook_failures == [1 - failed_ubatch, failed_ubatch]
+    _assert_ubatch_cleanup()
+    output = runner.run(_YieldingModel([]), inputs, state)
+    assert torch.equal(output, inputs["input_ids"].float().unsqueeze(-1) * 3)
+    _assert_ubatch_cleanup()
+    connection.send("recovered")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+def test_ubatch_runner_preserves_failure_during_concurrent_cleanup(failed_ubatch):
+    """Keep the forward failure when the sibling records a cleanup error first."""
+    _run_ubatch_subprocess(_run_ubatch_concurrent_cleanup, failed_ubatch)
 
 
 # DCP x DBO: each microbatch recomputes DCP-local seq_lens from its own
