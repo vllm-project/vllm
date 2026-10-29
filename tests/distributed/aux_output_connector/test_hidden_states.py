@@ -10,13 +10,68 @@ import torch
 
 from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
 from vllm.distributed.aux_output_connector.hidden_states import (
+    HiddenStateCaptureBuffer,
     HiddenStateCaptureChunk,
     HiddenStateCapturePlan,
     HiddenStateScheduler,
+    capture_plan,
     capture_scheduled_hidden_states,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
+
+pytestmark = pytest.mark.cpu_test
+
+
+def test_capture_window_binds_to_actual_prompt_length():
+    legacy = HiddenStateCapturePlan.from_window("client", 7, 2, 6, "test")
+    for spec in (asdict(legacy), {"start": 2, "end": 6, "collection_id": "test"}):
+        plan = capture_plan(
+            SamplingParams(extra_args={"hidden_state_capture": spec}), "engine", 12
+        )
+        assert (plan.window_start_abs, plan.window_end_abs) == (13, 17)
+        assert plan.request_id == "engine"
+
+
+@pytest.mark.parametrize(
+    "spec", [[], {"unknown": 1}, {"start": 0.5, "end": 2}, {"start": 4, "end": 2}]
+)
+def test_invalid_capture_spec_is_a_request_validation_error(spec):
+    with pytest.raises(VLLMValidationError):
+        capture_plan(SamplingParams(extra_args={"hidden_state_capture": spec}), "r", 3)
+
+
+def test_missing_logits_rows_skip_only_affected_capture():
+    plans = {
+        name: HiddenStateCapturePlan.from_window(
+            name, 1, 0, 2, "test", logprob_topk=int(name == "a")
+        )
+        for name in ("a", "b")
+    }
+    errors: dict[str, str] = {}
+    chunks = capture_scheduled_hidden_states(
+        plans,
+        ["a", "b"],
+        {"a": 2, "b": 2},
+        {"a": 0, "b": 0},
+        torch.zeros(4, 2),
+        logits=torch.ones(3, 4),
+        cu_num_logits=np.array([0, 1, 3]),
+        errors=errors,
+    )
+    assert errors == {"a": "logits_rows_unavailable"}
+    assert list(chunks) == ["b"]
+
+
+def test_missing_logprobs_settle_as_skip_instead_of_engine_error():
+    buffer = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window("r", 1, 0, 1, "test", logprob_topk=1)
+    )
+    result, reason = buffer.update(
+        HiddenStateCaptureChunk(np.array([0]), torch.zeros(1, 2)), 0, 1, stopped=True
+    )
+    assert result is None and reason == "logprob_rows_unavailable"
 
 
 def test_recomputed_history_needs_no_logits_after_delivery():

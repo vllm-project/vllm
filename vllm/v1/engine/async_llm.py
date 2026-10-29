@@ -51,6 +51,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer, log_tracing_disabled_warning
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
@@ -485,14 +486,8 @@ class AsyncLLM(EngineClient):
 
                 validate_capture_request(
                     request_params,
-                    (
-                        len(request.prompt_token_ids)
-                        if request.prompt_token_ids is not None
-                        else (
-                            request.prompt_embeds.shape[0]
-                            if request.prompt_embeds is not None
-                            else 0
-                        )
+                    length_from_prompt_token_ids_or_embeds(
+                        request.prompt_token_ids, request.prompt_embeds
                     ),
                     self.vllm_config,
                     request.resumable,

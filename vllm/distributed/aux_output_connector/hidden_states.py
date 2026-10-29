@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import torch
+
+from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -29,6 +33,17 @@ class HiddenStateCapturePlan:
     logprob_topk: int = 0
 
     def __post_init__(self) -> None:
+        for name in (
+            "prompt_len",
+            "window_start_abs",
+            "window_end_abs",
+            "min_rows",
+            "logprob_topk",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an integer")
+        if any(type(layer) is not int or layer < 0 for layer in self.aux_layer_ids):
+            raise ValueError("aux_layer_ids must contain nonnegative integers")
         if (
             self.prompt_len < 1
             or self.window_start_abs < self.prompt_len - 1
@@ -137,8 +152,9 @@ def capture_scheduled_hidden_states(
     query_start_loc: np.ndarray | None = None,
     *,
     logits: torch.Tensor | None = None,
-    logits_indices: torch.Tensor | None = None,
+    cu_num_logits: np.ndarray | None = None,
     accepted_ends: dict[str, int] | None = None,
+    errors: dict[str, str] | None = None,
 ) -> dict[str, HiddenStateCaptureChunk]:
     """Snapshot only window rows before reusable model buffers are overwritten."""
     chunks: dict[str, HiddenStateCaptureChunk] = {}
@@ -174,18 +190,25 @@ def capture_scheduled_hidden_states(
                     states = hidden_states[first_row:end_row]
                 values = token_ids = None
                 if plan.logprob_topk:
-                    if logits is None or logits_indices is None:
-                        raise ValueError(
-                            "Window logprobs require raw logits and indices"
-                        )
-                    rows = torch.arange(first_row, end_row, device=logits.device)
-                    indices = torch.searchsorted(logits_indices.contiguous(), rows)
-                    indices = indices.clamp(max=logits_indices.numel() - 1)
-                    torch._assert_async(
-                        (logits_indices[indices] == rows).all(),
-                        "Captured hidden rows have no corresponding logits",
+                    if logits is None or cu_num_logits is None:
+                        if errors is not None:
+                            errors[req_id] = "logits_unavailable"
+                        row_offset += num_rows
+                        continue
+                    logit_start, logit_end = map(int, cu_num_logits[index : index + 2])
+                    # MRV2 places each request's logits on its query suffix.
+                    query_logit_start = (
+                        row_offset + num_rows - (logit_end - logit_start)
                     )
-                    scores = logits[indices].float()
+                    if first_row < query_logit_start or logit_end > logits.shape[0]:
+                        if errors is not None:
+                            errors[req_id] = "logits_rows_unavailable"
+                        row_offset += num_rows
+                        continue
+                    selected_start = logit_start + first_row - query_logit_start
+                    scores = logits[
+                        selected_start : selected_start + end_row - first_row
+                    ].float()
                     from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 
                     _, token_ids = scores.topk(plan.logprob_topk, dim=-1)
@@ -251,7 +274,8 @@ class HiddenStateCaptureBuffer:
                 chunk.logprobs is None or chunk.logprob_token_ids is None
                 for chunk in self.chunks
             ):
-                raise ValueError("Captured window has missing logprob rows")
+                self.error = "logprob_rows_unavailable"
+                return None
             logprobs = torch.cat([c.logprobs for c in self.chunks])[
                 torch.from_numpy(unique_indices)
             ]
@@ -297,6 +321,8 @@ class HiddenStateCaptureBuffer:
         if not stopped and accepted_end < self.plan.window_end_abs:
             return None, None
         result = self.finish()
+        if self.error is not None:
+            return None, self.error
         if result is not None:
             return result, None
         reason = (
@@ -310,19 +336,41 @@ class HiddenStateCaptureBuffer:
 CAPTURE_KEY = "hidden_state_capture"
 
 
-def capture_plan(params, request_id: str, prompt_len: int):
+def capture_plan(
+    params: SamplingParams, request_id: str, prompt_len: int
+) -> HiddenStateCapturePlan | None:
     spec = (params.extra_args or {}).get(CAPTURE_KEY)
     if spec is None:
         return None
-    spec = dict(spec)
-    spec["request_id"] = request_id
-    spec["prompt_len"] = prompt_len
-    spec["aux_layer_ids"] = tuple(spec.get("aux_layer_ids", ()))
-    return HiddenStateCapturePlan(**spec)
+    try:
+        if not isinstance(spec, Mapping):
+            raise ValueError("capture specification must be a mapping")
+        spec = dict(spec)
+        spec["aux_layer_ids"] = tuple(spec.get("aux_layer_ids", ()))
+        if "start" in spec or "end" in spec:
+            return HiddenStateCapturePlan.from_window(
+                request_id=request_id, prompt_len=prompt_len, **spec
+            )
+        # Legacy asdict(plan) callers supplied their own prompt length.
+        # Preserve response offsets when binding the actual engine prompt.
+        client_prompt_len = spec.pop("prompt_len")
+        spec.pop("request_id", None)
+        spec["window_start_abs"] += prompt_len - client_prompt_len
+        spec["window_end_abs"] += prompt_len - client_prompt_len
+        return HiddenStateCapturePlan(
+            request_id=request_id, prompt_len=prompt_len, **spec
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise VLLMValidationError(
+            f"Invalid hidden capture specification: {exc}"
+        ) from exc
 
 
 def validate_capture_request(
-    params, prompt_len: int, config: VllmConfig, resumable: bool = False
+    params: SamplingParams,
+    prompt_len: int,
+    config: VllmConfig,
+    resumable: bool = False,
 ) -> None:
     from vllm.exceptions import VLLMValidationError
 
@@ -339,6 +387,23 @@ def validate_capture_request(
         )
     if plan.logprob_topk > config.model_config.get_vocab_size():
         raise VLLMValidationError("logprob_topk exceeds the model vocabulary")
+    maximum = config.model_config.max_logprobs
+    if maximum != -1 and plan.logprob_topk > maximum:
+        raise VLLMValidationError("logprob_topk exceeds max_logprobs")
+    rows = plan.window_end_abs - plan.window_start_abs
+    if rows > config.model_config.max_model_len:
+        raise VLLMValidationError("Hidden capture window exceeds max_model_len")
+    hidden_width = config.model_config.get_hidden_size() * (
+        len(plan.aux_layer_ids) + (plan.hidden_layout != "dflash_aux")
+    )
+    element_size = torch.empty((), dtype=config.model_config.dtype).element_size()
+    payload_bytes = rows * (hidden_width * element_size + plan.logprob_topk * 12)
+    if payload_bytes * config.scheduler_config.max_num_seqs > (
+        config.aux_output_config.max_hidden_capture_bytes
+    ):
+        raise VLLMValidationError(
+            "Hidden capture exceeds max_hidden_capture_bytes budget"
+        )
 
 
 @dataclass
@@ -413,8 +478,9 @@ class HiddenStateWorker:
             aux_hidden_states,
             batch.query_start_loc_np,
             logits=logits,
-            logits_indices=batch.logits_indices,
+            cu_num_logits=batch.cu_num_logits_np,
             accepted_ends=self.accepted_ends,
+            errors=errors,
         )
         self.pending = PendingHiddenOutput(chunks) if chunks or errors else None
         if self.pending is not None:
@@ -438,6 +504,7 @@ class HiddenStateScheduler:
                 continue
             if request_id not in self.buffers:
                 plan = capture_plan(params, request_id, request.num_prompt_tokens)
+                assert plan is not None
                 self.buffers[request_id] = HiddenStateCaptureBuffer(plan)
             plans[request_id] = self.buffers[request_id].plan
         finished, self.finished = tuple(self.finished), set()
@@ -462,6 +529,7 @@ class HiddenStateScheduler:
             self.done.add(request_id)
             self.finished.add(request_id)
             if num_new_tokens == 0 and not stopped:
+                # Retain the settled result/error until a normal output can carry it.
                 return None, None
             self.buffers.pop(request_id)
         return result, reason
