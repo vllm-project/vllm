@@ -43,6 +43,15 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
     )
 
 
+PREFILL_KERNELS = [pytest.param(minimax_m3_sparse_attn, id="scalar")]
+if current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn as minimax_m3_sparse_attn_tiled,
+    )
+
+    PREFILL_KERNELS.append(pytest.param(minimax_m3_sparse_attn_tiled, id="query_tiled"))
+
+
 @pytest.fixture
 def kv_layout(request) -> KVCacheLayout:
     """Resolve the requested layout name (legacy NHD/HND aliases included)."""
@@ -618,13 +627,18 @@ def _reference_decode_index_score(
 
 # 3600: 29 blocks over 12 splits of 3, so the last busy split has 2 blocks.
 @pytest.mark.parametrize("prefix_len", [1024, 3600])
-@pytest.mark.parametrize("force_split_k", [False, True])
-def test_prefill_index_topk_correctness(monkeypatch, prefix_len, force_split_k):
-    if force_split_k:
-        # Take the SM12.0-only split-K launch on any CUDA GPU.
-        monkeypatch.setattr(
-            current_platform, "is_device_capability", lambda cap, *_: cap == (12, 0)
-        )
+@pytest.mark.parametrize("device_capability", [80, 90, 120])
+def test_prefill_index_topk_correctness(monkeypatch, prefix_len, device_capability):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda cap, *_: device_capability == cap[0] * 10 + cap[1],
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda cap, *_: device_capability // 10 == cap // 10,
+    )
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -1796,6 +1810,7 @@ def _reference_sparse_attn(
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("sparse_attn", PREFILL_KERNELS)
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
     [
@@ -1804,6 +1819,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
+    sparse_attn,
     kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
@@ -1861,7 +1877,7 @@ def test_prefill_sparse_attention_correctness(
         q_start += q_len
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_cache,
         topk_idx,

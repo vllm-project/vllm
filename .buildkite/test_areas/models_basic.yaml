@@ -26,9 +26,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization)"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
+  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -38,15 +39,14 @@ steps:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
-    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 14
+    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset'
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Basic Models (Extra Initialization) Shard %N"
+      label: ":amd: (MI355 DPX) Basic Models (Extra Initialization)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
-      parallelism: 10
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -101,6 +101,7 @@ steps:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
       dind: false
+      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 65
       depends_on:
@@ -348,6 +349,25 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":amd: (MI300) Qwen4 Exp"
+  key: qwen4-exp-unit-tests-mi300
+  timeout_in_minutes: 40
+  dind: false
+  device: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/model_executor/layers/mamba/checkpoint.py
+  - tests/models/qwen4_exp/
+  commands:
+  - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
+  # PLE and QSA import conflicting HC registrations in a shared process.
+  - pytest -v -s models/qwen4_exp/test_ple.py
+
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
   depends_on:
@@ -377,6 +397,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
+  - tests/models/test_qwen3_5.py
   - tests/models/test_dory.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
@@ -399,6 +420,7 @@ steps:
       models/test_vision.py
       models/test_adapters.py
       models/test_qwen3_5_mtp_config.py
+      models/test_qwen3_5.py
       models/transformers/fusers/
       models/transformers/test_dynamic_rope.py
       model_executor/layers/test_activation.py
