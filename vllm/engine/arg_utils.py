@@ -1846,10 +1846,9 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
-        specialized_decode_kwargs = kernel_kwargs["specialized_decode"]
-        specialized_decode_kwargs["nargs"] = "?"
-        specialized_decode_kwargs["const"] = "auto"
-        kernel_group.add_argument("--specialized-decode", **specialized_decode_kwargs)
+        kernel_group.add_argument(
+            "--specialized-decode", **kernel_kwargs["specialized_decode"]
+        )
         kernel_group.add_argument(
             "--monokernel",
             action=argparse.BooleanOptionalAction,

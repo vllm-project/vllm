@@ -148,8 +148,8 @@ Nothing else changes. In particular, the decoder layer does not.
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V4.1 --specialized-decode monokernel
-vllm serve deepseek-ai/DeepSeek-V4.1 --specialized-decode   # auto: vLLM picks
-vllm serve deepseek-ai/DeepSeek-V4.1 --monokernel           # shorthand, will be deprecated
+vllm serve deepseek-ai/DeepSeek-V4.1 --specialized-decode auto  # vLLM picks
+vllm serve deepseek-ai/DeepSeek-V4.1 --monokernel               # shorthand, will be deprecated
 ```
 
 ## Lifecycle

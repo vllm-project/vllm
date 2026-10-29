@@ -852,7 +852,6 @@ def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
     ("argv", "expected"),
     [
         ([], None),
-        (["--specialized-decode"], "auto"),
         (["--specialized-decode", "auto"], "auto"),
         (["--specialized-decode", "monokernel"], "monokernel"),
         (["--monokernel"], "monokernel"),
@@ -863,8 +862,7 @@ def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
     ],
 )
 def test_specialized_decode_cli(argv, expected):
-    """``--monokernel`` is shorthand for ``--specialized-decode monokernel``,
-    and a bare ``--specialized-decode`` means ``auto``."""
+    """``--monokernel`` is shorthand for ``--specialized-decode monokernel``."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(argv))
     config = args.create_engine_config()
