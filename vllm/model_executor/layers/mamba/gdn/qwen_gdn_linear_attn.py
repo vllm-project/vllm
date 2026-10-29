@@ -634,13 +634,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
-        # Opt-in overlap of in_proj_ba with in_proj_qkvz (see forward_cuda), for
-        # callers outside torch.compile: compiled callers would need the custom-op
-        # wrapper (#36795, reverted in #38152 for cold-compile time) or Dynamo's
-        # stream tracing, neither validated here. Only for a plain cuBLAS ba GEMM:
-        # FlashInfer GEMMs (FP8 bmm_fp8, BF16 mm_bf16) share one process-wide
-        # workspace with the qkvz GEMM. Off with micro-batching (threads would
-        # share the events) and LoRA.
+        # Opt-in, for callers outside torch.compile (compiled callers would need a
+        # custom op or Dynamo stream tracing; not validated). Plain cuBLAS ba GEMM only:
+        # FlashInfer GEMMs share a process-wide workspace. Off with ubatching and LoRA.
         self._ba_stream = None
         ba_method = self.in_proj_ba.quant_method
         if (
