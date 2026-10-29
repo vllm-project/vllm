@@ -427,6 +427,7 @@ def main():
     ap.add_argument("--log", default=DEFAULT_LOG, help="JSONL log path")
     ap.add_argument("--state", default=DEFAULT_STATE, help="restart-budget state file")
     ap.add_argument("--dry-run", action="store_true", help="probe and report, never restart")
+    ap.add_argument("--once", action="store_true", help="single pass (the default; accepted so scheduler command lines read explicitly)")
     ap.add_argument("--deep-whisper", action="store_true", help="reserved: real transcription (loads GPU 1)")
     ap.add_argument("--loop", type=int, default=0, help="repeat every N seconds (0 = single pass)")
     args = ap.parse_args()
