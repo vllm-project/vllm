@@ -121,12 +121,23 @@ class FlashDsaCaches:
     bytes over the f32 scalar ``k_scale``, or uint8 ``mxfp4_mla`` rows
     [blocks, block_tokens, 272]; the uint8 index cache
     [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and the
-    bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
+    bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate). ``kv_cache_dtype`` is
+    vLLM's ``--kv-cache-dtype`` for the MLA cache; it, not the tensor's shape,
+    names the row format."""
 
     kv_cache: torch.Tensor
     idx_cache: torch.Tensor
     tail_cache: torch.Tensor
     k_scale: torch.Tensor | None = None
+    kv_cache_dtype: str = "auto"
+
+    @property
+    def kv_fp8(self) -> bool:
+        return self.kv_cache_dtype.startswith("fp8")
+
+    @property
+    def kv_mxfp4(self) -> bool:
+        return self.kv_cache_dtype == "mxfp4_mla"
 
 
 @dataclass
@@ -360,16 +371,13 @@ class FlashFfnOp:
                     "a sparse-attention launch needs caches, rows and a block table"
                 )
             _check("rows", rows, (S, ROW_WORDS), torch.int32)
-            kv = caches.kv_cache
-            kv4 = kv.element_size() == 1 and kv.shape[-1] == MXFP4_ROW_BYTES
-            kv8 = kv.element_size() == 1 and not kv4
             if (
-                kv8 != rt.kv_fp8
-                or kv4 != rt.kv_mxfp4
-                or (kv8 and caches.k_scale is None)
+                caches.kv_fp8 != rt.kv_fp8
+                or caches.kv_mxfp4 != rt.kv_mxfp4
+                or (caches.kv_fp8 and caches.k_scale is None)
             ):
                 raise ValueError(
-                    f"{kv.dtype} {tuple(kv.shape)} MLA cache on a kv_fp8={rt.kv_fp8} "
+                    f"{caches.kv_cache_dtype} MLA cache on a kv_fp8={rt.kv_fp8} "
                     f"kv_mxfp4={rt.kv_mxfp4} runtime (an fp8 cache needs its k_scale)"
                 )
             if idx_block_table is None:
