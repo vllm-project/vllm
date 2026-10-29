@@ -63,7 +63,7 @@ async fn wait_for_engine_subscriptions(
                     timeout: ready_timeout,
                 }
             })??;
-        if !is_engine_subscription(&message) {
+        if !is_subscribe_all(&message) {
             bail_unexpected_handshake_message!(
                 "expected coordinator subscription [0x01], got {message:?}"
             );
@@ -75,9 +75,9 @@ async fn wait_for_engine_subscriptions(
 }
 
 /// Whether `message` is the single-frame subscribe-all notification (`[0x01]`)
-/// that an engine's XSUB sends whenever it connects or reconnects to the
-/// coordinator broadcast socket.
-pub(super) fn is_engine_subscription(message: &ZmqMessage) -> bool {
+/// that an XSUB peer sends whenever it connects or reconnects to a coordinator
+/// XPUB socket.
+pub(super) fn is_subscribe_all(message: &ZmqMessage) -> bool {
     message.len() == 1 && message.get(0).is_some_and(|frame| frame.as_ref() == [0x01])
 }
 

@@ -11,7 +11,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{XPubSocket, ZmqError, ZmqMessage};
 
 use crate::client::imp::ClientInner;
-use crate::coordinator::bootstrap::is_engine_subscription;
+use crate::coordinator::bootstrap::is_subscribe_all;
 use crate::coordinator::handle::CoordinatorState;
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
 use crate::protocol::encode_msgpack;
@@ -161,7 +161,7 @@ impl InProcCoordinatorRunner {
                     subscription = self.coordinator_input.recv() => {
                         match subscription {
                             Ok(message) => {
-                                if is_engine_subscription(&message) {
+                                if is_subscribe_all(&message) {
                                     let state = *self.state.lock();
                                     if state.engines_running {
                                         debug!(
