@@ -276,9 +276,43 @@ message MediaItem {
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
     PreprocessedMediaFeatures features = 7;
+    // Images only. Accepted when ModelInfo.supports_nixl_ref is true.
+    NixlRef nixl_ref = 8;
   }
   string mime_type = 5;
   string uuid = 6;
+}
+
+// Decoded image pixels that stay in the host memory (DRAM) of another process.
+// The server reads them over NIXL. The pixels are contiguous 8-bit values in
+// [height, width, channels] order, so the region is height * width * channels
+// bytes long. The server converts them to RGB as it converts a decoded URL
+// image with the same layout.
+message NixlRef {
+  // NIXL metadata of the agent that registered the memory. The agent must
+  // have only the UCX backend. Send getLocalMD() when the agent has 1 to 16
+  // host-memory (DRAM) regions that do not overlap, or the connection
+  // entries of getLocalPartialMD() for an empty list followed by the memory
+  // sections of getLocalPartialMD() for the pixel region. The server rejects
+  // metadata of any other shape.
+  bytes agent_metadata = 1;
+  // Address of the first pixel in the address space of that agent. The pixels
+  // must lie inside one region of agent_metadata. The server uses the pixels
+  // as sent; for the same model input as the encoded image, they must equal
+  // what the server decodes from it: EXIF orientation applied, 16-bit samples
+  // narrowed (greyscale clipped at 255, colour to the high byte), and the
+  // first frame of an animation. Do not send one uuid for an image in both
+  // forms unless the pixels match. The owner must keep that region registered,
+  // and the pixels unchanged, until the first response of the request. If the
+  // request ends without a response (for example, it is cancelled or its gRPC
+  // deadline passes), the server starts no read of the region later than 30
+  // seconds after the request ends. A read that is still in flight at that
+  // time can end later; the server then discards its pixels.
+  uint64 addr = 2;
+  uint32 height = 3;
+  uint32 width = 4;
+  // 1 (L), 2 (LA), 3 (RGB), or 4 (RGBA).
+  uint32 channels = 5;
 }
 
 // Engine-ready multimodal features produced by a version-compatible frontend.

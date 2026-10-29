@@ -237,6 +237,9 @@ impl pb::control_server::Control for ControlServiceImpl {
             supports_token_ids_input: true,
             supports_lora: self.ready().supports_lora,
             supports_multimodal: self.state.chat.supports_multimodal(),
+            // With the flag on, startup fails when NIXL does not start.
+            supports_nixl_ref: self.state.api_server_options.enable_grpc_nixl_media
+                && self.state.chat.supports_image_input(),
             reasoning_parser: self
                 .state
                 .chat

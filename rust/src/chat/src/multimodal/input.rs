@@ -4,6 +4,8 @@
 use llm_multimodal::MediaContentPart;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 
+use super::DeferredImage;
+
 /// Media preparation stage supplied by a frontend handler.
 #[derive(Debug)]
 pub enum MultimodalInput {
@@ -33,6 +35,9 @@ impl From<Vec<MediaContentPart>> for MultimodalInput {
 pub enum MediaPart {
     /// Media that the `llm-multimodal` connector fetches and decodes.
     Content(MediaContentPart),
+    /// An image that the caller decoded. It loads after the request passes
+    /// validation.
+    DecodedImage(DeferredImage),
 }
 
 impl From<MediaContentPart> for MediaPart {

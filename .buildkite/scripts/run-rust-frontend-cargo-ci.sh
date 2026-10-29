@@ -24,6 +24,7 @@ export PATH="$CARGO_HOME/bin:$PATH"
 CARGO_BINSTALL_VERSION="${CARGO_BINSTALL_VERSION:-1.20.1}"
 UV_VERSION="${UV_VERSION:-0.13.4}"
 UV_SCRIPT_PYTHON_VERSION="${UV_SCRIPT_PYTHON_VERSION:-3.12}"
+LIBCLANG_VERSION="${LIBCLANG_VERSION:-18.1.1}"
 
 CARGO_SORT_VERSION_REQ="${CARGO_SORT_VERSION_REQ:-2}"
 CARGO_DENY_VERSION_REQ="${CARGO_DENY_VERSION_REQ:-0.20}"
@@ -87,7 +88,27 @@ install_uv() {
   uv python install "$UV_SCRIPT_PYTHON_VERSION"
 }
 
+# `--all-features` enables `vllm-server/nixl-media`. The build script of
+# `nixl-sys` runs bindgen, which needs libclang and the C builtin headers. The
+# agent has no clang, so libclang comes from its PyPI wheel and the builtin
+# headers come from GCC.
+install_libclang() {
+  log_section "Installing libclang ${LIBCLANG_VERSION}"
+  local target="$CARGO_HOME/libclang-${LIBCLANG_VERSION}"
+  uv pip install \
+    --python "$UV_SCRIPT_PYTHON_VERSION" \
+    --target "$target" \
+    "libclang==${LIBCLANG_VERSION}"
+  export LIBCLANG_PATH="$target/clang/native"
+
+  local gcc_include
+  gcc_include="$(g++ -print-file-name=include)"
+  export BINDGEN_EXTRA_CLANG_ARGS="-isystem ${gcc_include}"
+}
+
 run_style_clippy() {
+  install_uv
+  install_libclang
   install_cargo_binstall
   install_cargo_sort
   install_cargo_deny
@@ -118,6 +139,7 @@ run_style_clippy() {
 
 run_tests() {
   install_uv
+  install_libclang
   install_cargo_binstall
   install_cargo_nextest
 

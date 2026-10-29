@@ -265,6 +265,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
+                        enable_grpc_nixl_media: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -1956,6 +1957,7 @@ fn frontend_args_accept_json() {
                         log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
+                        enable_grpc_nixl_media: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -2889,6 +2891,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
+                        enable_grpc_nixl_media: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -3196,6 +3199,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                enable_grpc_nixl_media: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3328,6 +3332,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                enable_grpc_nixl_media: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3573,6 +3578,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                enable_grpc_nixl_media: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,

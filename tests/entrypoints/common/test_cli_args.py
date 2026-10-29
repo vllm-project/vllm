@@ -13,6 +13,7 @@ from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
+from vllm.entrypoints.common.startup import jsonify_non_default_args
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -247,6 +248,20 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
     args = parser.parse_args(["--grpc-port", "50051"])
     with pytest.raises(ValueError, match="--grpc-port requires"):
         validate_parsed_serve_args(args)
+
+
+def test_grpc_nixl_media_requires_rust_grpc_port(vllm_parser, monkeypatch):
+    """Only the Rust frontend's gRPC listener reads nixl_ref images."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = vllm_parser.parse_args(["serve", "--enable-grpc-nixl-media"])
+    with pytest.raises(ValueError, match="--enable-grpc-nixl-media requires"):
+        validate_parsed_serve_args(args)
+
+    args = vllm_parser.parse_args(
+        ["serve", "--grpc-port", "50051", "--enable-grpc-nixl-media"]
+    )
+    validate_parsed_serve_args(args)
+    assert jsonify_non_default_args(args)["enable_grpc_nixl_media"] is True
 
 
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):

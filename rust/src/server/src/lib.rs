@@ -267,6 +267,12 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
+        #[cfg(feature = "nixl-media")]
+        if config.api_server_options.enable_grpc_nixl_media {
+            grpc::start_nixl_media()
+                .await
+                .context("failed to start NIXL for --enable-grpc-nixl-media")?;
+        }
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
