@@ -165,9 +165,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
+        # AITER requires a torch.distributed-registered group and exchanges IPC
+        # handles via the default store; stateless groups satisfy neither.
+        # Only StatelessGroupCoordinator passes tcp_store_group, so this checks
+        # the property AITER depends on rather than the feature that currently
+        # creates stateless groups (elastic EP).
         if (
             "dp" in unique_name
+            and tcp_store_group is None
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
             and rocm_aiter_ops.is_custom_all_reduce_enabled()
