@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     MoERunner,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -134,9 +137,11 @@ def _gemma4_routing_kernel(
     per_expert_scale_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
+    is_padding_ptr,
     E: tl.constexpr,
     K: tl.constexpr,
     BLOCK_E: tl.constexpr,
+    HAS_PADDING: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs_e = tl.arange(0, BLOCK_E)
@@ -188,6 +193,13 @@ def _gemma4_routing_kernel(
     # Final weights: vectorized multiply (only top-K will be stored)
     all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
 
+    if HAS_PADDING:
+        # CUDA-graph padding rows hold stale activations; route them to the
+        # -1 skip sentinel so they don't pull real experts' weights.
+        is_pad = tl.load(is_padding_ptr + pid).to(tl.int1)
+        all_ids = tl.where(is_pad, -1, all_ids)
+        all_weights = tl.where(is_pad, 0.0, all_weights)
+
     # Write results with TWO masked stores — replaces K × 2 serial scalar stores
     base_off = pid * K + offs_e
     tl.store(topk_ids_ptr + base_off, all_ids, mask=top_mask)
@@ -199,6 +211,8 @@ def gemma4_fused_routing_kernel_triton(
     topk: int,
     per_expert_scale: torch.Tensor,
     num_warps: int = 1,
+    *,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     gating_output = gating_output.contiguous()
     per_expert_scale = per_expert_scale.contiguous()
@@ -211,9 +225,11 @@ def gemma4_fused_routing_kernel_triton(
         per_expert_scale,
         weights,
         ids,
+        is_padding if is_padding is not None else ids,
         E,
         topk,
         BLOCK_E,
+        is_padding is not None,
         num_warps=num_warps,
     )
     return weights, ids
@@ -349,7 +365,10 @@ class Gemma4Router(nn.Module):
         """
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
             return gemma4_fused_routing_kernel_triton(
-                gating_output, topk, self.per_expert_scale
+                gating_output,
+                topk,
+                self.per_expert_scale,
+                is_padding=get_moe_padding_mask(gating_output.shape[0]),
             )
 
         return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -34,6 +35,16 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
 )
 
 logger = init_logger(__name__)
+
+
+def _clear_pending_device_error() -> None:
+    """Clear the error a failed copy left pending for the next kernel launch."""
+    if not current_platform.is_cuda_alike():
+        return
+    try:
+        CudaRTLibrary().cudaGetLastError()
+    except (AssertionError, AttributeError, OSError):
+        logger.warning("Could not clear the pending device error", exc_info=True)
 
 
 def _select_swap_blocks_fn(
@@ -75,6 +86,7 @@ class Transfer:
     batch_src: torch.Tensor
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
+    failed: bool = False
 
 
 def compute_sub_block_ptrs(
@@ -704,16 +716,40 @@ class SingleDirectionOffloadingHandler:
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with current_platform.stream(stream):
-            start_event.record(stream)
-            if op_idx > 0:
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+        try:
+            with current_platform.stream(stream):
+                start_event.record(stream)
+                if op_idx > 0:
+                    self._swap_blocks_batch(
+                        src,
+                        dst,
+                        sizes,
+                        is_src_access_order_any=is_src_access_order_any,
+                    )
+                end_event.record(stream)
+        except RuntimeError:
+            _clear_pending_device_error()
+            logger.exception(
+                "KV offload %s transfer failed for job %d",
+                "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                job_id,
+            )
             end_event.record(stream)
+            self._transfer_events[job_id] = end_event
+            self._transfers.append(
+                Transfer(
+                    job_id=job_id,
+                    stream=stream,
+                    start_event=start_event,
+                    end_event=end_event,
+                    num_bytes=0,
+                    batch_src=batch_src,
+                    batch_dst=batch_dst,
+                    batch_sizes=batch_sizes,
+                    failed=True,
+                )
+            )
+            return True
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(
@@ -734,33 +770,63 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._transfers and self._transfers[0].end_event.query():
-            transfer = self._transfers.popleft()
-            transfer_time = (
-                transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-            )  # elapsed_time is in milliseconds
-            result = TransferResult(
-                job_id=transfer.job_id,
-                success=True,
-                transfer_size=transfer.num_bytes,
-                transfer_time=transfer_time,
-            )
+        while self._transfers:
+            transfer = self._transfers[0]
+            try:
+                if not transfer.end_event.query():
+                    break
+                transfer_time = (
+                    None
+                    if transfer.failed
+                    # elapsed_time is in milliseconds
+                    else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+                )
+            except RuntimeError:
+                logger.exception(
+                    "KV offload %s transfer failed for job %d while polling "
+                    "for completion",
+                    "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                    transfer.job_id,
+                )
+                self._transfers.popleft()
+                self._transfer_events.pop(transfer.job_id, None)
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
 
-            results.append(result)
+            self._transfers.popleft()
+            self._transfer_events.pop(transfer.job_id, None)
+            if transfer.failed:
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
+
+            results.append(
+                TransferResult(
+                    job_id=transfer.job_id,
+                    success=True,
+                    transfer_size=transfer.num_bytes,
+                    transfer_time=transfer_time,
+                )
+            )
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
             self._buffer_pool.append(
                 (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
             )
-            del self._transfer_events[transfer.job_id]
         return results
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
-                event.synchronize()
+                try:
+                    event.synchronize()
+                except RuntimeError:
+                    logger.exception(
+                        "KV offload transfer for job %d failed while waiting "
+                        "for it to complete",
+                        job_id,
+                    )
 
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
@@ -860,25 +926,19 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
-        self._store_handler = SingleDirectionOffloadingHandler(
+        make_handler = functools.partial(
+            SingleDirectionOffloadingHandler,
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
-            gpu_to_cpu=True,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
         )
-
-        self._load_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
-            blocks_per_chunk=blocks_per_chunk,
-            layer_refs_per_group=kv_caches.group_data_refs,
-            gpu_to_cpu=False,
-            canonical_layout=canonical_layout,
-            host_memory_is_pinned=host_memory_is_pinned,
-        )
+        self._store_handler = make_handler(gpu_to_cpu=True)
+        self._load_handler = make_handler(gpu_to_cpu=False)
+        # Own stream, so expedited loads do not queue behind regular loads.
+        self._expedited_load_handler = make_handler(gpu_to_cpu=False)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
@@ -887,17 +947,27 @@ class CPUOffloadingWorker(OffloadingWorker):
         return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
         """Async CPU -> GPU."""
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+        handler = self._expedited_load_handler if expedited else self._load_handler
+        return handler.transfer_async(job_id, src_spec, dst_spec)
 
     def get_finished(self) -> list[TransferResult]:
-        return self._store_handler.get_finished() + self._load_handler.get_finished()
+        return (
+            self._store_handler.get_finished()
+            + self._load_handler.get_finished()
+            + self._expedited_load_handler.get_finished()
+        )
 
     def wait(self, job_ids: set[int]) -> None:
         self._store_handler.wait(job_ids)
         self._load_handler.wait(job_ids)
+        self._expedited_load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
         handler_failed = False
@@ -907,11 +977,12 @@ class CPUOffloadingWorker(OffloadingWorker):
             logger.exception("Failed to shut down store offloading handler")
             handler_failed = True
 
-        try:
-            self._load_handler.shutdown()
-        except Exception:
-            logger.exception("Failed to shut down load offloading handler")
-            handler_failed = True
+        for handler in (self._load_handler, self._expedited_load_handler):
+            try:
+                handler.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down load offloading handler")
+                handler_failed = True
 
         if self._mmap_region is not None:
             if handler_failed:

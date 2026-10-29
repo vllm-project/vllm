@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
+import regex as re
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -40,7 +39,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
-from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -52,10 +50,23 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Matches any layer-qualified module path (e.g.
+# ``model.layers.5.mlp.shared_expert`` or
+# ``model.language_model.model.layers.5.mlp.shared_expert``) so skip reasons
+# are reported once per cause instead of once per layer.
+_LAYER_MODULE_PATH_RE = re.compile(r"(?:[\w]+\.)*(?:layers|mtp)\.\d+\.[\w.]*")
+
+
+def _normalize_skip_reason(reason: str) -> str:
+    return _LAYER_MODULE_PATH_RE.sub("<shared_expert>", reason)
+
+
 def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
+    moe_backend: str | None = None,
+    disable_under_ep: bool = False,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -63,6 +74,10 @@ def resolve_layer_fused_shared_expert(
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
+        moe_backend: MoE backend that runs the fused shared expert.
+        disable_under_ep: Whether this model family does not support FSE under
+            expert parallelism. Kept as an explicit call-site policy instead of
+            branching on model type here.
 
     Returns:
         Whether AITER fused shared experts are enabled.
@@ -74,15 +89,31 @@ def resolve_layer_fused_shared_expert(
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
     fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-    fse_compatible, fse_reason = (
-        is_shared_expert_quant_fse_compatible(
+
+    # TODO: should it be disabled for all models?
+    skip_reason: str | None = None
+    if fse_requested and disable_under_ep:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            fse_requested = False
+            skip_reason = "expert parallelism is enabled"
+
+    if fse_requested:
+        fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
+            moe_backend=moe_backend,
         )
-        if fse_requested
-        else (True, None)
-    )
+        if not fse_compatible:
+            skip_reason = fse_reason or "unknown reason"
+    else:
+        fse_compatible = True
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
     # In online shared_expert quantization is used, register it to
@@ -118,50 +149,16 @@ def resolve_layer_fused_shared_expert(
                     quant_key_str,
                     target_pattern,
                 )
-    if fse_requested and not is_fused_shared_expert_enabled:
-        logger.warning(
+    if skip_reason is not None:
+        # Keep the full per-layer reason at debug level; the warning below is
+        # deduplicated by cause so a long model logs it once.
+        logger.debug("Skipping shared-expert fusion at %s: %s", prefix, skip_reason)
+        logger.warning_once(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled - skipping for this layer: %s.",
-            fse_reason,
+            "cannot be enabled - skipping shared-expert fusion: %s.",
+            _normalize_skip_reason(skip_reason),
         )
     return is_fused_shared_expert_enabled
-
-
-def is_model_fused_shared_expert_compatible(
-    layers: nn.ModuleList | Iterable[nn.Module],
-    moe_cls: type[nn.Module],
-    moe_name: str,
-) -> bool:
-    """Resolve one fused-shared-expert state for a model's MoE layers."""
-
-    def get_moe_layer(layer: nn.Module) -> nn.Module | None:
-        for name in moe_name.split("."):
-            layer = getattr(layer, name, None)
-            if layer is None:
-                return None
-        return layer
-
-    moe_layers = (
-        moe_layer
-        for layer in layers
-        if not isinstance(layer, PPMissingLayer)
-        and (moe_layer := get_moe_layer(layer)) is not None
-        and isinstance(moe_layer, moe_cls)
-    )
-
-    enabled = [
-        getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
-    ]
-    enabled_count = sum(enabled)
-    disabled_count = len(enabled) - enabled_count
-    if enabled_count > 0 and disabled_count > 0:
-        raise NotImplementedError(
-            "Fused shared experts must be enabled for all MoE layers; found "
-            f"{enabled_count} enabled and {disabled_count} disabled layers. "
-            "Per-layer fused shared experts is not yet supported. Please open "
-            "an issue."
-        )
-    return enabled_count > 0 and disabled_count == 0
 
 
 @triton.jit
