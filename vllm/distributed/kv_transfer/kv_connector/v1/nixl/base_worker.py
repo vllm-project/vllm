@@ -587,6 +587,7 @@ class NixlBaseConnectorWorker:
             self._expand_remote_packed_rows(nixl_agent_meta)
         remote_members = nixl_agent_meta.region_members
         remote_groups = nixl_agent_meta.region_group_ids
+        remote_layer_groups = nixl_agent_meta.layer_group_ids
         group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
         remote_regions_by_layer: dict[str, list[int]] = defaultdict(list)
         for region, layer_names in enumerate(remote_members):
@@ -613,6 +614,10 @@ class NixlBaseConnectorWorker:
                 )
             group = group_by_layer[layer_name]
             layers.add(layer_name)
+            # Block ids are listed per group, so the group numbers must match;
+            # a region shared by several groups (-1) cannot show that.
+            if remote_layer_groups and remote_layer_groups.get(layer_name) != group:
+                groups_match = False
             for remote, local in zip(remote_regions, local_regions):
                 remote_group = remote_groups[remote] if remote_groups else group
                 if remote_group not in (group, _SHARED_REGION_GROUP_ID):
@@ -2008,6 +2013,11 @@ class NixlBaseConnectorWorker:
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
+            layer_group_ids={
+                name: self.kv_cache_config.transfer_group_index_by_layer[name]
+                for names in self.region_members
+                for name in names
+            },
             packed_member_layouts=self._packed_member_layouts,
         )
         # Wrap metadata in payload with hash for defensive decoding

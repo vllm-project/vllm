@@ -245,7 +245,10 @@ Invariants enforced when pairing:
   instead of falling back to pairing by index;
 * a layer must span the same number of regions on both sides;
 * every TP rank of one remote engine must pair the same way;
-* a layer in different cache groups on P and D is refused by push.
+* a layer in different cache groups on P and D is refused by push. Each
+  worker advertises every layer's cache group
+  (`NixlAgentMetadata.layer_group_ids`), so this is caught even when the
+  layer's region is shared by several groups.
 
 Decode-side PP is unsupported because completions are counted per
 consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push

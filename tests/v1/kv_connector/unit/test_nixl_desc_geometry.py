@@ -783,6 +783,7 @@ def _make_remote_meta(
     remote_ssm_sizes,
     region_members=None,
     region_group_ids=None,
+    layer_group_ids=None,
 ):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
@@ -796,6 +797,11 @@ def _make_remote_meta(
     )
     region_members = region_members or worker.region_members
     num_regions = len(region_members)
+    if layer_group_ids is None:
+        group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
+        layer_group_ids = {
+            name: group_by_layer[name] for names in region_members for name in names
+        }
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
@@ -812,6 +818,7 @@ def _make_remote_meta(
         physical_blocks_per_logical_kv_block=remote_ppl,
         region_members=region_members,
         region_group_ids=region_group_ids,
+        layer_group_ids=layer_group_ids,
     )
 
 
@@ -993,19 +1000,30 @@ def test_mla_hybrid_peer_with_other_region_order_pairs_by_layer():
 
 
 @pytest.mark.cpu_test
-def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
+@pytest.mark.parametrize("shared_regions_only", [False, True])
+def test_mla_hybrid_peer_with_other_cache_groups_is_refused(shared_regions_only):
     """A hybrid layer in another cache group on P would be read at the wrong
     group's blocks, and region-mapped reads cannot serve SSM state, so the
-    handshake refuses the peer before any transfer."""
+    handshake refuses the peer before any transfer. When every region is
+    shared by several groups (-1), only the per-layer groups show it."""
     worker = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
         num_logical_blocks=4,
-        kda_only_tensor=True,
+        kda_only_tensor=not shared_regions_only,
     )
-    # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in group 2.
+    layer_groups = dict(worker.kv_cache_config.transfer_group_index_by_layer)
     remote_groups = list(worker.region_group_ids)
-    remote_groups[remote_groups.index(1)] = 2
+    if shared_regions_only:
+        assert set(remote_groups) == {-1}
+        # P numbers the two KDA groups the other way round.
+        layer_groups = {
+            name: {1: 2, 2: 1}.get(g, g) for name, g in layer_groups.items()
+        }
+    else:
+        # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in 2.
+        remote_groups[remote_groups.index(1)] = 2
+        layer_groups["kda_a.2"] = 2
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=16,
@@ -1013,6 +1031,7 @@ def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
         remote_num_logical=4,
         remote_ssm_sizes=worker._mamba_ssm_size,
         region_group_ids=remote_groups,
+        layer_group_ids=layer_groups,
     )
 
     with pytest.raises(NotImplementedError, match="cache groups"):

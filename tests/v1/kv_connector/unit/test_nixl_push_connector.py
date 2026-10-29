@@ -1844,6 +1844,7 @@ def test_layer_metadata_round_trip():
     metadata.region_group_ids = [-1]
     metadata.region_names = ["L0"]
     metadata.region_mem_types = ["VRAM"]
+    metadata.layer_group_ids = {"L0": 0, "L1": 1}
 
     encoded = msgspec.msgpack.encode(metadata)
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
@@ -1910,6 +1911,25 @@ def test_pairing_keeps_pooled_regions_once():
         [0, 1, 0],
     )
     assert pairs.groups_match
+
+
+@pytest.mark.parametrize(
+    ("remote_layer_groups", "groups_match"),
+    [({"a": 0, "a.swa": 1, "b": 0}, True), ({"a": 1, "a.swa": 0, "b": 0}, False)],
+)
+def test_pairing_compares_each_layer_s_group_in_a_shared_region(
+    remote_layer_groups, groups_match
+):
+    """A region shared by two groups advertises group -1, so only the
+    per-layer groups show that the peer numbers its groups differently."""
+    worker = _layer_routing_worker(
+        [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
+    )
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_group_ids = [-1, 0]
+    metadata.layer_group_ids = remote_layer_groups
+
+    assert worker._pair_regions(metadata).groups_match is groups_match
 
 
 def test_pairing_keeps_a_pp_stage_s_regions():
