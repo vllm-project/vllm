@@ -690,9 +690,9 @@ class TestPushWriterStartLoadKv:
     def test_replicated_pcp_producer_send_aggregation_completes(
         self, _mock_nixl, default_vllm_config, dist_init
     ):
-        """PCP=2 replicated producer: D notifies only rank 0 and rank 1 reports
-        a synthetic completion, so the world_size=2 aggregation frees the
-        request on P."""
+        """PCP=2 replicated producer: rank 0's WRITE to D completes and rank 1
+        reports a synthetic completion, so the world_size=2 aggregation frees
+        the request on P."""
         req_id = "req"
         connectors = [make_nixl_pcp_producer(NixlPushConnector, r) for r in (0, 1)]
         for connector in connectors:
@@ -701,9 +701,12 @@ class TestPushWriterStartLoadKv:
             meta.reqs_in_batch.add(req_id)
             meta.reqs_to_send[req_id] = time.perf_counter() + 30
             connector.connector_worker.start_load_kv(meta)
-        connectors[0].connector_worker._get_new_notifs = MagicMock(
-            return_value={req_id}
-        )
+        # Rank 0 pushes; it learns the push finished from its WRITE handle.
+        rank0 = connectors[0].connector_worker
+        rank0.xfer_stats = MagicMock()
+        rank0.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        with rank0._sending_transfers_lock:
+            rank0._sending_transfers[req_id].append(101)
 
         aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
         outputs = [

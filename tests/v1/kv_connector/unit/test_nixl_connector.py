@@ -729,9 +729,10 @@ class TestNixlHandshake:
             metadata.reqs_in_batch.add(req_id)
             metadata.reqs_to_send[req_id] = time.perf_counter() + 30
             connector.connector_worker.start_load_kv(metadata)
-        connectors[0].connector_worker._get_new_notifs = MagicMock(
-            return_value={req_id}
-        )
+        # D reads from rank 0 only, and its one reader notifies rank 0.
+        connectors[0].connector_worker.nixl_wrapper.get_new_notifs = lambda: {
+            "agent": [f"{req_id}:1".encode()]
+        }  # type: ignore[method-assign]
 
         aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
         outputs = [
