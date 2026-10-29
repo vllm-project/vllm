@@ -86,7 +86,7 @@ vllm serve <model> \
 | --- | --- | --- |
 | `endpoint` | required | Server socket path, or `unix://` address. TCP is rejected. |
 | `startup_timeout_ms` | `30000` | How long a client waits for the server at startup. |
-| `lookup_timeout_ms` | `1000` | Deadline for each lookup RPC. A timeout is a cache miss. Requires MORI bindings exposing this option. |
+| `lookup_timeout_ms` | `1000` | Deadline for each lookup RPC. A timeout is a cache miss. Ignored with a warning when the MORI bindings do not expose this option; lookups then have no native deadline. |
 
 The connector never launches the server. Since the server owns the pool, the
 connector rejects `capacity_bytes`, `total_capacity_bytes`, and `dram_*`

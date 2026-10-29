@@ -105,11 +105,13 @@ def _build_client(options: dict[str, Any]) -> Any:
     standalone.address = address
     standalone.auto_start = False
     standalone.startup_timeout_ms = int(options.get("startup_timeout_ms", 30000))
-    if not hasattr(standalone, "lookup_timeout_ms"):
-        raise RuntimeError(
-            "Standalone UMBP requires MORI with lookup_timeout_ms support"
+    if hasattr(standalone, "lookup_timeout_ms"):
+        standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
+    else:
+        logger.warning_once(
+            "MORI bindings do not support lookup_timeout_ms; ignoring it, so "
+            "standalone UMBP lookups have no native deadline"
         )
-    standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
     client_config.standalone_process = standalone
 
     try:
