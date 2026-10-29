@@ -34,9 +34,9 @@ def _rank_local_reference(
     layout: RankLocalStoreLayout, start: int, end: int, block_ids: list[int]
 ) -> tuple[list[int], list[int], int]:
     block_id = block_ids[start // layout.block_size]
-    length = len(layout.block_len)
+    length = len(layout.block_stride)
     addrs = [
-        base_addr + block_id * layout.block_len[index % length]
+        base_addr + block_id * layout.block_stride[index % length]
         for index, base_addr in enumerate(layout.kv_caches_base_addr)
     ]
     sizes = [
@@ -77,6 +77,45 @@ def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
     assert layout.prepare_values([], [1, 2, 3], []) == ([], [], [])
     with pytest.raises(AssertionError):
         layout.prepare_values([(0, BLOCK_SIZE + 1)], [0, 1], [0])
+
+
+def test_rank_local_layout_skips_block_padding():
+    """A state padded up to a larger page, like a Mamba state padded to the
+    attention page size, is stored without the padding."""
+    num_layers, num_blocks, page, state = 2, 3, 64, 40
+    # Layer-outermost buffer; each layer views its state at the start of
+    # every page.
+    raw = torch.zeros(num_layers * num_blocks * page, dtype=torch.int8)
+    views = [
+        torch.as_strided(
+            raw,
+            (num_blocks, 1, 1, state),
+            (page, state, state, 1),
+            layer * num_blocks * page,
+        )
+        for layer in range(num_layers)
+    ]
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0), BLOCK_SIZE, BLOCK_SIZE
+    )
+    layout.register_kv_caches(views, num_blocks)
+
+    assert layout.kv_caches_base_addr == [view.data_ptr() for view in views]
+    assert layout.block_stride == [page] * num_layers
+    assert layout.block_len == [state] * num_layers
+    addrs, sizes, _ = layout.prepare_values(
+        [(0, BLOCK_SIZE), (BLOCK_SIZE, 3 * BLOCK_SIZE)], [2, 0, 1], [0, 0]
+    )
+    assert addrs == [
+        [view.data_ptr() + 2 * page for view in views],
+        [view.data_ptr() for view in views],
+    ]
+    # A two-block chunk copies the padding between its blocks.
+    assert sizes == [[state] * num_layers, [page + state] * num_layers]
+    assert layout.prepare_value_for_block(1) == (
+        [view.data_ptr() + page for view in views],
+        [state] * num_layers,
+    )
 
 
 @pytest.mark.parametrize(
