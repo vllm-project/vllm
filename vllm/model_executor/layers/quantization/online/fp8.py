@@ -43,6 +43,9 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequant_fp8_weight,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -275,24 +278,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
             if fp8_scaled_mm_is_batch_invariant(self.fp8_linear):
                 return self.fp8_linear.apply_weights(layer, x, bias)
 
-            weight_fp8 = layer.weight.to(torch.float32)
-            weight_scale = layer.weight_scale.to(torch.float32)
-            if weight_scale.numel() == 1:
-                # Per-tensor: simple scalar multiplication
-                weight_bf16 = (weight_fp8 * weight_scale).to(torch.bfloat16)
-            else:
-                # Multiple scales (fused modules like QKV)
-                if (
-                    weight_scale.dim() == 1
-                    and weight_scale.shape[0] == weight_fp8.shape[0]
-                ):
-                    # Per-row scaling
-                    weight_bf16 = (weight_fp8 * weight_scale.unsqueeze(1)).to(
-                        torch.bfloat16
-                    )
-                else:
-                    # Fallback
-                    weight_bf16 = (weight_fp8 * weight_scale).to(torch.bfloat16)
+            weight_bf16 = dequant_fp8_weight(layer.weight, layer.weight_scale)
             return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
@@ -470,10 +456,9 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             and not fp8_scaled_mm_is_batch_invariant(self.fp8_linear)
             and not isinstance(x, QuantizedActivation)
         ):
-            weight_dequant = (
-                layer.weight.to(torch.float32)
-                * layer.weight_scale.to(torch.float32).t()
-            ).to(x.dtype)
+            weight_dequant = dequant_fp8_weight(
+                layer.weight, layer.weight_scale.t(), out_dtype=x.dtype
+            )
             return torch.nn.functional.linear(x, weight_dequant.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
