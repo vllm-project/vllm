@@ -52,10 +52,12 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed):
             early |= aggregator.add_finished_recving({"request"})
         if rank == 0:
             assert not early and not normal.finished_recving
+    # A step without output must keep a deferred vote for the next one.
     assert aggregator.aggregate([None]) is None
     if not normal.finished_recving:
         normal = aggregate()
     assert early | (normal.finished_recving or set()) == {"request"}
+    assert not (early and normal.finished_recving)
+    # Failures arrive with the completion, so never through `early`.
     assert normal.failed_recving == ({"request"} if failed else set())
-    assert not early if failed else not (early and normal.finished_recving)
     assert aggregate().is_empty()

@@ -399,7 +399,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return any(c.has_pending_recving() for c in self._connectors)
 
     def poll_finished_recving(self) -> set[str]:
-        return set().union(*(c.poll_finished_recving() for c in self._connectors))
+        finished_recving: set[str] = set()
+        for c in self._connectors:
+            finished_recving |= c.poll_finished_recving()
+        return finished_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()

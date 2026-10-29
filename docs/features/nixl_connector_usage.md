@@ -410,20 +410,18 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
 ```
 
-## Early receive reporting
+## Early Receive Reporting
 
-Set `"enable_early_recv": true` in the decoder's `--kv-transfer-config` to report
-completed NIXL pulls before the next step output. Disabled by default.
+A decoder normally learns that a NIXL pull finished from the output of a later step. Set `enable_early_recv` (disabled by default) on the decoder to report completed pulls before that output, so the request can be scheduled sooner:
 
-Supported: `uni` or single-node `mp`, with synchronous or asynchronous scheduling,
-TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
-All ranks must finish receiving before admission; KV pressure may still delay it.
-Transfer failures use the configured recovery policy. Unexpected poll/channel
-errors are fatal; the `mp` monitor wakes even a paused engine.
-MP workers yield to queued RPCs and sleep between polls, adding up to 0.2 ms plus OS
-scheduling delay to a new RPC. Benchmark latency and CPU overhead before enabling.
-Post-processing uses the worker's current stream before the next forward.
-Transfer latency may be observed earlier; metrics use ordinary step outputs.
+```bash
+--kv-transfer-config '{..., "enable_early_recv": true}'
+```
+
+- **Supported**: the `uni` executor or single-node `mp`, sync or async scheduling, TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
+- **Unchanged**: a request still waits for every rank and for free KV blocks, and transfer failures follow `kv_load_failure_policy`. Unexpected polling errors stop the engine, even while it is paused.
+- **Overhead**: with `mp`, workers sleep up to 0.2 ms between polls, which can delay a new RPC by that much plus OS scheduling jitter. Measure latency and CPU usage before enabling.
+- **Streams and metrics**: KV post-processing runs on the worker's current stream before the next forward pass. Transfer metrics are still reported with regular step outputs.
 
 ## Metrics Reference
 

@@ -17,12 +17,21 @@ from vllm.v1.outputs import KVConnectorOutput
 
 logger = init_logger(__name__)
 
+# Interval between polls while the worker waits for its next RPC.
+_POLL_INTERVAL_S = 0.0002
+# Without a step RPC for this long the engine is idle or paused: stop polling
+# and let the worker block in dequeue().
+_ACTIVE_WINDOW_S = 1.0
+
 
 class EarlyKVOutputAggregator(KVOutputAggregator):
-    """Share the normal receive quorum only when early reporting is enabled."""
+    """Also counts receives that workers report between step outputs."""
 
     def add_finished_recving(self, req_ids: set[str]) -> set[str]:
-        """Callers report each worker/load once; identities are not deduplicated."""
+        """Count one worker's report and return the requests now finished.
+
+        Each worker reports a load once, so votes are not deduplicated.
+        """
         failed = req_ids & self._failed_recving_pending
         if failed:
             # Let normal aggregation count these votes and deliver the failure.
@@ -30,11 +39,9 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
                 [KVConnectorOutput(finished_recving=failed)]
             )
         finished = set[str]()
+        expected = self._expected_finished_count
         for req_id in req_ids - failed:
-            remaining = (
-                self._recv_remaining_count.get(req_id, self._expected_finished_count)
-                - 1
-            )
+            remaining = self._recv_remaining_count.get(req_id, expected) - 1
             if remaining:
                 self._recv_remaining_count[req_id] = remaining
             else:
@@ -44,13 +51,14 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
 
 
 class EarlyKVRecvReceiver:
-    """Engine core end: the request ids whose KV loads finished."""
+    """Engine end: receives the workers' reports."""
 
     def __init__(self) -> None:
         self.path = get_open_zmq_ipc_path()
         self._socket = make_zmq_socket(zmq.Context.instance(), self.path, zmq.PULL)
 
     def drain(self) -> list[set[str]]:
+        """Pending reports, one per worker poll; each is a separate vote."""
         notifications: list[set[str]] = []
         while True:
             try:
@@ -62,38 +70,35 @@ class EarlyKVRecvReceiver:
         self._socket.close(linger=0)
 
 
-# Interval between polls while the worker waits for its next RPC.
-_POLL_INTERVAL_S = 0.0002
-# Without a step RPC for this long the engine is idle or paused: stop polling
-# and let the worker block in dequeue().
-_ACTIVE_WINDOW_S = 1.0
-
-
 class EarlyKVRecvSender:
     """Worker end: polls the KV connector between RPCs."""
 
     def __init__(self, path: str) -> None:
         self._socket = make_zmq_socket(zmq.Context.instance(), path, zmq.PUSH)
-        self._last_activity = time.perf_counter()
+        self._last_step_rpc = time.perf_counter()
         self._next_poll = 0.0
 
     def step_rpc_done(self) -> None:
         """Worker thread: an ``execute_model`` or ``sample_tokens`` RPC finished."""
-        self._last_activity = time.perf_counter()
+        self._last_step_rpc = time.perf_counter()
 
     def wait_for_poll(self, rpc_mq: MessageQueue) -> bool:
-        """Wait briefly for a pending receive, yielding to queued RPCs."""
-        if not has_kv_transfer_group() or rpc_mq.shutting_down or rpc_mq.readable():
-            return False
-        now = time.perf_counter()
+        """Sleep until the next poll is due and return whether to poll.
+
+        Returns False, without sleeping, when an RPC is queued, no step RPC
+        arrived recently, or no receive is pending.
+        """
         if (
-            now - self._last_activity > _ACTIVE_WINDOW_S
+            rpc_mq.shutting_down
+            or rpc_mq.readable()
+            or time.perf_counter() - self._last_step_rpc > _ACTIVE_WINDOW_S
+            or not has_kv_transfer_group()
             or not get_kv_transfer_group().has_pending_recving()
         ):
             return False
-        if (delay := self._next_poll - now) > 0:
+        if (delay := self._next_poll - time.perf_counter()) > 0:
             time.sleep(delay)
-        # An RPC may have arrived during the bounded wait. Leave it for dequeue.
+        # An RPC may have arrived during the sleep. Leave it for dequeue.
         return not rpc_mq.shutting_down and not rpc_mq.readable()
 
     def poll(self) -> None:

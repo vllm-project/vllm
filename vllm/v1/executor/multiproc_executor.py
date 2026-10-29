@@ -456,12 +456,11 @@ class MultiprocExecutor(Executor):
     def take_early_finished_recving(self) -> set[str] | None:
         if self.early_kv_recv is None:
             return None
-        assert isinstance(self.kv_output_aggregator, EarlyKVOutputAggregator)
+        aggregator = self.kv_output_aggregator
+        assert isinstance(aggregator, EarlyKVOutputAggregator)
         finished: set[str] = set()
         for notification in self.early_kv_recv.drain():
-            finished.update(
-                self.kv_output_aggregator.add_finished_recving(notification)
-            )
+            finished |= aggregator.add_finished_recving(notification)
         return finished
 
     def execute_dummy_batch(self) -> None:

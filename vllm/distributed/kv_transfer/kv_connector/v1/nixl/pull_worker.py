@@ -54,7 +54,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def get_transfer_results(self) -> KVConnectorTransferResults:
         results = super().get_transfer_results()
         if self._early_finished_recving is not None:
-            # Normal collection may finish before the GPU output is ready.
+            # Report through the next poll, ahead of the step output.
             successful = results.finished_recving - results.failed_recving
             self._early_finished_recving.update(successful)
             results.finished_recving.difference_update(successful)
@@ -71,18 +71,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             return set()
         assert self._early_finished_recving is not None
         finished, self._early_finished_recving = self._early_finished_recving, set()
-        # Failed handles are retried by normal collection, once per step.
-        transfers = {
-            r: handles
-            for r, handles in self._recving_transfers.items()
-            if r not in self._recv_failures
-        }
+        # Failed requests keep their handles for normal collection, which
+        # retries releasing them once per step.
+        healthy = [r for r in self._recving_transfers if r not in self._recv_failures]
+        transfers = {r: self._recving_transfers.pop(r) for r in healthy}
         done, failed = self._pop_done_transfers(transfers)
+        # Put back what is still in progress.
         self._recving_transfers.update(transfers)
-        for req_id in done:
-            del self._recving_transfers[req_id]
         self._recv_failures.update(failed)
-        done -= self._recv_failures
+        done -= failed
         if done:
             self._finish_recved(done, set())
         return finished | done

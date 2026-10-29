@@ -390,10 +390,8 @@ class NixlPullConnector(NixlBaseConnector):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def has_pending_recving(self) -> bool:
-        return (
-            self.connector_worker is not None
-            and self.connector_worker.has_pending_recving()
-        )
+        assert self.connector_worker is not None
+        return self.connector_worker.has_pending_recving()
 
     def poll_finished_recving(self) -> set[str]:
         assert self.connector_worker is not None
