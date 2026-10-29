@@ -364,7 +364,7 @@ class ShmRingBuffer:
             ):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html
                     # Some platforms allocate memory based on page size,
                     # so the shared memory block size may be larger or equal
                     # to the requested size. The size parameter is ignored
@@ -693,7 +693,7 @@ class MessageQueue:
             # wait for all readers to connect
 
             # local readers
-            for i in range(self.n_local_reader):
+            for _ in range(self.n_local_reader):
                 # wait for subscription messages from all local readers
                 self.local_socket.recv()
             if self.n_local_reader > 0:
@@ -702,7 +702,7 @@ class MessageQueue:
                 self.local_socket.send(b"READY")
 
             # remote readers
-            for i in range(self.n_remote_reader):
+            for _ in range(self.n_remote_reader):
                 # wait for subscription messages from all remote readers
                 self.remote_socket.recv()
             if self.n_remote_reader > 0:

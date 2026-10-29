@@ -737,10 +737,10 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             max_tokens = processor.audio_seq_length
             ms_per_tok = processor.audio_ms_per_token
             max_duration_s = max_tokens * ms_per_tok / 1000.0
-            audios = hf_data["audio"]
+            audios: Any = hf_data["audio"]
             if not isinstance(audios, (list, tuple)):
                 audios = [audios]
-            for i, waveform in enumerate(audios):
+            for waveform in audios:
                 duration_s = len(waveform) / sr
                 if duration_s > max_duration_s:
                     logger.warning(

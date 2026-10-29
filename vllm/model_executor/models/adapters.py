@@ -467,7 +467,7 @@ def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
             ):
                 return candidate
 
-    for name, child in model.named_children():
+    for _, child in model.named_children():
         child_name = type(child).__name__
         if ("ForCausalLM" in child_name or "LMHead" in child_name) and hasattr(
             child, "model"

@@ -292,7 +292,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 this_new_tokens -= chunk_len
 
             n_chunks = cdiv(this_new_tokens, chunk_size)
-            for chunk in range(n_chunks):
+            for _ in range(n_chunks):
                 seq_idx.append(req_idx)
                 cu_chunk_seqlen.append(seqlen_pos)
                 chunk_len = min(chunk_size, this_new_tokens)

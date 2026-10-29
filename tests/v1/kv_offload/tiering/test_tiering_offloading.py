@@ -1402,8 +1402,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1440,8 +1440,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1478,8 +1478,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         ctx = ReqContext(req_id=req_id)
@@ -1516,7 +1516,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.manager.primary_tier,
             "lookup",
-            lambda key, req_context: (LookupResult.RETRY),
+            lambda key, req_context: LookupResult.RETRY,
         )
 
         with pytest.raises(AssertionError):
@@ -1621,8 +1621,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         rl_ctx = ReqContext(req_id="rl")

@@ -345,7 +345,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         )
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
-        # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
+        # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
@@ -568,7 +568,7 @@ class InductorAdaptor(CompilerInterface):
             # tracing context, and also disables caching for graphs
             # with high-order ops.
             # For vLLM, in either case, we want to cache the graph.
-            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
+            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221
             return
 
         def _get_shape_env() -> AlwaysHitShapeEnv:

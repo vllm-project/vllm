@@ -220,7 +220,7 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
             )
             image_sync = local_connector.fetch_image(f"file://{temp_dir}/{filename}")
         except FileNotFoundError as e:
-            pytest.fail("Failed to fetch image with space in name: {}".format(e))
+            pytest.fail(f"Failed to fetch image with space in name: {e}")
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
 

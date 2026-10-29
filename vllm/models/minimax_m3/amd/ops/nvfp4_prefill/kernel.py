@@ -318,7 +318,7 @@ def compile_nvfp4_prefill_fp16(rounds: int = 2):
         init += raw0
         n_st = 1 + 2 * TOK_PER_WG + TOK_PER_WG * NDT
         results = init
-        for u, st_ in range(  # type: ignore[call-overload]
+        for _, st_ in range(  # type: ignore[call-overload]
             fx.Index(0),
             fx.Index(n_u),
             fx.Index(1),

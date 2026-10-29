@@ -8,11 +8,12 @@ exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm
 # Revs are frozen to commit SHAs, bump them with `pre-commit autoupdate --freeze [--repo <url>]`
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: f9351c924055bf6c7b4a4670237d3ce141e9f57c  # frozen: v0.14.0
+  rev: f368fb366ff7f2f808dd324b83a6d32267799e19  # frozen: v0.17.2
   hooks:
   - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
+    types_or: [python, pyi, jupyter]
 - repo: https://github.com/crate-ci/typos
   rev: 9023c1f779400877cafdd98052113fc777e2cfdc  # frozen: v1.51.1
   hooks:

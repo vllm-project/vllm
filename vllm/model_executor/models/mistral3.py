@@ -468,7 +468,7 @@ class Mistral3ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         # NOTE: This is a special case for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json
         if (
             config.projector_hidden_act is None
             and config.vision_config.hidden_act == "gelu"

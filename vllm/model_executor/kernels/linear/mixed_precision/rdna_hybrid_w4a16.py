@@ -741,8 +741,10 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type {c.weight_type} not supported; "
-                f"supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type {c.weight_type} not supported; "
+                    f"supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.act_type not in (torch.float16, torch.bfloat16):

@@ -187,8 +187,10 @@ def test_hipb_mm_kernel_can_implement_success(enable_hipb_mm_kernel):
         ),
         (
             _make_config(weight_shape=(8, 4090)),
-            "requires N >= 16 and both N and K divisible by 16, "
-            "received N=8 and K=4090.",
+            (
+                "requires N >= 16 and both N and K divisible by 16, "
+                "received N=8 and K=4090."
+            ),
         ),
     ],
 )

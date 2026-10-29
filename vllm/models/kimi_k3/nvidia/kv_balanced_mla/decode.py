@@ -158,13 +158,17 @@ class KvBalancedDecode:
                     requests > self.max_requests,
                 ),
                 (
-                    f"{tokens} tokens over {requests} requests (uniform, at most "
-                    f"{self.max_q} each)",
+                    (
+                        f"{tokens} tokens over {requests} requests (uniform, at most "
+                        f"{self.max_q} each)"
+                    ),
                     tokens % requests or tokens // requests > self.max_q,
                 ),
                 (
-                    f"a query of shape {tuple(q.shape)} (expected "
-                    f"({tokens}, {self.heads}, {LATENT + ROPE}), contiguous)",
+                    (
+                        f"a query of shape {tuple(q.shape)} (expected "
+                        f"({tokens}, {self.heads}, {LATENT + ROPE}), contiguous)"
+                    ),
                     q.shape != (tokens, self.heads, LATENT + ROPE)
                     or not q.is_contiguous(),
                 ),

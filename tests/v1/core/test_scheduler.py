@@ -714,7 +714,7 @@ def test_schedule_multimodal_requests():
     for req_id, num_tokens in output.num_scheduled_tokens.items():
         assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
     assert len(output.scheduled_encoder_inputs) == 10
-    for req_id, encoder_input in output.scheduled_encoder_inputs.items():
+    for encoder_input in output.scheduled_encoder_inputs.values():
         assert len(encoder_input) == 1
 
 
@@ -5315,7 +5315,7 @@ def _assert_right_ec_connector_metadata(
     assert set(metadata_dict.keys()) == identifiers_dict
 
     # Verify the info matches
-    for i, mm_feature in enumerate(mm_features_list):
+    for mm_feature in mm_features_list:
         identifier = mm_feature.identifier
         assert metadata_dict[identifier].mm_hash == identifier
         assert metadata_dict[identifier].num_token == mm_feature.mm_position.length

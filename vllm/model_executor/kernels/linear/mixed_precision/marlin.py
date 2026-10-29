@@ -43,16 +43,20 @@ class MarlinLinearKernel(MPLinearKernel):
         if c.weight_type not in quant_types:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by"
-                f"  Marlin, supported types are: {quant_types}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by"
+                    f" Marlin, supported types are: {quant_types}"
+                ),
             )
 
         if c.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by "
-                "Marlin, supported group sizes are: "
-                f"{MARLIN_SUPPORTED_GROUP_SIZES}",
+                (
+                    f"Group size ({c.group_size}) not supported by "
+                    "Marlin, supported group sizes are: "
+                    f"{MARLIN_SUPPORTED_GROUP_SIZES}"
+                ),
             )
 
         # A group straddling TP ranks cannot be fixed by padding.

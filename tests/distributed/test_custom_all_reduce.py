@@ -600,8 +600,10 @@ def test_mnnvl_multimem_reduce_scatter_skips_rendezvous_after_peer_alloc_failure
     assert communicator.mnnvl_multimem_rs_buffer is None
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0
     assert warnings == [
-        "MNNVL multimem reduce-scatter symmetric-memory allocation "
-        "failed on at least one rank; falling back to NCCL."
+        (
+            "MNNVL multimem reduce-scatter symmetric-memory allocation "
+            "failed on at least one rank; falling back to NCCL."
+        )
     ]
 
 
@@ -650,8 +652,10 @@ def test_mnnvl_multimem_reduce_scatter_warns_on_rendezvous_failure(monkeypatch):
     assert communicator.mnnvl_multimem_rs_buffer is None
     assert communicator.mnnvl_multimem_rs_multicast_ptr == 0
     assert warnings == [
-        "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
-        "failed on at least one rank; falling back to NCCL."
+        (
+            "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
+            "failed on at least one rank; falling back to NCCL."
+        )
     ]
 
 
@@ -760,7 +764,7 @@ def graph_allreduce(
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=graph_capture_context.stream):
-                        for i in range(num_communication):
+                        for _ in range(num_communication):
                             out1 = tensor_model_parallel_all_reduce(inp1)
                             # the input buffer is immediately modified to test
                             # synchronization

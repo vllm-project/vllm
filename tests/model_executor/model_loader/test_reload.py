@@ -1400,8 +1400,11 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     lora_path = hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
     prompts = [
-        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+        (
+            "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            "SELECT count(*) FROM candidate"
+        )
     ]
 
     def prompt_logprobs(llm, lora_id):

@@ -126,7 +126,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
-    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
+    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
         model="Salesforce/blip2-opt-2.7b",
@@ -1161,7 +1161,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
-    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630 # noqa
+    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
     # model_name = "HwwwH/MiniCPM-V-2"
 
     # 2.5
@@ -2329,7 +2329,7 @@ def apply_image_repeat(
                 new_val = (i // 256 // 256, i // 256, i % 256)
                 cur_image.putpixel((0, 0), new_val)
 
-        uuid = "uuid_{}".format(i)
+        uuid = f"uuid_{i}"
 
         inputs.append(
             {
@@ -2382,7 +2382,7 @@ def time_counter(enable: bool):
         yield
         elapsed_time = time.time() - start_time
         print("-" * 50)
-        print("-- generate time = {}".format(elapsed_time))
+        print(f"-- generate time = {elapsed_time}")
         print("-" * 50)
     else:
         yield
@@ -2567,7 +2567,7 @@ def main(args):
             inputs = []
             inputs_with_empty_media = []
             for i in range(args.num_prompts):
-                uuid = "uuid_{}".format(i)
+                uuid = f"uuid_{i}"
                 inputs.append(
                     {
                         "prompt": prompts[i % len(prompts)],

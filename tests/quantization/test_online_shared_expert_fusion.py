@@ -580,11 +580,13 @@ def test_online_quantization(
         "block_sparse_moe" if architecture == "MiniMaxM3SparseForCausalLM" else "mlp"
     )
     assert logged_messages == [
-        "Quantizing 2 layers of types: "
-        f"{moe_prefix}.{shared_expert_name}.down_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4); "
-        f"{moe_prefix}.{shared_expert_name}.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 2 layers of types: "
+            f"{moe_prefix}.{shared_expert_name}.down_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4); "
+            f"{moe_prefix}.{shared_expert_name}.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
 
 
@@ -640,12 +642,16 @@ def test_online_gate_up_proj_target_disables_fse(
     assert not moe.is_fused_shared_expert_enabled
     assert moe.shared_experts is not None
     assert logged_messages == [
-        "Quantizing 1 layers of types: "
-        "mlp.shared_experts.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 1 layers of types: "
+            "mlp.shared_experts.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
     assert logged_warnings == [
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be "
-        "enabled - skipping shared-expert fusion: online quantization targets only "
-        "part of the shared expert at <shared_expert>."
+        (
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be "
+            "enabled - skipping shared-expert fusion: online quantization targets only "
+            "part of the shared expert at <shared_expert>."
+        )
     ]

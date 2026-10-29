@@ -474,7 +474,7 @@ def test_transfer(
 
     # build CanonicalKVCacheTensor list: one per tensor
     kv_cache_tensors: list[CanonicalKVCacheTensor] = []
-    for i in range(num_tensors):
+    for _ in range(num_tensors):
         gpu_tensor = torch.zeros(
             (num_gpu_blocks, gpu_page_size_bytes),
             dtype=torch.int8,

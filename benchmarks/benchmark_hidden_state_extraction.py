@@ -405,7 +405,7 @@ def main():
 
     if not args.skip_baseline and not args.skip_extract:
         slowdown = baseline["tokens_per_s"] / extract["tokens_per_s"]
-        print("Extraction slowdown factor: {:.2f}x".format(slowdown))
+        print(f"Extraction slowdown factor: {slowdown:.2f}x")
 
 
 if __name__ == "__main__":

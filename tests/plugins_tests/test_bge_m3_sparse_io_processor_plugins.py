@@ -177,7 +177,7 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
     assert hasattr(response, "data")
     assert len(response.data) == 1
     # Verify response data
-    for i, output in enumerate(response.data):
+    for output in response.data:
         # Each output should have sparse embeddings
         sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)

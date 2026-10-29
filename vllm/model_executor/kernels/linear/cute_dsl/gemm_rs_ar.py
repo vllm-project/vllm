@@ -413,7 +413,7 @@ class Sm100GemmRsAr:
                     idesc = _tcgen05.make_bf16_idesc(MMA_M, MMA_N)
                 multicast_mask = Uint16((1 << self.cta_group) - 1)
 
-                for bid in range(raw_bid, total_tiles, num_bids):
+                for _ in range(raw_bid, total_tiles, num_bids):
                     cute.arch.mbarrier_wait(
                         tmem_empty_mbar + tmem_stage, tmem_empty_parity
                     )

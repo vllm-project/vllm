@@ -160,13 +160,17 @@ def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
     [
         (
             False,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
         (
             True,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
     ],
 )

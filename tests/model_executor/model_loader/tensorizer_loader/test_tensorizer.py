@@ -61,7 +61,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 def patch_init_and_catch_error(self, obj, method_name, expected_error: type[Exception]):
     original = getattr(obj, method_name, None)
     if original is None:
-        raise ValueError("Method '{}' not found.".format(method_name))
+        raise ValueError(f"Method '{method_name}' not found.")
 
     def wrapper(*args, **kwargs):
         try:

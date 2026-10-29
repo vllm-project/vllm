@@ -2236,9 +2236,11 @@ def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantizing 3 layers of types: mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
-        "re:.*qkv_proj.*, mxfp4)"
+        (
+            "Quantizing 3 layers of types: mlp.down_proj: 2 (from linear: "
+            "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
+            "re:.*qkv_proj.*, mxfp4)"
+        )
     ]
 
 

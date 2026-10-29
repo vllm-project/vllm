@@ -1174,7 +1174,7 @@ def test_correct_decoded_token_preserves_valid_tokens():
 
             # All decoded tokens should be valid strings
             for logprob_dict in result.outputs[0].logprobs:
-                for token_id, logprob_info in logprob_dict.items():
+                for logprob_info in logprob_dict.values():
                     decoded_token = logprob_info.decoded_token
                     # Valid tokens should be non-empty strings (or empty if corrected)
                     assert isinstance(decoded_token, str)

@@ -491,9 +491,11 @@ def _minimax_m2_tool_segments(tool_calls: list[ToolCallSpec]) -> list[tuple[str,
         for key, value in tc.arguments.items():
             segs.append(
                 (
-                    f'<parameter name="{key}">'
-                    f"{_minimax_m2_arg_value(value)}"
-                    "</parameter>",
+                    (
+                        f'<parameter name="{key}">'
+                        f"{_minimax_m2_arg_value(value)}"
+                        "</parameter>"
+                    ),
                     False,
                 )
             )

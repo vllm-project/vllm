@@ -300,7 +300,7 @@ class Sm100GemmRsArBF16:
                 sdesc = _tcgen05.make_sdesc_128B_swizzle(0)
                 multicast_mask = Uint16((1 << self.cta_group) - 1)
 
-                for bid in range(raw_bid, total_tiles, num_bids):
+                for _ in range(raw_bid, total_tiles, num_bids):
                     cute.arch.mbarrier_wait(
                         tmem_empty_mbar + tmem_stage, tmem_empty_parity
                     )

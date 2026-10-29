@@ -2121,22 +2121,28 @@ _SINGLE_CALL_CASES = [
     (
         "mimo",
         "",
-        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
-        "</function></tool_call>",
+        (
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+        ),
         "",
     ),
     (
         "hermes",
         "",
-        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
-        "\n</tool_call>",
+        (
+            '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+            "\n</tool_call>"
+        ),
         "",
     ),
     (
         "qwen3_xml",
         "",
-        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
-        "</parameter>\n</function>\n</tool_call>",
+        (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        ),
         "",
     ),
     (

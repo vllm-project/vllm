@@ -117,7 +117,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
         mismatches = 0
 
-        for trial in range(num_trials):
+        for _ in range(num_trials):
             # Create a batch of size `max_batch_size` and insert the needle at
             # a random index
             prompts: list[str] = []

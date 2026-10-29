@@ -319,7 +319,7 @@ class PassConfig:
             )
 
 
-class DynamicShapesType(str, enum.Enum):
+class DynamicShapesType(enum.StrEnum):
     """Types of dynamic shapes handling in torch.compile().
     see  Dynamic shapes and vllm guard dropping in torch_compile.md
     for more details."""

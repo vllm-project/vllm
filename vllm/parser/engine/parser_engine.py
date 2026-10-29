@@ -1187,7 +1187,7 @@ class ParserEngine(Parser):
                 content_parts.append(delta.content)
 
         tool_calls: list[ToolCall] = []
-        for idx, slot in enumerate(self._tool_slots):
+        for slot in self._tool_slots:
             if not slot.name and not slot.args:
                 continue
 

@@ -201,9 +201,11 @@ class TestStreaming:
         "text",
         [
             '<tool_call>{"name": "get", "arguments": {"x": "hello"}}</tool_call>',
-            '<tool_call>{"name": "f", "arguments": '
-            '{"items": [1, [2, 3]], "obj": {"k": "v"}}}'
-            "</tool_call>",
+            (
+                '<tool_call>{"name": "f", "arguments": '
+                '{"items": [1, [2, 3]], "obj": {"k": "v"}}}'
+                "</tool_call>"
+            ),
         ],
         ids=["flat_args", "nested_arrays"],
     )

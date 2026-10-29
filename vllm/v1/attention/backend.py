@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
-class AttentionType(str, Enum):
+class AttentionType(StrEnum):
     """Attention type.
     Use string to be compatible with `torch.compile`.
     """

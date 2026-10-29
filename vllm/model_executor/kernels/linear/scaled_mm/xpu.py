@@ -50,8 +50,10 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         if c.activation_quant_key not in cls._SUPPORTED_ACT_QUANT_KEYS:
             return (
                 False,
-                "XPUW8A8FP8Linear only support per-tensor and per-token activation "
-                "quantization",
+                (
+                    "XPUW8A8FP8Linear only support per-tensor and per-token activation "
+                    "quantization"
+                ),
             )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUW8A8FP8Linear only support FP8 weight dtype"
@@ -133,8 +135,10 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
         if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
             return (
                 False,
-                "XPUW8A16FP8Linear only support per-channel and per-tensor "
-                "quantization",
+                (
+                    "XPUW8A16FP8Linear only support per-channel and per-tensor "
+                    "quantization"
+                ),
             )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUW8A16FP8Linear only support FP8 weight dtype"

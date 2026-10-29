@@ -844,7 +844,7 @@ def _assert_local_writes_within(worker, owned_ranges):
     assert nixl.xfers, "no transfers were posted"
     violations = []
     total_descs = 0
-    for op, local_handle, local_ids, _, remote_ids in nixl.xfers:
+    for _, local_handle, local_ids, _, remote_ids in nixl.xfers:
         assert len(local_ids) == len(remote_ids)
         desc_arr = nixl.dlists[local_handle]
         for i in local_ids:
@@ -1030,7 +1030,7 @@ def _run_hetero_case(
     desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, rh, rids in nixl.xfers:
         larr, rarr = nixl.dlists[lh], nixl.dlists[rh]
         for li, ri in zip(lids, rids):
             lreg, lkind, ltok = _resolve(
@@ -1086,7 +1086,7 @@ def _run_hetero_case(
     # those blocks must be either written by the transfer or zeroed by the
     # receive post-process. Stale bytes surface as mid-response garbage
     # once decode grows into the untransferred tail.
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, _, _ in nixl.xfers:
         larr = nixl.dlists[lh]
         for li in lids:
             addr, length, _ = (int(x) for x in larr[int(li)])

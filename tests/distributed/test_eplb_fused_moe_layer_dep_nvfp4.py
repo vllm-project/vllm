@@ -136,7 +136,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
 
         hidden_states = []
         router_logits = []
-        for layer_idx in range(test_config.num_layers):
+        for _ in range(test_config.num_layers):
             hidden_states.append(
                 torch.randn(
                     (test_config.num_tokens, test_config.hidden_size),
@@ -195,7 +195,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         num_global_experts = test_config.num_experts
 
         logical_to_physical_map_list = []
-        for lidx, fml in enumerate(fml_layers):
+        for lidx in range(len(fml_layers)):
             physical_to_logical_map = shuffled_indices[lidx].to(device)
             logical_to_physical_map = torch.empty(
                 (num_global_experts,), dtype=torch.int32, device=device

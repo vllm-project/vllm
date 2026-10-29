@@ -1058,7 +1058,7 @@ class RandomMultiModalDataset(RandomDataset):
             raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
 
         # Ensure modalities to sample are in limit_mm_per_prompt
-        for k, v in bucket_config.items():
+        for k in bucket_config:
             # get modality from bucket config
             modality = self.map_config_to_modality(k)
             if modality not in limit_mm_per_prompt:
@@ -1165,7 +1165,7 @@ class RandomMultiModalDataset(RandomDataset):
             else:
                 # If the counter is greater than the limit per prompt
                 # set all multimodal items of this modality to 0
-                for k, v in bucket_config_copy.items():
+                for k in bucket_config_copy:
                     if self.map_config_to_modality(k) == modality:
                         bucket_config_copy[k] = 0
                 # If all configs are 0, break the loop
@@ -3692,7 +3692,7 @@ class BlazeditDataset(HuggingFaceDataset):
                 continue
 
             # template copied from
-            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
+            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105
             prompt = f"""Given a code file, please apply the change requests and generate the new file.
 
 Original file:

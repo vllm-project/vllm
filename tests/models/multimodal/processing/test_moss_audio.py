@@ -197,8 +197,10 @@ def _assert_mm_inputs_equal(left, right):
             [*[ord(char) for char in "before "], MOSS_AUDIO_BOS_TOKEN_ID],
         ),
         (
-            f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}"
-            f"{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after",
+            (
+                f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}"
+                f"{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
+            ),
             [*[ord(char) for char in "before "], MOSS_AUDIO_BOS_TOKEN_ID],
         ),
         ("Describe this audio.", [MOSS_AUDIO_BOS_TOKEN_ID]),

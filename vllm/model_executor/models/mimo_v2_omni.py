@@ -1124,7 +1124,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     full.extend(ts_ids)
                     is_embed_mask.extend([False] * len(ts_ids))
                     # Vision tokens for all frames in this group
-                    for f in range(frames_per_group):
+                    for _ in range(frames_per_group):
                         full.append(vision_start_id)
                         is_embed_mask.append(False)
                         full.extend([video_pad_id] * n_per_grid)

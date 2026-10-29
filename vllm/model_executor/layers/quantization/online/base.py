@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
@@ -76,7 +76,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 logger = init_logger(__name__)
 
 
-class OnlineQuantizationSource(str, Enum):
+class OnlineQuantizationSource(StrEnum):
     """Supported online quantization configuration sources."""
 
     linear = "linear"  # LinearBase

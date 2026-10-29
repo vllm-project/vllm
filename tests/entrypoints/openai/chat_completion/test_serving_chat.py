@@ -142,8 +142,10 @@ def gptoss_speculative_server(default_server_args: list[str]):
     )
     server_args = default_server_args + [
         "--speculative-config",
-        f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
-        f'"method": "eagle3", "num_speculative_tokens": 3}}',
+        (
+            f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+            f'"method": "eagle3", "num_speculative_tokens": 3}}'
+        ),
         f"--attention-backend={attention_backend}",
     ]
     # gpt-oss requires AITER unified attention on ROCm
