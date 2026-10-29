@@ -258,6 +258,36 @@ def _worker(local_rank: int, world_size: int, port: int, vocab: int, q):
                 sampler.check_exchange()
         torch.distributed.barrier(group=cpu_group)
 
+        # Owned-columns mode (vocab-sharded verification): each rank samples
+        # from its owned columns' logits only and caches only those; the cache
+        # completion then restores the replicated loop's cache.
+        from vllm.v1.worker.gpu.spec_decode.vocab_shard import vocab_shard_range
+
+        ranges = [vocab_shard_range(vocab, world_size, r) for r in range(world_size)]
+        c0, c1 = ranges[local_rank]
+        owned, reason = TPMarkovSampler.create(spc, ranges)
+        assert owned is not None, reason
+        values = spc.draft_logits.values
+        for num_reqs in (1, 5, MAX_REQS):
+            _set_inputs(spc, num_reqs, vocab, num_reqs + 7, hidden)
+            tokens, cache = draft(num_reqs, active=False)
+            values.fill_(-1.0)
+            n = num_reqs * N_SPEC
+            owned.sample(
+                num_reqs,
+                hidden[:n, c0:c1].contiguous().view(num_reqs, N_SPEC, c1 - c0),
+                spc.sample_idx_mapping[:n].view(num_reqs, N_SPEC),
+                spc.sample_pos[:n].view(num_reqs, N_SPEC),
+            )
+            torch.accelerator.synchronize()
+            assert torch.equal(spc.draft_tokens[:num_reqs], tokens)
+            assert torch.equal(values[:, :, c0:c1], cache[:, :, c0:c1])
+            rows = spc.sample_idx_mapping[:n:N_SPEC]
+            rows = rows[rows >= 0]
+            owned.complete_cache(values, rows)
+            assert torch.equal(values[rows], cache[rows])
+        owned.check_exchange()
+
 
 def _run(world_size: int, vocab: int):
     q = mp.get_context("spawn").Queue()

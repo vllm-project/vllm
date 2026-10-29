@@ -44,7 +44,7 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pp_group, get_tp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -178,6 +178,10 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
+)
+from vllm.v1.worker.gpu.spec_decode.vocab_shard import (
+    VocabShard,
+    vocab_shard_unsupported_reason,
 )
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -346,6 +350,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
+        self.vocab_shard: VocabShard | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -551,6 +556,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
                 mask_stride=self.decode_query_len,
             )
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.vocab_sharded_verification
+            ):
+                self.vocab_shard = self._init_vocab_shard()
+                enable = getattr(self.speculator, "enable_vocab_sharded_drafting", None)
+                if self.vocab_shard is not None and enable is not None:
+                    enable(self.vocab_shard)
 
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
@@ -1691,12 +1704,79 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _init_vocab_shard(self) -> VocabShard | None:
+        reason = None
+        if self.rejection_sampler is None:
+            reason = "there is no rejection sampler"
+        elif self.batch_sharder is not None:
+            reason = "batch-sharded sampling is enabled"
+        elif not current_platform.is_cuda():
+            reason = "it needs CUDA"
+        elif not hasattr(self.model, "compute_logits_local"):
+            reason = (
+                f"{type(self.model).__name__} does not implement compute_logits_local"
+            )
+        if reason is None:
+            hidden = torch.zeros(
+                1,
+                self.model_config.get_hidden_size(),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            local_vocab_size = self.model.compute_logits_local(hidden).shape[-1]
+            reason = vocab_shard_unsupported_reason(
+                self.vocab_size, local_vocab_size, get_tp_group().world_size
+            )
+        if reason is not None:
+            logger.warning("vocab_sharded_verification is ignored because %s.", reason)
+            return None
+        shard = VocabShard(
+            self.vocab_size,
+            local_vocab_size,
+            max_num_logits=self.max_num_reqs * self.decode_query_len,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+        )
+        logger.info(
+            "Vocab-sharded verification: this rank owns vocabulary columns [%d, %d).",
+            shard.col_start,
+            shard.col_end,
+        )
+        return shard
+
     def sample(
         self,
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        if (
+            self.vocab_shard is not None
+            and input_batch.num_reqs > 0
+            and input_batch.num_draft_tokens > 0
+            and self.rejection_sampler is not None
+        ):
+            assert self.speculator is not None
+            draft_logits = self.speculator.draft_logits
+            if (
+                grammar_output is None
+                and self.rejection_sampler.supports_vocab_sharding(
+                    input_batch, draft_logits
+                )
+                and draft_logits.values.shape[-1] == self.vocab_shard.vocab_size
+            ):
+                local_logits = self.model.compute_logits_local(
+                    hidden_states[input_batch.logits_indices]
+                )
+                out = self.rejection_sampler.verify_vocab_sharded(
+                    local_logits, input_batch, draft_logits, self.vocab_shard
+                )
+                return out, out.num_sampled, out.num_rejected
+            # Verified in full: complete vocab-sharded draft logits first.
+            complete = getattr(self.speculator, "complete_draft_logits", None)
+            if complete is not None:
+                complete(input_batch.idx_mapping)
+
         shard_metadata = None
         global_input_batch = input_batch
         if self.batch_sharder is not None:

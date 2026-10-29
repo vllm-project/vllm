@@ -713,6 +713,16 @@ class SpeculativeConfig:
     symmetric memory between the TP ranks and probabilistic drafting over the
     full vocabulary; otherwise the replicated loop runs."""
 
+    vocab_sharded_verification: bool = False
+    """With tensor parallelism, verify drafts without gathering the target
+    logits: each TP rank keeps its share of the vocabulary (whole 8192-column
+    blocks) and runs temperature, top-p and rejection sampling on it, and the
+    ranks exchange small per-block partials over symmetric memory. Top-p is
+    exact. Steps with requests that need the full vocabulary (logprobs, top-k,
+    min_p, logits processors, structured output) are verified as usual.
+    Needs CUDA symmetric memory, probabilistic drafting and a target model that
+    implements `compute_logits_local`."""
+
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full

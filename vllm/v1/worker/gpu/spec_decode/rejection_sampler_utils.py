@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
@@ -14,6 +16,9 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard
 
 
 @triton.jit
@@ -151,15 +156,24 @@ def _compute_global_logprobs_and_logsumexp(
     draft_local_max_stride,
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
+    # [num_logits, 2] or None: the target and (pre-temperature) draft logits of
+    # the scalar ``token`` at each logit row, for vocab-sharded verification,
+    # where the full rows are not available on this rank.
+    token_logits_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
-    target_logit = tl.load(
-        target_logits_ptr + logit_idx * target_logits_stride + token,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
+    if token_logits_ptr is not None:
+        target_logit = tl.load(
+            token_logits_ptr + logit_idx * 2, mask=mask, other=float("-inf")
+        )
+    else:
+        target_logit = tl.load(
+            target_logits_ptr + logit_idx * target_logits_stride + token,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
     target_lse = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
@@ -172,20 +186,31 @@ def _compute_global_logprobs_and_logsumexp(
     target_log_prob = target_logit - target_lse
     if HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
-        draft_logit = (
-            tl.load(
-                draft_logits_ptr
-                + tl.maximum(
-                    draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr), 0
+        if token_logits_ptr is not None:
+            draft_logit = (
+                tl.load(
+                    token_logits_ptr + logit_idx * 2 + 1,
+                    mask=mask,
+                    other=float("-inf"),
                 )
-                * draft_logits_stride_0
-                + draft_step * draft_logits_stride_1
-                + token,
-                mask=mask,
-                other=float("-inf"),
-            ).to(tl.float32)
-            / temp
-        )
+                / temp
+            )
+        else:
+            draft_logit = (
+                tl.load(
+                    draft_logits_ptr
+                    + tl.maximum(
+                        draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr),
+                        0,
+                    )
+                    * draft_logits_stride_0
+                    + draft_step * draft_logits_stride_1
+                    + token,
+                    mask=mask,
+                    other=float("-inf"),
+                ).to(tl.float32)
+                / temp
+            )
         draft_lse = _compute_global_logsumexp(
             draft_local_max_ptr,
             draft_local_max_stride,
@@ -247,6 +272,10 @@ def _compute_local_logits_stats_kernel(
     temp_ptr,
     vocab_size,
     num_logits,
+    # Vocab-sharded verification: the grid covers blocks [block_start, ...),
+    # and target_logits holds columns [target_col_start, ...) only.
+    block_start,
+    target_col_start,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
@@ -255,12 +284,13 @@ def _compute_local_logits_stats_kernel(
     if _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
         # Max/argmax and summed exponentials are not needed.
         return
+    target_logits_ptr -= target_col_start
 
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
-    block_idx = tl.program_id(1)
+    block_idx = block_start + tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
 
@@ -357,6 +387,8 @@ def _compute_cumulative_log_p_kernel(
     # [num_logits, num_blocks]
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
+    # [num_logits, 2] or None (see _compute_global_logprobs_and_logsumexp)
+    token_logits_ptr,
     # [num_reqs + 1]
     cu_num_logits_ptr,
     # [num_reqs]
@@ -405,6 +437,7 @@ def _compute_cumulative_log_p_kernel(
                     draft_local_max_stride,
                     draft_local_sumexp_ptr,
                     draft_local_sumexp_stride,
+                    token_logits_ptr,
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
@@ -452,6 +485,9 @@ def _compute_local_residual_mass_kernel(
     vocab_size,
     num_logits,
     vocab_num_blocks,
+    # See _compute_local_logits_stats_kernel.
+    block_start,
+    target_col_start,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
@@ -476,7 +512,7 @@ def _compute_local_residual_mass_kernel(
     if temp == 0.0:
         return
 
-    block_idx = tl.program_id(1)
+    block_idx = block_start + tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
     target_log_probs, draft_log_probs, _, _ = _compute_global_logprobs_and_logsumexp(
@@ -486,7 +522,7 @@ def _compute_local_residual_mass_kernel(
         req_state_idx,
         draft_step_idx,
         temp,
-        target_logits_ptr,
+        target_logits_ptr - target_col_start,
         target_logits_stride,
         target_local_max_ptr,
         target_local_max_stride,
@@ -500,6 +536,7 @@ def _compute_local_residual_mass_kernel(
         draft_local_max_stride,
         draft_local_sumexp_ptr,
         draft_local_sumexp_stride,
+        None,  # token_logits_ptr
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
@@ -572,6 +609,8 @@ def _rejection_kernel(
     # [num_logits]
     fly_entropy_ptr,
     fly_entropy_threshold,
+    # [num_logits, 2] or None (see _compute_global_logprobs_and_logsumexp)
+    token_logits_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -699,6 +738,7 @@ def _rejection_kernel(
                         draft_local_max_stride,
                         draft_local_sumexp_ptr,
                         draft_local_sumexp_stride,
+                        token_logits_ptr,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
@@ -865,6 +905,9 @@ def _resample_kernel(
     watermark_key_0,
     watermark_key_1,
     vocab_size,
+    # See _compute_local_logits_stats_kernel.
+    block_start,
+    target_col_start,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -895,11 +938,13 @@ def _resample_kernel(
     )
     is_valid_rejected_draft = rejected_draft_token >= 0
 
-    block_idx = tl.program_id(1)
+    block_idx = block_start + tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
     target_logits = tl.load(
-        target_logits_ptr + resample_token_idx * target_logits_stride + block,
+        target_logits_ptr
+        + resample_token_idx * target_logits_stride
+        + (block - target_col_start),
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
@@ -1155,7 +1200,12 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
+    vocab_shard: "VocabShard | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """With ``vocab_shard``, verification is vocab-sharded over the TP group:
+    ``target_logits`` holds this rank's owned columns only, the per-block
+    kernels run on the owned blocks, and their partials are exchanged. The
+    result is the same as with the full target logits."""
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     draft_logits = None
     draft_logits_row_mapping = None
@@ -1167,6 +1217,13 @@ def rejection_sample(
     )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
+    target_col_start = 0
+    if vocab_shard is not None:
+        assert vocab_size == vocab_shard.num_cols
+        assert contexts is None and fly_window_size == 0
+        assert draft_logits_row_mapping is None
+        vocab_size = vocab_shard.vocab_size
+        target_col_start = vocab_shard.col_start
 
     watermark = contexts is not None
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
@@ -1238,7 +1295,11 @@ def rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
+    block_start, block_end = 0, vocab_num_blocks
+    if vocab_shard is not None:
+        assert vocab_num_blocks == vocab_shard.num_blocks
+        block_start, block_end = vocab_shard.block_start, vocab_shard.block_end
+    _compute_local_logits_stats_kernel[(num_logits, block_end - block_start)](
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -1260,9 +1321,24 @@ def rejection_sample(
         temperature,
         vocab_size,
         num_logits,
+        block_start,
+        target_col_start,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
+    token_logits = None
+    if vocab_shard is not None:
+        stats = [target_local_argmax, target_local_max, target_local_sumexp]
+        if has_draft_logits:
+            stats += [draft_local_max, draft_local_sumexp]
+        vocab_shard.allgather_cols(stats, block_start, block_end)
+        token_logits = vocab_shard.token_logits(
+            target_logits,
+            draft_logits,
+            draft_sampled,
+            expanded_idx_mapping,
+            expanded_local_pos,
+        )
 
     # Precompute the running joint ratio and residual mass for block
     # verification.
@@ -1292,6 +1368,7 @@ def rejection_sample(
             draft_local_max.stride(0),
             draft_local_sumexp,
             draft_local_sumexp.stride(0),
+            token_logits,
             cu_num_logits,
             idx_mapping,
             temperature,
@@ -1309,7 +1386,7 @@ def rejection_sample(
             local_residual_mass = target_logits.new_empty(
                 num_logits, vocab_num_blocks, dtype=torch.float32
             )
-            _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
+            _compute_local_residual_mass_kernel[(num_logits, block_end - block_start)](
                 local_residual_mass,
                 local_residual_mass.stride(0),
                 cumulative_log_p,
@@ -1334,9 +1411,15 @@ def rejection_sample(
                 vocab_size,
                 num_logits,
                 vocab_num_blocks,
+                block_start,
+                target_col_start,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             )
+            if vocab_shard is not None:
+                vocab_shard.allgather_cols(
+                    [local_residual_mass], block_start, block_end
+                )
         else:
             local_residual_mass = None
     else:
@@ -1385,6 +1468,7 @@ def rejection_sample(
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         fly_entropy,
         fly_entropy_threshold,
+        token_logits,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
@@ -1406,7 +1490,11 @@ def rejection_sample(
         resample_num_blocks,
         dtype=torch.float64 if use_fp64 else torch.float32,
     )
-    _resample_kernel[(num_reqs, resample_num_blocks)](
+    rs_start, rs_end = 0, resample_num_blocks
+    if vocab_shard is not None:
+        rs_start = vocab_shard.col_start // RESAMPLE_BLOCK_SIZE
+        rs_end = triton.cdiv(vocab_shard.col_end, RESAMPLE_BLOCK_SIZE)
+    _resample_kernel[(num_reqs, rs_end - rs_start)](
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
@@ -1434,6 +1522,8 @@ def rejection_sample(
         watermark_key_0,
         watermark_key_1,
         vocab_size,
+        rs_start,
+        target_col_start,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
@@ -1443,6 +1533,11 @@ def rejection_sample(
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
         SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
     )
+
+    if vocab_shard is not None:
+        vocab_shard.allgather_cols(
+            [resampled_local_argmax, resampled_local_max], rs_start, rs_end
+        )
 
     # Insert the resampled tokens into the output sampled.
     _insert_resampled_kernel[(num_reqs,)](
