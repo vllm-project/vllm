@@ -12,6 +12,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
@@ -20,6 +21,22 @@ from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+
+_GFX942_CONFIGS: list[triton.Config] = []
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() == 3:
+        _GFX942_CONFIGS = [
+            triton.Config(
+                {"BK": 64, "BV": BV, "matrix_instr_nonkdim": 16},
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+            for BV in [64, 128]
+            for num_warps in [2, 4]
+            for num_stages in [1, 2]
+        ]
 
 
 @triton.heuristics(
@@ -35,7 +52,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for BV in BKV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
-    ],
+    ]
+    + _GFX942_CONFIGS,
     key=["H", "K", "V", "BT"],
 )
 @triton.jit(do_not_specialize=["T"])

@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,6 +20,22 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+
+_GFX942_CONFIGS: list[triton.Config] = []
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() == 3:
+        _GFX942_CONFIGS = [
+            triton.Config(
+                {"BV": BV, "matrix_instr_nonkdim": 16},
+                num_warps=num_warps,
+                # num_stages=3 does not fit in LDS.
+                num_stages=2,
+            )
+            for num_warps in [4, 8]
+            for BV in [32, 64]
+        ]
 
 
 @triton.heuristics(
@@ -37,7 +54,8 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         for num_warps in [2, 4]
         for num_stages in _CHUNK_DELTA_H_NUM_STAGES
         for BV in [32, 64]
-    ],
+    ]
+    + _GFX942_CONFIGS,
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
 )
