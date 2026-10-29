@@ -1252,6 +1252,10 @@ class OffloadingConnectorScheduler:
             key = self._make_boundary_key(
                 req, group_config.group_idx, key_tokens, req_context
             )
+            # The offload manager can report HIT as soon as the source chunk
+            # is ready, while its earlier GPU load is still in flight.  Do
+            # not schedule the same partial-tail transfer twice.
+            pending |= key in (self._chunks_being_loaded or ())
             result = self.manager.lookup(key, req_context)
             if result is LookupResult.MISS:
                 return False, pending
@@ -2530,10 +2534,11 @@ class OffloadingConnectorScheduler:
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
-        # reset_cache cannot be called in the middle of a schedule step
+        # reset_cache cannot be called in the middle of a schedule step.
+        # _current_batch_jobs_to_flush may still hold a previous reset's flush
+        # set if no step ran since; the new ids are merged into it.
         assert not self._current_batch_load_jobs
         assert not self._current_batch_sync_loads
-        assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
         # Held for the whole reset. manager.reset_cache() drains tiers by
