@@ -8,14 +8,12 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     int4_w4afp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTokenSym,
@@ -255,25 +253,14 @@ def make_w4a8_moe_kernel(
 
     assert issubclass(experts_cls, CutlassExpertsW4A8Fp8)
     assert b_strides1 is not None and b_strides2 is not None
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        b_strides1=b_strides1,
-        b_strides2=b_strides2,
-        group_size=group_size,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_kwargs={
+            "b_strides1": b_strides1,
+            "b_strides2": b_strides2,
+            "group_size": group_size,
+        },
     )
