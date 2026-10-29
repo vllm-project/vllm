@@ -91,10 +91,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
-        self._token_text_ends: list[int] | None = (
+        self._held_token_ends: list[int] | None = (
             [] if self.stop_buffer_length else None
         )
-        self._num_released_tokens = 0
+        self._released_text_end = 0
 
         # Generation data
         self.output_text = ""
@@ -135,9 +135,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             if token_offsets is not None:
                 token_offsets.append(len(self.output_text))
 
-        if self._token_text_ends is not None:
+        if (held_ends := self._held_token_ends) is not None:
             assert token_offsets is not None
-            self._token_text_ends.extend(token_offsets[1:])
+            held_ends.extend(token_offsets[1:])
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -159,16 +159,14 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 # (possible when multiple tokens are appended in one step).
                 num_kept = bisect_left(token_offsets, stop_end, lo=1)
                 del self.token_ids[first_new_token_index + num_kept :]
-                if self._token_text_ends is not None:
-                    del self._token_text_ends[first_new_token_index + num_kept :]
+                if held_ends is not None:
+                    del held_ends[len(held_ends) - len(token_offsets) + 1 + num_kept :]
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-                    if self._token_text_ends is not None:
+                    if held_ends is not None:
                         # Clamp to the truncated text, keeping the ends sorted
                         # if a streaming-input session continues after the stop.
-                        ends = self._token_text_ends
-                        i = bisect_right(ends, truncate_to)
-                        ends[i:] = [truncate_to] * (len(ends) - i)
+                        held_ends[:] = [min(end, truncate_to) for end in held_ends]
 
         return stop_string
 
@@ -181,19 +179,17 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         this method is returned"""
         length = len(self.output_text)
         num_held_tokens = 0
-        ends = self._token_text_ends
-        if ends:
+        if held_ends := self._held_token_ends:
             if finished:
-                num_released = len(ends)
+                held_ends.clear()
+                self._released_text_end = length
             else:
-                num_released = bisect_right(
-                    ends,
-                    length - self.stop_buffer_length,
-                    lo=self._num_released_tokens,
-                )
-                num_held_tokens = len(ends) - num_released
-                length = ends[num_released - 1] if num_released else 0
-            self._num_released_tokens = num_released
+                num_released = bisect_right(held_ends, length - self.stop_buffer_length)
+                if num_released:
+                    self._released_text_end = held_ends[num_released - 1]
+                    del held_ends[:num_released]
+                num_held_tokens = len(held_ends)
+                length = self._released_text_end
 
         if not delta:
             return self.output_text[:length], num_held_tokens
