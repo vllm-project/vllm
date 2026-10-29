@@ -104,6 +104,39 @@ def _as_mock(value: object) -> MagicMock:
     return value
 
 
+def test_update_offload_keys_without_scanning_hash_prefix():
+    """Incremental key updates must not iterate over the earlier request hashes."""
+
+    class IndexOnlyHashes(list[BlockHash]):
+        def __iter__(self):
+            raise AssertionError("Request hashes must be accessed by index")
+
+    config = MagicMock()
+    config.kv_group_configs = [
+        SimpleNamespace(
+            group_idx=group_idx, hashes_per_chunk=stride, tokens_per_chunk=16 * stride
+        )
+        for group_idx, stride in enumerate((1, 2, 4))
+    ]
+    request = MagicMock(kv_transfer_params=None, block_hashes=IndexOnlyHashes())
+    context = ReqContext("test")
+    state = RequestOffloadState(config, request, context, RequestOffloadingContext())
+
+    for num_hashes in (0, 1, 4, 7, 7, 8):
+        request.block_hashes.extend(
+            BlockHash(bytes([i])) for i in range(len(request.block_hashes), num_hashes)
+        )
+        state.update_offload_keys()
+        for group_idx, stride in enumerate((1, 2, 4)):
+            expected = [
+                make_offload_key(bytes([i]), group_idx)
+                for i in range(stride - 1, num_hashes, stride)
+            ]
+            assert state.group_states[group_idx].offload_keys == expected
+            for chunk_idx, key in enumerate(expected, 1):
+                assert context.get_offload_key_position(key) == chunk_idx * stride * 16
+
+
 @pytest.mark.parametrize(
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
@@ -591,6 +624,79 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
     assert scheduler.get_num_new_matched_tokens(request, 16) == (8, True)
     assert scheduler._req_status["req"].partial_tail_boundary == 24
+
+
+def _hybrid_lookup(stored: set[OffloadKey]):
+    """Full attention (group 0) holds every chunk; Mamba (group 1) only
+    the boundary states in ``stored``."""
+
+    def lookup(key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if get_offload_group_idx(key) == 0:
+            return LookupResult.HIT
+        return LookupResult.HIT if key in stored else LookupResult.MISS
+
+    return lookup
+
+
+def _make_sparse_retention_scheduler() -> OffloadingConnectorScheduler:
+    # prefix_cache_retention_interval=0, the engine default: one Mamba state
+    # per replay boundary.
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.config = scheduler.config._replace(retention_interval=0)
+    return scheduler
+
+
+def test_sparse_group_miss_registers_shared_prefix_junction():
+    """A revisit that diverges before the only stored Mamba state heals.
+
+    The first request stored one Mamba state at the end of its prompt.
+    The revisit shares the first chunk (16 tokens) but not that state,
+    so the whole lookup misses. The connector must pin a junction at 16
+    so the recompute retains and offloads the Mamba state there; the next
+    revisit then hits the shared prefix.
+    """
+    scheduler = _make_sparse_retention_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.shared_prefix_boundary = 0
+    stored: set[OffloadKey] = set()
+    scheduler.manager.lookup.side_effect = _hybrid_lookup(stored)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert request.shared_prefix_boundary == 16
+
+    # The recompute's Mamba state at the junction is handed off and stored.
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 77, 16)]})
+    [job_id] = jobs
+    stored.update(scheduler._jobs[job_id].keys)
+
+    scheduler._req_status["req"].transfer_jobs.clear()
+    tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+    assert tokens == 16
+
+
+def test_shared_prefix_junction_is_not_lowered():
+    scheduler = _make_sparse_retention_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    # e.g. a longer junction from the local prefix cache
+    request.shared_prefix_boundary = 24
+    scheduler.manager.lookup.side_effect = _hybrid_lookup(set())
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert request.shared_prefix_boundary == 24
+
+
+def test_no_shared_prefix_junction_when_sparse_group_hits():
+    scheduler = _make_sparse_retention_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.shared_prefix_boundary = 0
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
+    assert tokens == 28
+    assert request.shared_prefix_boundary == 0
 
 
 def test_max_load_tokens_rounds_down_without_partial_tail():
@@ -1598,6 +1704,57 @@ def test_abort_queued_request_does_not_build_store_job(
     assert isinstance(metadata, OffloadingConnectorMetadata)
     assert all(job.req_id != queued_req_id for job in metadata.store_jobs.values())
     assert queued_req_id not in runner.connector_scheduler._req_status
+
+
+@pytest.mark.parametrize(
+    "finish_status", [RequestStatus.FINISHED_ERROR, RequestStatus.FINISHED_ABORTED]
+)
+def test_finish_mid_prefill_stores_only_computed_blocks(
+    request_runner, finish_status: RequestStatus
+):
+    """A request that finishes mid-prefill must not store a block it never
+    computed under that block's full hash."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size, num_gpu_blocks=16, async_scheduling=False
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    # Chunked prefill: 6 of the 16 prompt tokens per step.
+    runner.scheduler.max_num_scheduled_tokens = 6
+    runner.scheduler.scheduler_config.max_num_batched_tokens = 6
+    runner.new_request(token_ids=list(range(100, 116)))
+    req_id = str(runner.req_id)
+
+    scheduler_output = runner.scheduler.schedule()
+    assert scheduler_output.num_scheduled_tokens[req_id] == 6
+    runner._update_gpu_blocks()
+    req = runner.scheduler.requests[req_id]
+    model_runner_output = create_model_runner_output(
+        reqs=[req], token_id=0, use_eos=False
+    )
+    # A partial prefill samples no token.
+    model_runner_output.sampled_token_ids = [[]]
+    runner.scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert req.num_computed_tokens == 6
+
+    # The first step stored the one full block. The second block has only
+    # tokens 4-5 computed when the request finishes.
+    runner.scheduler.finish_requests(req_id, finish_status)
+    metadata = runner.scheduler.schedule().kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    stored_blocks = sorted(
+        int(block_id)
+        for job in metadata.store_jobs.values()
+        if job.req_id == req_id
+        for block_id in job.src_spec.block_ids
+    )
+    assert not stored_blocks, (
+        f"{finish_status.name}: stored {len(stored_blocks)} blocks {stored_blocks} "
+        f"but only {6 // block_size} full block(s) were computed "
+        f"(num_computed_tokens=6, prompt=16)"
+    )
 
 
 def test_store_jobs_wait_for_missing_offload_key(request_runner):
@@ -3510,6 +3667,167 @@ def test_complete_store_waits_for_all_worker_acks(
     )
     assert runner.manager.complete_store.call_count == 1
     assert job_id not in runner.connector_scheduler._jobs
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling: bool):
+    """A store that failed on any worker must not become loadable.
+
+    Its destination blocks were never written, so publishing them would serve
+    whatever the recycled blocks last held -- potentially another request's KV.
+    The failure is reported in an earlier step than the one that completes the
+    job, which is the case a per-step failure lookup would miss.
+    """
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        worker_count=3,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0, 0], complete_transfers=False)
+    job_id = next(iter(runner.connector_scheduler._jobs))
+    runner.manager.complete_store.reset_mock()
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1}, failed_jobs={job_id}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 0
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 2}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.complete_store.call_args.kwargs["success"] is False
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_successful_store_is_published(request_runner, async_scheduling: bool):
+    """The success path still publishes, so the guard cannot pass vacuously."""
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        worker_count=3,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0, 0], complete_transfers=False)
+    job_id = next(iter(runner.connector_scheduler._jobs))
+    runner.manager.complete_store.reset_mock()
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 3}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.complete_store.call_args.kwargs["success"] is True
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("recompute", [False, True], ids=["fail", "recompute"])
+@pytest.mark.parametrize("hybrid", [False, True], ids=["one_group", "full_and_swa"])
+def test_failed_load_ends_or_reruns_its_request(
+    request_runner, recompute: bool, hybrid: bool, async_scheduling: bool
+):
+    """A failed load ends or reruns its request, never the engine.
+
+    Its destination blocks hold undefined KV, so the request is reported through
+    failed_recving, which the scheduler handles for any number of KV cache
+    groups. A rerun must not read the offloaded cache again, or a persistent
+    fault would reload the same chunks forever.
+    """
+    block_size = 4
+    kv_cache_groups = None
+    expected_loaded: tuple[int | tuple[int, int], ...] = (0, 1, 2)
+    if hybrid:
+        # The sliding-window group loads only the blocks inside its window.
+        expected_loaded = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2))
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            ),
+        ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+    )
+    runner.scheduler.recompute_kv_load_failures = recompute
+    runner.new_request(token_ids=[0] * block_size * 3)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+
+    handler = runner.offloading_spec.handler
+
+    def num_loads() -> int:
+        return sum(
+            isinstance(dst_spec, GPULoadStoreSpec)
+            for _, dst_spec in handler.transfer_specs.values()
+        )
+
+    def at_most_one_load() -> None:
+        assert num_loads() <= 1, "the failed load was retried"
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * (block_size * 3 + 1))
+    request = runner.scheduler.requests[str(runner.req_id)]
+    runner.manager.lookup.return_value = LookupResult.HIT
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    handler.fail_loads = True
+    runner.run(decoded_tokens=[], expected_loaded=expected_loaded)
+
+    if not recompute:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        return
+    assert request.num_computed_tokens == 0
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], post_step_fn=at_most_one_load)
+    assert num_loads() == 1
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.num_output_tokens == 1
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
