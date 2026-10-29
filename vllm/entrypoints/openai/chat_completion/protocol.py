@@ -1059,6 +1059,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_messages_non_empty(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if not data.get("messages"):
+            raise VLLMValidationError(
+                "messages must be a non-empty list.",
+                parameter="messages",
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_generation_prompt(cls, data):
         if not isinstance(data, dict):
             return data
