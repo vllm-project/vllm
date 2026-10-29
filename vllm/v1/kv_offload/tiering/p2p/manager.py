@@ -681,6 +681,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
+
+        A load already failed with a deferred release stays pending until
+        its AbortAck, or until a missed AbortAck disconnects the session and
+        the reap's close() sets the event, so every event is set on return.
         """
         start = time.monotonic()
         warned = False
@@ -1123,7 +1127,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        deferred_release=lr.deferred_release,
+                    )
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)
