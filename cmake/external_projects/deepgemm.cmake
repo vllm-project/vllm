@@ -37,7 +37,7 @@ else()
   # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
   # (vllm-project/DeepGEMM#43).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "0820030756945b2daec208e8e8255268360f337d")
+  set(_DEEPGEMM_UPSTREAM_TAG "5cdb145704ec4672ecf4b61441599521ce635df6")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
