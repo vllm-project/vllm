@@ -1813,6 +1813,31 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
+def test_generate_scheduler_kv_cache_config_keeps_mixed_precision():
+    # The scheduler's copy reduces a UniformTypeKVCacheSpecs group to one
+    # layer's spec; the group's mixed precision, which needs KV cache zeroing,
+    # must survive that.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs={
+                        "layer_1": new_kv_cache_spec(),
+                        "layer_2": new_kv_cache_spec(dtype=torch.float16),
+                    },
+                ),
+            ),
+        ],
+    )
+    assert kv_cache_config.needs_kv_cache_zeroing
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config([kv_cache_config])
+    assert scheduler_kv_cache_config.needs_kv_cache_zeroing
+
+
 def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
     attention = FullAttentionSpec(
         block_size=16,
