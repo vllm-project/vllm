@@ -1394,10 +1394,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
     ),
     # Off by default. When on (ROCm only), the gated full-attention layers of
-    # Qwen3.5-family dense models (e.g. Qwen3.8-27B; unquantized bf16, TP1,
-    # ROCM_ATTN, auto KV-cache dtype) run from the input RMSNorm through the
-    # post-attention RMSNorm as fused Triton kernels for steps of up to 32
-    # tokens (four launches for pure decode). Larger steps use stock kernels.
+    # Qwen3.5-family models (e.g. Qwen3.8-27B; unquantized bf16, TP1) run the
+    # projections around attention as fused Triton kernels for steps of up to
+    # 32 tokens: input RMSNorm through q/k norm and RoPE in one launch, and the
+    # output gate through the post-attention RMSNorm in two. The selected
+    # attention backend runs unchanged. Larger steps use stock kernels.
     "VLLM_ROCM_QWEN_FUSED_FULL_ATTN": lambda: (
         os.getenv("VLLM_ROCM_QWEN_FUSED_FULL_ATTN", "False").lower() in ("true", "1")
     ),

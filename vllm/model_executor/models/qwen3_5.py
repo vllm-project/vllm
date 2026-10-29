@@ -240,11 +240,9 @@ def _use_rocm_fused_full_attn_decode(
         vllm_config.quant_config is None
         and vllm_config.parallel_config.tensor_parallel_size == 1
         and vllm_config.model_config.dtype == torch.bfloat16
-        and vllm_config.cache_config.cache_dtype == "auto"
         and not layer_scale
         and attn.attn_output_gate
         and attn.dual_chunk_attention_config is None
-        and attn.attn.attn_backend.get_name() == "ROCM_ATTN"
         and getattr(rope, "is_neox_style", False)
         and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
         and (

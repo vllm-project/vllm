@@ -573,10 +573,9 @@ class Qwen3NextDecoderLayer(nn.Module):
             q, gate, k, v, residual = torch.ops.vllm.rocm_qwen_full_attn_front(
                 hidden_states, residual, positions, sa.q_size, sa.kv_size, name
             )
-            attn = torch.empty_like(q)
-            torch.ops.vllm.rocm_qwen_full_attn_core(q, k, v, gate, attn, name)
+            attn = sa.attn(q, k, v)
             hidden_states, residual = torch.ops.vllm.rocm_qwen_full_attn_back(
-                attn, residual, name
+                attn, gate, residual, name
             )
             return self.mlp(hidden_states), residual
 
