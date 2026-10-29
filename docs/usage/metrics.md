@@ -72,6 +72,8 @@ Caveats to keep in mind when interpreting them:
   unlinked at startup and shutdown.
 - `save_outcomes_total` classifies eager-mode boundary hand-off stores;
   lazy-mode stores are not classified.
+- With `max_pending_store_blocks` set, other eager-mode blocks skipped by the
+  cap are counted in `capped_store_blocks_total`.
 - `used_blocks` counts blocks pinned by in-flight transfers or cache hits;
   warm cached blocks that are evictable are not counted. Use the
   `capacity_blocks` label of `simple_kv_offload_info` as the denominator.

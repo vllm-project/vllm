@@ -487,6 +487,33 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## Capping pending stores for `SimpleCPUOffloadConnector`
+
+A store keeps its GPU blocks pinned until every worker has copied them. When the
+offload tier writes more slowly than new KV is computed (for example a disk
+backend on saturated storage), pending stores can pin a large share of GPU KV
+and starve scheduling. `max_pending_store_blocks` in `kv_connector_extra_config`
+caps the blocks held by queued or in-flight stores. The default, `0`, means no
+cap.
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "kv_offload_backend": "disk",
+    "disk_path": "/mnt/nvme/kv",
+    "max_pending_store_blocks": 4096
+  }
+}
+```
+
+In eager mode, blocks past the cap are skipped, not deferred: they are not
+offloaded unless a later request holding the same blocks stores them. In lazy
+mode, the scan stops at the cap as if the offload pool were full, and the
+remaining blocks are retried on a later step. Skipped eager blocks are counted
+in `vllm:simple_kv_offload_capped_store_blocks_total`.
+
 ## Chunked-local attention with `SimpleCPUOffloadConnector`
 
 For chunked-local attention, CPU cache reuse requires the GPU-local prefix to

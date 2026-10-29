@@ -138,6 +138,7 @@ class BoundaryStoreStats:
     skipped_in_flight: int = 0
     dropped_null_block: int = 0
     dropped_not_hashed: int = 0
+    dropped_store_cap: int = 0
 
 
 class SimpleCPUOffloadScheduler:
@@ -155,9 +156,14 @@ class SimpleCPUOffloadScheduler:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         aligned_num_cpu_blocks: int | None = None,
+        max_pending_store_blocks: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        # Cap on GPU blocks pinned by queued or in-flight stores; 0 = no cap.
+        # Eager mode skips store candidates past the cap (they stay out of the
+        # offload tier); lazy mode leaves them for a later step.
+        self.max_pending_store_blocks = max_pending_store_blocks
         # When disk mode is active, the offload pool size is disk-based.
         offload_capacity = (
             disk_capacity_bytes if disk_capacity_bytes > 0 else cpu_capacity_bytes
@@ -274,6 +280,7 @@ class SimpleCPUOffloadScheduler:
         # Interval stats state drained by get_stats()
         self._boundary_stats_snapshot = BoundaryStoreStats()
         self._interval_load_blocks_completed = 0
+        self._interval_capped_store_blocks = 0
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
@@ -641,6 +648,10 @@ class SimpleCPUOffloadScheduler:
         free_queue = gpu_pool.free_block_queue
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
+        budget = self._store_budget()
+        if budget is not None:
+            # Past the store cap, the walk stops as if the CPU pool were full.
+            num_cpu_free = min(num_cpu_free, budget)
 
         # Validate cursor: stale if block was removed from free queue.
         if self._cursor is not None and self._cursor.ref_cnt > 0:
@@ -710,6 +721,7 @@ class SimpleCPUOffloadScheduler:
         # Dedup against blocks already scheduled.
         in_flight = self._in_flight_store_gpu_blocks
         num_free = cpu_block_pool.get_num_free_blocks()
+        budget = self._store_budget()
 
         block_state = scheduler_output.kv_connector_block_state
         boundary_offloads = (
@@ -752,6 +764,9 @@ class SimpleCPUOffloadScheduler:
                 if admission is _StoreAdmission.ALREADY_CACHED:
                     stats.skipped_already_cached += 1
                     continue
+                if budget is not None and budget <= 0:
+                    stats.dropped_store_cap += 1
+                    continue
                 if num_free <= 0:
                     stats.dropped_cpu_full += 1
                     logger.warning_once(
@@ -771,6 +786,8 @@ class SimpleCPUOffloadScheduler:
                 in_flight.add(gpu_block_id)
                 gpu_block_pool.touch([gpu_block])
                 num_free -= 1
+                if budget is not None:
+                    budget -= 1
                 stats.stored += 1
                 scheduled_for_req = True
             if scheduled_for_req:
@@ -807,8 +824,10 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             gpu_block_ids, advanced_per_group, block_meta = (
-                self._select_eager_blocks_to_store(state, block_ids_by_group)
+                self._select_eager_blocks_to_store(state, block_ids_by_group, budget)
             )
+            if budget is not None:
+                budget -= len(gpu_block_ids)
 
             # Batch allocate the CPU destinations.
             n_to_alloc = len(gpu_block_ids)
@@ -864,12 +883,19 @@ class SimpleCPUOffloadScheduler:
         self,
         state: StoreRequestState,
         block_ids_by_group: tuple[list[int], ...],
+        budget: int | None = None,
     ) -> tuple[
         list[int],
         list[int],
         list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
     ]:
-        """Return confirmed eager blocks, cursor advances, and event metadata."""
+        """Return confirmed eager blocks, cursor advances, and event metadata.
+
+        At most ``budget`` blocks are selected (None = no store cap). Ready
+        blocks past it are skipped rather than deferred: the cursor moves past
+        them without a CPU allocation or GPU pin, so they stay out of the
+        offload tier unless a later request holding them stores them.
+        """
         assert self._gpu_block_pool is not None
         gpu_block_ids: list[int] = []
         advanced_per_group = [0] * len(self.cpu_kv_cache_config.kv_cache_groups)
@@ -920,6 +946,10 @@ class SimpleCPUOffloadScheduler:
                     self._classify_store_candidate(gpu_block)
                     is not _StoreAdmission.READY
                 ):
+                    advanced_per_group[g] += 1
+                    continue
+                if budget is not None and len(gpu_block_ids) >= budget:
+                    self._interval_capped_store_blocks += 1
                     advanced_per_group[g] += 1
                     continue
                 if len(gpu_block_ids) >= num_free:
@@ -1006,6 +1036,24 @@ class SimpleCPUOffloadScheduler:
     def get_boundary_store_stats(self) -> BoundaryStoreStats:
         return replace(self.boundary_store_stats)
 
+    def _num_pending_store_blocks(self) -> int:
+        """Blocks in stores that are queued, in flight, or awaiting release."""
+        return sum(
+            len(t.cpu_block_ids)
+            for t in (
+                *self._store_event_to_blocks.values(),
+                *self._pending_finished_stores,
+                *self._abandoned_store_event_to_blocks.values(),
+            )
+        )
+
+    def _store_budget(self) -> int | None:
+        """Blocks that may still start a store under max_pending_store_blocks,
+        or None when there is no cap."""
+        if self.max_pending_store_blocks <= 0:
+            return None
+        return max(0, self.max_pending_store_blocks - self._num_pending_store_blocks())
+
     def get_stats(self) -> SimpleCPUOffloadStats:
         """Drain per-step stats for the connector's stats hooks."""
         stats = SimpleCPUOffloadStats()
@@ -1025,20 +1073,20 @@ class SimpleCPUOffloadScheduler:
                 self._interval_load_blocks_completed,
             )
             self._interval_load_blocks_completed = 0
+        if self._interval_capped_store_blocks:
+            stats.increase_counter(
+                MetricName.CAPPED_STORE_BLOCKS,
+                self._interval_capped_store_blocks,
+            )
+            self._interval_capped_store_blocks = 0
 
         stats.set_gauge(
             MetricName.USED_BLOCKS,
             self.num_cpu_blocks - self.cpu_block_pool.get_num_free_blocks(),
         )
-        pending = sum(
-            len(t.cpu_block_ids)
-            for t in (
-                *self._store_event_to_blocks.values(),
-                *self._pending_finished_stores,
-                *self._abandoned_store_event_to_blocks.values(),
-            )
+        stats.set_gauge(
+            MetricName.PENDING_STORE_BLOCKS, self._num_pending_store_blocks()
         )
-        stats.set_gauge(MetricName.PENDING_STORE_BLOCKS, pending)
         stats.set_gauge(MetricName.INFO, 1, self._info_labelvalues)
         return stats
 
@@ -1268,7 +1316,10 @@ class SimpleCPUOffloadScheduler:
         gpu_pool = self._gpu_block_pool
         if state is None or gpu_pool is None:
             return
-        gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
+        budget = self._store_budget()
+        gpu_ids, _, block_meta = self._select_eager_blocks_to_store(
+            state, block_ids, budget
+        )
         partial_tail = self._find_fa_partial_tail_source(request, block_ids)
         if (
             partial_tail is not None
@@ -1277,6 +1328,7 @@ class SimpleCPUOffloadScheduler:
             # allocate two CPU blocks for one GPU block.
             and partial_tail not in gpu_ids
             and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
+            and (budget is None or len(gpu_ids) < budget)
         ):
             gpu_ids.append(partial_tail)
             if block_meta is not None:

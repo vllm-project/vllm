@@ -24,6 +24,7 @@ class MetricName:
 
     SAVE_OUTCOMES = "vllm:simple_kv_offload_save_outcomes_total"
     LOAD_BLOCKS = "vllm:simple_kv_offload_load_blocks_total"
+    CAPPED_STORE_BLOCKS = "vllm:simple_kv_offload_capped_store_blocks_total"
     USED_BLOCKS = "vllm:simple_kv_offload_used_blocks"
     PENDING_STORE_BLOCKS = "vllm:simple_kv_offload_pending_store_blocks"
     INFO = "vllm:simple_kv_offload_info"
@@ -39,6 +40,7 @@ OUTCOME_TO_FIELD = {
     "dropped_not_hashed": "dropped_not_hashed",
     "skipped_already_cached": "skipped_already_cached",
     "skipped_in_flight": "skipped_in_flight",
+    "dropped_store_cap": "dropped_store_cap",
 }
 
 INFO_LABELS = ["backend", "page_cache", "lazy_offload", "capacity_blocks"]
@@ -200,6 +202,16 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
             ),
             labelnames=self._labelnames,
         )
+        self._counter_capped_store_blocks = self._counter_cls(
+            name="vllm:simple_kv_offload_capped_store_blocks_total",
+            documentation=(
+                "Eager-mode KV blocks not offloaded because "
+                "max_pending_store_blocks blocks were already in pending "
+                "stores. Boundary hand-offs dropped by the cap are counted "
+                "as the dropped_store_cap save outcome instead."
+            ),
+            labelnames=self._labelnames,
+        )
         self._gauge_used_blocks = self._gauge_cls(
             name="vllm:simple_kv_offload_used_blocks",
             documentation=(
@@ -237,6 +249,7 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
         self._defs: dict[str, PromMetricT] = {
             MetricName.SAVE_OUTCOMES: self._counter_save_outcomes,
             MetricName.LOAD_BLOCKS: self._counter_load_blocks,
+            MetricName.CAPPED_STORE_BLOCKS: self._counter_capped_store_blocks,
             MetricName.USED_BLOCKS: self._gauge_used_blocks,
             MetricName.PENDING_STORE_BLOCKS: self._gauge_pending_store_blocks,
             MetricName.INFO: self._gauge_info,
@@ -244,6 +257,7 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
         self._num_label_values: dict[str, int] = {
             MetricName.SAVE_OUTCOMES: 1,
             MetricName.LOAD_BLOCKS: 0,
+            MetricName.CAPPED_STORE_BLOCKS: 0,
             MetricName.USED_BLOCKS: 0,
             MetricName.PENDING_STORE_BLOCKS: 0,
             MetricName.INFO: len(INFO_LABELS),

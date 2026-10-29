@@ -59,8 +59,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
+from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler, TransferMeta
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.metrics import MetricName, _StatsKey
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -306,6 +307,7 @@ def make_scheduler(
     num_groups: int = 1,
     lazy: bool = False,
     kv_cache_config: KVCacheConfig | None = None,
+    max_pending_store_blocks: int = 0,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with small block pools."""
     if kv_cache_config is None:
@@ -322,6 +324,7 @@ def make_scheduler(
         scheduler_block_size=BLOCK_SIZE,
         hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
+        max_pending_store_blocks=max_pending_store_blocks,
     )
 
     # Build a real GPU block pool and bind it
@@ -831,6 +834,115 @@ def test_finished_eager_store_respects_cpu_capacity() -> None:
 
     assert len(meta.store_gpu_blocks) == available
     assert len(meta.store_cpu_blocks) == available
+
+
+def _capped_store_blocks(sched: SimpleCPUOffloadScheduler) -> int:
+    values = sched.get_stats().data[_StatsKey.DATA]
+    return values.get(MetricName.CAPPED_STORE_BLOCKS, {}).get((), 0)
+
+
+def _new_eager_requests(
+    fix: SchedulerFixture, num_requests: int, num_blocks: int
+) -> tuple[list[Request], dict[str, tuple[list[int], ...]]]:
+    requests = [make_request(num_blocks=num_blocks) for _ in range(num_requests)]
+    new_reqs = {}
+    for request in requests:
+        kv_blocks = _alloc_and_register(fix, request, num_blocks=num_blocks)
+        fix.scheduler.update_state_after_alloc(
+            request, kv_blocks, num_external_tokens=0
+        )
+        new_reqs[request.request_id] = kv_blocks.get_block_ids()
+    return requests, new_reqs
+
+
+def test_eager_store_cap_skips_blocks_past_the_cap() -> None:
+    """Past max_pending_store_blocks, eager candidates are skipped, not queued:
+    no CPU block, no GPU pin, and the cursor moves on so they are not retried.
+    """
+    fix = make_scheduler(
+        num_cpu_blocks=8, num_gpu_blocks=16, max_pending_store_blocks=3
+    )
+    sched = fix.scheduler
+    requests, new_reqs = _new_eager_requests(fix, num_requests=2, num_blocks=2)
+    capped_req_id = requests[1].request_id
+    capped_gpu_block = new_reqs[capped_req_id][0][1]
+    free_cpu_blocks = get_cpu_free_blocks(sched)
+
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_id: 2 * BLOCK_SIZE for req_id in new_reqs}, new_reqs=new_reqs
+        )
+    )
+
+    assert len(meta.store_gpu_blocks) == 3
+    assert capped_gpu_block not in meta.store_gpu_blocks
+    assert fix.gpu_block_pool.blocks[capped_gpu_block].ref_cnt == 1
+    assert get_cpu_free_blocks(sched) == free_cpu_blocks - 3
+    assert sched._reqs_to_store[capped_req_id].num_stored_blocks == [2]
+    assert _capped_store_blocks(sched) == 1
+
+    # The cap spans steps: nothing new starts while it is full.
+    late_requests, late_new_reqs = _new_eager_requests(fix, 1, num_blocks=1)
+    late_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {late_requests[0].request_id: BLOCK_SIZE}, new_reqs=late_new_reqs
+        )
+    )
+    assert late_meta.store_event == -1
+
+    # Completion frees the budget; the skipped block is not retried.
+    simulate_store_completion(sched, meta.store_event)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {capped_req_id: 1}, cached_req_new_blocks={capped_req_id: None}
+        )
+    )
+    assert meta.store_event == -1
+    next_requests, next_new_reqs = _new_eager_requests(fix, 1, num_blocks=1)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {next_requests[0].request_id: BLOCK_SIZE}, new_reqs=next_new_reqs
+        )
+    )
+    assert len(meta.store_gpu_blocks) == 1
+
+
+def test_finished_eager_store_respects_store_cap() -> None:
+    """A finished request drops blocks past the cap instead of queueing them."""
+    fix = make_scheduler(
+        num_cpu_blocks=8, num_gpu_blocks=16, max_pending_store_blocks=2
+    )
+    sched = fix.scheduler
+    request = make_request(num_blocks=3)
+    kv_blocks = _alloc_and_register(fix, request, num_blocks=3)
+    sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)
+
+    sched.request_finished_all_groups(request, kv_blocks.get_block_ids())
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+
+    assert len(meta.store_gpu_blocks) == 2
+    assert _capped_store_blocks(sched) == 1
+
+
+def test_lazy_store_cap_defers_to_a_later_step() -> None:
+    """Lazy mode leaves blocks past the cap in the free queue for a later step."""
+    fix = make_scheduler(
+        num_cpu_blocks=8, num_gpu_blocks=8, lazy=True, max_pending_store_blocks=1
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    req = make_request(num_blocks=2)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, num_blocks=2))
+    _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(meta.store_gpu_blocks) == 1
+    assert sched.build_connector_meta(make_scheduler_output({})).store_event == -1
+
+    simulate_store_completion(sched, meta.store_event)
+    meta2 = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(meta2.store_gpu_blocks) == 1
+    assert meta2.store_gpu_blocks != meta.store_gpu_blocks
 
 
 def test_reset_releases_unsubmitted_finished_stores() -> None:
@@ -3120,6 +3232,50 @@ def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
     assert mamba_blocks[1].block_id not in meta.store_gpu_blocks
     stats = sched.get_boundary_store_stats()
     assert stats.dropped_request_gone == 1
+    assert stats.stored == 0
+
+
+def test_boundary_handoff_dropped_at_store_cap() -> None:
+    """A boundary hand-off past max_pending_store_blocks is dropped and counted
+    as its own outcome, without a CPU block or GPU pin."""
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=16, num_gpu_blocks=24, block_size=block_size
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    # One block already in flight fills the cap.
+    sched.max_pending_store_blocks = 1
+    sched._store_event_to_blocks[999] = TransferMeta([0], [0])
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    attn_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(2)
+    mamba_blocks[1].set_block_hash(
+        make_block_hash_with_group_id(req.block_hashes[1], 1)
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attn_blocks, mamba_blocks))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    output = make_scheduler_output(
+        {req.request_id: 2 * block_size},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
+        boundary_state_offloads={
+            req.request_id: [(1, mamba_blocks[1].block_id, 2 * block_size)]
+        },
+    )
+
+    meta = sched.build_connector_meta(output)
+
+    assert meta.store_event == -1
+    assert mamba_blocks[1].ref_cnt == 1
+    stats = sched.get_boundary_store_stats()
+    assert stats.dropped_store_cap == 1
     assert stats.stored == 0
 
 
