@@ -469,12 +469,9 @@ class DeepSeekV4MTP(nn.Module):
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
-    def finalize_mega_moe_weights(self) -> None:
+    def process_weights_after_loading(self) -> None:
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
-
-    def process_weights_after_loading(self) -> None:
-        self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

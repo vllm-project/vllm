@@ -63,3 +63,7 @@ def test_vl_wrapper_delegates_finalization_to_hook(module, cls_name) -> None:
     model.process_weights_after_loading()
 
     assert model.language_model.finalized_values == [(1.0, 3.0)]
+
+    # A reload reruns the hook: no one-shot guard may skip it.
+    model.process_weights_after_loading()
+    assert model.language_model.finalized_values == [(1.0, 3.0)] * 2

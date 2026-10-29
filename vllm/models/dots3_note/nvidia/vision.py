@@ -230,9 +230,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        # Reruns on every weight reload: rebuild the fused FP8 experts from the
-        # freshly loaded checkpoint experts, refilling the fused buffers in
-        # place (captured CUDA graphs keep the startup addresses).
+        # Reruns on every reload: refill the fused FP8 buffers in place
+        # (captured CUDA graphs keep the startup addresses).
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -253,11 +252,10 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             ("_fused_w2_fp8", w2_weights),
             ("_fused_w2_scale", w2_scales),
         ):
-            fused = torch.stack(parts).contiguous()
             if name in self._buffers:
-                self._buffers[name].copy_(fused)
+                torch.stack(parts, out=self._buffers[name])
             else:
-                self.register_buffer(name, fused, persistent=False)
+                self.register_buffer(name, torch.stack(parts), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -545,9 +543,8 @@ class DotsMoEVitModel(PreTrainedModel):
             self.compile_block_modules()
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
-        # Module.compile compiles in place: parameter names stay those of the
-        # checkpoint (no ``_orig_mod``), so weight reloads still find them.
-        # Post-load processing reruns on every reload; compile once.
+        # In-place compile keeps checkpoint parameter names (no ``_orig_mod``);
+        # post-load processing reruns on every reload, so compile once.
         if getattr(self, "_blocks_compiled", False):
             return
         for block in self.blocks:

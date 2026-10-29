@@ -45,7 +45,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -266,42 +265,24 @@ class Llama4VisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                self.q_size + 2 * self.kv_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            # q/k/v arrive as separate checkpoint tensors (possibly in
-            # different load_weights calls): write each into its rows.
-            for param in (self.qkv_proj.weight, self.qkv_proj.bias):
-                param.weight_loader = self._load_qkv_shard
-            self.o_proj = ReplicatedLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            self.o_proj = RowParallelLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                input_is_parallel=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.head_dim,
+            self.embed_dim,
+            bias=True,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+            disable_tp=use_data_parallel,
+        )
 
         rope_parameters = {
             "rope_type": "mllama4",
@@ -317,12 +298,6 @@ class Llama4VisionAttention(nn.Module):
             is_neox_style=False,
             dtype=torch.complex64,  # important
         )
-
-    def _load_qkv_shard(
-        self, param: torch.Tensor, loaded_weight: torch.Tensor, shard_id: str
-    ) -> None:
-        offset = {"q": 0, "k": self.q_size, "v": self.q_size + self.kv_size}[shard_id]
-        param.data.narrow(0, offset, loaded_weight.shape[0]).copy_(loaded_weight)
 
     def forward(
         self,
