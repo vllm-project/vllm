@@ -74,6 +74,7 @@ RESIDUAL_CUTE_CASES = [
 ]
 
 GLM_GPU_TABLES = (
+    ((10, 0), glm52_gemm.GLM52_PROJECTIONS_SM100),
     ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
     ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
 )
@@ -480,7 +481,7 @@ def test_glm52_projection_plans_are_separate() -> None:
     [
         ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
         ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
-        ((10, 0), None),
+        ((10, 0), glm52_gemm.GLM52_PROJECTIONS_SM100),
         ((9, 0), None),
     ],
 )
@@ -592,7 +593,7 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         root.attn.fused_qkv_a_proj.quant_method._plan
         == table[(qkv_a.n, qkv_a.k)].build_plan()
     )
-    assert root.attn.q_b_proj.quant_method._plan == q_b.build_plan()
+    assert root.attn.q_b_proj.quant_method._plan == table[(q_b.n, q_b.k)].build_plan()
     if (6144, 4096) in table:
         assert root.attn.o_proj.quant_method._plan == table[(6144, 4096)].build_plan()
     else:
