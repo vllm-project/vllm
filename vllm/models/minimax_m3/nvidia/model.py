@@ -180,6 +180,8 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
         and attn.head_dim == attn.idx_head_dim == 128
         and attn.rotary_emb.rotary_dim == 64
         and attn.hidden_size % 128 == 0
+        # It writes whole NVFP4 index pages from per-rank index-q heads.
+        and attn.index_k_shard == 1
     )
 
 

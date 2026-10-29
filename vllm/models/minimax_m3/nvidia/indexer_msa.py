@@ -85,7 +85,7 @@ PREFILL_FMHA_CHUNK_SIZE = 8192
 PREFILL_FMHA_SCRATCH_BYTES = 256 << 20
 SPIN_LIMIT = 1 << 26
 # Speculative methods whose drafter does not reuse the target's sparse layers.
-_SPEC_METHODS = (None, "eagle", "eagle3", "ngram", "suffix", "draft_model")
+_SPEC_METHODS = (None, "eagle", "eagle3", "ngram", "suffix", "draft_model", "dspark")
 _COMM: "IndexKShardComm | None" = None
 _COMM_FAILED = False
 _COMM_OWNER: weakref.ReferenceType | None = None
@@ -861,8 +861,17 @@ def _unsupported_reason(
         return "needs an SM100-family (Blackwell) GPU"
     if topk_blocks != 16:
         return f"needs the MSA indexer (topk_blocks=16, got {topk_blocks})"
-    if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
-        return f"needs indexer_kv_dtype='fp8' (got {indexer_kv_dtype!r})"
+    if indexer_kv_dtype not in ("fp8", "fp8_e4m3", "nvfp4"):
+        return f"needs indexer_kv_dtype 'fp8' or 'nvfp4' (got {indexer_kv_dtype!r})"
+    if indexer_kv_dtype == "nvfp4":
+        from vllm.models.minimax_m3.nvidia.indexer_nvfp4_decode_cp import (
+            SUPPORTED_TP_SIZES as DECODE_CP_TP_SIZES,
+        )
+
+        attention_config = vllm_config.attention_config
+        # Only the NVFP4 indexer runs decode CP, and only at these TP sizes.
+        if attention_config.indexer_decode_cp and tp in DECODE_CP_TP_SIZES:
+            return "indexer_decode_cp splits decode over a replicated index cache"
     if total_index_heads % tp:
         return f"{total_index_heads} index heads do not split over TP{tp}"
     if vllm_config.kv_transfer_config is not None:

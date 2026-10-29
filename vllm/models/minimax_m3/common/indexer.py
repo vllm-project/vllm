@@ -154,13 +154,15 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         kv_cache = kv_cache.squeeze(1)
         if self.tp_shard > 1:
-            # Packed [B, N, D / tp] page -> [B, N / tp, D] token rows; the
-            # fused insert kernel addresses rows flat, so blocks must be dense.
+            # Packed [B, N, D / tp] page -> [B, N / tp, D]: this rank's rows of
+            # each page (D is the per-token width, 72 B for NVFP4). FP8 rows
+            # are token rows the fused insert kernel addresses flat; an NVFP4
+            # shard page is planar, all codes and then all scales.
             num_blocks, block_size, content = kv_cache.shape
             rows = block_size // self.tp_shard
-            assert content * self.tp_shard == self.head_dim
+            assert content * self.tp_shard == self.head_size
             assert kv_cache.is_contiguous()
-            kv_cache = kv_cache.view(num_blocks, rows, self.head_dim)
+            kv_cache = kv_cache.view(num_blocks, rows, self.head_size)
         self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -168,7 +170,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         # a sharded cache budgets 1 / tp_shard of it per rank.
         content = None
         if self.tp_shard > 1:
-            content = self.head_dim * self.dtype.itemsize // self.tp_shard
+            content = self.head_size * self.dtype.itemsize // self.tp_shard
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -536,13 +538,15 @@ def select_indexer_impl_cls(
     *,
     topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType | str = "bf16",
+    index_k_shard: int = 1,
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
-    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only), or the MSA impl when
+    the index cache is TP-sharded. Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
     support.
     """
@@ -594,6 +598,20 @@ def select_indexer_impl_cls(
             raise NotImplementedError(
                 "indexer_kv_dtype='nvfp4' requires an SM100, SM103 or SM107 GPU."
             )
+        if index_k_shard > 1:
+            # Index-K CP lives in the MSA impl: sharded NVFP4 decode scoring and
+            # FP8 staging of the shard pages for prefill.
+            from vllm.models.minimax_m3.nvidia.indexer_msa import (
+                MiniMaxM3IndexerMSAImpl,
+            )
+
+            logger.info_once(
+                "MiniMax M3 indexer: selected MSA with an NVFP4 index cache "
+                "sharded over TP%d [topk_blocks=%d]",
+                index_k_shard,
+                topk_blocks,
+            )
+            return MiniMaxM3IndexerMSAImpl
         from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
             MiniMaxM3IndexerNvfp4Impl,
         )
@@ -666,6 +684,7 @@ class MiniMaxM3Indexer(nn.Module):
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
+            index_k_shard=index_k_shard,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,
