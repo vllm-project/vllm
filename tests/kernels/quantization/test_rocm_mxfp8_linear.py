@@ -36,6 +36,13 @@ V41_ATTN_SHAPES = [
     ("wo_b", 5120, 8192 // 4),
 ]
 
+M31_TP4_SHAPES = [
+    ("fused_qkv", 2560, 6144),
+    ("o_proj", 6144, 2048),
+    ("shared_gate_up", 1536, 6144),
+    ("shared_down", 6144, 768),
+]
+
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     weight_bf16 = torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.05
@@ -46,8 +53,46 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     return layer
 
 
-@pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize(
+    "n,k,selected,fallback",
+    [
+        (2560, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
+        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
+        (6144, 768, (16, 16, 256, 2, 3), (16, 32, 256, 4, 3)),
+    ],
+)
+def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
+    """The gfx950 small-M tuning is shape-scoped and ends after M=16."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("MiniMax-M3.1 small-M tuning requires gfx950")
+    for num_tokens in (1, 8, 16):
+        assert rocm_native._select_cfg(num_tokens, n, k) == selected
+    assert rocm_native._select_cfg(17, n, k) == fallback
+
+
+@pytest.mark.parametrize(
+    "n,k,fallback",
+    [
+        (2560, 6144, (16, 16, 1024, 2, 2)),
+        (1536, 6144, (16, 16, 1024, 2, 2)),
+        (6144, 768, (16, 32, 256, 4, 3)),
+    ],
+)
+def test_rocm_mxfp8_linear_preserves_non_gfx950_tiles(monkeypatch, n, k, fallback):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    for num_tokens in (1, 8, 16, 17):
+        assert rocm_native._select_cfg(num_tokens, n, k) == fallback
+
+
+@pytest.mark.parametrize(
+    "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
@@ -257,6 +302,63 @@ def test_rocm_mxfp8_block32_split_k_first_use_in_capture(packed):
     graph.replay()
     torch.accelerator.synchronize()
     assert _rel_err(out, expected) < 5e-3
+
+
+FUSED_QUANT_SHAPES = [(6144, 1024), (6144, 768), (6144, 384), (8192, 512), (4096, 640)]
+FUSED_QUANT_TOKENS = [1, 2, 3, 5, 8, 16]
+FUSED_QUANT_CASES = [
+    (n, k, m) for n, k in FUSED_QUANT_SHAPES for m in FUSED_QUANT_TOKENS
+] + [(6144, 2048, m) for m in (1, 2, 3, 4)]
+
+
+def _spy_launch(monkeypatch) -> list[bool]:
+    """Record, per ``_launch``, whether the activation quant ran in-kernel."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    fused: list[bool] = []
+    real_launch = rocm_native._launch
+
+    def spy(x, x_scale, *args, **kwargs):
+        fused.append(x_scale is None)
+        return real_launch(x, x_scale, *args, **kwargs)
+
+    monkeypatch.setattr(rocm_native, "_launch", spy)
+    return fused
+
+
+def _mxfp8_weight(n: int, k: int):
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.05
+    return _mxfp8_e4m3_quantize_torch(weight)
+
+
+@pytest.mark.parametrize("n,k,num_tokens", FUSED_QUANT_CASES, ids=lambda v: str(v))
+@torch.inference_mode()
+def test_rocm_mxfp8_fused_act_quant_bitwise_eq_unfused(monkeypatch, n, k, num_tokens):
+    """Small-M bf16 GEMMs quantize the activation in-kernel, bit-exact with
+    the unfused path: ``mxfp8_e4m3_quantize`` and the ``_select_cfg`` tile."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    torch.manual_seed(num_tokens)
+    w, w_scale = _mxfp8_weight(n, k)
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16)
+    x[0, :32] = 0.0  # an all-zero block clamps its scale byte to 0
+    if num_tokens > 1:
+        x[1] *= 3e6  # output beyond the fp16 range, which bf16 must keep
+
+    assert rocm_native._select_fused_quant_cfg(num_tokens, n, k) is not None
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = torch.empty((num_tokens, n), dtype=torch.bfloat16, device="cuda")
+    rocm_native._launch(
+        x_q, x_scale, w, w_scale, expected, *rocm_native._select_cfg(num_tokens, n, k)
+    )
+
+    fused = _spy_launch(monkeypatch)
+    out = rocm_native._mxfp8_dot_scaled_linear(x, w, w_scale)
+    assert fused == [True]
+    assert torch.isfinite(out).all()
+    assert torch.equal(out, expected), (
+        f"max abs diff {(out.float() - expected.float()).abs().max().item()}"
+    )
 
 
 @pytest.mark.parametrize("num_rows", [1, 64, 65])

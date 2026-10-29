@@ -207,6 +207,9 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/checkpoint/prepare` - Prepare for a process checkpoint (stops serving, needs `--enable-sleep-mode`)
+- `/checkpoint/restore` - Restore after a process checkpoint (needs `--enable-sleep-mode`)
+- `/checkpoint/status` - Check if the server is prepared for a checkpoint (needs `--enable-sleep-mode`)
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size

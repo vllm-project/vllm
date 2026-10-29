@@ -1087,11 +1087,13 @@ async def test_stream_error_preserves_message_and_closes_block(block_type):
     events = _parse_sse_events(
         [event async for event in converter.message_stream_converter(source())]
     )
+    # The ErrorResponse produced by create_error_response(ValueError) carries
+    # HTTP 400, and the SSE path reuses the non-streaming status->type mapping.
     assert events[-1] == (
         "error",
         {
             "type": "error",
-            "error": {"type": "internal_error", "message": "backend failed"},
+            "error": {"type": "invalid_request_error", "message": "backend failed"},
         },
     )
     assert not any(event_type == "message_stop" for event_type, _ in events)
@@ -1451,6 +1453,27 @@ class TestDetectMergeInlineSystem:
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    def test_tools_none_check_template_merges(self):
+        """OLMo 3-style ``tools | tojson`` on undefined tools falls back to merge."""
+        template = (
+            "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+
+    def test_tools_loop_template_no_merge(self):
+        """Hermes-style ``for tool in tools`` must not raise in the probe."""
+        template = (
+            "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
+    def test_non_template_error_defaults_merge(self):
+        """A non-TemplateError render failure must not abort startup."""
+        template = "{{ undefined_var | tojson }}"
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
 
     @pytest.mark.parametrize(
         ("resolved", "expected"),
@@ -1814,7 +1837,7 @@ class TestClientErrorResponses:
 
     def test_validation_error_returns_bad_request(self):
         """A pydantic ValidationError during Anthropic->OpenAI conversion is
-        surfaced as a 400 BadRequestError, not a 500."""
+        surfaced as a 400 invalid_request_error, not a 500."""
         handler = MagicMock(spec=AnthropicServingMessages)
         handler.create_messages.side_effect = self._conversion_error()
 
@@ -1825,7 +1848,7 @@ class TestClientErrorResponses:
         assert response.status_code == HTTPStatus.BAD_REQUEST
         body = response.json()
         assert body["type"] == "error"
-        assert body["error"]["type"] == "BadRequestError"
+        assert body["error"]["type"] == "invalid_request_error"
         assert "at most 4 items" in body["error"]["message"]
 
     def test_vllm_client_error_returns_bad_request(self):
@@ -1840,7 +1863,7 @@ class TestClientErrorResponses:
             response = client.post("/v1/messages", json=self._request_body())
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
-        assert response.json()["error"]["type"] == "BadRequestError"
+        assert response.json()["error"]["type"] == "invalid_request_error"
 
     def test_generic_error_still_returns_internal_server_error(self):
         """Non-client errors keep the existing 500 behaviour."""
@@ -1852,7 +1875,7 @@ class TestClientErrorResponses:
             response = client.post("/v1/messages", json=self._request_body())
 
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        assert response.json()["error"]["type"] == "InternalServerError"
+        assert response.json()["error"]["type"] == "api_error"
 
     def test_count_tokens_validation_error_returns_bad_request(self):
         """The count_tokens route maps conversion errors to 400 as well."""
@@ -1866,7 +1889,7 @@ class TestClientErrorResponses:
             )
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
-        assert response.json()["error"]["type"] == "BadRequestError"
+        assert response.json()["error"]["type"] == "invalid_request_error"
 
 
 # ======================================================================
