@@ -3252,6 +3252,61 @@ async fn non_stream_chat_returns_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_return_prompt_text_reports_the_rendered_prompt() {
+    for stream in [false, true] {
+        let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            |_| {},
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "return_prompt_text": true,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+
+        let prompt_texts = if stream {
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            sse_json_payloads(&text)
+                .into_iter()
+                .map(|chunk| chunk.get("prompt_text").cloned())
+                .collect::<Vec<_>>()
+        } else {
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+            vec![json.get("prompt_text").cloned()]
+        };
+        // Streaming sends it on the first chunk only.
+        let (first, rest) = prompt_texts.split_first().expect("response");
+        assert_eq!(
+            first,
+            &Some(json!("user: hello\nassistant:")),
+            "stream={stream}"
+        );
+        assert!(
+            rest.iter().all(Option::is_none),
+            "stream={stream}: {prompt_texts:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
     for endpoint in ["/v1/chat/completions", "/v1/completions"] {
         for stream in [false, true] {
@@ -3406,6 +3461,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": false,
+                        "return_prompt_text": true,
                         "messages": [{
                             "role": "user",
                             "content": [
@@ -3433,6 +3489,11 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json["object"], "chat.completion");
+    // The rendered prompt, before the image placeholder is expanded.
+    assert_eq!(
+        json["prompt_text"],
+        json!("user: describe <|image_pad|>\nassistant:")
+    );
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
 

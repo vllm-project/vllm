@@ -170,11 +170,12 @@ async fn render_chat(
         chat_request.sampling_params.max_tokens,
         state.text.max_model_len(),
     )?;
-    let (text_request, _) = state
+    let text_request = state
         .chat
         .prepare(chat_request, &state.text)
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
+        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .text_request;
     Ok(Json(lower_render_request(
         &state,
         text_request,

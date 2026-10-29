@@ -221,7 +221,13 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
+    /// Render one request into a text request, also returning the rendered
+    /// prompt text when the request asked for it and the renderer produced
+    /// text.
+    async fn prepare_text_request(
+        &self,
+        mut request: ChatRequest,
+    ) -> Result<(TextRequest, Option<String>)> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         if self.exclude_tools_when_tool_choice_none {
@@ -234,8 +240,11 @@ impl ChatRequestProcessor {
         .await
         .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
         let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
+        // Taken before media placeholders are expanded, like Python.
+        let prompt_text =
+            request.return_prompt_text.then(|| rendered.prompt.as_text().cloned()).flatten();
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
-        Ok(TextRequest {
+        let text_request = TextRequest {
             request_id: request.request_id,
             prompt,
             mm_features,
@@ -255,14 +264,16 @@ impl ChatRequestProcessor {
             reasoning_ended: None,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
-        })
+        };
+        Ok((text_request, prompt_text))
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
     pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
-        self.prepare_text_request(request).await
+        let (text_request, _) = self.prepare_text_request(request).await?;
+        Ok(text_request)
     }
 
     /// Prepare one chat request without submitting it to an engine.
@@ -275,7 +286,7 @@ impl ChatRequestProcessor {
         &self,
         mut request: ChatRequest,
         text_processor: &TextRequestProcessor,
-    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+    ) -> Result<PreparedChatRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
@@ -287,7 +298,7 @@ impl ChatRequestProcessor {
                 tool_strict_level: self.tool_strict_level,
             },
         )?;
-        let mut text_request = self.prepare_text_request(request).await?;
+        let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.
@@ -311,8 +322,23 @@ impl ChatRequestProcessor {
             }
         }
 
-        Ok((text_request, output_processor))
+        Ok(PreparedChatRequest {
+            text_request,
+            output_processor,
+            prompt_text,
+        })
     }
+}
+
+/// One chat request rendered, tokenized, and ready for submission.
+pub struct PreparedChatRequest {
+    /// The tokenized text request, with any output grammar applied.
+    pub text_request: TextRequest,
+    /// Request-scoped processor for the decoded output.
+    pub output_processor: DynChatOutputProcessor,
+    /// The rendered prompt text, when the request asked for it and the
+    /// renderer produced text.
+    pub prompt_text: Option<String>,
 }
 
 /// Structured chat facade above [`TextLlm`].
@@ -446,14 +472,17 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let (text_request, output_processor) =
-            self.processor.prepare(request, self.text.request_processor()).await?;
+        let PreparedChatRequest {
+            text_request,
+            output_processor,
+            prompt_text,
+        } = self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream))
+        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
