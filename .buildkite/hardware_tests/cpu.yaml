@@ -123,7 +123,12 @@ steps:
   - vllm/_custom_ops.py
   - vllm/compilation/decorators.py
   - vllm/compilation/caching.py
+  - vllm/env_override.py
+  - vllm/model_executor/utils.py
   - vllm/v1/worker/cpu_worker.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/cpu/model_runner.py
+  - vllm/v1/worker/gpu/model_runner.py
   - vllm/platforms/cpu.py
   - vllm/distributed/device_communicators/cpu_communicator.py
   - vllm/distributed/device_communicators/base_device_communicator.py
@@ -134,6 +139,11 @@ steps:
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - vllm/model_executor/layers/fused_moe/routed_experts.py
   - vllm/model_executor/layers/fused_moe/layer.py
+  - vllm/model_executor/layers/fused_moe/config.py
+  - vllm/model_executor/layers/fused_moe/oracle/fp8.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/modelopt.py
   - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
   - vllm/model_executor/layers/fused_moe/runner/*.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
@@ -148,6 +158,9 @@ steps:
   - tests/utils.py
   - tests/models/utils.py
   - tests/compile/test_aot_compile.py
+  - tests/compile/test_inductor_operator_str_patch.py
+  - tests/model_executor/test_utils.py
+  - tests/kernels/moe/test_moe_weight_loading_padded.py
   - tests/v1/e2e/general/accuracy_utils.py
   commands:
     - >-
@@ -164,7 +177,12 @@ steps:
       tests/kernels/moe/test_cpu_fused_moe.py::test_cpu_fused_moe_input_weighting_preserves_router_weights
       tests/kernels/moe/test_cpu_fused_moe.py::test_cpu_vec_fused_moe_shape_support
       tests/compile/test_aot_compile.py::test_inductor_aot_roundtrip
-      tests/v1/distributed/test_internal_lb_dp.py::test_cpu_ep_internal_lb_matches_reference_after_idle"
+      tests/v1/distributed/test_internal_lb_dp.py::test_cpu_ep_internal_lb_matches_reference_after_idle
+      tests/compile/test_inductor_operator_str_patch.py
+      tests/model_executor/test_utils.py
+      tests/kernels/moe/test_moe_weight_loading_padded.py::TestLoadWeightsExpertBias
+      tests/kernels/moe/test_moe_weight_loading_padded.py::TestLoadWeightsExpertMapping
+      tests/kernels/moe/test_moe_weight_loading_padded.py::TestPerTensorScaleCoercion"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
