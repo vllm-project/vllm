@@ -2,51 +2,52 @@ group: Disaggregated Mooncake
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (B200) [Nightly] Distributed MooncakeConnector PD accuracy"
-  key: distributed-mooncakeconnector-pd-accuracy-4-gpus
-  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
-  optional: true
-  timeout_in_minutes: 15
-  working_dir: "/vllm-workspace/tests"
-  # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
-  # transfers: its pods are the only ones granted IPC_LOCK, which RDMA needs to
-  # pin memory, and the only ones using host networking. Elsewhere topology
-  # discovery finds no usable HCA and the tcp fallback then advertises the
-  # docker bridge address, so every transfer fails to connect.
-  device: b200-k8s
-  num_devices: 4
-  source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
-    - tests/v1/kv_connector/mooncake_integration/
-  commands:
-    - INSTALL_MOONCAKE_COMPRESSION=1 bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-    - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
-    - MOONCAKE_COMPRESSION_CONFIG='{"enable-compression-pipeline":true,"pipeline":["codec"],"logical_blocks_per_chunk":8}' PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1 bash v1/kv_connector/mooncake_integration/run_accuracy_test.sh --attention-backend FLASH_ATTN
-  mirror:
-    amd:
-      label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
-      optional: true
-      dind: false
-      device: mi355_4
-      num_devices: 4
-      timeout_in_minutes: 30
-      working_dir: "/vllm-workspace/tests"
-      depends_on:
-        - image-build-amd
-      source_file_dependencies:
-        - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
-        - tests/v1/kv_connector/mooncake_integration/
-        - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
-        - tests/utils.py
-        - examples/disaggregated/mooncake_connector/
-        - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-        - vllm/platforms/rocm.py
-        - requirements/common.txt
-        - requirements/kv_connectors_rocm.txt
-      commands:
-        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-        # Same full accuracy/TP sweep, using same-host HIP GPU transport.
-        - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
+# Disabled until the KV connectors installation is locked.
+# - label: ":nvidia: (B200) [Nightly] Distributed MooncakeConnector PD accuracy"
+#   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
+#   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+#   optional: true
+#   timeout_in_minutes: 15
+#   working_dir: "/vllm-workspace/tests"
+#   # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
+#   # transfers: its pods are the only ones granted IPC_LOCK, which RDMA needs to
+#   # pin memory, and the only ones using host networking. Elsewhere topology
+#   # discovery finds no usable HCA and the tcp fallback then advertises the
+#   # docker bridge address, so every transfer fails to connect.
+#   device: b200-k8s
+#   num_devices: 4
+#   source_file_dependencies:
+#     - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+#     - tests/v1/kv_connector/mooncake_integration/
+#   commands:
+#     - INSTALL_MOONCAKE_COMPRESSION=1 bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
+#     - MOONCAKE_COMPRESSION_CONFIG='{"enable-compression-pipeline":true,"pipeline":["codec"],"logical_blocks_per_chunk":8}' PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1 bash v1/kv_connector/mooncake_integration/run_accuracy_test.sh --attention-backend FLASH_ATTN
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
+#       optional: true
+#       dind: false
+#       device: mi355_4
+#       num_devices: 4
+#       timeout_in_minutes: 30
+#       working_dir: "/vllm-workspace/tests"
+#       depends_on:
+#         - image-build-amd
+#       source_file_dependencies:
+#         - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+#         - tests/v1/kv_connector/mooncake_integration/
+#         - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+#         - tests/utils.py
+#         - examples/disaggregated/mooncake_connector/
+#         - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+#         - vllm/platforms/rocm.py
+#         - requirements/common.txt
+#         - requirements/kv_connectors_rocm.txt
+#       commands:
+#         - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+#         # Same full accuracy/TP sweep, using same-host HIP GPU transport.
+#         - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
 
 - label: ":nvidia: (L4) Mooncake EC TCP E2E"
   key: mooncake-ec-tcp-e2e-2-gpus

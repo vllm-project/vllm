@@ -24,6 +24,9 @@ sm_90+.
 
 import torch
 
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
+
 
 def fused_mla_key_concat_kv_cache_insert(
     q: torch.Tensor,  # [Tp, H, qk_head_dim], RoPE is applied in place
@@ -210,6 +213,29 @@ def fused_mla_kv_concat_quant_fp8(
             k_nope, k_pe, v, k_fp8, v_fp8
         )
     return k_fp8, v_fp8
+
+
+def fused_mla_kv_pack_quant_fp8(
+    kv_nope: torch.Tensor,  # [T, H, nope + v] bf16/fp16, the kv_b_proj output
+    k_pe: torch.Tensor,  # [T, rope] or [T, 1, rope], kv_nope's dtype or fp8
+    *,
+    nope_dim: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """fp8 ``(k, v)`` context pack; FlashInfer's kernel for bf16 on SM10x."""
+    if (
+        kv_nope.dtype == torch.bfloat16
+        and k_pe.dtype == torch.bfloat16
+        and kv_nope.is_contiguous()
+        and current_platform.is_device_capability_family(100)
+        and has_flashinfer_concat_mla_kv_quant_fp8()
+    ):
+        from flashinfer import concat_mla_kv_quant_fp8
+
+        return concat_mla_kv_quant_fp8(
+            kv_nope, k_pe.reshape(k_pe.shape[0], k_pe.shape[-1]), nope_dim=nope_dim
+        )
+    k_nope, v = kv_nope.split((nope_dim, kv_nope.shape[-1] - nope_dim), dim=-1)
+    return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
 
 
 def fused_mla_decode_q_concat_kv_cache_insert(

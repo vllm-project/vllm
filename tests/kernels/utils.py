@@ -170,6 +170,11 @@ def torch_experts(
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
     activation: MoEActivation = MoEActivation.SILU,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
+    swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
@@ -214,6 +219,21 @@ def torch_experts(
     f32 = torch.float32
 
     act = op_registry[activation.custom_op_name]
+    if activation == MoEActivation.SITU and activation_situ_beta is not None:
+        act_kwargs = {
+            "beta": activation_situ_beta,
+            "linear_beta": activation_situ_linear_beta,
+        }
+    elif (
+        activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE and swiglu_limit is not None
+    ):
+        act_kwargs = {
+            "swiglu_limit": swiglu_limit,
+            "alpha": swiglu_alpha,
+            "beta": swiglu_beta,
+        }
+    else:
+        act_kwargs = {}
 
     for i in range(num_experts):
         mask = topk_ids == i
@@ -222,7 +242,7 @@ def torch_experts(
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = act()(tmp1)
+                tmp2 = act(**act_kwargs)(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
@@ -271,7 +291,7 @@ def torch_experts(
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
 
-                tmp2 = act()(tmp1).to(out.dtype)
+                tmp2 = act(**act_kwargs)(tmp1).to(out.dtype)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape

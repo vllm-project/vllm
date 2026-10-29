@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,6 +18,8 @@ const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_
 
 #[derive(Debug, Error, Macro)]
 pub(crate) enum LoraPathAccessError {
+    #[error("No adapter found for {lora_path}")]
+    NotFound { lora_path: String },
     #[error("{message}")]
     InvalidPath { message: String },
     #[error("{message}")]
@@ -60,9 +63,12 @@ fn validate_lora_path_access(
         ));
     }
 
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|_| invalid_path!("Local LoRA adapter path must exist and be accessible."))?;
+    let canonical_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => LoraPathAccessError::NotFound {
+            lora_path: lora_path.to_string(),
+        },
+        _ => invalid_path!("Local LoRA adapter path must exist and be accessible."),
+    })?;
     let canonical_prefixes = allowed_prefixes
         .iter()
         .map(|prefix| {
@@ -105,7 +111,6 @@ impl LoadedLora {
             lora_int_id: self.lora_int_id,
             lora_path: self.lora_path.clone(),
             base_model_name: self.base_model_name.clone(),
-            tensorizer_config_dict: None,
             load_inplace: false,
             is_3d_lora_weight: self.is_3d_lora_weight,
         }
@@ -348,7 +353,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::validate_lora_path_access;
+    use super::{LoraPathAccessError, validate_lora_path_access};
 
     fn temp_lora_dir(test_name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -413,6 +418,25 @@ mod tests {
                     .to_str()
                     .expect("utf-8 temp path")
             )
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Python answers a missing adapter with 404 `NotFoundError`, so the
+    /// guard reports a missing path apart from an inaccessible one.
+    #[test]
+    fn lora_path_reports_missing_paths_as_not_found() {
+        let root = temp_lora_dir("missing-path");
+        let missing = root.join("missing-adapter");
+
+        let prefixes = [root.clone()];
+        let error =
+            validate_lora_path_access(missing.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect_err("missing adapter path should be rejected");
+        assert!(
+            matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap()),
+            "{error:?}"
         );
 
         fs::remove_dir_all(root).ok();
