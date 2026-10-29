@@ -113,7 +113,23 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Output ""
 Write-Output "=== Verification ==="
-schtasks /query /tn "$TaskName" /fo LIST | Select-String -Pattern 'TaskName|Status|Next Run|Task To Run|Schedule Type|Repeat'
+# Get-ScheduledTask rather than parsing 'schtasks /query /fo LIST': that output is
+# localised ('Nom de la tache', 'Statut'...) and Select-String on English labels
+# silently matches nothing on a French host - a verification that sees nothing.
+$t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if (-not $t) {
+    Write-Output "  task                 : NOT FOUND after create - investigate"
+    exit 1
+}
+$info = Get-ScheduledTaskInfo -TaskName $TaskName
+Write-Output "  task                 : $($t.TaskName)"
+Write-Output "  state                : $($t.State)"
+Write-Output "  action               : $($t.Actions[0].Execute) $($t.Actions[0].Arguments)"
+Write-Output "  principal            : $($t.Principal.UserId) | LogonType=$($t.Principal.LogonType) | RunLevel=$($t.Principal.RunLevel)"
+Write-Output "  next run             : $($info.NextRunTime)"
 
 Write-Output ""
 Write-Output "DONE - task '$TaskName' registered (user-level, /IT, no elevation)."
+Write-Output "Run it once by hand to prove it end-to-end:"
+Write-Output "  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Output "  Get-Content 'D:\Production\Embeddings\logs\liveness-guard.jsonl' -Tail 1"
