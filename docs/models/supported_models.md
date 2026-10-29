@@ -391,6 +391,8 @@ th {
 | `DeepseekV3ForCausalLM` | DeepSeek-V3 | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV32ForCausalLM` | DeepSeek-V3.2 | `deepseek-ai/DeepSeek-V3.2`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV4ForCausalLM` | DeepSeek-V4 | `deepseek-ai/DeepSeek-V4-Flash`, `deepseek-ai/DeepSeek-V4-Pro`, etc. | | ✅︎ |
+| `DomynEdgeForCausalLM` | Domyn Edge | `domyn/Domyn-Edge-Base`, `domyn/Domyn-Edge-SFT`, etc. | | |
+| `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
 | `DotsOCRForCausalLM` | dots_ocr | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
@@ -400,6 +402,7 @@ th {
 | `FalconForCausalLM` | Falcon | `tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc. | | ✅︎ |
 | `FalconMambaForCausalLM` | FalconMamba | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc. | | ✅︎ |
 | `FalconH1ForCausalLM` | Falcon-H1 | `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc. | ✅︎ | ✅︎ |
+| `FlintForCausalLM` | Flint | `RecursiveSI/flint`, `RecursiveSI/flint-nvfp4-gguf` (GGUF) | | ✅︎ |
 | `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `Gemma2ForCausalLM` | Gemma 2 | `google/gemma-2-9b`, `google/gemma-2-27b`, etc. | ✅︎ | ✅︎ |
 | `Gemma3ForCausalLM` | Gemma 3 | `google/gemma-3-1b-it`, etc. | ✅︎ | ✅︎ |
@@ -578,8 +581,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `InternVLChatModel` | InternVL 3.5, InternVL 3.0, InternVideo 2.5, InternVL 2.5, InternVL 2.0 | T + I<sup>E+</sup> + (V<sup>E+</sup>) | `OpenGVLab/InternVL3_5-14B`, `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/InternVL2-4B`, etc. | ✅︎ | ✅︎ |
 | `InternVLForConditionalGeneration` | InternVL 3.0 (HF format) | T + I<sup>E+</sup> + V<sup>E+</sup> | `OpenGVLab/InternVL3-1B-hf`, etc. | ✅︎ | ✅︎ |
 | `KananaVForConditionalGeneration` | Kanana-V | T + I<sup>+</sup> | `kakaocorp/kanana-1.5-v-3b-instruct`, etc. | | ✅︎ |
-| `KeyeForConditionalGeneration` | Keye-VL-8B-Preview | T + I<sup>E+</sup> + V<sup>E+</sup> | `Kwai-Keye/Keye-VL-8B-Preview` | ✅︎ | ✅︎ |
-| `KeyeVL1_5ForConditionalGeneration` | Keye-VL-1_5-8B | T + I<sup>E+</sup> + V<sup>E+</sup> | `Kwai-Keye/Keye-VL-1_5-8B` | ✅︎ | ✅︎ |
 | `KimiAudioForConditionalGeneration` | Kimi-Audio | T + A<sup>+</sup> | `moonshotai/Kimi-Audio-7B-Instruct` | | ✅︎ |
 | `KimiK25ForConditionalGeneration` | Kimi-K2.5 | T + I<sup>+</sup> | `moonshotai/Kimi-K2.5` | | ✅︎ |
 | `KimiK3ForConditionalGeneration` | Kimi-K3 | T + I<sup>+</sup> | `moonshotai/Kimi-K3` | | ✅︎ |
@@ -606,6 +607,8 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | T + A | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
+| `MuseSparkForConditionalGeneration` | Muse Spark Open | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`, etc. | ✅︎ | ✅︎ |
+| `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | T + A | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
 | `RadioMBartPrefixForCausalLM` | Nemotron Parse 3.5 | T + I | `nvidia/Nemotron-3.5-Parse` | | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
@@ -741,11 +744,25 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
+| `MingV3ASRForConditionalGeneration` | Ming-3.0-ASR | `inclusionAI/Ming-3.0-asr-tiny` | | |
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
+| `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
+
+!!! note
+    `Nemotron3_5TranscribeForConditionalGeneration` transcribes with speaker tags. Its chat template turns
+    thinking on by default, so transcription servers should set
+    `--default-chat-template-kwargs '{"enable_thinking": false}'`. It supports MTP and DFlash2 speculative
+    decoding.
+
+    Long audio: by default vLLM refuses audio longer than 600 s and transcription uploads larger than 25 MB
+    (`VLLM_MAX_AUDIO_DECODE_DURATION_S`, `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`). A chat request takes one clip of
+    up to one hour, the model's training limit (`--limit-mm-per-prompt '{"audio": {"length": <samples>}}'`
+    changes it), and `/v1/audio/transcriptions` splits longer audio into pieces of at most one hour, shorter
+    when `--max-model-len` is below 65,536.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
