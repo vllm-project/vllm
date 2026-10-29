@@ -4495,3 +4495,63 @@ Preuve : [roo-extensions#4434 c.6504596191](https://github.com/jsboige/roo-exten
 **Note de sécurité (non-alerte)** : 10 × 401 en 2 s à 15:18:41-42Z depuis `176.172.94.128`, clé `Bearer 7bbea5bbba71…` inconnue, **0 succès**. L'IP est celle historiquement attribuée à Jamin, mais l'attribution par IP seule est SUPPOSÉE et l'absence de tout 200 ne franchit pas le critère d'alerte. Consigné, pas escaladé.
 
 **Fuseau** : cycle horodaté en `Z` depuis `date -u`, pas depuis `Get-Date -Format u`.
+
+---
+
+## 29/10 19:3xZ — RÉTRACTATION d'une mesure maison + télémétrie GPU aveugle depuis 118 jours
+
+### 1. La mesure « −23 % pendant le test GPU-2 » est RETIRÉE
+
+Maintenance a objecté : « une ligne/60 s donne ~99 points sur 16:00–17:39 et 9 sur 17:39–17:48, pas
+685/60 ». **L'objection est exacte.** Mon agrégation bucketait sur la regex `\[(\d\d):(\d\d):(\d\d)Z\]`
+du flux **stdout** — or ce flux **ne porte pas de date**, et le conteneur a connu **9 démarrages**
+(9 bannières). Les fenêtres « AVANT n=778 / PENDANT n=685 / APRÈS n=60 » empilaient donc ~9 boots
+sur plusieurs jours. **Aucune de ces trois valeurs n'était un échantillon d'une seule journée.**
+
+**Source correcte** : `/out/wedge_telemetry.jsonl`, champ `ts` en epoch. Ré-analyse bornée à
+2026-10-29, fenêtres explicites :
+
+| Bras | n | durée | run moy | gen moy | gen méd | prefill moy | KV max |
+|---|---|---|---|---|---|---|---|
+| AVANT 16:00–17:39 | **94** | 97,1 min | 1,2 | 42,9 | 33,6 | 3 020 | 56,2 % |
+| PENDANT 17:39–17:48 | **9** | 8,4 min | 1,8 | **66,2** | **61,2** | 412 | 21,5 % |
+| APRÈS 17:48–18:40 | **48** | 49,4 min | 1,2 | 44,5 | 40,2 | 6 225 | 37,4 % |
+
+Les `n` tombent exactement sur 1 ligne/60 s ⇒ **le découpage est juste cette fois**. La médiane de
+décodage **pendant** (61,2) est **plus haute** qu'avant (33,6) et qu'après (40,2) — mais **cela ne
+prouve pas l'absence d'impact non plus** : les bras ne sont pas comparables (`run` 1,8 vs 1,2 ;
+prefill 412 vs 3 020/6 225), le différentiel est un effet de **mélange de trafic**, pas une mesure
+de contention. **Verdict : NON MESURÉ — ni établi, ni exclu.** Annoncer « aucune dégradation »
+serait la même faute que d'annoncer « −23 % » : une conclusion causale sur des bras non appariés.
+(Formulation corrigée après objection de maintenance-a9, qui a demandé la symétrie.)
+
+### 2. Pourquoi je ne pouvais PAS témoigner du test GPU-2 — et c'est un bug de 118 jours
+
+`wedge_telemetry.py` appelle `nvidia-smi` via `subprocess.run`, avec un `except Exception: return []`
+qui avale tout. **`nvidia-smi` est ABSENT de l'image du conteneur**, et le conteneur n'a
+**aucun accès GPU** (`HostConfig.DeviceRequests = null`, pas de `/dev/nvidia*`).
+
+| Fait | Valeur |
+|---|---|
+| Dernier point avec données `gpu` | **2026-07-03 03:21:17Z** (index 313) |
+| Premier point sans | 2026-07-03 03:22:15Z |
+| Points sans données GPU depuis | **164 325** sur **2 847 h = 118 jours** |
+| `/app/wedge_telemetry.py` mtime | **2026-07-03 03:17** — 5 min avant la rupture |
+
+Conséquences : la signature `gpu_lowpower_pegged` (GPU ≥ 90 % à basse puissance — l'indicateur conçu
+pour l'investigation de régression de débit) est **`False` par construction depuis le 3 juillet** ;
+et la télémétrie **ne peut structurellement pas** voir un test sur GPU 2. Le wedge n'est pas
+affecté (autorité = le compteur du watchdog v6.2, pas ce fichier), mais **toute preuve GPU par ce
+canal est nulle**. Correctif = recréer le conteneur avec accès GPU (et/ou `pynvml`) **et** retirer
+l'`except` silencieux. **Non appliqué** : touche un conteneur prod, hors mandat de surveillance.
+
+### 3. Ce qu'il faudrait pour mesurer réellement (protocole, non lancé)
+
+1. **Témoin horodaté du test GPU-2** : le lanceur CoursIA-2 écrit `date -u` + `nvidia-smi
+   --query-gpu=index,utilization.gpu,power.draw` en début et fin de passe, dans un fichier daté.
+   Sans ce témoin, la fenêtre est **supposée** — c'était le cas ici.
+2. **Sondes appariées** : scrapes `:5002/metrics` encadrant **chaque** bras, pas seulement T−2 et
+   Tfin+2 (qui mélangent témoin + charge + après).
+3. **TTFT** : seule une sonde active le donne. `time_to_first_token_seconds` est **cumulatif depuis
+   le boot** ⇒ **non reconstructible** par fenêtre. Le proxy `gen_rate`/`prompt_rate` du jsonl est
+   un **débit**, pas une latence.
