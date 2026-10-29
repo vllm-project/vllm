@@ -14,7 +14,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import round_down, round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -28,6 +28,10 @@ def _compute_bytes(shape: tuple[int, ...], dtype: torch.dtype) -> int:
 # Constants
 _MB = 1024**2
 _GiB = 1024**3
+# Every view starts at a multiple of this, the alignment cudaMalloc guarantees,
+# so kernels see the same alignment as on a standalone allocation. Head views
+# also end on it, so a retained span aligned down to it never overlaps them.
+_VIEW_ALIGNMENT = 256
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
@@ -196,7 +200,7 @@ class WorkspaceManager:
 
         """
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
-        aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
+        aligned_bytes = [round_up(actual, _VIEW_ALIGNMENT) for actual in actual_bytes]
         total_bytes = sum(aligned_bytes)
 
         # Calculate cumulative offsets using itertools.accumulate
@@ -240,7 +244,7 @@ class WorkspaceManager:
         num_bytes = _compute_bytes(shape, dtype)
         workspace_id = self._get_workspace_id()
         current_workspace = self._ensure_workspace_size(num_bytes)
-        start = (current_workspace.numel() - num_bytes) // 256 * 256
+        start = round_down(current_workspace.numel() - num_bytes, _VIEW_ALIGNMENT)
         intact = self._retained[workspace_id] == (key, start)
         self._retained[workspace_id] = (key, start)
         view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
