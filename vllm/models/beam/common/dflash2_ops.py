@@ -31,9 +31,9 @@ def _candidate_edges_kernel(
         pred_id = tl.load(IDS + (position - 1) * TOP_K + predecessor).to(tl.int64)
     r = tl.arange(0, BLOCK_R)
     c = tl.arange(0, BLOCK_K)
-    pred = tl.load(PREDECESSORS + pred_id.to(tl.int64) * RANK + r, r < RANK, 0)
+    pred = tl.load(PREDECESSORS + pred_id * RANK + r, r < RANK, 0)
     hidden = tl.load(HIDDEN + position * RANK + r, r < RANK, 0)
-    # Preserve the materialized product and GEMM's output rounding.
+    # Preserve the materialized product and its output rounding.
     weighted = (pred.to(tl.float32) * hidden.to(tl.float32)).to(hidden.dtype)
     ids = tl.load(IDS + position * TOP_K + c, c < TOP_K, 0).to(tl.int64)
     successors = tl.load(
@@ -45,7 +45,9 @@ def _candidate_edges_kernel(
     scores = scores.to(hidden.dtype).to(tl.float32)
     unary = tl.load(UNARY + position * TOP_K + c, c < TOP_K, 0).to(tl.float32)
     tl.store(
-        OUTPUT + (position * TOP_K + predecessor) * TOP_K + c, scores + unary, c < TOP_K
+        OUTPUT + (position * TOP_K + predecessor) * TOP_K + c,
+        scores + unary,
+        c < TOP_K,
     )
 
 
@@ -58,11 +60,13 @@ def candidate_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
-    """Gather codebooks and score candidate edges without intermediate tensors."""
+    """Gather codebooks and score candidate edges without intermediates."""
     batch, steps, _ = candidate_ids.shape
     rank = hidden.shape[-1]
     output = torch.empty(
-        (batch, steps, top_k, top_k), dtype=unary_logits.dtype, device=hidden.device
+        (batch, steps, top_k, top_k),
+        dtype=unary_logits.dtype,
+        device=hidden.device,
     )
     if batch * steps:
         _candidate_edges_kernel[(batch * steps, top_k)](

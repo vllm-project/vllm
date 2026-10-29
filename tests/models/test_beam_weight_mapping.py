@@ -17,10 +17,11 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.models.beam.nvidia import model as beam
-from vllm.models.beam.nvidia.model import BeamModel
+from vllm.models.beam import attention
+from vllm.models.beam import model as beam
 from vllm.transformers_utils.configs.beam import BeamConfig
 
+BeamModel = beam.BeamModel
 MAPPER = BeamModel.hf_to_vllm_mapper
 
 
@@ -90,7 +91,9 @@ def test_attention_output_gate_is_renamed_not_fused():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="This test requires an accelerator"
+)
 @torch.inference_mode()
 def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeypatch):
     """Load reference names directly and use each weight on its intended branch."""
@@ -141,16 +144,15 @@ def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeyp
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="This test requires an accelerator"
+)
 @pytest.mark.parametrize("tp_size", [4, 8])
 @torch.inference_mode()
 def test_checkpoint_loads_into_merged_qkv_gate(
     default_vllm_config, monkeypatch, tp_size
 ):
     """All four checkpoint projections load directly into the allocated TP shard."""
-    from vllm.models.beam.nvidia import attention
-    from vllm.models.beam.nvidia.projection import packed_projection
-
     for module in (
         "vllm.model_executor.layers.linear",
         "vllm.model_executor.parameter",
@@ -198,8 +200,9 @@ def test_checkpoint_loads_into_merged_qkv_gate(
         expected_weight = torch.cat([w.chunk(tp_size)[-1] for w in weights])
         torch.testing.assert_close(param, expected_weight, rtol=0, atol=0)
         x = torch.randn(3, 64, device="cuda", dtype=torch.bfloat16)
+        packed, _ = attn.qkv_gate_proj(x)
         torch.testing.assert_close(
-            packed_projection(x, param, False),
+            packed,
             torch.nn.functional.linear(x, expected_weight),
             rtol=0,
             atol=0,

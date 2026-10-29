@@ -39,7 +39,9 @@ def _conv_residual_norm_kernel(
         coefficient = tl.load(BASE + tap * WIDTH + col, valid, 0).to(
             tl.float32
         ) + tl.load(
-            DELTA + row * DELTA_ROW_STRIDE + tap * DELTA_TAP_STRIDE + group, valid, 0
+            DELTA + row * DELTA_ROW_STRIDE + tap * DELTA_TAP_STRIDE + group,
+            valid,
+            0,
         ).to(tl.float32)
         value = tl.load(X + (row - tap) * X_STRIDE + col, valid, 0).to(tl.float32)
         result = tl.fma(coefficient, value, result)
@@ -49,8 +51,11 @@ def _conv_residual_norm_kernel(
     tl.store(RESIDUAL + row * RESIDUAL_STRIDE + col, result, mask)
     variance = tl.sum(result * result, 0) / WIDTH
     weight = tl.load(WEIGHT + col, mask, 0).to(tl.float32)
-    normalized = result * tl.rsqrt(variance + EPS) * weight
-    tl.store(OUTPUT + row * WIDTH + col, normalized, mask)
+    tl.store(
+        OUTPUT + row * WIDTH + col,
+        result * tl.rsqrt(variance + EPS) * weight,
+        mask,
+    )
 
 
 def conv_residual_norm(

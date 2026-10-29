@@ -2,37 +2,37 @@ meta:
   title: "Beam-1.0-501B-A23B"
   slug: "beam-1.0-501b-a23b"
   provider: "Reflection"
-  description: "Reflection's Beam — a sparse MoE language model (501B total / 23B active) with hybrid sliding-window + NoPE full attention, a 1M-token window, Harmony-format reasoning and tool calling, and an optional DFlash2 speculative drafter. Available in NVFP4, FP8 and BF16."
+  description: "Reflection's Beam — a sparse MoE language model (501B total / 23B active) with hybrid sliding-window + NoPE full attention, a 1M-token window, Harmony-format reasoning and tool calling, and an optional DFlash2 speculative drafter. Available in NVFP4, FP8 and BF16 on NVIDIA and BF16 on AMD ROCm."
   date_added: 2026-10-16
-  date_updated: 2026-10-16
+  date_updated: 2026-10-23
   tasks:
     - text
   performance_headline: "501B/23B-active MoE with hybrid sliding-window attention, 1M context, and DFlash2 speculative decoding"
   related_recipes: []
-  # Beam's kernels (including a custom all-reduce) are CUDA-only and the
-  # only published build is the CUDA Docker image, so AMD is unsupported.
   hardware:
     b300: verified
     h200: verified
-    mi300x: unsupported
-    mi325x: unsupported
-    mi350x: unsupported
-    mi355x: unsupported
-  # Open on the default variant's recommended hardware (NVFP4, TP4).
+    mi300x: supported
+    mi325x: verified
+    mi350x: verified
+    mi355x: verified
   default_hardware: b300
+  default_variant:
+    amd: bf16
 
 model:
   model_id: "reflection/Beam-1.0-501B-A23B"
   min_vllm_version: "0.33.0"
-  # Docker-only at launch: Beam support ships in this image before it reaches a
-  # vLLM wheel. A single-key CUDA map pins the one published build, so the
-  # CUDA toggle can't synthesize a nonexistent `-cu129` tag. Restore the pip
+  # Docker-only at launch: Beam support ships in these images before it reaches
+  # a vLLM wheel. The NVIDIA tag is the published CUDA build; the AMD build
+  # lives in the ROCm nightly image (vllm-project/vllm#62057). Restore the pip
   # path once a release carries the support.
   docker_image:
-    cu130: "vllm/vllm-openai:reflection-beam"
+    nvidia: "vllm/vllm-openai:reflection-beam"
+    amd: "vllm/vllm-openai-rocm:nightly"
   install:
     docker:
-      note: "Beam support hasn't landed in a vLLM release yet, so it ships only in this image. Use Docker until it does."
+      note: "Beam support hasn't landed in a vLLM release yet, so it ships only in these images: vllm/vllm-openai:reflection-beam on NVIDIA and the ROCm nightly on AMD. Use Docker until it does."
     pip: false
   architecture: moe
   # 52 layers, 256 routed experts (top-8, moe_intermediate_size 2560), dense
@@ -64,13 +64,18 @@ features:
       - "beam"
   spec_decoding:
     label: "DFlash2"
-    description: "DFlash2 speculative decoding with the Beam-trained drafter (DFlash2BeamDraftModel, 5 layers, block size 16), drafting 7 tokens per step. method is dflash; DFlash2 is selected by the draft architecture. The drafter runs on FlashAttention, and adaptive verification checks only the draft tokens likely to be accepted."
+    description: "DFlash2 speculative decoding with the Beam-trained drafter (DFlash2BeamDraftModel, 5 layers, block size 16), drafting 7 tokens per step. method is dflash; DFlash2 is selected by the draft architecture."
     args:
       - "--speculative-config"
       # num_speculative_tokens 7: the drafter supports up to block_size - 1
       # (15), but acceptance falls off well before that. Adaptive
       # verification is neutral at low concurrency and helps under load.
       - '{"method":"dflash","model":"reflection/Beam-1.0-501B-A23B-DFlash2","num_speculative_tokens":7,"attention_backend":"FLASH_ATTN","enable_adaptive_verification":true}'
+    hardware_overrides:
+      amd:
+        args:
+          - "--speculative-config"
+          - '{"method":"dflash","model":"reflection/Beam-1.0-501B-A23B-DFlash2","num_speculative_tokens":7,"enable_adaptive_verification":true}'
 
 opt_in_features:
   - spec_decoding
@@ -118,6 +123,8 @@ variants:
     # Per-channel FP8 (compressed-tensors FP8_DYNAMIC, no block structure), so
     # TP8 has no block_n divisibility constraint.
     description: "FP8 per-channel weights (compressed-tensors); router, embeddings and lm_head unquantized. Recommended on H200."
+    precision_hardware:
+      brand: NVIDIA
     # Triton MoE measured fastest on B300 and H200; auto would pick CUTLASS
     # grouped GEMM. Auto-selection already matches the measured attention
     # (FlashInfer with TRT-LLM kernels on Blackwell, FA3 on Hopper) and FP8
@@ -129,14 +136,20 @@ variants:
     model_id: "reflection/Beam-1.0-501B-A23B"
     precision: bf16
     # Real checkpoint 1002.7 GB (FP32 router weights) × 1.2 = 1203.2 → 1204 GB.
-    # Fits one 8x B300 node (2144 GB); does not fit 8x H200 (1128 GB).
+    # Fits one 8x B300 node (2144 GB), one 8x MI350X/MI355X node (2304 GB), one
+    # 8x MI325X node (2048 GB) or one 8x MI300X node (1536 GB); does not fit
+    # 8x H200 (1128 GB).
     vram_minimum_gb: 1204
-    description: "Native BF16 checkpoint (FP32 router weights and expert biases). Requires one 8x B200 or B300 node."
-    # 1204 GB only fits a single 8x B200 (1440 GB) or 8x B300 (2144 GB) node,
-    # and the recipe has no multi-node strategies, so other GPUs can't run it.
+    description: "Native BF16 checkpoint (FP32 router weights and expert biases). Requires one 8x B200/B300 or 8x MI300X-class node."
+    # 1204 GB only fits a single 8x node with at least 1536 GB, and the recipe
+    # has no multi-node strategies, so smaller nodes can't run it.
     supported_hardware:
       - b200
       - b300
+      - mi300x
+      - mi325x
+      - mi350x
+      - mi355x
     # Keep the KV cache in BF16 (overrides the model-level FP8 KV cache).
     # Blackwell auto-selects the FlashInfer TRT-LLM MoE for BF16 experts.
     extra_args:
@@ -147,6 +160,25 @@ compatible_strategies:
   - single_node_tp
   - single_node_tep
   - single_node_dep
+
+# The AMD model path (vllm/models/beam/amd/) raises on sequence-parallel MoE,
+# which is what the DEP strategies emit (--data-parallel-size with
+# --enable-expert-parallel). TP and TEP are validated.
+strategy_hardware:
+  single_node_dep:
+    amd: unsupported
+
+# AMD serves through the ROCm attention and Triton MoE backends with AITER
+# enabled, the layout validated on 8x MI350X (vllm-project/vllm#62057).
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "--moe-backend"
+      - "triton"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
 
 guide: |
   ## Overview
@@ -169,7 +201,7 @@ guide: |
   |---|---|---|---|---|
   | NVFP4 (default) | [`reflection/Beam-1.0-501B-A23B-NVFP4`](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4) | 294 GB | 353 GB | 4x B200/B300 or one GB200/GB300 tray (TP4); 8x H100 (TP8, Marlin) |
   | FP8 | [`reflection/Beam-1.0-501B-A23B-FP8`](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8) | 503 GB | 604 GB | 8x H200 (TP8) |
-  | BF16 | [`reflection/Beam-1.0-501B-A23B`](https://huggingface.co/reflection/Beam-1.0-501B-A23B) | 1,003 GB | 1,204 GB | 8x B200/B300 (TP8) |
+  | BF16 | [`reflection/Beam-1.0-501B-A23B`](https://huggingface.co/reflection/Beam-1.0-501B-A23B) | 1,003 GB | 1,204 GB | 8x B200/B300 (TP8), 8x MI300X-class (TP8) |
 
   *Minimum GPU memory* is the weights plus 20% headroom for activations,
   CUDA graphs and a working KV cache. It is the total across all GPUs, and
@@ -180,23 +212,29 @@ guide: |
   runs W4A4; on Hopper, vLLM serves the FP4 experts through Marlin with BF16
   activations.
 
+  **AMD ROCm tested only on BF16.**
+
   ## Prerequisites
 
-  - **vLLM:** the `vllm/vllm-openai:reflection-beam` Docker image. Beam
-    support has not shipped in a vLLM release yet.
-  - **Hardware:** NVIDIA GPUs. Beam's kernels, including a custom all-reduce
-    used with expert parallelism, are CUDA-only.
+  - **vLLM:** the `vllm/vllm-openai:reflection-beam` Docker image on NVIDIA,
+    the `vllm/vllm-openai-rocm:nightly` image on AMD. Beam support has not
+    shipped in a vLLM release yet.
+  - **Hardware:** NVIDIA GPUs, plus AMD GPUs on ROCm. On NVIDIA Beam's
+    kernels, including a custom all-reduce used with expert parallelism, are
+    CUDA-only; the AMD path replaces them with standard vLLM ROCm attention,
+    RCCL collectives and AMD-local Triton kernels.
   - **Transformers:** the tokenizer uses the Transformers 5 format
     (`TokenizersBackend`).
 
   ### Install vLLM
 
   ```bash
-  docker pull vllm/vllm-openai:reflection-beam
+  docker pull vllm/vllm-openai:reflection-beam    # NVIDIA (CUDA)
+  docker pull vllm/vllm-openai-rocm:nightly       # AMD (ROCm)
   ```
 
-  The `vllm serve` commands below run inside this image; the command builder
-  above renders the full `docker run` line.
+  The `vllm serve` commands below run inside these images; the command builder
+  above renders the full `docker run` line for the hardware you select.
 
   ## Launching the server
 
@@ -261,16 +299,43 @@ guide: |
     --reasoning-parser beam
   ```
 
+  ### BF16 with TP8 + expert parallel on AMD ROCm
+
+  The AMD path in `vllm/models/beam/amd/` selects its classes on ROCm and
+  runs the target and the DFlash2 drafter on standard vLLM ROCm attention,
+  RCCL collectives and AMD-local Triton kernels. It was validated end-to-end
+  on 8x MI325X (gfx942), 8x MI350X and 8x MI355X (gfx950). MI300X uses the
+  validated gfx942 code path, where the weights need 1,204 GB of the node's
+  1,536 GB.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve reflection/Beam-1.0-501B-A23B \
+    --dtype bfloat16 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --moe-backend triton \
+    --reasoning-parser beam \
+    --tool-call-parser beam \
+    --enable-auto-tool-choice
+  ```
+
+  `VLLM_ROCM_USE_AITER=1`, `--attention-backend ROCM_AITER_UNIFIED_ATTN` and
+  `--moe-backend triton` are what the command builder emits on AMD; the
+  builder also keeps the KV cache in BF16. **DEP is not available on AMD:**
+  the ROCm model path raises on sequence-parallel MoE, so only TP and
+  TP + expert parallel are offered.
+
   ### Tuning
 
   - **KV cache dtype:** the NVFP4 and FP8 commands use
     `--kv-cache-dtype fp8`, which halves KV memory per token (on 8x H200 with
     the FP8 checkpoint, about 14M to 28M tokens). The BF16 command keeps the
-    KV cache in BF16.
+    KV cache in BF16, on NVIDIA and AMD alike.
   - **Parallelism:** tensor parallelism is the recommended single-node layout.
     TEP (`--enable-expert-parallel`) and DEP (`--data-parallel-size 8
-    --enable-expert-parallel`) are also supported; DEP is better suited to
-    very large batch sizes.
+    --enable-expert-parallel`) are also supported on NVIDIA; DEP is better
+    suited to very large batch sizes. On AMD only TP and TEP are offered.
 
   ### MegaMoE with attention DP (NVFP4, Blackwell)
 
@@ -317,6 +382,19 @@ guide: |
   which reduces KV-cache capacity. Acceptance depends on natural-language
   input, so benchmark it with a real-text dataset rather than
   `--dataset-name random`.
+
+  **On AMD**, the ROCm drafter delegates cache handling to the selected ROCm
+  attention backend, so the builder omits the FlashAttention pin:
+
+  ```bash
+  --speculative-config '{"method":"dflash","model":"reflection/Beam-1.0-501B-A23B-DFlash2","num_speculative_tokens":7,"enable_adaptive_verification":true}'
+  ```
+
+  The token count is not platform-specific. The AMD DFlash2 path was
+  validated with the BF16 target on MI325X, MI350X and MI355X. On MI355X,
+  both vanilla decoding and DFlash2 reached 90.06% on GPQA-Diamond and 97.45%
+  on AIME 2026. On MI325X, both reached 90.18% on GPQA-Diamond. These results
+  reproduce Reflection's published BF16 accuracy within statistical error.
 
   ### Output constraints
 
@@ -365,3 +443,4 @@ guide: |
   - [Beam FP8](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8)
   - [Beam NVFP4](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4)
   - [DFlash2 drafter](https://huggingface.co/reflection/Beam-1.0-501B-A23B-DFlash2)
+  - [vLLM PR #62057 — Beam 1.0 on ROCm (MI300X/MI325X/MI350X/MI355X)](https://github.com/vllm-project/vllm/pull/62057)

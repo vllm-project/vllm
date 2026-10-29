@@ -16,8 +16,7 @@ import torch
 from torch import nn
 
 from vllm import LLM, SamplingParams
-from vllm.models.beam.nvidia import model as beam
-from vllm.platforms import current_platform
+from vllm.models.beam import model as beam
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -28,12 +27,13 @@ TINY_CONFIG = {
     "architectures": ["BeamForCausalLM"],
     "model_type": "beam",
     "vocab_size": 1024,
-    "hidden_size": 128,
+    # Keep a supported attention head size on both NVIDIA and AMD backends.
+    "hidden_size": 512,
     "intermediate_size": 256,
     "num_hidden_layers": 2,
     "num_attention_heads": 8,
     "num_key_value_heads": 2,
-    "head_dim": 16,
+    "head_dim": 64,
     "max_position_embeddings": 512,
     "rms_norm_eps": 1e-6,
     "sliding_window": 128,
@@ -59,7 +59,9 @@ TINY_CONFIG = {
 }
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Beam targets CUDA")
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="This test requires an accelerator"
+)
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize(
     "enforce_eager,tp_size,num_experts,enable_ep",
