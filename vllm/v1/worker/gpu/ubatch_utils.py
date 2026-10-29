@@ -498,6 +498,7 @@ class UBatchRunner:
 
         outputs: dict[int, Any] = {}
         errors: dict[int, BaseException] = {}
+        dtype = self.vllm_config.model_config.dtype
 
         @torch.inference_mode()
         def run_ubatch(ubatch_context, inputs: dict[str, Any]) -> None:
@@ -505,10 +506,14 @@ class UBatchRunner:
                 # New threads must select the worker's device.
                 torch.accelerator.set_device_index(self.device.index)
                 if for_capture:
-                    # Allocate cuBLAS workspaces before capture.
+                    # Create BLAS handles and workspaces before capture. ROCm
+                    # keeps a hipBLASLt handle per thread and stream, and only a
+                    # GEMM creates it; creating one during capture fails.
                     for stream in (compute_stream, self.comm_stream):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
+                            x = torch.zeros(1, 1, dtype=dtype, device=self.device)
+                            torch.mm(x, x)
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
