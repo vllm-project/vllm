@@ -100,7 +100,7 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
         torch.randn(1, num_tokens, num_qk_heads, head_dim, device=device), dim=-1
     ).bfloat16()
     v = torch.randn(1, num_tokens, num_v_heads, head_dim, device=device).bfloat16()
-    g = F.logsigmoid(torch.randn(1, num_tokens, num_v_heads, device=device))
+    g = F.logsigmoid(torch.randn(1, num_tokens, num_v_heads, device=device)).exp()
     beta = torch.sigmoid(torch.randn(1, num_tokens, num_v_heads, device=device))
     initial_state = 0.1 * torch.randn(
         len(query_lens), num_v_heads, head_dim, head_dim, device=device

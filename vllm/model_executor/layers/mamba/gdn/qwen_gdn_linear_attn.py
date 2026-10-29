@@ -325,7 +325,6 @@ def fi_chunk_gated_delta_rule(
     checkpoint_every_n_tokens: int = 0,
     use_cp: Literal["auto"] | bool = "auto",
     output: torch.Tensor | None = None,
-    g_in_log_space: bool = True,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -343,11 +342,9 @@ def fi_chunk_gated_delta_rule(
     g = g.squeeze(0).contiguous()
     beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
-    # FlashInfer takes the gate as exp(g). fused_post_conv_prep can emit that
-    # directly (g_in_log_space=False), saving an elementwise pass per layer.
+    # Like FlashInfer's own API, g is the already-exponentiated gate;
+    # fused_post_conv_prep emits it directly (output_g_exp=True).
     fi_g = g.to(torch.float32)
-    if g_in_log_space:
-        fi_g = torch.exp(fi_g)
     fi_beta = beta.to(torch.float32)
     # cu_seqlens goes through as is: FlashInfer accepts int32 and int64.
     result = chunk_gated_delta_rule_fi(
@@ -420,6 +417,9 @@ class ChunkGatedDeltaRule(CustomOp):
         core_attn_out: torch.Tensor | None = None,
         aiter_prefill_metadata: object | None = None,
     ):
+        # g is in log space in this dispatch layer (shared with the Triton/FLA
+        # backends); FlashInfer takes exp(g), so exp here.
+        g = torch.exp(g.to(torch.float32))
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -1470,6 +1470,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         output. A single sequence under ``use_cp="auto"`` takes the CP route
         wherever the heuristic can pick it; ``use_cp=False`` forces the other.
         """
+        # g arrives in log space (from _warmup_prefill_kernels); FlashInfer
+        # takes exp(g).
+        g = torch.exp(g.to(torch.float32))
         checkpoint_buffers: list[torch.Tensor | None] = [None]
         if self._exports_checkpoints:
             (state_checkpoints,) = current_workspace_manager().get_simultaneous(
@@ -1945,7 +1948,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 use_qk_l2norm_in_kernel=False,
                 output=output,
-                g_in_log_space=False,
             )
 
         (state_checkpoints,) = current_workspace_manager().get_simultaneous(
@@ -1963,7 +1965,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             cu_seqlens=attn_metadata.prefill_query_start_loc,
             use_qk_l2norm_in_kernel=False,
             output=output,
-            g_in_log_space=False,
             state_checkpoints=state_checkpoints,
             checkpoint_cu_starts=plan.cu_starts,
             checkpoint_every_n_tokens=plan.every_n_tokens,
