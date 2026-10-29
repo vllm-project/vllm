@@ -40,7 +40,7 @@ DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
-    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
 All2AllBackend = Literal[
     "naive",
@@ -102,6 +102,8 @@ class EPLBConfig:
     - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
+    - "symm_mem": Push expert rows over CUDA symmetric memory; needs all EP
+      ranks in one NVLink domain (MNNVL across nodes)
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
     """
