@@ -11,6 +11,7 @@ import torch
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -56,7 +57,6 @@ def _make_rejection_sampler(
     rejection_sampler.fly_window_size = 0
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
-    rejection_sampler.draft_logits_num_shards = 1
     rejection_sampler.watermark_key = None
     return rejection_sampler
 
@@ -167,8 +167,13 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     processed_logits = torch.zeros((12, vocab_size), device=device)
     processed_logits[0, 0] = -float("inf")
     processed_logits[rows_per_request + 1, 1] = -float("inf")
-    draft_logits = torch.zeros(
-        (num_reqs, num_speculative_steps, vocab_size), device=device
+    draft_logits = DraftLogitsCache(
+        num_reqs,
+        num_speculative_steps,
+        vocab_size,
+        dtype=torch.float32,
+        fill=0.0,
+        device=device,
     )
     draft_sampled = torch.zeros(
         (num_reqs, rows_per_request), dtype=torch.int64, device=device
