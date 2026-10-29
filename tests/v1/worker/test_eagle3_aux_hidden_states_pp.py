@@ -101,6 +101,9 @@ def minimax_pp_stage(monkeypatch):
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
     monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
     monkeypatch.setattr(
+        minimax_m3.MiniMaxM3Model, "_init_fused_moe_finalize", lambda *_: None
+    )
+    monkeypatch.setattr(
         minimax_m3,
         "VocabParallelEmbedding",
         lambda *args, **kwargs: torch.nn.Identity(),
@@ -149,6 +152,7 @@ def minimax_pp_stage(monkeypatch):
                 model_config=SimpleNamespace(hf_text_config=config),
                 quant_config=None,
                 speculative_config=None,
+                kernel_config=SimpleNamespace(moe_backend="auto"),
                 use_v2_model_runner=True,
             )
         )

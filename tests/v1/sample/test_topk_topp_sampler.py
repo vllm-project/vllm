@@ -205,6 +205,22 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
         flashinfer_sampler_supported()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
+    """Without flashinfer-cubin, nvcc or ninja, FlashInfer cannot build its
+    sampling kernels, so the sampler must fall back to native sampling."""
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    monkeypatch.setattr(topk_topp_sampler, "has_flashinfer", lambda: False)
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert topk_topp_sampler.flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="FlashInfer kernels are disabled"):
+        topk_topp_sampler.flashinfer_sampler_supported()
+
+
 # =============================================================================
 # Triton kernel tests
 # =============================================================================
@@ -394,27 +410,6 @@ class TestTritonTopkTopp:
         # Mixed values
         p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
         self._compare_results(logits.clone(), k=None, p=p)
-
-    @pytest.mark.parametrize("k_val", [None, 50])
-    def test_tiny_p_keeps_max_token(self, k_val: int | None):
-        """Above 64 rows, a top-p below the fp32 resolution of the kept mass
-        must still keep a max token instead of masking the whole row."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
-        batch_size = 156
-        logits = (
-            3.0
-            * torch.randn(
-                batch_size, 32000, generator=self.generator, dtype=torch.float32
-            )
-        ).bfloat16()
-        logits[1::4, :2] = logits[1::4].amax(dim=-1, keepdim=True)  # tied max
-        logits = logits.float()
-        is_max = logits == logits.amax(dim=-1, keepdim=True)
-        k = None if k_val is None else torch.full((batch_size,), k_val)
-        p = torch.full((batch_size,), 1e-9, dtype=torch.float32)
-        kept = apply_top_k_top_p_triton(logits.clone(), k, p) != float("-inf")
-        assert (kept & is_max).any(dim=-1).all()
 
     def test_large_batch(self):
         """Test with a large batch size."""

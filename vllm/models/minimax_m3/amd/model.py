@@ -25,6 +25,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
@@ -35,6 +36,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -48,8 +52,11 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -60,6 +67,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -80,6 +88,8 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -101,6 +111,7 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
 from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
     swiglu_oai_split,
 )
@@ -431,17 +442,10 @@ class MiniMaxM3MoE(nn.Module):
         # MoE call as the last expert slot, so we don't build a separate module.
         # On gfx950 with aiter MoE the append is fused inside aiter's grouped
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
-        # It is disabled under expert parallelism (the shared slot is appended to
-        # the routed top-k, which the EP expert-mapping path does not handle).
         self.is_fused_shared_expert_enabled = False
-        if (
-            bool(getattr(config, "n_shared_experts", None))
-            and not get_current_vllm_config().parallel_config.enable_expert_parallel
-        ):
+        if bool(getattr(config, "n_shared_experts", None)):
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config,
-                prefix,
-                shared_expert_name="shared_experts",
+                quant_config, prefix, disable_under_ep=True
             )
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
@@ -590,7 +594,7 @@ class MiniMaxM3Attention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if _USE_GFX942_NATIVE_QKNORM_ROPE:
@@ -1135,7 +1139,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         # Single fused projection emitting [q | k | v | index_q | index_k].
         qkv, _ = self.qkv_proj(hidden_states)
@@ -1460,6 +1464,24 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
+def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
+    """Whether ``input_layernorm`` can hand ``qkv_proj`` an MXFP8 activation.
+
+    The quant key does not encode the scale layout (FlashInfer wants swizzled
+    scales under the same key), so this also requires the ROCm ``dot_scaled``
+    kernel, which reads the row-major scales the fused norm writes.
+    """
+    if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:
+        return False
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(qkv_proj, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(qkv_proj, "quant_method", None), "kernel", None)
+    return isinstance(
+        kernel, RocmDotScaledMxfp8LinearKernel
+    ) and kernel.supports_quantized_input(qkv_proj)
+
+
 class MiniMaxM3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -1533,6 +1555,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
+        if self.fuse_input_norm_mxfp8:
+            logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
 
     def forward(
         self,
@@ -1541,14 +1566,25 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        attn_input: torch.Tensor | QuantizedActivation
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            attn_input = self.input_layernorm(hidden_states)
+        elif self.fuse_input_norm_mxfp8:
+            x_q, x_scale, residual = gemma_fused_add_rmsnorm_mxfp8(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight,
+                self.input_layernorm.variance_epsilon,
+            )
+            attn_input = QuantizedActivation(
+                x_q, x_scale, hidden_states.dtype, hidden_states.shape, kMxfp8Dynamic
+            )
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            attn_input, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
-            hidden_states=hidden_states,
+            hidden_states=attn_input,
         )
 
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
@@ -1688,10 +1724,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             MiniMaxM3MoE,
-            "block_sparse_moe",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1792,8 +1828,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
         # expert, include the appended slot (id == num_local_experts).
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
+        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
         num_experts = self.config.num_local_experts + (
-            n_shared if self.is_fused_shared_expert_enabled else 0
+            n_shared if self.fused_shared_expert_layers else 0
         )
         return fused_moe_make_expert_params_mapping(
             self,
@@ -1842,7 +1879,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # down->w2) so it loads via the routed expert loader. Runs before the
             # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
             # captured by the dense gate_up_proj mapping.
-            if self.is_fused_shared_expert_enabled and ".shared_experts." in name:
+            # Only parse the layer index when FSE is enabled.
+            if (
+                ".shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
                 sid = self.config.num_local_experts
                 name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
                 name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")

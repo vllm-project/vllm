@@ -1076,13 +1076,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(h!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0) -> ()");
+      "                 int resident_null_block=0,"
+      "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
-      "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
+      "hisparse_invalidate_written_slots(Tensor device_global_indices_ptrs,"
       "                                   Tensor request_state_indices,"
       "                                   Tensor req_id_per_token,"
-      "                                   Tensor written_slots) -> ()");
+      "                                   Tensor written_slots,"
+      "                                   int num_state_rows,"
+      "                                   int region_stride) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"
@@ -1144,7 +1147,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
 
   ops.def(
       "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
-      "Tensor block_table, Tensor workspace_starts, int batch_size) -> ()");
+      "Tensor block_table, Tensor workspace_starts, int batch_size, Tensor? "
+      "seq_starts=None) -> ()");
 
   ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "

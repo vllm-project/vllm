@@ -239,13 +239,17 @@ class NixlBaseConnectorWorker:
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group, dtype=np.int32)
             spec_type = self._group_spec_types[i]
+            # Hybrid regions are keyed by base address, so some hold only
+            # another group's layers (e.g. KDA-only or scratch-only tensors).
+            # Reading them for this group would only re-read aliased bytes.
+            group_regions = (
+                self._group_region_indices[i] if self._group_region_indices else None
+            )
             if _is_attention_spec(spec_type):
-                # A scratch cache lives only in its own regions; every other
-                # attention group spans all of them.
                 fa_region_ids = (
-                    np.asarray(self._scratch_region_indices, dtype=np.int32)
-                    if spec_type is CircularBufferSpec
-                    else np.arange(self.num_regions, dtype=np.int32)
+                    np.arange(self.num_regions, dtype=np.int32)
+                    if group_regions is None
+                    else np.asarray(group_regions, dtype=np.int32)
                 )[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
@@ -258,11 +262,23 @@ class NixlBaseConnectorWorker:
                 # num_fa_descs offset must be computed per-engine since
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
-                ssm_region_ids = (
-                    np.arange(num_ssm_regions, num_ssm_regions + 1, dtype=np.int32)
-                    if i == self._ple_group_index
-                    else np.arange(num_ssm_regions, dtype=np.int32)
-                )[:, None]
+                if i == self._ple_group_index:
+                    ssm_region_ids = np.arange(
+                        num_ssm_regions, num_ssm_regions + 1, dtype=np.int32
+                    )
+                elif group_regions is None:
+                    ssm_region_ids = np.arange(num_ssm_regions, dtype=np.int32)
+                else:
+                    # Each SSM layer owns ssm_regions_per_layer consecutive
+                    # descs, in _ssm_region_indices order.
+                    ssm_slots = np.flatnonzero(
+                        np.isin(self._ssm_region_indices, group_regions)
+                    ).astype(np.int32)
+                    ssm_region_ids = (
+                        ssm_slots[:, None] * ssm_regions_per_layer
+                        + np.arange(ssm_regions_per_layer, dtype=np.int32)
+                    ).ravel()
+                ssm_region_ids = ssm_region_ids[:, None]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
@@ -740,8 +756,15 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
+        # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
+        params = self.kv_transfer_config.get_from_extra_config("ucx_backend_params", {})
+        ucx_backend_params = {k: str(v) for k, v in params.items()}
         sleep_mode = vllm_config.model_config.enable_sleep_mode and config is not None
-        if sleep_mode:
+        # With UCX params, create every backend here, in the configured order.
+        explicit_backends = (config is not None and not sleep_mode) and (
+            bool(ucx_backend_params) and "UCX" in self.nixl_backends
+        )
+        if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
@@ -751,8 +774,17 @@ class NixlBaseConnectorWorker:
                 {
                     "num_threads": str(num_threads),
                     "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
+                    **ucx_backend_params,
                 },
             )
+        elif explicit_backends:
+            for backend in self.nixl_backends:
+                nixl_params: dict[str, str] = {}
+                if backend == "UCX":
+                    if not non_ucx_backends:
+                        nixl_params["num_threads"] = str(num_threads)
+                    nixl_params.update(ucx_backend_params)
+                self.nixl_wrapper.create_backend(backend, nixl_params)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
@@ -1000,10 +1032,10 @@ class NixlBaseConnectorWorker:
         self._region_is_mla = list[bool]()
         self._head_sharded_draft_regions = set[int]()
         self._ssm_region_indices = list[int]()
-        # Regions holding a scratch cache (the CSA compressor circular buffer).
-        # Tracked explicitly because a scratch page shares its address with the
-        # page it overlays, so its regions cannot be recovered from spec type.
-        self._scratch_region_indices = list[int]()
+        # Per transfer group, the regions holding its layers (None: all). Tracked
+        # explicitly because aliased layers share a region keyed by address, so
+        # e.g. a scratch page lands in the region of the page it overlays.
+        self._group_region_indices = list[list[int] | None]()
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
@@ -1541,17 +1573,18 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
-        self._scratch_region_indices = []
+        region_groups: list[set[int]] = []
         self._ple_block_len = None
         self._ple_region_index = None
 
-        # A shared packed row may transfer whole if every page in it is
-        # replicated across TP ranks (MLA), or if P and D shard heads alike
-        # (non-MLA, equal TP checked at handshake). SSM state (e.g.
-        # Qwen3.8-Flash-Next) must stay split.
+        # A shared packed row may transfer whole only if every page in it is
+        # replicated across TP ranks: MLA without SSM state. Head-sharded
+        # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
         packed_storage = (
             _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and self.use_mla
             and not self._has_mamba
         )
         if route_packed_layers and any(
@@ -1677,14 +1710,13 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                # Block-outermost: one block row holds every layer's page (in an
-                # MLA model, only its MLA layers' pages travel as rows).
+                # Block-outermost MLA: one block row holds every layer's page.
                 packed_mla = (
                     self._has_packed_cache
                     and not self._has_mamba
                     and packed_storage
                     and storage_is_block_major
-                    and (is_mla_region or not self.use_mla)
+                    and is_mla_region
                 )
                 if packed_mla and use_layer_name_routing:
                     # PP>1 prefill stage: register only this layer's page of each row.
@@ -1743,10 +1775,13 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                # A packed PP producer keeps one region per layer, so aliases at
-                # one address (a layer and its SWA view) stay distinct.
-                if base_addr in seen_base_addresses and not route_packed_layers:
-                    region_index = seen_base_addresses.index(base_addr)
+                # Overlaid groups can page the same bytes with different page
+                # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
+                # one address share a region only if their block_len matches.
+                # A packed PP producer keeps one region per layer.
+                region_key = (base_addr, block_len)
+                if region_key in seen_region_keys and not route_packed_layers:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1755,12 +1790,15 @@ class NixlBaseConnectorWorker:
                         self.region_num_blocks[region_index] = num_blocks
                     if self.region_group_ids[region_index] != group_id:
                         self.region_group_ids[region_index] = _SHARED_REGION_GROUP_ID
+                    region_groups[region_index].add(group_id)
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
+                    region_groups.append({group_id})
                     self.region_names.append(layer_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
@@ -1780,11 +1818,6 @@ class NixlBaseConnectorWorker:
                         self._ple_block_len = block_len
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
-                elif (
-                    isinstance(layer_spec, CircularBufferSpec)
-                    and region_index not in self._scratch_region_indices
-                ):
-                    self._scratch_region_indices.append(region_index)
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1818,7 +1851,10 @@ class NixlBaseConnectorWorker:
             == len(self.region_num_blocks)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
-        self._scratch_region_indices.sort()
+        self._group_region_indices = [
+            [r for r, groups in enumerate(region_groups) if group_id in groups] or None
+            for group_id in range(len(self.kv_cache_config.transfer_groups))
+        ]
         self._head_sharded_draft_regions = self._get_head_sharded_draft_regions()
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
@@ -2861,16 +2897,13 @@ class NixlBaseConnectorWorker:
             )
 
         # NVFP4 pages store all heads' data before all heads' scales, so a
-        # head's bytes are not a contiguous slice of the page, unless the
-        # backend lays out the page by KV head.
+        # head's bytes are not a contiguous slice of the page.
         if (
             not self.use_mla
             and self.transfer_topo.local_physical_heads
             != max(1, self.transfer_topo.total_num_kv_heads // remote_tp_size)
             and any(
-                isinstance(spec, AttentionSpec)
-                and spec.kv_quant_mode.is_nvfp4
-                and not spec.kv_head_major_slots
+                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
                 for spec in self._layer_specs.values()
             )
         ):
@@ -2878,13 +2911,6 @@ class NixlBaseConnectorWorker:
                 "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
                 f"(local TP {self.transfer_topo.tp_size}, remote TP "
                 f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
-            )
-        # A whole row holds this rank's heads of every layer: no re-sharding.
-        if self._packed_member_layouts and not self.use_mla and tp_ratio != 1:
-            raise RuntimeError(
-                "Packed KV rows of a non-MLA model need the same TP on prefill "
-                f"and decode (local TP {self.transfer_topo.tp_size}, remote TP "
-                f"{remote_tp_size}). Use LBHNC for heterogeneous TP."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.

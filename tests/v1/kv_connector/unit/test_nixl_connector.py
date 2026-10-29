@@ -1788,24 +1788,14 @@ class TestNixlHandshake:
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
     @pytest.mark.parametrize(
-        (
-            "kv_quant_mode",
-            "local_tp",
-            "remote_tp",
-            "num_kv_heads",
-            "kv_head_major_slots",
-            "rejected",
-        ),
+        ("kv_quant_mode", "local_tp", "remote_tp", "num_kv_heads", "rejected"),
         [
-            (KVQuantMode.NVFP4, 2, 1, 8, False, True),
-            (KVQuantMode.NVFP4, 1, 2, 8, False, True),
-            (KVQuantMode.NVFP4, 2, 2, 8, False, False),
+            (KVQuantMode.NVFP4, 2, 1, 8, True),
+            (KVQuantMode.NVFP4, 1, 2, 8, True),
+            (KVQuantMode.NVFP4, 2, 2, 8, False),
             # Both sides hold one replicated head per rank: no head split.
-            (KVQuantMode.NVFP4, 16, 8, 8, False, False),
-            (KVQuantMode.NONE, 2, 1, 8, False, False),
-            # H2ND pages: each head's K and V slots are one contiguous run.
-            (KVQuantMode.NVFP4, 4, 1, 4, True, False),
-            (KVQuantMode.NVFP4, 1, 4, 4, True, False),
+            (KVQuantMode.NVFP4, 16, 8, 8, False),
+            (KVQuantMode.NONE, 2, 1, 8, False),
         ],
     )
     @patch(
@@ -1820,12 +1810,10 @@ class TestNixlHandshake:
         local_tp,
         remote_tp,
         num_kv_heads,
-        kv_head_major_slots,
         rejected,
     ):
         """NVFP4 pages keep all heads' data before all heads' scales, so
-        heterogeneous-TP head splitting would silently corrupt the KV unless the
-        spec lays out the page by KV head.
+        heterogeneous-TP head splitting would silently corrupt the KV.
         """
         block_size = maybe_update_block_size(16)
         vllm_config = create_vllm_config(block_size=block_size)
@@ -1841,7 +1829,6 @@ class TestNixlHandshake:
                         head_size=16,
                         dtype=torch.uint8,
                         kv_quant_mode=kv_quant_mode,
-                        kv_head_major_slots=kv_head_major_slots,
                     ),
                 )
             ],
@@ -1868,11 +1855,6 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [local_len]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-        worker.src_blocks_data = np.array(
-            [(0, local_len, worker.tp_rank, local_len, worker.num_blocks)],
-            dtype=np.uint64,
-        )
-        worker.num_descs = worker.num_blocks
         meta = NixlAgentMetadata(
             engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             agent_metadata=FakeNixlWrapper.AGENT_METADATA,
@@ -5150,3 +5132,71 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+class _BackendRecordingNixlWrapper(FakeNixlWrapper):
+    def __init__(self, agent_name: str, config=None, *args, **kwargs):
+        super().__init__(agent_name, *args, **kwargs)
+        self.config = config
+        self.created_backends: list[tuple[str, dict[str, str]]] = []
+
+    def create_backend(self, backend: str, init_params: dict[str, str]) -> None:
+        self.created_backends.append((backend, dict(init_params)))
+
+
+@pytest.mark.parametrize(
+    "extra_config, agent_backends, created_backends",
+    [
+        # No UCX params: the agent config creates the backends, as before.
+        ({}, ["UCX"], []),
+        (
+            {"ucx_backend_params": {"ucx_error_handling_mode": "none"}},
+            [],
+            [("UCX", {"num_threads": "4", "ucx_error_handling_mode": "none"})],
+        ),
+        (
+            {
+                "backends": ["UCX", "LIBFABRIC"],
+                "ucx_backend_params": {"ucx_error_handling_mode": "none"},
+            },
+            [],
+            [("UCX", {"ucx_error_handling_mode": "none"}), ("LIBFABRIC", {})],
+        ),
+        # UCX not selected: the params have nothing to apply to.
+        (
+            {
+                "backends": ["LIBFABRIC"],
+                "ucx_backend_params": {"ucx_error_handling_mode": "none"},
+            },
+            ["LIBFABRIC"],
+            [],
+        ),
+    ],
+)
+def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_backends):
+    """kv_connector_extra_config.ucx_backend_params reaches UCX's create_backend."""
+
+    def agent_config(backends=None, num_threads=0, capture_telemetry=False):
+        return SimpleNamespace(
+            backends=["UCX"] if backends is None else backends,
+            num_threads=num_threads,
+        )
+
+    vllm_config = create_vllm_config(kv_connector_extra_config=extra_config)
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+            _BackendRecordingNixlWrapper,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_agent_config",
+            agent_config,
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+    wrapper = connector.connector_worker.nixl_wrapper
+    assert wrapper.config.backends == agent_backends
+    assert wrapper.created_backends == created_backends

@@ -70,6 +70,7 @@ def _get_effective_quant_keys(
 
     Raises:
         NotImplementedError: If the checkpoint format can not be determined.
+
     """
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
@@ -100,6 +101,7 @@ def get_checkpoint_quant_keys(
 
     Raises:
         NotImplementedError: If the checkpoint format can not be determined.
+
     """
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -192,7 +194,10 @@ def is_shared_expert_quant_fse_compatible(
                     and quant_config.expert_dtype == "fp4"
                     and moe_backend == "aiter_mega_moe"
                 ):
-                    routed_keys = (kMxfp4Static, None)
+                    routed_keys: tuple[QuantKey | None, QuantKey | None] = (
+                        kMxfp4Static,
+                        None,
+                    )
                 else:
                     routed_keys = _get_effective_quant_keys(
                         quant_config, expert_prefix, RoutedExperts

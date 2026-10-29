@@ -621,7 +621,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
-            num_sample_reqs = batch_desc.num_reqs or num_reqs
         else:
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
@@ -635,14 +634,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
-            num_sample_reqs = num_reqs
-        self._sample_after_forward(input_batch, num_sample_reqs)
 
         return self.draft_tokens[:num_reqs]
-
-    def _sample_after_forward(self, input_batch: InputBatch, num_reqs: int) -> None:
-        """Sampling left out of `_generate_draft`; `num_reqs` is the (padded)
-        request count it ran with. Nothing by default."""
 
 
 @triton.jit
@@ -689,7 +682,6 @@ def _prepare_dflash_inputs_kernel(
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    PAD_BLOCK: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -818,12 +810,12 @@ def _prepare_dflash_inputs_kernel(
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1, PAD_BLOCK):
-                block = i + tl.arange(0, PAD_BLOCK)
+            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_reqs + 1
                 tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
-            for i in range(num_reqs, max_num_reqs, PAD_BLOCK):
-                block = i + tl.arange(0, PAD_BLOCK)
+            for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_reqs
                 tl.store(out_seq_lens_ptr + block, 0, mask=mask)
             # Padded sample slots point at query index 0 (a valid row in
@@ -832,8 +824,8 @@ def _prepare_dflash_inputs_kernel(
             # sampling to prevent writing stale values to draft logits.
             pad_start = num_reqs * num_speculative_steps
             pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end, PAD_BLOCK):
-                block = i + tl.arange(0, PAD_BLOCK)
+            for i in range(pad_start, pad_end, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < pad_end
                 tl.store(out_sample_indices_ptr + block, 0, mask=mask)
                 tl.store(out_sample_pos_ptr + block, 0, mask=mask)
@@ -842,8 +834,8 @@ def _prepare_dflash_inputs_kernel(
             # captured CG sees PAD slots (no K/V write) for replay sizes
             # larger than the current request count.
             q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens, PAD_BLOCK):
-                block = i + tl.arange(0, PAD_BLOCK)
+            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_tokens
                 tl.store(out_input_ids_ptr + block, 0, mask=mask)
                 tl.store(out_query_positions_ptr + block, 0, mask=mask)
@@ -896,7 +888,7 @@ def prepare_dflash_inputs(
     # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
+    BLOCK_SIZE = 128
     num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
     _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
         input_buffers.input_ids,
@@ -936,7 +928,4 @@ def prepare_dflash_inputs(
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
-        # Pad in wide blocks: at BLOCK_SIZE (8 in a decode step) the padding up
-        # to max_num_tokens takes thousands of serial iterations (~20 us).
-        PAD_BLOCK=1024,
     )
