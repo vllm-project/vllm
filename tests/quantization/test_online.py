@@ -2562,8 +2562,8 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
 
     def quantize(w2_in, moe_tp_size):
         layer = torch.nn.Module()
-        layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(w2_in, requires_grad=False)
+        layer.w13_weight = torch.nn.Parameter(w13.clone(), requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(w2_in.clone(), requires_grad=False)
         layer.num_experts = layer.local_num_experts = w13.shape[0]
         method = SimpleNamespace(moe=SimpleNamespace(tp_size=moe_tp_size))
         Int8OnlineMoEMethod._quantize_weights(method, layer)
@@ -2619,13 +2619,29 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.parametrize(
+    "model_name, expected_model_memory_gib",
+    [
+        # MoE models covering both linear and MoE paths, one per modeling backend
+        (GRANITE_MODEL_NAME, 1.35),
+        ("allenai/OLMoE-1B-7B-0125-Instruct", 6.7),
+    ],
+    ids=["moe", "moe_transformers"],
+)
 def test_online_quant_peak_mem(
     vllm_runner,
     caplog_mp_spawn,
     monkeypatch,
+    model_name,
+    expected_model_memory_gib,
 ) -> None:
     _test_online_quant_peak_mem_impl(
-        "fp8_per_tensor", vllm_runner, caplog_mp_spawn, monkeypatch
+        "fp8_per_tensor",
+        model_name,
+        expected_model_memory_gib,
+        vllm_runner,
+        caplog_mp_spawn,
+        monkeypatch,
     )
 
 

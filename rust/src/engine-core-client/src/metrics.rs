@@ -7,14 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
     CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
-    Family, HistogramMetric, LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
-    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
+    MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
+    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
-    CachedTokensBySource, KvConnectorStats, MooncakeStats, MooncakeTransferStats,
-    MultiConnectorStats, NixlStats, SchedulerStats,
+    CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
+    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
 };
 use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
@@ -82,6 +83,8 @@ struct SchedulerStatsHandles {
     scheduler_waiting: U64Gauge,
     scheduler_waiting_capacity: U64Gauge,
     scheduler_waiting_deferred: U64Gauge,
+    /// One handle per `KvFetchReqsByStage::STAGES` entry.
+    scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
     /// One handle per [`SLEEP_STATES`] entry.
     engine_sleep_state: [U64Gauge; 3],
@@ -214,6 +217,13 @@ fn resolve_scheduler_stats_handles(
         scheduler_waiting_deferred: metrics
             .scheduler_waiting_by_reason
             .get_or_create_owned(&deferred),
+        scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
+            metrics.scheduler_kv_fetch_by_stage.get_or_create_owned(&KvFetchStageLabels {
+                model_name: model_name.to_string(),
+                engine,
+                stage,
+            })
+        }),
         kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
         engine_sleep_state: SLEEP_STATES.map(|sleep_state| {
             metrics.engine_sleep_state.get_or_create_owned(&EngineSleepStateLabels {
@@ -300,6 +310,13 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         .set(stats.num_waiting_reqs + stats.num_skipped_waiting_reqs);
     handles.scheduler_waiting_capacity.set(stats.num_waiting_reqs);
     handles.scheduler_waiting_deferred.set(stats.num_skipped_waiting_reqs);
+    for (handle, count) in handles
+        .scheduler_kv_fetch_by_stage
+        .iter()
+        .zip(stats.num_kv_fetch_reqs_by_stage.counts())
+    {
+        handle.set(count);
+    }
     handles.kv_cache_usage.set(stats.kv_cache_usage);
 
     // Prefix-cache counters, including the connector-backed external cache path.
@@ -538,12 +555,13 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
+    use itertools::Itertools as _;
     use vllm_metrics::Metrics;
 
     use crate::metrics::LoraInfoExporter;
     use crate::protocol::stats::{
-        KvConnectorStats, MooncakeOperation, MooncakeRecord, MooncakeStats, MooncakeStatus,
-        MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
+        KvConnectorStats, KvFetchReqsByStage, MooncakeOperation, MooncakeRecord, MooncakeStats,
+        MooncakeStatus, MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
     };
 
     fn names(values: &[&str]) -> BTreeSet<String> {
@@ -671,6 +689,46 @@ mod tests {
             vllm:mooncake_num_failed_recvs_total{model_name="model",engine="0"} 1
             vllm:mooncake_num_kv_expired_reqs_total{model_name="model",engine="0"} 0"#]]
         .assert_eq(&mooncake_transfer_series);
+    }
+
+    /// Exports every engine's KV fetch stage gauges from startup and sets them
+    /// from each `SchedulerStats` update.
+    #[test]
+    fn kv_fetch_reqs_by_stage_are_recorded_into_stage_gauges() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        // Series of one family render in hash order, so sort them.
+        let kv_fetch_series = || {
+            metrics
+                .render()
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("vllm:num_requests_kv_fetch_by_stage{"))
+                .sorted()
+                .join("\n")
+        };
+
+        expect![[r#"
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="completed_waiting"} 0
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="in_progress"} 0
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="waiting_to_start"} 0"#]]
+        .assert_eq(&kv_fetch_series());
+
+        let stats = SchedulerStats {
+            num_kv_fetch_reqs_by_stage: KvFetchReqsByStage {
+                waiting_to_start: 3,
+                in_progress: 1,
+                completed_waiting: 2,
+            },
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        expect![[r#"
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="completed_waiting"} 2
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="in_progress"} 1
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="waiting_to_start"} 3"#]]
+        .assert_eq(&kv_fetch_series());
     }
 
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
