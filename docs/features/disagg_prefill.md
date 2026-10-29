@@ -49,6 +49,44 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+## Piecewise prefix loading with MultiConnector
+
+By default, `MultiConnector` loads from the first child with a positive hit and
+saves through all children. Set `"load_policy": "range_aware"` in
+`kv_connector_extra_config`, alongside `connectors`, to let ordered children
+load adjacent ranges of one prefix. This is an opt-in connector extension:
+a suffix loader must implement `supports_load_range` and
+`update_state_after_alloc_for_range`; enabling the policy does not add range
+support to an existing connector.
+
+The loader uses scheduler-block alignment together with each child's optional
+`load_range_alignment`. If compatible ranges cannot cover the longest hit, or
+the selected sources mix synchronous and asynchronous loading, it uses the
+single child with the longest hit. The scheduler may shorten that hit before
+allocation. Async requests wait for every selected source, including after
+cancellation or a transfer failure.
+
+### Hybrid cache and bounded replay
+
+Ranges describe full-attention token positions in the complete allocated block
+table. Each SWA group independently uses the first compatible child that reports
+its complete window through `get_loadable_window_group_ids(request, end_token)`.
+Resolve this availability during prefix lookup; a prefix hit alone does not
+prove that a window exists. A child may supply a window without supplying any
+prefix tokens. Only explicitly assigned `window_group_ids` may be written, at
+`window_end_token`; `is_terminal` does not grant window ownership.
+
+When the scheduler shortens a prefix, it finalizes the plan at that endpoint
+before allocation through `get_loaded_kv_cache_group_ids_for_prefix`. Window
+sources are selected again for the new endpoint. The default implementation of
+this hook preserves existing connectors' loaded-group declarations.
+
+Missing complete windows, legacy hybrid loaders, recurrent state, or incompatible
+load modes use the existing single-source load interface instead. Single-source
+bounded replay remains the backend's responsibility; no partial windows are
+stitched together and no recurrent state is split. Children must not declare
+window groups restored unless their load actually restores them.
+
 ## Reusing prefill token ids on decode
 
 !!! note
