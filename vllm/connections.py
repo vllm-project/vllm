@@ -528,18 +528,20 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
+        download_started = False
         try:
             with self.get_response(url, timeout=timeout) as r:
                 r.raise_for_status()
 
                 with save_path.open("wb") as f:
+                    download_started = True
                     for chunk in r.iter_content(chunk_size):
                         f.write(chunk)
 
             return save_path
         except Exception:
             # Clean up partial downloads before retrying or propagating
-            if save_path.exists():
+            if download_started and save_path.exists():
                 save_path.unlink()
             raise
 
@@ -552,6 +554,7 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
+        download_started = False
         try:
             async with await self.get_async_response(
                 url,
@@ -560,13 +563,14 @@ class HTTPConnection:
                 r.raise_for_status()
 
                 with save_path.open("wb") as f:
+                    download_started = True
                     async for chunk in r.content.iter_chunked(chunk_size):
                         f.write(chunk)
 
             return save_path
         except Exception:
             # Clean up partial downloads before retrying or propagating
-            if save_path.exists():
+            if download_started and save_path.exists():
                 save_path.unlink()
             raise
 
