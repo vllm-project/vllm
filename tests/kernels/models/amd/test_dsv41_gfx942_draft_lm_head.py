@@ -81,7 +81,7 @@ def wvsplitk_rows(monkeypatch):
 def _shard_under_skinny_cap(monkeypatch):
     """Let this shard take wvSplitK.
 
-    32320 x 5120 bf16 is 315 MiB, over MI300 and MI355 L3, so the guard
+    32320 x 5120 bf16 is 315 MiB, over the 256 MiB cap, so the guard
     skips wvSplitK for n > 1. The cap here is the shard itself. The
     accessor caches its one evaluation, so clear it on the way in and out.
     """
