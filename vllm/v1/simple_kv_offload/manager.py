@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadHandshake,
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
@@ -54,6 +55,10 @@ from vllm.v1.simple_kv_offload.metrics import (
     OUTCOME_TO_FIELD,
     MetricName,
     SimpleCPUOffloadStats,
+)
+from vllm.v1.simple_kv_offload.shared_block_pool import (
+    SharedCPUBlockPool,
+    with_shared_pool_lock,
 )
 from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes
 
@@ -155,8 +160,10 @@ class SimpleCPUOffloadScheduler:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         aligned_num_cpu_blocks: int | None = None,
+        cpu_offload_shared: bool = False,
     ):
         self.vllm_config = vllm_config
+        self._shared_required = cpu_offload_shared
         self.kv_cache_config = kv_cache_config
         # When disk mode is active, the offload pool size is disk-based.
         offload_capacity = (
@@ -280,6 +287,32 @@ class SimpleCPUOffloadScheduler:
         self._expected_worker_count = vllm_config.parallel_config.world_size
         self._store_event_pending_counts: dict[int, int] = {}
 
+    def set_shared_pool(self, metadata: SimpleCPUOffloadHandshake) -> None:
+        from vllm.v1.simple_kv_offload.shared_offload import shared_hash_signature
+
+        if metadata.hash_signature != shared_hash_signature(self.vllm_config):
+            raise ValueError("Shared CPU offload scheduler/worker hash mismatch.")
+        if metadata.blocks_per_rank != self.num_cpu_blocks:
+            raise ValueError(
+                "Shared CPU offload scheduler/worker block count mismatch."
+            )
+        pool = SharedCPUBlockPool(
+            metadata,
+            self.hash_block_size,
+            self.enable_kv_cache_events,
+            max_hashes_per_slot=max(self.group_block_sizes) // self.hash_block_size + 1,
+            medium=self.kv_event_medium,
+        )
+        self.cpu_block_pool = pool
+        self.cpu_coordinator.block_pool = pool
+        for manager in self.cpu_coordinator.single_type_managers:
+            manager.block_pool = pool
+            manager._null_block = pool.null_block
+
+    def shutdown(self) -> None:
+        if isinstance(self.cpu_block_pool, SharedCPUBlockPool):
+            self.cpu_block_pool.close()
+
     @staticmethod
     def _derive_cpu_config(
         gpu_config: "KVCacheConfig",
@@ -363,10 +396,17 @@ class SimpleCPUOffloadScheduler:
         Called by Scheduler after kv_cache_manager is ready."""
         self._gpu_block_pool = gpu_block_pool
 
+    @with_shared_pool_lock
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits."""
+        if isinstance(self.cpu_block_pool, SharedCPUBlockPool):
+            from vllm.v1.core.kv_cache_utils import NONE_HASH
+
+            if self.cpu_block_pool.metadata.hash_signature[1] != NONE_HASH:
+                raise ValueError("Shared CPU offload runtime prefix hash mismatch.")
+
         # Pins found CPU blocks so they survive LRU eviction until
         # update_state_after_alloc() consumes them. Any pin from an earlier
         # call on the same request (e.g. retry after a failed allocate_slots)
@@ -429,6 +469,7 @@ class SimpleCPUOffloadScheduler:
 
     # TODO(yifan): this API now only matches the suffix part of the prefix cache. A more
     # general API should scan blocks in both GPU and CPU block pool in a single pass.
+    @with_shared_pool_lock
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -542,6 +583,7 @@ class SimpleCPUOffloadScheduler:
             request=request, transfer_meta=TransferMeta(gpu_block_ids, cpu_block_ids)
         )
 
+    @with_shared_pool_lock
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -606,6 +648,7 @@ class SimpleCPUOffloadScheduler:
         )
         return result
 
+    @with_shared_pool_lock
     def prepare_store_specs(
         self, scheduler_output: SchedulerOutput
     ) -> tuple[
@@ -1042,6 +1085,7 @@ class SimpleCPUOffloadScheduler:
         stats.set_gauge(MetricName.INFO, 1, self._info_labelvalues)
         return stats
 
+    @with_shared_pool_lock
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
 
@@ -1218,6 +1262,7 @@ class SimpleCPUOffloadScheduler:
             or self._abandoned_store_event_to_blocks
         )
 
+    @with_shared_pool_lock
     def request_finished(
         self,
         request: "Request",
@@ -1252,6 +1297,7 @@ class SimpleCPUOffloadScheduler:
 
         return False, None
 
+    @with_shared_pool_lock
     def request_finished_all_groups(
         self,
         request: "Request",
@@ -1424,6 +1470,7 @@ class SimpleCPUOffloadScheduler:
                 event.locality = "LOCAL"
         return events
 
+    @with_shared_pool_lock
     def reset(self) -> bool:
         """Abandon pending transfers and reset the CPU cache when safe.
 
