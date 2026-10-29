@@ -75,6 +75,14 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "auto_awq": 0.5,
 }
 
+# Quantization methods whose weights are NOT quantized in attention layers,
+# even though they quantize other layers. gpt_oss_mxfp4 quantizes MoE experts
+# only: Mxfp4Config skips attention layers ("MXFP4 attention layer is not
+# implemented"), so gpt-oss attention weights stay at the model dtype (BF16).
+# The table entry above is therefore for FFN/expert weights only; the
+# attention parser must not apply it.
+_ATTENTION_KEEPS_MODEL_DTYPE = frozenset({"gpt_oss_mxfp4"})
+
 
 #### Basic Data Types ####
 
@@ -470,16 +478,21 @@ class AttentionQuantizationConfigParser(Parser):
             return args
 
         quant_method = cfg.get_name()
+        if quant_method in _ATTENTION_KEEPS_MODEL_DTYPE:
+            # Attention weights are not quantized for this method, so keep
+            # the model-dtype size already set by BaseConfigParser.
+            return args
         if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
             args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
-                # Fall back to the model-dtype size set by BaseConfigParser
-                # instead of dropping the whole component silently.
+            # Fall back to the model-dtype size set by BaseConfigParser
+            # instead of dropping the whole component silently.
             logger.warning_once(
                 "Unsupported quantization method for attention metrics: %s; "
                 "falling back to model dtype weight size",
                 quant_method,
-        )
+            )
+
         return args
 
 
@@ -1139,7 +1152,7 @@ class FfnQuantizationConfigParser(Parser):
                 "Unsupported quantization method for FFN metrics: %s; "
                 "falling back to model dtype weight size",
                 quant_method,
-        )
+            )
 
         return args
 
