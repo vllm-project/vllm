@@ -767,16 +767,10 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        # The extensible KV cache measures the capture footprint after warmup.
         cudagraph_memory_estimate = 0
-        if (
-            (current_platform.is_cuda_alike() or current_platform.is_xpu())
-            and (
-                self.use_v2_model_runner
-                or self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            )
-            and not self.cache_config.enable_extensible_kv_cache
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            self.use_v2_model_runner
+            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 

@@ -199,9 +199,7 @@ class ExtensibleKVCache:
                 full_view = self.buffer.full_view()
                 kv_caches.update((name, full_view) for name in tensor.layers)
                 continue
-            kernel_block_size = layer_kernel_block_size(
-                spec, group_id, kernel_block_sizes
-            )
+            kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
             for layer_idx, layer_name in enumerate(tensor.layers):
                 segment, offset = self._locate(
                     tensor.offset + layer_idx * tensor.layer_stride
