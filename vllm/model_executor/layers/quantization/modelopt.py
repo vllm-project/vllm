@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
@@ -898,8 +898,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def dequantize_weight(
         self, layer: torch.nn.Module
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Materialize serialized ModelOpt NVFP4 expert weights."""
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield ``(experts, w13, w2)`` dequantized ModelOpt NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,

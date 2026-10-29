@@ -740,7 +740,7 @@ def test_padded_moe_reload_releases_each_layer(
             map_global_to_local=lambda i: i, num_fused_shared_experts=0
         )
         layer._loaded_expert_biases = set()
-        layer._fused_shared_expert_quantizer = None
+        layer.shared_expert_online_loader = None
         method.create_weights(
             layer,
             experts,

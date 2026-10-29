@@ -480,6 +480,7 @@ class TestLoadWeightsExpertBias:
     def _make_experts(self, has_bias: bool) -> torch.nn.Module:
         experts = torch.nn.Module()
         experts.layer_name = "model.layers.0.mlp.experts"
+        experts.shared_expert_online_loader = None
         experts.moe_config = make_dummy_moe_config(num_experts=self.NUM_EXPERTS)
         mapping = RoutedExperts.build_expert_params_mapping(
             "gate_proj",
@@ -573,6 +574,7 @@ class TestLoadWeightsExpertMapping:
     ):
         experts = torch.nn.Module()
         experts.layer_name = layer_name
+        experts.shared_expert_online_loader = None
         experts.moe_config = SimpleNamespace(is_act_and_mul=is_gated)
         experts.get_expert_mapping = lambda **_: mapping
         experts.is_fused_checkpoint_transposed = transposed

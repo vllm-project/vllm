@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedExperts,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -65,6 +66,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -383,6 +385,30 @@ class MiniMaxM3MoE(nn.Module):
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_local_experts}."
+            )
+
+        # MiniMax-M3.1 like checkpoints (`quant_method: mxfp8`, `moe_quant_algo:
+        # NVFP4`) have no native NVFP4 MoE backend on ROCm: the routed experts must be
+        # re-quantized online.
+        experts_prefix = f"{prefix}.experts"
+        if (
+            isinstance(quant_config, ModelOptMxFp8Config)
+            and quant_config.moe_quant_algo == "NVFP4"
+            and not quant_config.is_layer_excluded(experts_prefix)
+            and (
+                quant_config.online_quantization_config is None
+                or quant_config.online_quantization_config.resolve_quant_method_cls(
+                    RoutedExperts, experts_prefix
+                )
+                is None
+            )
+        ):
+            raise NotImplementedError(
+                "This MiniMax model with NVFP4 MoE experts "
+                "(`moe_quant_algo: NVFP4`, `moe_quant_format: nvfp4-pack-quantized`) "
+                "is not supported on ROCm. Please use `--quantization-config.moe "
+                "mxfp8` (or `--quantization-config.moe mxfp4`) to re-quantize the "
+                "MoE to MXFP8 (or MXFP4) when loading to serve on ROCm."
             )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
