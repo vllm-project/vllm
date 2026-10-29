@@ -168,8 +168,6 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
 class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
-    # Tensors that forward() sends between PP stages.
-    intermediate_tensor_keys = ["hidden_states"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -231,7 +229,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            self.intermediate_tensor_keys, config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -268,8 +266,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        # A later PP stage receives the full residual stream, so its first layer
-        # treats it like an embedding (plain RMSNorm, no AR).
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
         full_num_tokens = positions.shape[0]
@@ -299,8 +296,7 @@ class DeepseekV32Model(torch.nn.Module):
             assert not self.use_sequence_parallel, (
                 "Currently, SP is not supported with PP"
             )
-            # hidden_states is a per-TP-rank partial sum, but PP send/recv
-            # requires TP-replicated tensors.
+            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
             hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
             return IntermediateTensors({"hidden_states": hidden_states})
 

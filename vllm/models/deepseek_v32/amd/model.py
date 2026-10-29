@@ -214,8 +214,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        # A later PP stage receives the full residual stream, so its first layer
-        # treats it like an embedding (plain RMSNorm, no AR).
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
         aux_hidden_states = []
@@ -230,8 +229,7 @@ class DeepseekV32Model(torch.nn.Module):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            # hidden_states is a per-TP-rank partial sum, but PP send/recv
-            # requires TP-replicated tensors.
+            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
             hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
             return IntermediateTensors({"hidden_states": hidden_states})
 

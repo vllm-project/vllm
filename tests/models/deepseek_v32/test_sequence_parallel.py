@@ -169,12 +169,10 @@ def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
 
     pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
     monkeypatch.setattr(deepseek_v32_model, "get_pp_group", lambda: pp_group)
-    tp_size = 2
     monkeypatch.setattr(
         deepseek_v32_model,
         "tensor_model_parallel_all_reduce",
-        # all reduce would sum the same tensor across multiple ranks
-        lambda tensor: tensor * tp_size,
+        lambda tensor: tensor * 2,
     )
 
     received = torch.full((3, 2), 5.0)
