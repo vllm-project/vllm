@@ -153,7 +153,9 @@ class SparseMQAIndexer(nn.Module):
             # FP8 Q: its scale is folded into the weights; unit UE8M0 scales.
             assert isinstance(q_quant, torch.Tensor)
             q_values = q_quant
-            q_scale, weights = mqa_logits_mx_inputs(q_values, None, weights)
+            q_scale, weights = mqa_logits_mx_inputs(
+                q_values, None, weights, torch.bfloat16
+            )
         k_dtype = torch.int8 if self.use_fp4_cache else q_values.dtype
         kv_cache = self.k_cache.kv_cache
         topk_tokens = self.topk_tokens

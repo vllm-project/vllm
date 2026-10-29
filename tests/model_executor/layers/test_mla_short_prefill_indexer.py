@@ -815,6 +815,7 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool, kv_dtype:
         ks,
         ke,
         max_len,
+        logits_dtype=torch.bfloat16,
     )
     in_range = torch.arange(max_len, device="cuda") < lens.unsqueeze(1)
     # A row's last candidate block may extend past max_len.
@@ -968,7 +969,8 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(
             block_table.repeat_interleave(next_n, dim=0),
             sched,
             int(req_lens.max()),
-            indices,
+            logits_dtype=torch.bfloat16,
+            indices=indices,
         )
         lens_flat = row_lens.flatten()
         cols = torch.arange(logits.shape[1], device="cuda")

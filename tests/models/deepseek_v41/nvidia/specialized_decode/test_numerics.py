@@ -604,7 +604,9 @@ def _index_scores(indexer, step):
     decode = step.metadata.decode
     q, q_scale = step.q
     q = q.unsqueeze(1).view(torch.int8)
-    q_scale, weights = mqa_logits_mx_inputs(q, q_scale.unsqueeze(1), step.weights)
+    q_scale, weights = mqa_logits_mx_inputs(
+        q, q_scale.unsqueeze(1), step.weights, indexer.logits_dtype
+    )
     ends = decode.seq_lens.view(-1)
     logits = as_fp32_logits(
         fp8_fp4_paged_mqa_logits(
@@ -615,6 +617,7 @@ def _index_scores(indexer, step):
             decode.block_table,
             decode.schedule_metadata,
             max_model_len=indexer.max_model_len,
+            logits_dtype=indexer.logits_dtype,
             indices=decode.indices,
         ),
         ends,

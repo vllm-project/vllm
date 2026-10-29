@@ -126,6 +126,15 @@ class AttentionConfig:
     for steps whose contexts are too short for the pool to pay; it is not
     enabled by default there."""
 
+    indexer_logits_dtype: Literal["float32", "bfloat16"] = "float32"
+    """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
+    sparse-attention indexer. "float32" (default) reduces the head-weighted
+    scores in FP32 and feeds them to the top-k as is. "bfloat16" halves the
+    logits memory; on SM100 it also reduces in BF16 with BF16 head weights and
+    lets the DeepSelect top-k rank the logits directly, while other top-k
+    kernels read an FP32 copy. The sparse MQA-logits path
+    (`indexer_sparse_logits`) always emits BF16."""
+
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split
     them across TP ranks instead of scoring every row on each rank."""
