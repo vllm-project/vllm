@@ -20,11 +20,19 @@ streaming passes over the row, each split across several programs per row:
 4. the mask.
 
 Kept set: the smallest prefix of tokens ordered by (logit desc, index asc)
-whose probability mass reaches p, plus every token equal to the row max. This
-matches the PyTorch reference up to the summation order of the probabilities.
-If a row's bracket holds more tokens than the scratch capacity (pathological
-distributions), the row keeps its whole coarse bracket, a superset whose mass
-still reaches p.
+whose probability mass reaches p, plus every token equal to the row max. It
+matches a float64 reference except where the reference's cumulative mass at
+the boundary is within fp32 rounding of p (the masses are fp32 with
+compensated summation); there the boundary can move by one token.
+
+When a bracket holds more tokens than the scratch that sorts it, typically
+many exact ties (bf16 logits upcast to fp32 share few distinct values), the
+boundary is found by walking the bracket's distinct values downwards, adding
+each value's mass and resolving the boundary value's ties by index: over the
+gathered tokens, or over the row if even the gather overflowed (slow; seen
+only on synthetic tie-heavy rows). Only a bracket with more than
+``_MAX_DISTINCT`` distinct values beyond the scratch keeps its whole coarse
+bracket, a superset whose mass still reaches p.
 
 Rows with p >= 1 are left untouched, as are rows whose finite logits are all
 equal or that hold a single finite logit.
@@ -63,6 +71,9 @@ _MAX_SLICES = 32
 _MIN_SLICE = 4096
 # Bracket bounds are relaxed by this relative margin against rounding.
 _BOUND_MARGIN = 1e-5
+# Distinct values a too-crowded fine bracket is walked through before a row
+# falls back to its coarse bracket.
+_MAX_DISTINCT = 64
 
 _LOG2E = tl.constexpr(1.4426950408889634)
 # Per-row state floats: flag, max, sum_exp, inv_bin_width, first_bin, last_bin,
@@ -85,6 +96,14 @@ def _num_slices(batch_size: int, vocab_size: int, num_sm: int) -> int:
 
 def _slice_capacity(slices: int) -> int:
     return next_power_of_2(min(ROW_CAPACITY, max(512, 2 * ROW_CAPACITY // slices)))
+
+
+@triton.jit
+def _kahan_add(total, comp, value):
+    """Compensated (Kahan) summation step: returns (total, compensation)."""
+    y = value - comp
+    t = total + y
+    return t, (t - total) - y
 
 
 @triton.jit
@@ -159,13 +178,16 @@ def _topp_hist_coarse_kernel(
     ROW = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
     offs = tl.arange(0, BLOCK)
     z = tl.zeros((BLOCK,), tl.float32)
+    zc = tl.zeros((BLOCK,), tl.float32)  # Kahan compensation
     hist = tl.zeros((NB,), tl.int32)
     for i in range(start, end, BLOCK):
         x = tl.load(ROW + i + offs, mask=i + offs < end, other=-float("inf"))
         finite = x > -float("inf")
-        z += tl.where(finite, tl.exp2((x - row_max) * _LOG2E), 0.0)
+        z, zc = _kahan_add(
+            z, zc, tl.where(finite, tl.exp2((x - row_max) * _LOG2E), 0.0)
+        )
         hist += tl.histogram(_coarse_bin(x, row_max, inv_w, NB), NB, mask=finite)
-    tl.store(ZPART + pid, tl.sum(z))
+    tl.store(ZPART + pid, tl.sum(z - zc))
     tl.store(HIST + pid.to(tl.int64) * NB + tl.arange(0, NB), hist)
 
 
@@ -247,6 +269,7 @@ def _topp_hist_gather_kernel(
     ROW = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
     offs = tl.arange(0, BLOCK)
     above = tl.zeros((BLOCK,), tl.float32)
+    above_c = tl.zeros((BLOCK,), tl.float32)  # Kahan compensation
     n = 0
     out = pid.to(tl.int64) * SLICE_CAP
     for i in range(start, end, BLOCK):
@@ -254,19 +277,23 @@ def _topp_hist_gather_kernel(
         finite = x > -float("inf")
         b = _coarse_bin(x, row_max, inv_w, NB)
         e = tl.exp2((x - row_max) * _LOG2E)
-        above += tl.where(finite & (b < first_bin), e, 0.0)
+        above, above_c = _kahan_add(
+            above, above_c, tl.where(finite & (b < first_bin), e, 0.0)
+        )
         cand = finite & (b >= first_bin) & (b <= last_bin)
         pos = n + tl.cumsum(cand.to(tl.int32), 0) - 1
         ok = cand & (pos < SLICE_CAP)
         tl.store(CAND_X + out + pos, x, mask=ok)
         tl.store(CAND_I + out + pos, i + offs, mask=ok)
         n += tl.sum(cand.to(tl.int32))
-    tl.store(ABOVE + pid, tl.sum(above))
+    tl.store(ABOVE + pid, tl.sum(above - above_c))
     tl.store(COUNTS + pid, n)
 
 
 @triton.jit
 def _topp_hist_boundary_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
     P,
     ROWSTATE,
     ABOVE,
@@ -281,6 +308,8 @@ def _topp_hist_boundary_kernel(
     FINE_CAP: tl.constexpr,
     CHUNK: tl.constexpr,
     MARGIN: tl.constexpr,
+    MAX_DISTINCT: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
     base = ROWSTATE + row * _RS
@@ -298,7 +327,50 @@ def _topp_hist_boundary_kernel(
     boundary_x = -float("inf")
     boundary_i = 2147483647
     if tl.max(counts) > SLICE_CAP:
-        mode = 2.0  # keep the whole coarse bracket
+        # The coarse bracket overflowed the gather scratch (extreme ties or a
+        # very flat tail): walk the bracket's distinct values over the row.
+        ROW = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
+        inv_w = tl.load(base + 3)
+        lo_bin = first_bin.to(tl.int32)
+        hi_bin = last_bin.to(tl.int32)
+        r = tl.arange(0, CHUNK)
+        prev = float("inf")
+        done = 0
+        it = 0
+        while (done == 0) & (it < MAX_DISTINCT):
+            it += 1
+            v = -float("inf")
+            cnt = 0
+            for i in range(0, VOCAB_SIZE, CHUNK):
+                x = tl.load(ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf"))
+                b = _coarse_bin(x, row_max, inv_w, NB)
+                inb = (x > -float("inf")) & (b >= lo_bin) & (b <= hi_bin) & (x < prev)
+                v = tl.maximum(v, tl.max(tl.where(inb, x, -float("inf"))))
+            for i in range(0, VOCAB_SIZE, CHUNK):
+                x = tl.load(ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf"))
+                cnt += tl.sum((x == v).to(tl.int32))
+            e = tl.exp2((v - row_max) * _LOG2E)
+            if (v == -float("inf")) | (above + cnt * e >= target):
+                need = tl.maximum(target - above, 0.0)
+                kk = tl.minimum(tl.maximum(tl.ceil(need / e).to(tl.int32), 1), cnt)
+                seen = 0
+                for i in range(0, VOCAB_SIZE, CHUNK):
+                    x = tl.load(
+                        ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf")
+                    )
+                    eq = x == v
+                    pos = seen + tl.cumsum(eq.to(tl.int32), 0)
+                    hit = eq & (pos == kk)
+                    if tl.sum(hit.to(tl.int32)) > 0:
+                        boundary_i = tl.sum(tl.where(hit, i + r, 0))
+                    seen += tl.sum(eq.to(tl.int32))
+                boundary_x = v
+                done = 1
+            else:
+                above += cnt * e
+                prev = v
+        if done == 0:
+            mode = 2.0  # keep the whole coarse bracket
     else:
         # Fine bins over the bracket's logit range (x_hi - (last-first+1) w, x_hi].
         x_hi = row_max - first_bin * w
@@ -328,6 +400,7 @@ def _topp_hist_boundary_kernel(
         f_last = tl.min(tl.where(cl >= target, fbin, NBF - 1))
         # Exact mass above the fine bracket; compact the fine bracket's tokens.
         above_fine = tl.zeros((CHUNK,), tl.float32)
+        above_fine_c = tl.zeros((CHUNK,), tl.float32)
         nf = 0
         fine_row = FINE + row.to(tl.int64) * FINE_CAP * 2
         for j in range(S):
@@ -340,8 +413,12 @@ def _topp_hist_boundary_kernel(
                     ix = tl.load(CAND_I + src + c0 + k, mask=m, other=0)
                     fb = ((x_hi - x) * inv_w2).to(tl.int32)
                     fb = tl.minimum(tl.maximum(fb, 0), NBF - 1)
-                    above_fine += tl.where(
-                        m & (fb < f_first), tl.exp2((x - row_max) * _LOG2E), 0.0
+                    above_fine, above_fine_c = _kahan_add(
+                        above_fine,
+                        above_fine_c,
+                        tl.where(
+                            m & (fb < f_first), tl.exp2((x - row_max) * _LOG2E), 0.0
+                        ),
                     )
                     cand = m & (fb >= f_first) & (fb <= f_last)
                     pos = nf + tl.cumsum(cand.to(tl.int32), 0) - 1
@@ -349,10 +426,72 @@ def _topp_hist_boundary_kernel(
                     tl.store(fine_row + pos * 2, x.to(tl.int32, bitcast=True), mask=ok)
                     tl.store(fine_row + pos * 2 + 1, ix, mask=ok)
                     nf += tl.sum(cand.to(tl.int32))
+        above += tl.sum(above_fine - above_fine_c)
         if nf > FINE_CAP:
-            mode = 2.0
+            # Too many tokens in the fine bracket to sort, typically ties (bf16
+            # logits upcast to fp32 share few distinct values). Walk the
+            # bracket's distinct values downwards, adding each value's mass,
+            # and resolve the boundary value's ties by index.
+            prev = float("inf")
+            done = 0
+            it = 0
+            while (done == 0) & (it < MAX_DISTINCT):
+                it += 1
+                v = -float("inf")
+                for j in range(S):
+                    nj = tl.load(COUNTS + row * S + j)
+                    src = (row * S + j).to(tl.int64) * SLICE_CAP
+                    for c0 in range(0, SLICE_CAP, CHUNK):
+                        if c0 < nj:
+                            m = c0 + k < nj
+                            x = tl.load(
+                                CAND_X + src + c0 + k, mask=m, other=-float("inf")
+                            )
+                            fb = ((x_hi - x) * inv_w2).to(tl.int32)
+                            fb = tl.minimum(tl.maximum(fb, 0), NBF - 1)
+                            inb = m & (fb >= f_first) & (fb <= f_last) & (x < prev)
+                            v = tl.maximum(v, tl.max(tl.where(inb, x, -float("inf"))))
+                cnt = 0
+                for j in range(S):
+                    nj = tl.load(COUNTS + row * S + j)
+                    src = (row * S + j).to(tl.int64) * SLICE_CAP
+                    for c0 in range(0, SLICE_CAP, CHUNK):
+                        if c0 < nj:
+                            m = c0 + k < nj
+                            x = tl.load(
+                                CAND_X + src + c0 + k, mask=m, other=-float("inf")
+                            )
+                            cnt += tl.sum((m & (x == v)).to(tl.int32))
+                e = tl.exp2((v - row_max) * _LOG2E)
+                if (v == -float("inf")) | (above + cnt * e >= target):
+                    # Tokens of value v to keep, in index order: the first kk.
+                    need = tl.maximum(target - above, 0.0)
+                    kk = tl.minimum(tl.maximum(tl.ceil(need / e).to(tl.int32), 1), cnt)
+                    seen = 0
+                    for j in range(S):
+                        nj = tl.load(COUNTS + row * S + j)
+                        src = (row * S + j).to(tl.int64) * SLICE_CAP
+                        for c0 in range(0, SLICE_CAP, CHUNK):
+                            if c0 < nj:
+                                m = c0 + k < nj
+                                x = tl.load(
+                                    CAND_X + src + c0 + k, mask=m, other=-float("inf")
+                                )
+                                ix = tl.load(CAND_I + src + c0 + k, mask=m, other=0)
+                                eq = m & (x == v)
+                                pos = seen + tl.cumsum(eq.to(tl.int32), 0)
+                                hit = eq & (pos == kk)
+                                if tl.sum(hit.to(tl.int32)) > 0:
+                                    boundary_i = tl.sum(tl.where(hit, ix, 0))
+                                seen += tl.sum(eq.to(tl.int32))
+                    boundary_x = v
+                    done = 1
+                else:
+                    above += cnt * e
+                    prev = v
+            if done == 0:
+                mode = 2.0  # more distinct values than the walk allows
         else:
-            above += tl.sum(above_fine)
             q = tl.arange(0, FINE_CAP)
             valid = q < nf
             xb = tl.load(fine_row + q * 2, mask=valid, other=0)
@@ -560,6 +699,8 @@ def _launch_boundary(
         FINE_CAP=FINE_CAPACITY,
         CHUNK=min(slice_cap, 1024),
         MARGIN=_BOUND_MARGIN,
+        MAX_DISTINCT=_MAX_DISTINCT,
+        VOCAB_SIZE=logits.shape[1],
         num_warps=8,
     )
 

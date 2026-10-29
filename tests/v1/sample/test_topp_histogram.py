@@ -19,6 +19,21 @@ from vllm.v1.sample.ops.topp_histogram_triton import (  # noqa: E402
 DEVICE = "cuda"
 
 
+def _boundary_band(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    """Distance from p of the float64 cumulative mass just before and just
+    after the reference boundary token: within this band, fp32 summation can
+    legitimately move the boundary by one token."""
+    x = logits.double()
+    probs = torch.softmax(x, dim=-1)
+    order = torch.argsort(-x, dim=-1, stable=True)
+    cum = probs.gather(1, order).cumsum(-1)
+    pd = p.double().unsqueeze(1)
+    k = (cum < pd).sum(-1, keepdim=True).clamp(max=x.shape[1] - 1)
+    after = cum.gather(1, k)
+    before = torch.where(k > 0, cum.gather(1, (k - 1).clamp(min=0)), 0.0)
+    return torch.minimum((pd - before).abs(), (after - pd).abs()).squeeze(1)
+
+
 def _reference_keep(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
     """Exact float64 top-p: the smallest prefix by (logit desc, index asc)
     whose probability mass reaches p, plus the row max(es)."""
@@ -46,6 +61,13 @@ def _logits(batch: int, vocab: int, regime: str, seed: int) -> torch.Tensor:
     g.manual_seed(seed)
     if regime == "flat":
         return torch.randn(batch, vocab, device=DEVICE, generator=g)
+    if regime == "bf16":
+        # LM-like: a few hot tokens over a broad tail, bf16 values upcast to
+        # fp32, so the boundary region holds many exactly tied tokens.
+        x = torch.randn(batch, vocab, device=DEVICE, generator=g) * 2.5 - 3.0
+        hot = torch.randint(0, vocab, (batch, 16), device=DEVICE, generator=g)
+        x.scatter_(1, hot, torch.rand(batch, 16, device=DEVICE, generator=g) * 6 + 8)
+        return x.bfloat16().float().contiguous()
     x = torch.randn(batch, vocab, device=DEVICE, generator=g) * 2.0
     n_hot = 8 if regime == "peaked" else 64
     hot = torch.randint(0, vocab, (batch, n_hot), device=DEVICE, generator=g)
@@ -69,11 +91,11 @@ def _check(logits: torch.Tensor, p: torch.Tensor, out: torch.Tensor):
     active = p < 1.0
     # The kept mass reaches p (up to fp32 summation rounding) ...
     assert bool((mass[active] >= p[active].double() - 1e-5).all())
-    # ... and the set matches the float64 reference except where the
-    # reference's boundary is within fp32 rounding of p.
+    # ... and the set matches the float64 reference exactly, except by one
+    # boundary token where the reference's cumulative mass is within fp32
+    # rounding of p.
     diff = (keep != ref_keep).sum(-1)
-    ref_mass = (probs * ref_keep).sum(-1)
-    near = (ref_mass - p.double()).abs() < 1e-4
+    near = (_boundary_band(logits, p) < 1e-6) & (diff <= 1)
     assert bool(((diff == 0) | near).all()), diff[~near]
     # Rows with p >= 1 are untouched.
     assert torch.equal(out[~active], logits[~active])
@@ -81,7 +103,9 @@ def _check(logits: torch.Tensor, p: torch.Tensor, out: torch.Tensor):
 
 @pytest.mark.parametrize("batch", [MIN_BATCH_SIZE, 64, 257])
 @pytest.mark.parametrize("vocab", [1024, 32000, 200064])
-@pytest.mark.parametrize("regime", ["peaked", "mixed", "flat", "ties", "masked"])
+@pytest.mark.parametrize(
+    "regime", ["peaked", "mixed", "flat", "ties", "masked", "bf16"]
+)
 def test_top_p_histogram_matches_reference(batch: int, vocab: int, regime: str):
     logits = _logits(batch, vocab, regime, seed=batch * 7 + vocab)
     g = torch.Generator(device=DEVICE)
