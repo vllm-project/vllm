@@ -178,6 +178,10 @@ _TEXT_GENERATION_MODELS = {
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
+    "MistralLarge4ForCausalLM": (
+        "vllm.models.mistral_large4",
+        "MistralLarge4ForCausalLM",
+    ),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "MiMoV2FlashForCausalLM": ("mimo_v2", "MiMoV2FlashForCausalLM"),
@@ -712,6 +716,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
+    ),
+    "MistralLarge4DSparkModel": (
+        "vllm.models.mistral_large4",
+        "MistralLarge4DSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),

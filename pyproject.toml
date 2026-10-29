@@ -61,6 +61,9 @@ include = ["vllm*"]
 # packages re-export their submodules
 "vllm/**/__init__.py" = ["F403"]
 "vllm/_version.py" = ["ALL"]
+# FlyDSL kernel source adapted from ROCm/ATOM: traced DSL code (closures in
+# unrolled loops, long tiled-address expressions)
+"vllm/models/mistral_large4/amd/specialized_decode/mono/**" = ["B007", "B023", "E501", "SIM102", "UP042"]
 # test args are mostly pytest fixtures, which don't benefit from descriptions
 "tests/**" = ["D417"]
 
