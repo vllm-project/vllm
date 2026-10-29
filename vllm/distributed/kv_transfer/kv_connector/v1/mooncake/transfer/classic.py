@@ -36,12 +36,7 @@ class ClassicTransferBackend(TransferBackend):
         )
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
-        self._hostname = hostname
         self._rpc_port = self._engine.get_rpc_port()
-
-    @property
-    def hostname(self) -> str:
-        return self._hostname
 
     @property
     def rpc_port(self) -> int:
@@ -86,10 +81,7 @@ class ClassicTransferBackend(TransferBackend):
         error = (
             None if ret_value == 0 else f"Mooncake transfer engine returned {ret_value}"
         )
-        return [
-            TransferEvent(range_id=request.range_id, state=state, error=error)
-            for request in ranges
-        ]
+        return [TransferEvent(state=state, error=error) for _ in ranges]
 
     def shutdown(self) -> None:
         """The classic engine exposes no teardown entry point."""

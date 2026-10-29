@@ -58,7 +58,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine impor
     MemoryRegion,
     RangeRequest,
     TransferBackend,
-    TransferEvent,
     TransferOp,
     TransferState,
 )
@@ -1382,9 +1381,6 @@ class MooncakeConnectorWorker:
             device_name=device_name,
         )
         self.rpc_port = self.transfer.rpc_port
-        # Ranges are identified worker-wide so that a late event can never be
-        # mistaken for one belonging to a later submission.
-        self._range_ids = itertools.count()
 
         logger.debug(
             "Mooncake Transfer Engine initialized at %s:%d",
@@ -1911,7 +1907,7 @@ class MooncakeConnectorWorker:
 
             if src_ptrs:
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                events = await self.sender_loop.run_in_executor(
+                transfer_err_msg = await self.sender_loop.run_in_executor(
                     self._sender_executor,
                     self._send_blocks,
                     remote_session,
@@ -1919,15 +1915,7 @@ class MooncakeConnectorWorker:
                     dst_ptrs,
                     lengths,
                 )
-
-                failed_event = next(
-                    (event for event in events if event.state is TransferState.FAILED),
-                    None,
-                )
-                if failed_event is not None:
-                    transfer_err_msg = (
-                        failed_event.error or "Mooncake transfer engine failed"
-                    )
+                if transfer_err_msg is not None:
                     err_msg = (
                         transfer_err_msg
                         if err_msg is None
@@ -2226,19 +2214,16 @@ class MooncakeConnectorWorker:
         src_ptrs: list[int],
         dst_ptrs: list[int],
         lengths: list[int],
-    ) -> list[TransferEvent]:
+    ) -> str | None:
+        """Moves one request and returns why it failed, or None on success."""
         ranges = [
-            RangeRequest(
-                range_id=next(self._range_ids),
-                local_addr=src,
-                remote_addr=dst,
-                length=length,
-            )
+            RangeRequest(local_addr=src, remote_addr=dst, length=length)
             for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
         ]
         start_time = time.perf_counter()
         events = self.transfer.transfer(remote_session, TransferOp.WRITE, ranges)
         duration = time.perf_counter() - start_time
+        assert len(events) == len(ranges), "a backend must answer every range"
         failed_event = next(
             (event for event in events if event.state is TransferState.FAILED), None
         )
@@ -2249,17 +2234,17 @@ class MooncakeConnectorWorker:
                 num_descs=len(src_ptrs),
             )
             logger.debug("Sending to %s done, took %s", remote_session, duration)
-        else:
-            self.xfer_stats.record_failed_transfer()
-            logger.warning(
-                "Sending to %s failed (%s) after %s (%d descriptors, %d bytes)",
-                remote_session,
-                failed_event.error,
-                duration,
-                len(src_ptrs),
-                sum(lengths),
-            )
-        return events
+            return None
+        self.xfer_stats.record_failed_transfer()
+        logger.warning(
+            "Sending to %s failed (%s) after %s (%d descriptors, %d bytes)",
+            remote_session,
+            failed_event.error,
+            duration,
+            len(src_ptrs),
+            sum(lengths),
+        )
+        return failed_event.error or "Mooncake transfer engine failed"
 
     @staticmethod
     def _memory_regions(

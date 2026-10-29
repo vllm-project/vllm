@@ -24,7 +24,6 @@ class MemoryRegion:
 
 @dataclass(frozen=True)
 class RangeRequest:
-    range_id: int
     local_addr: int
     remote_addr: int
     length: int
@@ -32,7 +31,6 @@ class RangeRequest:
 
 @dataclass(frozen=True)
 class TransferEvent:
-    range_id: int
     state: TransferState
     error: str | None = None
 
@@ -42,21 +40,23 @@ class TransferBackend(ABC):
 
     @property
     @abstractmethod
-    def hostname(self) -> str:
-        """Address peers use to reach this worker."""
-
-    @property
-    @abstractmethod
     def rpc_port(self) -> int:
         """Port peers use to reach this worker's engine."""
 
     @abstractmethod
     def register_regions(self, regions: Sequence[MemoryRegion]) -> None:
-        """Pins local memory for transfers. Raises RuntimeError on failure."""
+        """Pins local memory for transfers.
+
+        An empty sequence is a no-op. Raises RuntimeError when the engine
+        rejects the memory.
+        """
 
     @abstractmethod
     def unregister_regions(self, regions: Sequence[MemoryRegion]) -> None:
-        """Releases memory pinned by `register_regions`."""
+        """Releases memory pinned by `register_regions`.
+
+        An empty sequence is a no-op.
+        """
 
     @abstractmethod
     def transfer(
@@ -64,10 +64,18 @@ class TransferBackend(ABC):
     ) -> list[TransferEvent]:
         """Moves every range and returns one terminal event for each.
 
-        Blocks until every range reached a terminal state. Called from worker
-        threads, so an implementation must accept concurrent calls.
+        The result lines up with `ranges` by position, and an empty request
+        returns an empty list. Blocks until every range reached a terminal
+        state. Called from worker threads, so an implementation must accept
+        concurrent calls.
         """
 
     @abstractmethod
     def shutdown(self) -> None:
-        """Stops the backend. No transfer runs after this returns."""
+        """Stops the backend.
+
+        The caller stops submitting before calling this, but work already
+        queued on its worker threads is not cancelled, so a `transfer` call may
+        still be running or start afterwards. An implementation must tolerate
+        that.
+        """

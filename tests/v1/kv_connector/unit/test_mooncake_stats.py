@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -222,7 +221,6 @@ def _bare_worker() -> MooncakeConnectorWorker:
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
     worker.transfer = MagicMock()
-    worker._range_ids = itertools.count()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -232,18 +230,18 @@ def _bare_worker() -> MooncakeConnectorWorker:
 def test_send_blocks_records_success():
     worker = _bare_worker()
     worker.transfer.transfer.return_value = [
-        TransferEvent(range_id=0, state=TransferState.COMPLETED),
-        TransferEvent(range_id=1, state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.COMPLETED),
     ]
 
-    events = worker._send_blocks(
+    error = worker._send_blocks(
         "host:1234",
         src_ptrs=[0x1000, 0x2000],
         dst_ptrs=[0x3000, 0x4000],
         lengths=[1024, 2048],
     )
 
-    assert [event.state for event in events] == [TransferState.COMPLETED] * 2
+    assert error is None
     assert worker.xfer_stats.num_successful_transfers == 1
     data = worker.xfer_stats.data
     assert data["bytes_transferred"] == [1024 + 2048]
@@ -255,22 +253,24 @@ def test_send_blocks_records_failure():
     worker = _bare_worker()
     worker.transfer.transfer.return_value = [
         TransferEvent(
-            range_id=0,
             state=TransferState.FAILED,
             error="Mooncake transfer engine returned 1",
         )
     ]
 
-    events = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    error = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 
-    assert [event.state for event in events] == [TransferState.FAILED]
+    assert error == "Mooncake transfer engine returned 1"
     assert worker.xfer_stats.num_successful_transfers == 0
     assert worker.xfer_stats.data["num_failed_transfers"] == [1]
 
 
 def test_send_blocks_submits_one_range_per_descriptor():
     worker = _bare_worker()
-    worker.transfer.transfer.return_value = []
+    worker.transfer.transfer.return_value = [
+        TransferEvent(state=TransferState.COMPLETED),
+        TransferEvent(state=TransferState.COMPLETED),
+    ]
 
     worker._send_blocks("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
 
@@ -293,7 +293,7 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
     worker.transfer.transfer.return_value = [
-        TransferEvent(range_id=0, state=TransferState.COMPLETED)
+        TransferEvent(state=TransferState.COMPLETED)
     ]
     worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 

@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.classic impo
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
     MemoryRegion,
     RangeRequest,
+    TransferEvent,
     TransferOp,
     TransferState,
 )
@@ -81,7 +82,6 @@ def test_backend_initializes_engine_with_p2p_handshake():
         "rdma",
         "mlx5_0",
     )
-    assert backend.hostname == "10.0.0.1"
     assert backend.rpc_port == 12345
 
 
@@ -93,8 +93,8 @@ def test_transfer_reports_completion_per_range():
         "10.0.0.2:1234",
         TransferOp.WRITE,
         [
-            RangeRequest(range_id=0, local_addr=0x1000, remote_addr=0x2000, length=256),
-            RangeRequest(range_id=1, local_addr=0x1100, remote_addr=0x2100, length=256),
+            RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=256),
+            RangeRequest(local_addr=0x1100, remote_addr=0x2100, length=256),
         ],
     )
 
@@ -105,9 +105,9 @@ def test_transfer_reports_completion_per_range():
         [0x2000, 0x2100],
         [256, 256],
     )
-    assert [(event.range_id, event.state) for event in events] == [
-        (0, TransferState.COMPLETED),
-        (1, TransferState.COMPLETED),
+    assert [event.state for event in events] == [
+        TransferState.COMPLETED,
+        TransferState.COMPLETED,
     ]
     assert [event.error for event in events] == [None, None]
 
@@ -119,7 +119,7 @@ def test_transfer_reports_engine_failure_for_every_range():
     events = backend.transfer(
         "10.0.0.2:1234",
         TransferOp.WRITE,
-        [RangeRequest(range_id=3, local_addr=0x1000, remote_addr=0x2000, length=64)],
+        [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=64)],
     )
 
     assert len(events) == 1
@@ -134,7 +134,7 @@ def test_transfer_reads_when_op_is_read():
     events = backend.transfer(
         "10.0.0.2:1234",
         TransferOp.READ,
-        [RangeRequest(range_id=0, local_addr=0x1000, remote_addr=0x2000, length=8)],
+        [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=8)],
     )
 
     assert engine.calls[-1][0] == "read"
@@ -200,29 +200,27 @@ def test_backend_rejects_failed_initialize():
 def test_concurrent_transfers_keep_their_own_events():
     engine = FakeEngine()
     backend = make_backend(engine)
-    results: dict[str, list] = {}
+    results: dict[str, list[TransferEvent]] = {}
     submitted = threading.Barrier(2)
 
-    def submit_and_collect(name: str, range_id: int) -> None:
+    def submit_and_collect(name: str, length: int) -> None:
         submitted.wait()
         results[name] = backend.transfer(
             "10.0.0.2:1234",
             TransferOp.WRITE,
-            [
-                RangeRequest(
-                    range_id=range_id, local_addr=0x1000, remote_addr=0x2000, length=16
-                )
-            ],
+            [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=length)],
         )
 
     threads = [
-        threading.Thread(target=submit_and_collect, args=("first", 0)),
-        threading.Thread(target=submit_and_collect, args=("second", 1)),
+        threading.Thread(target=submit_and_collect, args=("first", 16)),
+        threading.Thread(target=submit_and_collect, args=("second", 32)),
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    assert [event.range_id for event in results["first"]] == [0]
-    assert [event.range_id for event in results["second"]] == [1]
+    assert [event.state for event in results["first"]] == [TransferState.COMPLETED]
+    assert [event.state for event in results["second"]] == [TransferState.COMPLETED]
+    lengths = sorted(call[4][0] for call in engine.calls if call[0] == "write")
+    assert lengths == [16, 32]
