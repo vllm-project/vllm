@@ -581,3 +581,18 @@ steps: []
 #   commands:
 #     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
 #     - MLA=1 bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh
+
+# - label: ":nvidia: (L4) [Nightly] P2P KV-Offload tier source faults"
+#   key: p2p-kv-offload-source-faults-4-gpus
+#   optional: true
+#   timeout_in_minutes: 30
+#   working_dir: "/vllm-workspace/tests"
+#   device: l4
+#   num_devices: 4
+#   source_file_dependencies:
+#     - vllm/v1/kv_offload/
+#     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+#     - tests/v1/kv_offload/tiering/p2p/
+#   commands:
+#     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#     - FAULTS=1 bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh

@@ -10,6 +10,8 @@
 #   DP_EP=1    data-parallel / expert-parallel prefillers and decoders
 #   FEATURES=1 cache types beyond plain attention: hybrid Mamba/GDN state,
 #              sliding window, fp8 KV
+#   FAULTS=1   a p2p source stalls, is killed and restarted, or is removed;
+#              asserts time bounds and recovery instead of accuracy
 # Every config sizes for a single 4-GPU host.
 set -euo pipefail
 
@@ -63,6 +65,12 @@ feature_configs=(
   # fp8 pages through the canonical mixed-TP path that bf16 already covers.
   "P2P_MODE=pd  CANONICAL_LAYOUT=1 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype,fp8 MODEL_NAMES=${DENSE_MODEL}"
 )
+# Two sources, one decoder, p2p mode; prefiller 0 is the one faulted.
+fault_configs=(
+  "FAULT_CASE=stall  NUM_PREFILL_INSTANCES=2 MODEL_NAMES=${DENSE_MODEL}"
+  "FAULT_CASE=kill   NUM_PREFILL_INSTANCES=2 MODEL_NAMES=${DENSE_MODEL}"
+  "FAULT_CASE=remove NUM_PREFILL_INSTANCES=2 MODEL_NAMES=${DENSE_MODEL}"
+)
 
 run_tests() {
   local label=$1
@@ -103,6 +111,9 @@ elif [[ -n "${DP_EP:-}" ]]; then
 elif [[ -n "${FEATURES:-}" ]]; then
   unset FEATURES
   run_tests "features" "${cmdline_args}" "${feature_configs[@]}"
+elif [[ -n "${FAULTS:-}" ]]; then
+  unset FAULTS
+  run_tests "faults" "${cmdline_args}" "${fault_configs[@]}"
 else
   run_tests "TP" "${cmdline_args}" "${tp_configs[@]}"
   run_tests "decoder-first" "${cmdline_args} --decoder-first" \
