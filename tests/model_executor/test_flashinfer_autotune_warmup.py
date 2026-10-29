@@ -31,12 +31,18 @@ class _FakeMoERunner:
     moe_config: Any
 
 
-def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
+def _make_moe(
+    *,
+    max_deferred_tokens: int = 128,
+    enabled: bool = True,
+    all2all: bool = False,
+):
     """Create a fake MoE layer with a deferred-finalize token limit."""
     moe = _FakeMoERunner()
     moe.moe_config = SimpleNamespace(
         use_deferred_moe_finalize=enabled,
         defer_moe_finalize_max_num_tokens=max_deferred_tokens,
+        moe_parallel_config=SimpleNamespace(use_all2all_kernels=all2all),
     )
     return moe
 
@@ -458,6 +464,38 @@ def test_flashinfer_autotune_off_grid_max_tokens_uses_op_buckets():
     assert [c.kwargs["num_tokens"] for c in runner._dummy_run.call_args_list] == [
         21504,
         128,
+    ]
+
+
+def test_flashinfer_autotune_off_grid_max_tokens_keeps_override_with_all2all():
+    """With all2all dispatch the ops' own buckets follow each rank's local M,
+    so ranks could profile different buckets and desync the timing all-reduce."""
+    runner = _make_runner([_make_moe(all2all=True)], max_tokens=21504)
+    max_buckets = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 21504)
+    deferred_buckets = (1, 2, 4, 8, 16, 32, 64, 128)
+
+    with (
+        patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner),
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(21504, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            side_effect=(max_buckets, deferred_buckets),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_map_to_hybrid_bucket_uncapped",
+            side_effect=lambda num_tokens: 32768 if num_tokens > 16384 else num_tokens,
+        ),
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    assert autotune.call_args_list == [
+        call(tuning_buckets=max_buckets, round_up=True),
+        call(tuning_buckets=deferred_buckets, round_up=True),
     ]
 
 

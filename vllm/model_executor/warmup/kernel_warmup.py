@@ -336,6 +336,17 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
+def _flashinfer_moe_uses_all2all(runner: "GPUModelRunner") -> bool:
+    """Return whether any MoE layer dispatches tokens across ranks."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
+
+    return any(
+        isinstance(module, MoERunner)
+        and module.moe_config.moe_parallel_config.use_all2all_kernels
+        for module in runner.get_model().modules()
+    )
+
+
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
@@ -372,13 +383,18 @@ def _run_flashinfer_autotune_dummy_runs(
         # grid up (e.g. 21504 -> 32768). With an off-grid max M, an override
         # would leave serving's top bucket untuned, so tune the full-size pass
         # with each op's own buckets. Bounded or drafter-widened passes keep
-        # the override; on the grid it maps like the ops do.
+        # the override; on the grid it maps like the ops do. With all2all
+        # dispatch the ops build their buckets from each rank's own token
+        # count, but FlashInfer all-reduces every tactic's timing across the
+        # tune group, so every rank must profile the same buckets: keep the
+        # override there.
         tuning_buckets = None
         if (
             num_tokens < max_tokens
             or max_tuning_tokens > num_tokens
             or fi_utils.flashinfer_map_to_hybrid_bucket_uncapped(num_tokens)
             == num_tokens
+            or _flashinfer_moe_uses_all2all(runner)
         ):
             tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
                 max_tuning_tokens
