@@ -2396,3 +2396,83 @@ def test_clef_omni_backend_samples_reference_frames(tmp_path):
     assert metadata["do_sample_frames"] is False
     for frame, idx in zip(frames, [0, 15, 30, 45]):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
+
+
+def test_opencv_capture_keeps_stream_alive_until_release(tmp_path, monkeypatch):
+    """OpenCV borrows the stream; it must survive reads and capture release."""
+    import gc
+    import weakref
+
+    cv2 = pytest.importorskip("cv2")
+    path = _write_gray_video(tmp_path, total_frames=10, fps=5)
+    native_capture = cv2.VideoCapture
+    streams = []
+
+    def track_stream(stream, *args):
+        streams.append(weakref.ref(stream))
+        return native_capture(stream, *args)
+
+    monkeypatch.setattr(cv2, "VideoCapture", track_stream)
+    with OpenCVVideoBackendMixin.open_video_capture(path.read_bytes()) as cap:
+        gc.collect()
+        assert streams[0]() is not None
+        reference = native_capture(str(path))
+        try:
+            for _ in range(10):
+                ok, frame = cap.read()
+                ref_ok, ref_frame = reference.read()
+                assert ok and ref_ok
+                np.testing.assert_array_equal(frame, ref_frame)
+        finally:
+            reference.release()
+    assert not cap.isOpened()
+    stream = streams[0]()
+    assert stream is None or stream.closed
+
+
+@pytest.mark.parametrize("failure_stage", ["metadata", "sampling", "read"])
+def test_opencv_decode_releases_captures_on_error(tmp_path, monkeypatch, failure_stage):
+    cv2 = pytest.importorskip("cv2")
+    path = _write_gray_video(tmp_path, total_frames=10, fps=5)
+    native_capture = cv2.VideoCapture
+    captures = []
+
+    def track_capture(*args):
+        cap = native_capture(*args)
+        captures.append(cap)
+        return cap
+
+    def fail(*args, **kwargs):
+        raise ValueError("injected video decode failure")
+
+    monkeypatch.setattr(cv2, "VideoCapture", track_capture)
+    owner, method = {
+        "metadata": (OpenCVVideoBackendMixin, "get_video_metadata"),
+        "sampling": (VideoBackend, "compute_frames_index_to_sample"),
+        "read": (VideoBackend, "read_frames"),
+    }[failure_stage]
+    monkeypatch.setattr(owner, method, fail)
+    with pytest.raises(ValueError, match="injected video decode failure"):
+        VideoBackend.load_bytes(path.read_bytes(), num_frames=4, backend="opencv")
+    assert captures
+    assert all(not cap.isOpened() for cap in captures)
+
+
+def test_opencv_failed_open_releases_capture(monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    native_capture = cv2.VideoCapture
+    captures = []
+
+    def track_capture(*args):
+        cap = native_capture(*args)
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(cv2, "VideoCapture", track_capture)
+    with (
+        pytest.raises(ValueError, match="Could not open video stream"),
+        OpenCVVideoBackendMixin.open_video_capture(b"invalid video"),
+    ):
+        pytest.fail("Invalid video should not open")
+    assert captures
+    assert all(not cap.isOpened() for cap in captures)
