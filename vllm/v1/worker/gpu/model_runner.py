@@ -1877,6 +1877,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allow_skip_drafts=scheduler_output.skip_drafts,
         )
 
+        # DeepSeek V4.1 producer prefill has shown shape-dependent output
+        # differences when a piecewise graph pads the scheduled token count.
+        # Keep this experimental remote-table path exact until that behavior is
+        # understood; exact-size captures and decode graphs remain available.
+        engram = self.vllm_config.engram_config
+        kv_transfer = self.vllm_config.kv_transfer_config
+        if (
+            not dummy_run
+            and engram is not None
+            and engram.rdma_provider
+            and kv_transfer is not None
+            and kv_transfer.is_kv_producer
+            and batch_req_state is not None
+            and batch_req_state.has_prefill
+            and batch_desc.num_tokens != num_toks
+        ):
+            assert self.dp_size == 1
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_toks,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+            )
+
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
