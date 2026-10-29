@@ -304,6 +304,30 @@ def get_model_path(model: str | Path, revision: str | None = None):
     )
 
 
+def get_subfolder_path(
+    model: str,
+    subfolder: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> str:
+    """Return the local path of `subfolder` in a local or Hub checkpoint,
+    downloading only that subfolder from the Hub."""
+    if os.path.isdir(model):
+        return os.path.join(model, subfolder)
+    # Avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    with get_lock(model, cache_dir):
+        snapshot = hf_api().snapshot_download(
+            repo_id=model,
+            revision=revision,
+            cache_dir=cache_dir,
+            allow_patterns=f"{subfolder}/*",
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
+    return os.path.join(snapshot, subfolder)
+
+
 _WEIGHT_FILE_PATTERNS = [
     "*.safetensors",
     "*.bin",

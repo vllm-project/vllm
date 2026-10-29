@@ -73,6 +73,17 @@ else:
 
 logger = init_logger(__name__)
 
+_QWEN3_5_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MTP",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeMTP",
+    }
+)
+
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
@@ -126,6 +137,10 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
         return frozenset({"DeepseekV41ForCausalLM"})
+    if current_platform.is_cuda():
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
+        # platforms keep the torch.compile path.
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
