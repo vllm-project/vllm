@@ -5,6 +5,7 @@
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
 
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -54,6 +55,9 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
+)
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    _quantize_moe_weight_to_nvfp4,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -786,6 +790,110 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
         # MuseSpark NVFP4 keeps layers 0 and 61 in BF16.
         return MuseSparkUnquantizedFusedMoE(moe_config)
+
+
+def quantize_experts_to_nvfp4(
+    weight: torch.Tensor, device: torch.device | str
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize experts ``[E, R, C]`` to the ModelOpt NVFP4 checkpoint layout.
+
+    Experts move to ``device`` one at a time. Returns, on ``device``, packed
+    E2M1 ``[E, R, C // 2]``, block scales ``[E, R, C // 16]`` and one global
+    scale per expert ``[E]``.
+    """
+    # Copying each expert back to fresh pageable host memory can stall late in
+    # loading on Grace (GB300); the weight loader copies from ``device``.
+    num_experts, rows, cols = weight.shape
+    packed = torch.empty(
+        (num_experts, rows, cols // 2), dtype=torch.uint8, device=device
+    )
+    block_scale = torch.empty(
+        (num_experts, rows, cols // 16), dtype=torch.float8_e4m3fn, device=device
+    )
+    global_scale = torch.empty(num_experts, dtype=torch.float32, device=device)
+    for expert in range(num_experts):
+        quantized = _quantize_moe_weight_to_nvfp4(
+            weight[expert : expert + 1].to(device)
+        )
+        for out, value in zip(
+            (packed, block_scale, global_scale), quantized, strict=True
+        ):
+            out[expert].copy_(value[0])
+    return packed, block_scale, global_scale
+
+
+class MuseSparkBf16AsNvFp4RoutedExperts(MuseSparkRoutedExperts):
+    """NVFP4 experts for a BF16 layer of an NVFP4 checkpoint, quantized on load.
+
+    Whole experts are quantized before the TP/EP split, as an offline
+    requantized checkpoint would be. The checkpoint has no input scales for
+    them; see ``set_uncalibrated_input_scales``.
+    """
+
+    def _get_quant_method(
+        self,
+        prefix: str,
+        quant_config: QuantizationConfig | None,
+        moe_config: FusedMoEConfig,
+    ) -> FusedMoEMethodBase:
+        assert isinstance(quant_config, ModelOptNvFp4Config)
+        return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return super().load_weights(self._quantize_bf16_weights(weights))
+
+    def _quantize_bf16_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, tensor in weights:
+            if name not in ("w13_weight", "w2_weight"):
+                yield name, tensor
+                continue
+            packed, block_scale, global_scale = quantize_experts_to_nvfp4(
+                tensor, self.moe_config.device
+            )
+            stem = name.removesuffix("_weight")
+            yield name, packed
+            yield f"{stem}_weight_scale", block_scale
+            # Gate and up share their expert's global scale.
+            yield (
+                f"{stem}_weight_scale_2",
+                global_scale if stem == "w2" else global_scale[:, None].expand(-1, 2),
+            )
+
+
+def set_uncalibrated_input_scales(
+    input_scales: Mapping[int, tuple[torch.Tensor, torch.Tensor]],
+    uncalibrated: Collection[int],
+) -> None:
+    """Set static input scales for NVFP4 MoE layers with no activation calibration.
+
+    ``input_scales`` maps every NVFP4 MoE layer to its ``(w13, w2)`` input
+    scales. The TRT-LLM NVFP4 MoE quantizes activations with static scales; each
+    uncalibrated layer takes the max of the two nearest calibrated layers.
+    """
+    calibrated = [idx for idx in input_scales if idx not in uncalibrated]
+    for idx in uncalibrated:
+        neighbours = sorted(calibrated, key=lambda n: (abs(n - idx), n))[:2]
+        if not neighbours:
+            raise ValueError(
+                f"MoE layer {idx} has no calibrated NVFP4 layer to take its "
+                "input scales from."
+            )
+        scales = []
+        for i, input_scale in enumerate(input_scales[idx]):
+            scale = max(input_scales[n][i].max().item() for n in neighbours)
+            input_scale.fill_(scale)
+            scales.append(scale)
+        logger.info(
+            "MoE layer %d quantized from BF16 takes the input scales of layers "
+            "%s: w13 %.4e, w2 %.4e.",
+            idx,
+            neighbours,
+            *scales,
+        )
 
 
 class MuseMoERunner(MoERunner):

@@ -48,6 +48,7 @@ def make_runner(
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
+    routed_experts_cls: type[MuseSparkRoutedExperts] = MuseSparkRoutedExperts,
 ):
     """Build a MuseSpark runner, load ``ckpt`` and finalize its weights."""
     num_experts = expert_bias.numel()
@@ -77,14 +78,14 @@ def make_runner(
             scoring_func="sigmoid",
             e_score_correction_bias=expert_bias,
             routed_scaling_factor=ROUTE_SCALE,
-            routed_experts_cls=MuseSparkRoutedExperts,
+            routed_experts_cls=routed_experts_cls,
             runner_cls=MuseMoERunner,
             runner_args={"post_expert_norm": norm},
         )
     runner.cuda()
     routed = runner.routed_experts
     loaded = list(routed.load_weights(list(ckpt.items())))
-    assert len(loaded) == len(ckpt)
+    assert set(ckpt) <= set(loaded)
     routed.quant_method.process_weights_after_loading(routed)
     moe_kernel = routed.quant_method.moe_kernel
     assert moe_kernel is not None

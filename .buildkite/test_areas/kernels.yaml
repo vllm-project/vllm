@@ -694,6 +694,10 @@ steps:
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
+  - vllm/models/muse_spark/common/
+  - vllm/models/muse_spark/nvidia/
+  - tests/kernels/moe/muse_spark_utils.py
+  - tests/kernels/moe/test_muse_spark_trtllm_moe.py
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -713,6 +717,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s tests/kernels/moe/test_muse_spark_trtllm_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     - pytest -v -s tests/models/quantization/test_nvfp4.py
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     _validate_route_major_deployment,
     needs_pre_norm_all_reduce,
+    set_uncalibrated_input_scales,
     validate_deployment,
 )
 
@@ -126,3 +127,28 @@ def test_hopper_route_major_deployments(kwargs, match):
         return
     with pytest.raises(NotImplementedError, match=match):
         _validate_route_major_deployment(_moe_config(**kwargs))
+
+
+def _input_scales(scale: float) -> tuple[torch.Tensor, torch.Tensor]:
+    # Each max sits on a single expert.
+    w13 = torch.full((4, 2), scale / 2)
+    w13[1, 1] = scale
+    w2 = torch.full((4,), scale / 4)
+    w2[2] = scale / 2
+    return w13, w2
+
+
+def test_uncalibrated_layers_take_nearest_calibrated_input_scales():
+    """Layers quantized from BF16 borrow the max of the two nearest NVFP4 layers."""
+    layers = {idx: _input_scales(float(idx)) for idx in (0, 1, 2, 3, 59, 60, 61)}
+    set_uncalibrated_input_scales(layers, [0, 61])
+
+    for idx, w13, w2 in ((0, 2.0, 1.0), (61, 60.0, 30.0)):
+        assert torch.all(layers[idx][0] == w13)
+        assert torch.all(layers[idx][1] == w2)
+    assert layers[1][0].max() == 1.0
+
+
+def test_uncalibrated_layer_without_calibrated_neighbours_is_rejected():
+    with pytest.raises(ValueError, match="no calibrated NVFP4 layer"):
+        set_uncalibrated_input_scales({0: _input_scales(0.0)}, [0])

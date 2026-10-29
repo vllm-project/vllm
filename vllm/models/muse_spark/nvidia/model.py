@@ -110,8 +110,11 @@ from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MuseSpark1xRouter,
+    MuseSparkBf16AsNvFp4RoutedExperts,
+    MuseSparkModelOptNvFp4FusedMoE,
     MuseSparkMoEConfig,
     MuseSparkRoutedExperts,
+    set_uncalibrated_input_scales,
 )
 from vllm.models.muse_spark.nvidia.ops.cute_dsl.qk_norm import (
     qk_norm,
@@ -394,12 +397,25 @@ class MuseSpark1xMoE(nn.Module):
         layer_is_nvfp4 = isinstance(
             quant_config, ModelOptNvFp4Config
         ) and not quant_config.is_layer_excluded(f"{prefix}.experts")
+        # Opt-in: run the BF16 experts of an NVFP4 checkpoint as NVFP4 too.
+        self.quantize_bf16_experts = (
+            isinstance(quant_config, ModelOptNvFp4Config)
+            and not layer_is_nvfp4
+            and getattr(config, "muse_spark_quantize_bf16_experts", False)
+        )
         if (
             mega_backend
             and quant_config is not None
             and not isinstance(quant_config, ModelOptNvFp4Config)
         ):
             raise NotImplementedError("MuseSpark MegaMoE supports BF16 and NVFP4.")
+        if self.quantize_bf16_experts and (
+            mega_backend or not current_platform.is_device_capability_family(100)
+        ):
+            raise NotImplementedError(
+                "muse_spark_quantize_bf16_experts needs the FlashInfer TRT-LLM "
+                "NVFP4 MoE: an SM100 GPU and no MegaMoE."
+            )
         self.use_mega_moe = mega_backend
         self.is_nvfp4_mega_moe = mega_backend and layer_is_nvfp4
 
@@ -621,7 +637,11 @@ class MuseSpark1xMoE(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.expert_bias,
             routed_scaling_factor=self.route_scale,
-            routed_experts_cls=self.post_norm_routed_experts_cls,
+            routed_experts_cls=(
+                MuseSparkBf16AsNvFp4RoutedExperts
+                if self.quantize_bf16_experts
+                else self.post_norm_routed_experts_cls
+            ),
             runner_cls=self.post_norm_runner_cls,
             runner_args={
                 "post_expert_norm": self.post_expert_norm,
@@ -1930,7 +1950,35 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(
+            interleaved_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        return loaded | self._set_bf16_quantized_input_scales()
+
+    def _set_bf16_quantized_input_scales(self) -> set[str]:
+        """Set the input scales of experts quantized from BF16 (none on disk)."""
+        experts_by_layer = {
+            idx: layer.feed_forward.experts.routed_experts
+            for idx, layer in enumerate(self.model.layers)
+            if isinstance(getattr(layer, "feed_forward", None), MuseSpark1xMoE)
+            and not layer.feed_forward.use_mega_moe
+        }
+        input_scales = {
+            idx: (experts.w13_input_scale.data, experts.w2_input_scale.data)
+            for idx, experts in experts_by_layer.items()
+            if isinstance(experts.quant_method, MuseSparkModelOptNvFp4FusedMoE)
+        }
+        uncalibrated = [
+            idx
+            for idx, experts in experts_by_layer.items()
+            if isinstance(experts, MuseSparkBf16AsNvFp4RoutedExperts)
+        ]
+        set_uncalibrated_input_scales(input_scales, uncalibrated)
+        return {
+            f"model.layers.{idx}.feed_forward.experts.routed_experts.{name}"
+            for idx in uncalibrated
+            for name in ("w13_input_scale", "w2_input_scale")
+        }
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()

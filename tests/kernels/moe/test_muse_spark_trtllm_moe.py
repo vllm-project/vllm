@@ -31,7 +31,12 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNormWithInputScale,
 )
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
-from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSparkTrtLlmNvFp4Experts
+from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+    MuseSparkBf16AsNvFp4RoutedExperts,
+    MuseSparkRoutedExperts,
+    MuseSparkTrtLlmNvFp4Experts,
+    quantize_experts_to_nvfp4,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -48,7 +53,12 @@ E, N, K, TOPK, M = 32, 1024, 2048, 8, 64
 FP4_SF_MAX = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX
 
 
-def build_moe(norm_cls, ckpt: dict[str, torch.Tensor], quant_config=None):
+def build_moe(
+    norm_cls,
+    ckpt: dict[str, torch.Tensor],
+    quant_config=None,
+    routed_experts_cls: type[MuseSparkRoutedExperts] = MuseSparkRoutedExperts,
+):
     # Non-zero so selecting on biased scores and normalizing unbiased ones is
     # distinguishable from using one set for both.
     expert_bias = (torch.rand(E, device="cuda", dtype=torch.float32) - 0.5) * 0.4
@@ -71,6 +81,7 @@ def build_moe(norm_cls, ckpt: dict[str, torch.Tensor], quant_config=None):
         hidden_size=K,
         intermediate_size=N,
         top_k=TOPK,
+        routed_experts_cls=routed_experts_cls,
     )
     assert router.routing_method_type == RoutingMethodType.MiniMax2
     routed = runner.routed_experts
@@ -432,3 +443,80 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
         ckpt, quant_config = _bf16_checkpoint(), None
     _, _, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt, quant_config)
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
+
+
+def test_quantize_experts_to_nvfp4_layout():
+    """Host BF16 experts quantize on the GPU into the ModelOpt NVFP4 layout, and
+    the results stay on the GPU."""
+    torch.manual_seed(0)
+    w = (torch.randn(2, 64, 256) * 0.02).to(torch.bfloat16)
+    w[0, 3, 5] = 0.3
+    # E2M1 6.0 is code 7 and -0.5 is code 9; element 0 takes the low nibble.
+    w[1] = 0
+    w[1, 0, 0], w[1, 0, 1] = 6.0, -0.5
+
+    packed, block_scale, global_scale = quantize_experts_to_nvfp4(w, "cuda")
+    assert packed.shape == (2, 64, 128) and packed.dtype == torch.uint8
+    assert block_scale.shape == (2, 64, 16)
+    assert block_scale.dtype == torch.float8_e4m3fn
+    assert packed.is_cuda and block_scale.is_cuda and global_scale.is_cuda
+    torch.testing.assert_close(
+        global_scale.cpu(), w.float().abs().amax(dim=(1, 2)) / FP4_SF_MAX
+    )
+    assert packed[1, 0, 0].item() == 7 | (9 << 4)
+    dequant = _dequant(
+        packed[0].cuda(), block_scale[0].cuda(), 1.0 / global_scale[0].cuda()
+    )
+    assert _rel(dequant, w[0].cuda().float()) < 0.12
+
+
+@torch.inference_mode()
+def test_muse_spark_bf16_experts_load_as_nvfp4(dist_init, workspace_init):
+    """BF16 experts quantized on load match the same layer exported to NVFP4."""
+    bf16 = _bf16_checkpoint()
+    input_scales = {
+        "w13_input_scale": torch.rand(E, 2, device="cuda") + 0.5,
+        "w2_input_scale": torch.rand(E, device="cuda") + 0.5,
+    }
+    w13, w13_scale, w13_scale_2 = quantize_experts_to_nvfp4(bf16["w13_weight"], "cuda")
+    w2, w2_scale, w2_scale_2 = quantize_experts_to_nvfp4(bf16["w2_weight"], "cuda")
+    exported = {
+        "w13_weight": w13,
+        "w13_weight_scale": w13_scale,
+        "w13_weight_scale_2": w13_scale_2[:, None].expand(-1, 2),
+        "w2_weight": w2,
+        "w2_weight_scale": w2_scale,
+        "w2_weight_scale_2": w2_scale_2,
+        **input_scales,
+    }
+
+    layers = []
+    for ckpt, routed_experts_cls in (
+        (exported, MuseSparkRoutedExperts),
+        ({**bf16, **input_scales}, MuseSparkBf16AsNvFp4RoutedExperts),
+    ):
+        torch.manual_seed(0)
+        _, routed, _, vllm_config, runner = build_moe(
+            MuseSpark1xRMSNormWithInputScale,
+            ckpt,
+            nvfp4_quant_config(),
+            routed_experts_cls,
+        )
+        experts = routed.quant_method.moe_kernel.fused_experts
+        assert isinstance(experts, MuseSparkTrtLlmNvFp4Experts)
+        layers.append((routed, experts, run_moe(runner, vllm_config, *_inputs(1))))
+
+    (expected, expected_experts, expected_out), (routed, experts, out) = layers
+    for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
+        assert torch.equal(
+            getattr(routed, name).view(torch.uint8),
+            getattr(expected, name).view(torch.uint8),
+        ), name
+    assert torch.equal(experts.g1_scale_c, expected_experts.g1_scale_c)
+    assert torch.equal(
+        experts.quant_config.g1_alphas, expected_experts.quant_config.g1_alphas
+    )
+    assert torch.equal(
+        experts.quant_config.g2_alphas, expected_experts.quant_config.g2_alphas
+    )
+    assert _rel(out, expected_out.float()) < 1e-3

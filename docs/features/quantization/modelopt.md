@@ -49,6 +49,26 @@ module prefix and decoder layer indices before constructing quantized layers.
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
 
+## Muse Spark BF16 routed experts
+
+The ModelOpt NVFP4 checkpoint of Muse Spark Open
+(`meta-models/Muse-Spark-Open-816B-A42B-NVFP4`) keeps the routed experts of
+layers 0 and 61 in BF16 (24 GiB each). To run them as NVFP4 too, set the
+`muse_spark_quantize_bf16_experts` text-config field (off by default):
+
+```bash
+vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
+    --hf-overrides '{"text_config": {"muse_spark_quantize_bf16_experts": true}}'
+```
+
+vLLM then quantizes those experts to NVFP4 while loading, one expert at a time
+on the GPU, so all MoE layers run the FlashInfer TRT-LLM NVFP4 MoE and the
+weights shrink by about 34 GiB. The checkpoint has no activation calibration
+for these layers, so each takes the largest static input scales of its two
+nearest NVFP4 layers. The other modules of those layers stay BF16. This needs
+an SM100-family GPU and is not supported with the `deep_gemm_mega_moe` MoE
+backend.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
