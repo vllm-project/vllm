@@ -21,6 +21,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
+use crate::metrics::SchedulerStatsRecorder;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
@@ -37,11 +38,12 @@ use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
-use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
+use crate::transport::ConnectedEngine;
 use crate::{
     CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
     Error, TransportMode,
@@ -2414,6 +2416,149 @@ async fn wake_up_requires_every_engine_to_be_fully_awake() {
     client.shutdown().await.unwrap();
 }
 
+/// Render the `vllm:engine_sleep_state` series of one model as
+/// `awake,weights_offloaded,discard_all` for engines 0 and 1.
+fn engine_sleep_state_series(model_name: &str) -> [String; 2] {
+    let rendered = vllm_metrics::METRICS.render().unwrap();
+    [0, 1].map(|engine| {
+        ["awake", "weights_offloaded", "discard_all"]
+            .map(|state| {
+                let prefix = format!(
+                    "vllm:engine_sleep_state{{model_name=\"{model_name}\",engine=\"{engine}\",sleep_state=\"{state}\"}} "
+                );
+                rendered
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .unwrap_or("missing")
+                    .to_owned()
+            })
+            .join(",")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sleep_and_wake_calls_record_engine_sleep_state() {
+    init_tracing();
+    // A model name of its own keeps other tests' clients off these series.
+    const MODEL: &str = "engine-sleep-state-model";
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        // Each engine answers the calls in order; `None` stands for a `()`
+        // result. On the partial wake-up only engine 1 reports fully awake.
+        let answers = [
+            ("sleep", None),
+            ("wake_up", Some(engine_index == 1)),
+            ("wake_up", Some(true)),
+            ("release_kv_cache_memory", None),
+            ("wake_up", Some(true)),
+            ("sleep", None),
+        ];
+        engines.push(spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    for (method, fully_awake) in answers {
+                        let utility = recv_engine_message(dealer).await;
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from(method));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: fully_awake.map(utility_result_value),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(handshake_address, 2, MODEL, Duration::from_secs(2), 5, None),
+        &ipc,
+    )
+    .await;
+
+    let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
+    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
+    assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
+    series.push(("partial wake", engine_sleep_state_series(MODEL)));
+    assert!(client.wake_up(None).await.unwrap());
+    series.push(("full wake", engine_sleep_state_series(MODEL)));
+    client.release_kv_cache_memory().await.unwrap();
+    series.push(("release kv cache", engine_sleep_state_series(MODEL)));
+    assert!(client.wake_up(None).await.unwrap());
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
+
+    expect_test::expect![[r#"
+        [
+            (
+                "connected",
+                [
+                    "1,0,0",
+                    "1,0,0",
+                ],
+            ),
+            (
+                "sleep level 1",
+                [
+                    "0,1,0",
+                    "0,1,0",
+                ],
+            ),
+            (
+                "partial wake",
+                [
+                    "0,1,0",
+                    "0,1,0",
+                ],
+            ),
+            (
+                "full wake",
+                [
+                    "1,0,0",
+                    "1,0,0",
+                ],
+            ),
+            (
+                "release kv cache",
+                [
+                    "0,0,0",
+                    "0,0,0",
+                ],
+            ),
+            (
+                "sleep level 2",
+                [
+                    "0,0,1",
+                    "0,0,1",
+                ],
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&series);
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
@@ -2746,7 +2891,7 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 }
 
 #[test]
-fn python_msgpack_fixtures_match_rust_encoding() {
+fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
     let output = Command::new(&script)
@@ -3006,13 +3151,57 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
-        multi_connector_stats,
-        KvConnectorStats::Multi(stats)
-            if stats.nixl.is_some()
-                && stats.mooncake_transfer.is_some()
-                && stats.mooncake.is_some()
-                && stats.other.contains_key("UnsupportedConnector")
+    let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
+        panic!("Python MultiConnector stats should decode as Multi");
+    };
+    assert!(multi_connector_stats.nixl.is_some());
+    assert!(multi_connector_stats.mooncake_transfer.is_some());
+    assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
+    let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
+    assert_eq!(nixl_stats.num_failed_handshakes, [1]);
+    assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+
+    let metrics = vllm_metrics::Metrics::new();
+    let recorder = SchedulerStatsRecorder::new(
+        &metrics.scheduler,
+        "test-model",
+        &[ConnectedEngine {
+            engine_id: EngineId::from_engine_index(0),
+            ready_response: crate::mock_engine::default_ready_response(),
+        }],
+    );
+    recorder.record(
+        0,
+        &SchedulerStats {
+            kv_connector_stats: Some(KvConnectorStats::Multi(multi_connector_stats)),
+            ..Default::default()
+        },
+    );
+    let rendered_metrics = metrics.render().unwrap();
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_xfer_time_seconds_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_sum{model_name=\"test-model\",engine=\"0\"} 12288"
+        )
+    );
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_transfers_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_notifications_total{model_name=\"test-model\",engine=\"0\"} 1"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {

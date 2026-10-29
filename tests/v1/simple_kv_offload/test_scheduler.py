@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -613,7 +614,7 @@ def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
         mm_features=None,
         block_hasher=req._block_hasher,
     )
-    assert prompt_logprobs_request.skip_reading_prefix_cache
+    assert prompt_logprobs_request.skip_reading_external_kv
 
     assert sched.get_num_new_matched_tokens(
         prompt_logprobs_request, num_computed_tokens=0
@@ -1135,6 +1136,36 @@ def test_lazy_duplicate_store_skipped() -> None:
             "Expected no new CPU blocks for duplicate hashes"
         )
     assert get_cpu_free_blocks(sched) == cpu_free_after_first
+
+
+# ---------------------------------------------------------------------------
+# Test 2d: Lazy walk covers bounded-replay SWA allocations
+# ---------------------------------------------------------------------------
+def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
+    """Lazy: the walk covers what every group, offloaded or not, takes per step."""
+    config = _make_kv_cache_config(num_blocks=32, num_groups=3)
+    for group in config.kv_cache_groups[1:]:
+        group.kv_cache_spec = SlidingWindowMLASpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+            sliding_window=BLOCK_SIZE * 4,
+            bounded_replay=True,
+        )
+    fix = make_scheduler(
+        num_cpu_blocks=32, num_gpu_blocks=32, lazy=True, kv_cache_config=config
+    )
+    gpu_pool = fix.gpu_block_pool
+
+    # One step takes cdiv(64, 16) blocks per group.
+    num_blocks = 3 * 4
+    blocks = _allocate_gpu_blocks(gpu_pool, make_request(num_blocks), num_blocks)
+    _flush_old_blocks_to_lru_head(gpu_pool, gpu_pool.get_num_free_blocks())
+    gpu_pool.free_blocks(blocks)
+
+    meta = fix.scheduler.build_connector_meta(make_scheduler_output({}))
+    assert sorted(meta.store_gpu_blocks) == [b.block_id for b in blocks]
 
 
 # ---------------------------------------------------------------------------
