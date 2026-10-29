@@ -645,10 +645,10 @@ class XPUPlatform(Platform):
         group_size: int,
         timeout: timedelta,
     ) -> "ProcessGroup":
+        assert torch.distributed.is_xccl_available()
         from torch.distributed import ProcessGroup
         from torch.distributed.distributed_c10d import ProcessGroupXCCL
 
-        assert torch.distributed.is_xccl_available()
         pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
 
         backend_options = ProcessGroupXCCL.Options()
