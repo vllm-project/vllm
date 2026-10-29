@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.minimax_m3_reasoning_parser import MiniMaxM3ReasoningParser
 
@@ -225,12 +226,12 @@ def test_streaming_reasoning_tags_are_not_returned():
     reasoning, content, end_states = run_streaming(
         parser,
         tokenizer,
-        ["<mm:think>", "plan", "</mm:think>", "answer"],
+        ["<mm:think>", "plan", "</mm:think>", "", "answer"],
     )
 
     assert reasoning == "plan"
     assert content == "answer"
-    assert end_states == [False, False, True, True]
+    assert end_states == [False, False, True, True, True]
 
 
 def test_streaming_boundary_can_emit_reasoning_and_content():
@@ -459,3 +460,92 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
     )
+
+
+@pytest.mark.parametrize(
+    "chat_kwargs,chunks,expected_reasoning,expected_content",
+    [
+        pytest.param(
+            None,
+            [
+                ("<", ""),
+                ("", ""),
+                ("mm:", ""),
+                ("think>", "<mm:"),
+                ("plan", "think>plan"),
+                ("</mm:", "</mm:"),
+                ("think>answer", "think>answer"),
+            ],
+            "plan",
+            "answer!",
+            id="split-start-with-held-text",
+        ),
+        pytest.param(
+            None,
+            [
+                ("</", ""),
+                ("", ""),
+                ("mm:", ""),
+                ("think>", "</mm:"),
+                ("answer", "think>answer"),
+            ],
+            None,
+            "answer!",
+            id="leading-closer-with-held-text",
+        ),
+        pytest.param(
+            {"thinking_mode": "enabled"},
+            [
+                ("p", ""),
+                ("", ""),
+                ("lan", "plan"),
+                ("</mm:", "</mm:"),
+                ("think>answer", "think>answer"),
+            ],
+            "plan",
+            "answer!",
+            id="prefilled-enabled",
+        ),
+        pytest.param(
+            {"thinking_mode": "disabled"},
+            [("p", ""), ("", ""), ("lain answer", "plain answer")],
+            None,
+            "plain answer!",
+            id="disabled-plain-content",
+        ),
+    ],
+)
+def test_parse_delta_handles_empty_text_before_visible_output(
+    chat_kwargs, chunks, expected_reasoning, expected_content
+):
+    tokenizer = RuntimeSplitMiniMaxM3Tokenizer()
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="minimax_m3")
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, chat_template_kwargs=chat_kwargs)
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    events = [*chunks, ("", ""), ("!", "!"), ("", "")]
+    reasoning_parts, content_parts = [], []
+    token_ids = []
+    for index, (token_text, delta_text) in enumerate(events):
+        delta_ids = tokenizer.encode_runtime(token_text)
+        token_ids.extend(delta_ids)
+        delta = parser.parse_delta(
+            delta_text,
+            delta_ids,
+            request,
+            prompt_token_ids=[] if index == 0 else None,
+            finished=index == len(events) - 1,
+        )
+        if delta is not None:
+            reasoning_parts.append(delta.reasoning or "")
+            content_parts.append(delta.content or "")
+
+    assert ("".join(reasoning_parts) or None, "".join(content_parts) or None) == (
+        expected_reasoning,
+        expected_content,
+    )
+    full_text = "".join(text for _, text in events)
+    assert tokenizer.decode(token_ids) == full_text
+    nonstream_parser = parser_cls(tokenizer, chat_template_kwargs=chat_kwargs)
+    reasoning, content, _ = nonstream_parser.parse(full_text, request)
+    assert (reasoning, content) == (expected_reasoning, expected_content)
