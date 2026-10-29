@@ -68,33 +68,34 @@ class IncrementalDetokenizer:
         return SlowIncrementalDetokenizer(tokenizer, request)
 
 
-def _prompt_ends_mid_utf8(
-    tokenizer: TokenizerLike, request: EngineCoreRequest
-) -> bool:
+def _prompt_ends_mid_utf8(tokenizer: TokenizerLike, request: EngineCoreRequest) -> bool:
     """Whether the prompt token ids decode to text ending in an incomplete
     UTF-8 sequence (trailing U+FFFD).
 
-    ``DecodeStream(ids=...)`` cannot establish its text prefix from such a
-    prompt (the lazy prefill in tokenizers' ``step_decode_stream`` requires
-    the decoded prefix to not end with the replacement character), so the
-    entire prompt text would leak into the first streamed delta. Requests
-    like this are routed to ``SlowIncrementalDetokenizer``, whose offset
-    bookkeeping handles incomplete tails. This can happen with token-array
-    prompts whose final tokens hold part of a multi-byte character (e.g.
-    byte-fallback/byte-level BPE tokens for emoji or Thai combining marks).
+    `DecodeStream(ids=...)` only establishes its text prefix when the decoded
+    prompt does not end in U+FFFD, so such a prompt would leak into the first
+    streamed delta. This happens with token-id prompts whose last tokens hold
+    part of a multi-byte character, as byte-level BPE tokens and
+    byte-fallback `<0xNN>` tokens can.
     """
-    prompt_ids = request.prompt_token_ids
-    if not prompt_ids:
-        return False
+    prompt_ids = request.prompt_token_ids or []
     assert request.sampling_params is not None
-    # Only the trailing bytes matter: one UTF-8 character spans at most 4
-    # bytes and tokens hold at least one byte each, so an 8-token window is
-    # sufficient even with a few trailing special tokens being skipped.
+    skip_special_tokens = request.sampling_params.skip_special_tokens
+    end = len(prompt_ids)
+    if skip_special_tokens:
+        # Skipped trailing special tokens must not fill the tail window.
+        special_ids = set(tokenizer.all_special_ids)
+        while end and prompt_ids[end - 1] in special_ids:
+            end -= 1
+    if not end:
+        return False
+    # A UTF-8 character spans at most 4 bytes, and each token holds at least
+    # one byte.
     tail = tokenizer.decode(
-        prompt_ids[-8:],
-        skip_special_tokens=request.sampling_params.skip_special_tokens,
+        prompt_ids[max(0, end - 8) : end],
+        skip_special_tokens=skip_special_tokens,
     )
-    return tail.endswith("�")
+    return tail.endswith("\ufffd")
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
