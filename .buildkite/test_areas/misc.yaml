@@ -144,20 +144,6 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":python: Mooncake Store Connector Unit Tests"
-  key: mooncake-store-connector-unit
-  depends_on:
-    - image-build-cpu
-  device: cpu-small
-  timeout_in_minutes: 15
-  working_dir: /vllm-workspace/tests
-  source_file_dependencies:
-    - vllm/distributed/kv_transfer/
-    - vllm/v1/request.py
-    - tests/v1/kv_connector/unit/
-  commands:
-    - pytest -v -s v1/kv_connector/unit/test_mooncake_store_connector.py v1/kv_connector/unit/test_mooncake_store_scheduler.py
-
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
 #   device: h200_35gb

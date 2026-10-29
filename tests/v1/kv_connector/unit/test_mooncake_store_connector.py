@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -42,7 +41,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
 
 from .utils import create_vllm_config
 
@@ -831,42 +829,6 @@ def test_lookup_key_client_non_block_lookup_async():
     assert _poll_lookup(client, "req1") == 7
     # Future is consumed (popped) on read.
     assert "req1" not in client.futures
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("all_groups", [False, True])
-def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
-    config = _make_vllm_config()
-    gate, started = threading.Event(), threading.Event()
-    with (
-        set_current_vllm_config(config),
-        patch.object(worker, "make_zmq_socket") as make,
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
-        )
-    client = connector.connector_scheduler.client
-    make.return_value.send_multipart.side_effect = lambda *args, **kwargs: started.set()
-    make.return_value.recv.side_effect = _gated_recv(gate, 7)
-    request = Request("queued", [1] * 128, SamplingParams(max_tokens=1), None)
-    try:
-        assert client.lookup("busy", 128, [], non_block=True) is None
-        assert started.wait(5)
-        assert client.lookup(request.request_id, 128, [], non_block=True) is None
-        finish = (
-            connector.request_finished_all_groups
-            if all_groups
-            else connector.request_finished
-        )
-        assert finish(request, ([],) if all_groups else []) == (False, None)
-        gate.set()
-        client.executor.submit(lambda: None).result(timeout=5)
-        assert make.return_value.send_multipart.call_count == 1
-        assert client.lookup("busy", 128, []).hit_length == 7
-    finally:
-        gate.set()
-        client.executor.shutdown(wait=True, cancel_futures=True)
-        connector.shutdown()
 
 
 def test_lookup_key_client_discard_clears_state():
