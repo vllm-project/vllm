@@ -2383,30 +2383,35 @@ def test_sharded_decode_index_score_matches_reference(
             assert torch.count_nonzero(r[[0, 2]]).item() == 0
 
 
-_E2M1_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-
-
 def _random_nvfp4_index_rows(num_pages: int, page_size: int):
     """Token-major NVFP4 index rows: codes ``[P, N, 64]``, e4m3 scales ``[P, N, 8]``.
 
-    Every code appears, including -0, and each 16-dim group gets its own scale.
+    Every code appears, including -0, and each 16-dim group gets its own scale;
+    scales reach 240, so the largest codes saturate at 448 once rounded to e4m3.
     """
     codes = torch.randint(
         0, 256, (num_pages, page_size, 64), dtype=torch.uint8, device="cuda"
     )
-    exponent = torch.randint(-4, 2, (num_pages, page_size, 8), device="cuda")
+    exponent = torch.randint(-4, 8, (num_pages, page_size, 8), device="cuda")
     mantissa = 1 + torch.randint(0, 8, exponent.shape, device="cuda") / 8
     scales = (mantissa * torch.exp2(exponent.float())).to(torch.float8_e4m3fn)
     return codes, scales.view(torch.uint8)
 
 
-def _dequant_nvfp4_index(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """fp32 ``[..., 128]`` rows; the low nibble is the even dim."""
+def _dequant_nvfp4_index(
+    codes: torch.Tensor, scales: torch.Tensor, round_e4m3: bool = True
+) -> torch.Tensor:
+    """fp32 ``[..., 128]`` rows of e2m1 * scale, clamped and rounded once to e4m3
+    as the SM100/SM103 Q8KV4 indexer scores them, or exact as SM107's does with
+    ``round_e4m3=False``; the low nibble is the even dim."""
     nibbles = torch.stack((codes & 15, codes >> 4), -1).flatten(-2).long()
-    grid = torch.tensor(_E2M1_GRID, device=codes.device)
+    grid = torch.tensor(_E2M1_VALUES, device=codes.device)
     values = grid[nibbles & 7] * torch.where(nibbles >= 8, -1.0, 1.0)
     group_scales = scales.view(torch.float8_e4m3fn).float()
-    return (values.unflatten(-1, (8, 16)) * group_scales[..., None]).flatten(-2)
+    values = (values.unflatten(-1, (8, 16)) * group_scales[..., None]).flatten(-2)
+    if not round_e4m3:
+        return values
+    return values.clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float()
 
 
 def _nvfp4_shard_pages(codes, scales, rank, world, page_size, pitch_pad):
@@ -2422,6 +2427,92 @@ def _nvfp4_shard_pages(codes, scales, rank, world, page_size, pitch_pad):
     pages[:, : rows * 64] = codes[:, owned].reshape(num_pages, -1)
     pages[:, rows * 64 : rows * 72] = scales[:, owned].reshape(num_pages, -1)
     return pages.as_strided((num_pages, rows, 72), (pitch, 72, 1))
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("world,page_size", [(2, 128), (2, 256), (4, 128), (4, 256)])
+def test_sharded_decode_index_score_nvfp4_matches_stock_q8kv4(world, page_size):
+    """By default the sharded scorer rounds NVFP4 K as this device's stock Q8KV4
+    decode indexer does (to e4m3 on SM100/SM103, exact on SM107), so their
+    history page maxima differ only by FP32 summation order."""
+    pytest.importorskip("cutlass")
+    from vllm.third_party.fmha_sm100.sparse import BatchDecodeIndexerQ8KV4Wrapper
+
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        MAX_K_TILES,
+        minimax_m3_index_decode_score_sharded_cutedsl,
+    )
+
+    torch.manual_seed(0)
+    heads, qlen = 4, 8
+    seq_lens = torch.tensor([97, 129, 4097, 8189], device="cuda", dtype=torch.int32)
+    batch = seq_lens.numel()
+    tokens = batch * qlen
+    # Every page of the longest request has a block-table column.
+    width = -(-int(seq_lens.max()) // page_size)
+    num_pages = batch * width
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).view(
+        batch, width
+    )
+    codes, scales = _random_nvfp4_index_rows(num_pages, page_size)
+    q = torch.randn(tokens, heads, HEAD_DIM, device="cuda").to(torch.float8_e4m3fn)
+
+    # Stock scores of the unsharded B128 pages: page p's half h is B128 page
+    # p * halves + h.
+    halves = page_size // BLOCK_SIZE
+    stock_pages = torch.stack(
+        [
+            _nvfp4_shard_pages(codes, scales, h, halves, page_size, 0)
+            for h in range(halves)
+        ],
+        dim=1,
+    ).reshape(halves * num_pages, BLOCK_SIZE, 72)
+    logical_table = (
+        block_table[..., None] * halves
+        + torch.arange(halves, device="cuda", dtype=torch.int32)
+    ).flatten(1)
+    columns = logical_table.shape[1]
+    stock = BatchDecodeIndexerQ8KV4Wrapper(num_heads=heads)
+    stock.plan(logical_table, seq_lens)
+    expected = stock._run_scores(q, stock_pages).view(tokens, heads, columns)
+
+    index_scale = page_size // BLOCK_SIZE
+    scores = torch.empty((tokens, heads, MAX_K_TILES // index_scale), device="cuda")
+    actual = torch.full((tokens, heads, MAX_K_TILES), -float("inf"), device="cuda")
+    for rank in range(world):
+        scores.fill_(-float("inf"))
+        minimax_m3_index_decode_score_sharded_cutedsl(
+            q,
+            _nvfp4_shard_pages(codes, scales, rank, world, page_size, 0),
+            block_table,
+            seq_lens,
+            rank,
+            qlen,
+            qlen,
+            scores,
+            page_size=page_size,
+            world_size=world,
+        )
+        # P128 ranks hold interleaved rows of every page; P256 ranks hold
+        # contiguous rows of global page 2c + rank * 2 // world.
+        index_offset = rank * index_scale // world
+        owned = actual[..., index_offset::index_scale]
+        torch.maximum(owned, scores, out=owned)
+
+    # The stock indexer writes only pages below each query's own page.
+    positions = (
+        seq_lens.repeat_interleave(qlen)
+        - qlen
+        + torch.arange(tokens, device="cuda") % qlen
+    )
+    own = torch.div(positions, BLOCK_SIZE, rounding_mode="floor")
+    future = torch.arange(columns, device="cuda")[None, :] >= own[:, None]
+    torch.testing.assert_close(
+        actual[..., :columns].masked_fill(future[:, None], 0.0),
+        expected.masked_fill(future[:, None], 0.0),
+        rtol=1e-5,
+        atol=1e-4,
+    )
 
 
 @pytest.mark.skipif(
@@ -2441,6 +2532,9 @@ def _nvfp4_shard_pages(codes, scales, rank, world, page_size, pitch_pad):
 # A pitch past ROWS * 72 B models shard pages inside larger compound pages.
 @pytest.mark.parametrize("pitch_pad", [0, 256])
 @pytest.mark.parametrize("pdl_mode", ["off", "prefetch"])
+# Both K roundings on every arch: SM100/SM103's stock decode rounds K to e4m3,
+# SM107's keeps it exact.
+@pytest.mark.parametrize("round_k", [True, False])
 def test_sharded_decode_index_score_nvfp4_matches_reference(
     world,
     decode_query_len,
@@ -2449,6 +2543,7 @@ def test_sharded_decode_index_score_nvfp4_matches_reference(
     page_size,
     pitch_pad,
     pdl_mode,
+    round_k,
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
@@ -2466,7 +2561,7 @@ def test_sharded_decode_index_score_nvfp4_matches_reference(
     total_q = seq_lens.numel() * decode_query_len
     q = torch.randn(total_q, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
     codes, scales = _random_nvfp4_index_rows(num_pages, page_size)
-    kv = _dequant_nvfp4_index(codes, scales)
+    kv = _dequant_nvfp4_index(codes, scales, round_e4m3=round_k)
     logical_table = block_table
     if page_size == 256:
         logical_table = (
@@ -2519,13 +2614,14 @@ def test_sharded_decode_index_score_nvfp4_matches_reference(
                 world_size=world,
                 use_pdl=pdl_mode != "off",
                 prefetch_history=pdl_mode == "prefetch",
+                nvfp4_round_k=round_k,
             )
         masked_scores = scores.masked_fill(
             column_ids[None, None, :] >= local_valid[:, None, None], -float("inf")
         )
         columns = all_scores[..., index_offset::index_scale]
         torch.maximum(columns, masked_scores, out=columns)
-    # e2m1 x e4m3 and e4m3 Q are exact in FP16, so only FP32 summation order differs.
+    # K and e4m3 Q are exact in FP16, so only FP32 summation order differs.
     torch.testing.assert_close(
         all_scores.transpose(0, 1), expected, rtol=1e-5, atol=1e-4
     )

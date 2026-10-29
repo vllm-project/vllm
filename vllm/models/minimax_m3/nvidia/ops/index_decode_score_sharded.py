@@ -16,6 +16,7 @@ from vllm.cute_utils import EVICT_FIRST, cvt, mma_sync, simple_tma_copy
 from vllm.models.minimax_m3.nvidia.ops.index_decode_score import (
     _fp8_to_f16_mma_fragments,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 
@@ -419,7 +420,7 @@ class IndexDecodeScoreShardedKernel:
         self,
         rC_m: cute.Tensor,  # [4, Q_TILES] m16n8 accumulators of rows 16m..16m+15
         rMax: cute.Tensor,  # [2, Q_TILES] running maxima of this lane's columns
-        m: cutlass.Constexpr[int],
+        m,
         lane_id,
         k_base,
         q_start,
@@ -546,14 +547,20 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
 
     A shard page holds this rank's rows of an NVFP4 index page:
     ``[ROWS x 64 B e2m1 codes][ROWS x 8 B e4m3 group scales]``, the low nibble
-    the even dim and one scale per 16 dims. K is dequantized exactly to FP16
-    and fed to the same ``mma.sync`` as the FP8 kernel. ldmatrix gives each
+    the even dim and one scale per 16 dims. With ``round_k`` each K value is
+    rounded once to e4m3, as the SM100/SM103 Q8KV4 decode indexer scores it;
+    without it K keeps the exact e2m1 x scale product, as on SM107. K is fed
+    as FP16 to the same ``mma.sync`` as the FP8 kernel. ldmatrix gives each
     lane eight consecutive codes per 16 B row slice, so every lane reads the
     matching eight Q bytes itself instead of ldmatrix-loading Q.
     """
 
     DATA_BYTES = 64
     SCALE_BYTES = 8
+
+    def __init__(self, *args, round_k: bool = True, **kw):
+        super().__init__(*args, **kw)
+        self.round_k = round_k
 
     @cute.jit
     def __call__(
@@ -852,8 +859,9 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                 # Lane j of a quad owns codes [8j, 8j + 8) of every 32-code slice.
                 quad = lane_id % 4
                 row0 = lane_id // 4
-                # Span k's word holds groups 4k..4k+3; slice h uses byte 2h + j // 2.
-                scale_sel = Uint32(quad // 2) * 0x11 + 0x20
+                # Span k's word holds groups 4k..4k+3; slice h uses byte 2h + j // 2
+                # of row r's word (prmt bytes 0-3), then of row r + 8's (4-7).
+                scale_sel = Uint32(quad // 2) * 0x1111 + 0x6420
 
                 if warp_id == 0:
                     cute.arch.mbarrier_wait(tma_full_mbar, 0)
@@ -894,24 +902,25 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
 
                     k_base = self.page_k_base(super_id, warp_id, rank)
                     rMax.fill(float("-inf"))
-                    for m in cutlass.range_constexpr(ROWS // 16):
+                    # One 16-row tile at a time: unrolled, the eight tiles of a
+                    # P256 page at TP2 keep too much live across tiles.
+                    for m in cutlass.range(ROWS // 16, unroll=1):
                         rC.fill(0.0)
                         for k in cutlass.range_constexpr(SPANS):
                             cute.copy(ldsm_atom, sK_ldsm[None, (m, k, tma_stage)], rK)
                             # Words: rows {r, r + 8} of the low, then high 16 B.
                             rK_u32 = cute.recast_tensor(rK, Uint32)
-                            scales0 = cvt.e4m3x2_select_to_fp16x2(
-                                sS_warp[m * 16 + row0, k, tma_stage], scale_sel
-                            )
-                            scales1 = cvt.e4m3x2_select_to_fp16x2(
-                                sS_warp[m * 16 + 8 + row0, k, tma_stage], scale_sel
+                            # {s, s} f16x2 scales: [2 * ri + h] is row r + 8 * ri's
+                            # for slice 2k + h.
+                            scales = cvt.e4m3x4_select_to_fp16x2x4(
+                                sS_warp[m * 16 + row0, k, tma_stage],
+                                sS_warp[m * 16 + 8 + row0, k, tma_stage],
+                                scale_sel,
                             )
                             for h in cutlass.range_constexpr(2):
                                 s = k * 2 + h
-                                k0 = cvt.nvfp4x8_to_fp16x8(rK_u32[h * 2], scales0[h])
-                                k1 = cvt.nvfp4x8_to_fp16x8(
-                                    rK_u32[h * 2 + 1], scales1[h]
-                                )
+                                k0 = self.k_fp16x8(rK_u32[h * 2], scales[h])
+                                k1 = self.k_fp16x8(rK_u32[h * 2 + 1], scales[2 + h])
                                 # One m16n8k16 per four codes of each row.
                                 for half in cutlass.range_constexpr(2):
                                     rA_u32[0] = k0[half * 2]
@@ -922,7 +931,7 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                                         rB_u32[0] = rQ[half * 2, s, n]
                                         rB_u32[1] = rQ[half * 2 + 1, s, n]
                                         rC[None, n] = mma_sync(rA, rB, rC[None, n])
-                        if cutlass.const_expr(m == ROWS // 16 - 1):
+                        if m == ROWS // 16 - 1:
                             # The stage's last shared memory read is done.
                             cute.arch.mbarrier_arrive(tma_empty_mbar + tma_stage)
                         self.fold_tile_maxima(rC, rMax, m, lane_id, k_base, q_start)
@@ -942,6 +951,15 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                     if tma_stage == 0:
                         tma_parity ^= 1
 
+    @cute.jit
+    def k_fp16x8(self, codes, scale):
+        """Eight codes of one row times an f16x2 {scale, scale}: four f16x2 words."""
+        if cutlass.const_expr(self.round_k):
+            k = cvt.nvfp4x8_to_e4m3_fp16x8(codes, scale)
+        else:
+            k = cvt.nvfp4x8_to_fp16x8(codes, scale)
+        return k
+
     @cache
     @staticmethod
     def compile(
@@ -954,6 +972,7 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
         use_pdl: bool = False,
         prefetch_history: bool = False,
         score_columns: int = MAX_K_TILES,
+        round_k: bool = True,
     ):
         bs = cute.sym_int()
         total_tokens = cute.sym_int()
@@ -985,6 +1004,7 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
             page_size,
             use_pdl,
             prefetch_history,
+            round_k=round_k,
         )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
@@ -1034,6 +1054,16 @@ def nvfp4_shard_views(
     return codes, scales
 
 
+@cache
+def nvfp4_k_rounds_to_e4m3(device_index: int) -> bool:
+    """Whether the stock Q8KV4 decode indexer rounds NVFP4 K to e4m3 here.
+
+    SM100/SM103 round each e2m1 x scale product once to e4m3 for an FP8 MMA;
+    SM107 has no QMUL4 and keeps the exact FP16 product (MSA #41).
+    """
+    return not current_platform.is_device_capability(107, device_index)
+
+
 def minimax_m3_index_decode_score_sharded_cutedsl(
     idx_q: torch.Tensor,
     index_kv_shard: torch.Tensor,
@@ -1049,12 +1079,15 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     world_size: int | None = None,
     use_pdl: bool = False,
     prefetch_history: bool = False,
+    nvfp4_round_k: bool | None = None,
 ) -> None:
     """Write B128 maxima for interleaved P128 or contiguous P256 shards.
 
     ``index_kv_shard`` is FP8 ``[pages, ROWS, 128]`` or, for NVFP4 index
     caches, uint8 ``[pages, ROWS, 72]`` pages (see ``nvfp4_shard_views``).
     History prefetch requires metadata fenced by a non-PDL cache writer.
+    NVFP4 K is rounded to e4m3 where the stock decode indexer rounds it, unless
+    ``nvfp4_round_k`` says otherwise.
     """
     nvfp4 = index_kv_shard.dtype == torch.uint8
     if idx_q.dtype != torch.float8_e4m3fn or not (
@@ -1080,6 +1113,12 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     kernel_cls = (
         IndexDecodeScoreShardedNvfp4Kernel if nvfp4 else IndexDecodeScoreShardedKernel
     )
+    # The NVFP4 kernel also compiles in how it rounds K.
+    nvfp4_args: tuple[bool, ...] = ()
+    if nvfp4:
+        if nvfp4_round_k is None:
+            nvfp4_round_k = nvfp4_k_rounds_to_e4m3(index_kv_shard.device.index)
+        nvfp4_args = (nvfp4_round_k,)
     kernel = kernel_cls.compile(
         num_heads,
         max_decode_query_len,
@@ -1090,6 +1129,7 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
         use_pdl,
         prefetch_history,
         score_columns,
+        *nvfp4_args,
     )
     if nvfp4:
         codes, scales = nvfp4_shard_views(index_kv_shard)
