@@ -408,6 +408,9 @@ CHATML = (
 DROPS_THOUGHTS = CHATML.replace(
     "{{ m.content }}", "{{ m.content.split('</think>')[-1] }}"
 )
+TEXT_ENGINE = SimpleNamespace(
+    model_config=SimpleNamespace(supports_multimodal_inputs=False)
+)
 
 
 @pytest.mark.parametrize(
@@ -427,7 +430,7 @@ def test_thinking_only_templates_are_refused(qwen, template, reason):
     tokenizer, _ = qwen
     renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
     context = ReadContext(
-        None, SimpleNamespace(renderer=renderer), template, "auto", {}
+        TEXT_ENGINE, SimpleNamespace(renderer=renderer), template, "auto", {}
     )
     if reason is None:
         NextTokenStrategy(context)
@@ -439,7 +442,7 @@ def test_thinking_only_templates_are_refused(qwen, template, reason):
 def test_liquid_ignores_templates_that_drop_thoughts(qwen):
     renderer = SimpleNamespace(get_tokenizer=lambda: qwen[0])
     context = ReadContext(
-        None, SimpleNamespace(renderer=renderer), DROPS_THOUGHTS, "auto", {}
+        TEXT_ENGINE, SimpleNamespace(renderer=renderer), DROPS_THOUGHTS, "auto", {}
     )
     LiquidStrategy(context)
 
