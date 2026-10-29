@@ -637,6 +637,62 @@ def test_publication_reserves_measured_size_without_evicting(renderer):
             assert snapshot is not None
 
 
+def test_reused_routes_charge_full_scan_size_with_validated_bound(renderer):
+    """Exact and partial hits skip rescanning reused IDs but charge the same."""
+    import sys as _sys
+
+    from vllm.utils.session_prefix import token_bytes
+
+    cache = renderer.session_token_cache
+    if not cache.enabled:
+        assert renderer.session_prefix_context("a", None) is None
+        return  # The pinned-version CI exercises publication.
+    params = TokenizeParams(max_total_tokens=1024, add_special_tokens=False)
+    first = "<|im_start|>user\n" + "one two three four " * 40 + "<|im_end|>\n"
+    grown = first + "<|im_start|>assistant\nfive six seven<|im_end|>\n"
+    key = (None, "s")
+    for text, route in ((first, "miss"), (first, "exact"), (grown, "partial")):
+        before = cache.stats[route]
+        context = cache.context("s", None)
+        prompt = renderer.tokenize_prompt(
+            {"prompt": text}, replace(params, session_prefix_context=context)
+        )
+        context.finish(publish=True)
+        assert cache.stats[route] == before + 1
+        ids = list(prompt["prompt_token_ids"])
+        assert (
+            ids == renderer.get_tokenizer()(text, add_special_tokens=False)["input_ids"]
+        )
+        with cache.store.borrow(key) as snapshot:
+            assert snapshot is not None and snapshot.ids == ids
+            # The bound may come from the whole previous snapshot; it only
+            # needs to be an upper bound of the stored IDs.
+            assert snapshot.bound is not None and snapshot.bound >= max(ids)
+            expected = (
+                1024
+                + sum(_sys.getsizeof(part) for part in key)
+                + _sys.getsizeof(text)
+                + token_bytes(ids)
+            )
+            assert cache.store._entries[key].size == expected
+
+
+def test_audit_ignores_runtime_truncation_and_padding_state():
+    """A tokenizer used with truncation/padding before the cache is built stays
+    audited: Transformers resets that backend state on every call."""
+    # A freshly loaded tokenizer, as HfRenderer receives it before wrapping it
+    # in its thread pool.
+    tokenizer: Any = get_tokenizer(
+        MODEL, revision="c1899de289a04d12100db370d81485cdf75e47ca"
+    )
+    if not SessionTokenCache(tokenizer, 1 << 20).enabled:
+        return  # The pinned-version CI exercises the audited path.
+    tokenizer(["a", "b c"], padding=True, truncation=True, max_length=4)
+    graph = json.loads(tokenizer.backend_tokenizer.to_str())
+    assert graph["truncation"] is not None and graph["padding"] is not None
+    assert SessionTokenCache(tokenizer, 1 << 20).enabled
+
+
 @pytest.mark.parametrize("renderer", ["left", "right"], indirect=True)
 @pytest.mark.parametrize("route", ["miss", "exact", "partial"])
 def test_length_validation_does_not_repeat_encoding(renderer, route):

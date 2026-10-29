@@ -29,7 +29,8 @@ def lcp(a: str, b: str) -> int:
     return lo
 
 
-def token_bytes(ids: list[int]) -> int:
+def token_bound(ids: list[int]) -> int | None:
+    """Largest ID if ``ids`` is an exact list of exact uint32 ints, else None."""
     if (
         sys.implementation.name == "cpython"
         and type(ids) is list
@@ -37,10 +38,24 @@ def token_bytes(ids: list[int]) -> int:
     ):
         maximum = max(ids, default=0)
         if min(ids, default=0) >= 0 and maximum <= 0xFFFFFFFF:
-            # Count every occurrence, including shared integer objects.
-            return sys.getsizeof([]) + len(ids) * (
-                struct.calcsize("P") + sys.getsizeof(maximum)
-            )
+            return maximum
+    return None
+
+
+def token_bytes(ids: list[int], bound: int | None = None) -> int:
+    """Bytes owned by ``ids`` and its elements, never understated.
+
+    ``bound`` may be passed only when every element of the exact list ``ids``
+    is already known to be an exact uint32 int no larger than it, e.g. the
+    maximum of validated parts; otherwise the list is scanned.
+    """
+    if bound is None:
+        bound = token_bound(ids)
+    if bound is not None:
+        # Count every occurrence, including shared integer objects.
+        return sys.getsizeof([]) + len(ids) * (
+            struct.calcsize("P") + sys.getsizeof(bound)
+        )
     return (
         sys.getsizeof([])
         + len(ids) * struct.calcsize("P")
