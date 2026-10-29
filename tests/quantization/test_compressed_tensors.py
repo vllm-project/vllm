@@ -1327,6 +1327,7 @@ def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
             )
         for name, parameter in shared_parameters.items():
             replace_parameter(attached, name, parameter)
+        attached_parameters = dict(attached.named_parameters())
         for name in ("_k_scale", "_v_scale", "_q_scale"):
             attached.register_buffer(name, getattr(source, name))
         with weights_already_processed():
@@ -1340,7 +1341,11 @@ def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
                 parameter_name = f"{name}_{suffix}"
                 assert (
                     attached.get_parameter(parameter_name)
-                    is shared_parameters[parameter_name]
+                    is attached_parameters[parameter_name]
+                )
+                assert (
+                    attached.get_parameter(parameter_name).data_ptr()
+                    == shared_parameters[parameter_name].data_ptr()
                 )
         for name in ("k", "v"):
             host = getattr(attached, f"_{name}_scale_cpu")
