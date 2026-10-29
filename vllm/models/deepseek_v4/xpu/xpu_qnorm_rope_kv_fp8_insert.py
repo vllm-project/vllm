@@ -37,7 +37,9 @@ def _xpu_qnorm_rope_kernel(
     cos_sin_cache layout: [max_pos, ROPE_DIM] with first HALF_ROPE=cos,
     second HALF_ROPE=sin.
     """
-    token_idx = tl.program_id(0)
+    # int64: token_idx * num_heads * HEAD_DIM exceeds int32 past 2^31 q elements
+    # (e.g. 65536 tokens x 64 heads), which faults the device.
+    token_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1)
 
     if token_idx >= num_tokens:

@@ -48,3 +48,27 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s kernels/core/test_uva.py'
+
+- label: ":intel: (BMG) DeepSeek-V4 XPU qnorm/RoPE Kernel Tests"
+  key: deepseek-v4-xpu-qnorm-rope-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/models/deepseek_v4/xpu/xpu_qnorm_rope_kv_fp8_insert.py
+    - tests/kernels/test_deepseek_v4_xpu_qnorm_rope_large_batch.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s
+      kernels/test_deepseek_v4_xpu_qnorm_rope_large_batch.py'
