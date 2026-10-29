@@ -2022,3 +2022,92 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+class TestLookupPinHandoff:
+    """Primary HITs reported by lookup() stay pinned until consumed."""
+
+    @pytest.fixture
+    def capacity_one(self):
+        mock_region = _mock_mmap_region(1)
+        primary = CPUPrimaryTierOffloadingManager(num_chunks=1, mmap_region=mock_region)
+        secondary = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary,
+            secondary_tiers=[secondary],
+        )
+        ctx = ReqContext(req_id="lookup-pin")
+        manager.on_new_request(ctx)
+        return manager, primary, secondary, ctx
+
+    def _store_in_primary(self, manager, ctx, key):
+        manager.prepare_store([key], ctx)
+        manager.complete_store([key], ctx, success=True)
+        manager._process_finished_jobs()
+
+    def test_lookup_protects_hit_until_prepare_load_pins_it(self, capacity_one):
+        """A promotion cannot evict a HIT between lookup() and prepare_load()."""
+        manager, primary, secondary, ctx = capacity_one
+        hit, secondary_hit = to_keys([1, 2])
+        self._store_in_primary(manager, ctx, hit)
+        secondary.chunks[secondary_hit] = True
+
+        assert manager.lookup(hit, ctx) is LookupResult.HIT
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.MISS
+        assert primary.lookup(hit, ctx) is LookupResult.HIT
+
+        manager.prepare_load([hit], ctx)
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.MISS
+
+        manager.complete_load([hit], ctx)
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.HIT_PENDING
+        assert primary.lookup(hit, ctx) is LookupResult.MISS
+
+    def test_create_store_job_takes_over_lookup_pin(self, capacity_one):
+        manager, primary, secondary, ctx = capacity_one
+        hit, secondary_hit = to_keys([1, 2])
+        self._store_in_primary(manager, ctx, hit)
+        secondary.chunks[secondary_hit] = True
+
+        assert manager.lookup(hit, ctx) is LookupResult.HIT
+        job = manager.create_store_job([hit], ctx)
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.MISS
+
+        secondary.submit_store(job)
+        manager._process_finished_jobs()
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.HIT_PENDING
+        assert primary.lookup(hit, ctx) is LookupResult.MISS
+
+    def test_on_schedule_end_releases_unconsumed_lookup_pins(self, capacity_one):
+        manager, primary, secondary, ctx = capacity_one
+        hit, secondary_hit = to_keys([1, 2])
+        self._store_in_primary(manager, ctx, hit)
+        secondary.chunks[secondary_hit] = True
+
+        assert manager.lookup(hit, ctx) is LookupResult.HIT
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.MISS
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        )
+
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.HIT_PENDING
+        assert primary.lookup(hit, ctx) is LookupResult.MISS
+
+    def test_on_request_finished_releases_unconsumed_lookup_pins(self, capacity_one):
+        manager, primary, secondary, ctx = capacity_one
+        hit, secondary_hit = to_keys([1, 2])
+        self._store_in_primary(manager, ctx, hit)
+        secondary.chunks[secondary_hit] = True
+
+        assert manager.lookup(hit, ctx) is LookupResult.HIT
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.MISS
+        manager.on_request_finished(ctx)
+
+        next_ctx = ReqContext(req_id="next-request")
+        manager.on_new_request(next_ctx)
+        assert manager.lookup(secondary_hit, next_ctx) is LookupResult.HIT_PENDING
+        assert primary.lookup(hit, next_ctx) is LookupResult.MISS

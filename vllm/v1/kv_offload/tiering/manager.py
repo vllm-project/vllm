@@ -17,6 +17,9 @@ Key Design Principles:
    "data is being promoted, try later"
 5. ref_cnt as eviction protection — primary.prepare_read() increments ref_cnt,
    protecting chunks from eviction until complete_read() is called
+6. Lookup pins bridge lookup and load — a primary HIT reported by lookup() is
+   pinned before any promotion for the request can evict it, then handed over
+   to the GPU load or secondary transfer that consumes the result
 """
 
 import threading
@@ -104,6 +107,8 @@ class RequestState:
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
+    unpinned_hits: set[OffloadKey] = field(default_factory=set)
+    pinned_lookup_hits: set[OffloadKey] = field(default_factory=set)
 
 
 class JobMetadata(NamedTuple):
@@ -725,6 +730,7 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            self._track_unpinned_hit(key, req_context)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -797,6 +803,11 @@ class TieringOffloadingManager(OffloadingManager):
             True if promotion was initiated, False if primary tier is full.
 
         """
+        # A HIT reported earlier in this step has not necessarily reached
+        # prepare_load() yet. Pin every such HIT before prepare_write() can
+        # choose it as an eviction victim.
+        self._pin_unpinned_hits(req_context)
+
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -827,6 +838,41 @@ class TieringOffloadingManager(OffloadingManager):
         entry.keys.extend(primary_write_result.keys_to_store)
         entry.chunk_ids.extend(store_spec.chunk_ids)
         return True
+
+    def _track_unpinned_hit(self, key: OffloadKey, req_context: ReqContext) -> None:
+        """Remember a reported primary HIT until a consumer pins it."""
+        state = self._req_state.get(req_context.req_id)
+        if state is None or key in state.pinned_lookup_hits:
+            return
+        state.unpinned_hits.add(key)
+
+    def _pin_unpinned_hits(self, req_context: ReqContext) -> None:
+        """Protect every primary HIT reported so far for this request."""
+        state = self._req_state.get(req_context.req_id)
+        if state is None or not state.unpinned_hits:
+            return
+        keys = tuple(state.unpinned_hits)
+        self.primary_tier.prepare_read(keys, req_context)
+        state.unpinned_hits.clear()
+        state.pinned_lookup_hits.update(keys)
+
+    def _release_lookup_pins(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Release lookup pins superseded by a load or transfer job pin."""
+        state = self._req_state.get(req_context.req_id)
+        if state is None:
+            return
+        released = state.pinned_lookup_hits.intersection(keys)
+        state.unpinned_hits.difference_update(keys)
+        if not released:
+            return
+        self.primary_tier.complete_read(tuple(released), req_context)
+        state.pinned_lookup_hits.difference_update(released)
+
+    def _release_all_lookup_pins(self, state: RequestState) -> None:
+        self._release_lookup_pins(tuple(state.pinned_lookup_hits), state.req_context)
+        state.unpinned_hits.clear()
 
     def _flush_pending_promotions(self) -> None:
         """Submit one batched submit_load() per (tier, request).
@@ -863,7 +909,8 @@ class TieringOffloadingManager(OffloadingManager):
         step.
 
         This increments ref_cnt on the chunks in the primary tier, protecting
-        them from eviction during the transfer.
+        them from eviction during the transfer, and releases the lookup pin
+        that protected the same chunks between lookup() and this call.
 
         Args:
             keys: Chunks to prepare for loading.
@@ -873,7 +920,9 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
 
         """
-        return self.primary_tier.prepare_load(keys, req_context)
+        spec = self.primary_tier.prepare_load(keys, req_context)
+        self._release_lookup_pins(keys, req_context)
+        return spec
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -1081,14 +1130,15 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> TransferJob:
         """Pin chunks in the primary tier and create a tracked store job.
 
-        Calls prepare_read() to increment ref_cnt (protecting chunks
-        from eviction during the async transfer), allocates a job ID,
-        and registers the job in _jobs.
+        Calls prepare_read() to increment ref_cnt (protecting chunks from
+        eviction during the async transfer), releases any lookup pin for the
+        same chunks, allocates a job ID, and registers the job in _jobs.
 
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
         """
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
+        self._release_lookup_pins(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
         job_metadata = TransferJob(
@@ -1139,8 +1189,9 @@ class TieringOffloadingManager(OffloadingManager):
         *,
         exclude_tier_idx: int | None = None,
     ) -> None:
-        self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
+        self._release_all_lookup_pins(state)
+        self.primary_tier.on_request_finished(req_context)
         state.is_finished = True
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
@@ -1199,11 +1250,17 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
+        # Every HIT reported this step has either been consumed by
+        # prepare_load()/create_store_job() or belongs to a request that was
+        # not scheduled. Neither needs protection from promotions next step.
+        for state in self._req_state.values():
+            self._release_all_lookup_pins(state)
+
         for req_id in context.new_req_ids:
-            state = self._req_state.get(req_id)
-            if state is None:
+            new_state = self._req_state.get(req_id)
+            if new_state is None:
                 continue
-            self._metrics.on_request_allocated(state.req_context)
+            self._metrics.on_request_allocated(new_state.req_context)
 
     @override
     def has_pending_work(self) -> bool:
@@ -1263,6 +1320,12 @@ class TieringOffloadingManager(OffloadingManager):
         assert not self._deferred_releases, (
             "drain_jobs() returned with deferred releases still pending"
         )
+
+        # Lookup pins are step-scoped. A reset invalidates the primary cache
+        # they refer to, so release them before resetting it.
+        for state in self._req_state.values():
+            self._release_all_lookup_pins(state)
+            assert not state.pinned_lookup_hits
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
