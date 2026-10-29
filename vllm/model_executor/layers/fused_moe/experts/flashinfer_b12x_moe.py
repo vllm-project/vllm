@@ -25,7 +25,6 @@ from vllm.utils.b12x import B12xWarmupUnit
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
-    has_flashinfer_b12x_w4a16_moe,
 )
 from vllm.utils.math_utils import round_up
 
@@ -216,14 +215,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        if (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic):
-            return True
         # W4A16 NVFP4 checkpoints (activation_key=None) run FlashInfer's
-        # BF16-activation kernel, which needs B12xMoEWrapper(quant_mode=...).
-        return (weight_key, activation_key) == (
-            kNvfp4Static,
-            None,
-        ) and has_flashinfer_b12x_w4a16_moe()
+        # BF16-activation kernel via B12xMoEWrapper(quant_mode="w4a16").
+        return (weight_key, activation_key) in (
+            (kNvfp4Static, kNvfp4Dynamic),
+            (kNvfp4Static, None),
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:

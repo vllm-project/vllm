@@ -49,7 +49,6 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     reorder_w1w3_to_w3w1,
 )
-from vllm.utils.flashinfer import has_flashinfer_b12x_w4a16_moe
 from vllm.utils.torch_utils import set_random_seed
 
 # Dimensions chosen to satisfy FP4 alignment requirements (k multiple of 256,
@@ -446,9 +445,6 @@ def test_flashinfer_b12x_moe_w4a16(
     NVFP4 weights (as in the Marlin MoE tests) so quantization error cancels
     and the tolerance only covers kernel numerics.
     """
-    if not has_flashinfer_b12x_w4a16_moe():
-        pytest.skip("Installed FlashInfer lacks B12xMoEWrapper(quant_mode=...)")
-
     set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
