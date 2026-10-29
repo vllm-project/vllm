@@ -1194,11 +1194,11 @@ _requires_q8_indexer = pytest.mark.skipif(
 
 
 def _random_nvfp4_index_pages(
-    num_pages: int, scale_max: float = 0.5, page_pad: int = 0
+    num_pages: int, scale_max: float = 0.5, page_pad: int = 0, rows: int = BLOCK_SIZE
 ) -> torch.Tensor:
-    """``[num_pages, 128, 72]`` uint8 pages: random E2M1 codes, then E4M3 scales."""
-    data_bytes = BLOCK_SIZE * HEAD_DIM // 2
-    page_bytes = BLOCK_SIZE * _NVFP4_PAGE_WIDTH
+    """``[num_pages, rows, 72]`` uint8 pages: random E2M1 codes, then E4M3 scales."""
+    data_bytes = rows * HEAD_DIM // 2
+    page_bytes = rows * _NVFP4_PAGE_WIDTH
     raw = torch.zeros(
         num_pages, page_bytes + page_pad, dtype=torch.uint8, device="cuda"
     )
@@ -1207,21 +1207,21 @@ def _random_nvfp4_index_pages(
     )
     scale = torch.rand(num_pages, page_bytes - data_bytes, device="cuda") * scale_max
     raw[:, data_bytes:page_bytes] = scale.to(torch.float8_e4m3fn).view(torch.uint8)
-    return raw[:, :page_bytes].view(num_pages, BLOCK_SIZE, _NVFP4_PAGE_WIDTH)
+    return raw[:, :page_bytes].view(num_pages, rows, _NVFP4_PAGE_WIDTH)
 
 
 def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
-    """Reference ``[P, 128, 128]`` e4m3: e2m1 * scale, clamped, rounded once."""
-    num_pages = pages.shape[0]
+    """Reference ``[P, rows, 128]`` e4m3: e2m1 * scale, clamped, rounded once."""
+    num_pages, rows = pages.shape[:2]
     flat = pages.reshape(num_pages, -1)
-    data = flat[:, : BLOCK_SIZE * HEAD_DIM // 2].view(num_pages, BLOCK_SIZE, -1)
-    scale = flat[:, BLOCK_SIZE * HEAD_DIM // 2 :].view(torch.float8_e4m3fn)
+    data = flat[:, : rows * HEAD_DIM // 2].view(num_pages, rows, -1)
+    scale = flat[:, rows * HEAD_DIM // 2 :].view(torch.float8_e4m3fn)
     codes = torch.stack((data & 0xF, data >> 4), dim=-1).reshape(
-        num_pages, BLOCK_SIZE, HEAD_DIM
+        num_pages, rows, HEAD_DIM
     )
     magnitude = torch.tensor(_E2M1_VALUES, device="cuda")[(codes & 7).long()]
     value = torch.where(codes >= 8, -magnitude, magnitude)
-    value = value * scale.float().view(num_pages, BLOCK_SIZE, -1).repeat_interleave(
+    value = value * scale.float().view(num_pages, rows, -1).repeat_interleave(
         16, dim=-1
     )
     return value.clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
@@ -1230,8 +1230,10 @@ def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
 @_requires_q8_indexer
 @pytest.mark.parametrize("use_qmul4", [False, True])
 @pytest.mark.parametrize("scale_max", [0.5, 448.0])
+# Fewer rows: an index cache sharded over TP (P128 at TP2/TP4, P256 at TP4).
+@pytest.mark.parametrize("rows", [BLOCK_SIZE, 64, 32])
 def test_gather_nvfp4_index_k_fp8_bitwise(
-    scale_max: float, use_qmul4: bool, monkeypatch
+    scale_max: float, use_qmul4: bool, rows: int, monkeypatch
 ):
     """Each request's leading pages land at its compact offset, bit-identical
     to the reference dequant (incl. saturation), and nothing else is written,
@@ -1247,14 +1249,14 @@ def test_gather_nvfp4_index_k_fp8_bitwise(
 
     torch.manual_seed(0)
     num_physical = 40
-    kv = _random_nvfp4_index_pages(num_physical, scale_max, page_pad=32)
+    kv = _random_nvfp4_index_pages(num_physical, scale_max, page_pad=32, rows=rows)
     block_table = torch.randperm(num_physical, device="cuda", dtype=torch.int32)[
         :36
     ].view(3, 12)
     num_pages = torch.tensor([5, 0, 12], dtype=torch.int32, device="cuda")
     page_offsets = torch.cumsum(num_pages, 0, dtype=torch.int32) - num_pages
     total = int(num_pages.sum())
-    out = torch.full((total + 1, BLOCK_SIZE, HEAD_DIM), 1.0, device="cuda").to(
+    out = torch.full((total + 1, rows, HEAD_DIM), 1.0, device="cuda").to(
         torch.float8_e4m3fn
     )
 
@@ -1272,6 +1274,111 @@ def test_gather_nvfp4_index_k_fp8_bitwise(
             expected[pages].view(torch.uint8),
         )
     assert torch.all(out[total].float() == 1.0)
+
+
+@_requires_q8_indexer
+def test_gather_nvfp4_index_k_fp8_past_grid_y_limit():
+    """One request of more than 65535 pages, as the sharded gather prefill
+    passes every page of a step (shared prefixes repeat pages)."""
+    from vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k import (
+        minimax_m3_gather_nvfp4_index_k_fp8,
+    )
+
+    torch.manual_seed(0)
+    rows, num_pages = 32, 65536 + 7
+    kv = _random_nvfp4_index_pages(40, rows=rows)
+    pages = torch.randint(0, 40, (1, num_pages), dtype=torch.int32, device="cuda")
+    counts = torch.tensor([num_pages, 0], dtype=torch.int32, device="cuda")
+    out = torch.empty(
+        (num_pages, rows, HEAD_DIM), dtype=torch.float8_e4m3fn, device="cuda"
+    )
+
+    minimax_m3_gather_nvfp4_index_k_fp8(
+        kv, pages, counts[:1], counts[1:], num_pages, out
+    )
+
+    expected = _dequant_nvfp4_index_pages(kv)[pages[0].long()]
+    assert torch.equal(out.view(torch.uint8), expected.view(torch.uint8))
+
+
+def test_index_k_sharding_policy(monkeypatch):
+    """When the index cache is sharded: FP8 with every prefill mode, NVFP4 with
+    the gather prefill only, and NVFP4 not where decode CP runs (TP4)."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.nvidia import indexer_msa as msa
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda *_: True
+    )
+
+    def reason(tp, dtype, prefill_cp="gather", decode_cp=False, spec_tokens=0):
+        monkeypatch.setattr(msa, "get_tensor_model_parallel_world_size", lambda: tp)
+        spec = None
+        if spec_tokens:
+            spec = SimpleNamespace(
+                method="dspark",
+                num_speculative_tokens=spec_tokens,
+                parallel_drafting=True,
+            )
+        config = SimpleNamespace(
+            attention_config=SimpleNamespace(
+                indexer_prefill_cp=prefill_cp, indexer_decode_cp=decode_cp
+            ),
+            kv_transfer_config=None,
+            parallel_config=SimpleNamespace(
+                use_ubatching=False,
+                decode_context_parallel_size=1,
+                prefill_context_parallel_size=1,
+            ),
+            speculative_config=spec,
+            use_v2_model_runner=True,
+        )
+        return msa._unsupported_reason(config, 4, dtype, 16)
+
+    for tp in (2, 4):
+        for prefill_cp in ("gather", "local_score", "local_score_unified"):
+            assert reason(tp, "fp8", prefill_cp) is None
+            assert (reason(tp, "nvfp4", prefill_cp) is None) == (prefill_cp == "gather")
+        assert reason(tp, "fp8", decode_cp=True) is None
+        assert (reason(tp, "nvfp4", decode_cp=True) is None) == (tp == 2)
+        # DSpark at k = 7: four index heads x eight queries fit the scorer.
+        assert reason(tp, "nvfp4", spec_tokens=7) is None
+        assert reason(tp, "nvfp4", spec_tokens=8) is not None
+    assert reason(8, "nvfp4") is not None
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("world,page_size", [(2, 128), (2, 256), (4, 128), (4, 256)])
+def test_gather_prefill_pages_reassembles_nvfp4_shards(world, page_size):
+    """Each rank stages its NVFP4 shard pages to FP8 before the all-gather, and
+    the reassembled pages are the unsharded pages staged the same way."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.nvidia.indexer_msa import gather_prefill_pages
+
+    torch.manual_seed(0)
+    codes, scales = _random_nvfp4_index_rows(12, page_size)
+    # A page listed twice, as requests sharing a cached prefix list it.
+    pages = torch.tensor([3, 0, 7, 7, 11], device="cuda")
+    staged: list[torch.Tensor] = []
+
+    def all_gather(local: torch.Tensor, dim: int) -> torch.Tensor:
+        # Ranks run in order; the last one sees every rank's staged pages.
+        staged.append(local.clone())
+        return torch.cat(staged + [local] * (world - len(staged)), dim)
+
+    comm = SimpleNamespace(
+        group=SimpleNamespace(world_size=world, all_gather=all_gather)
+    )
+    for rank in range(world):
+        shard = _nvfp4_shard_pages(codes, scales, rank, world, page_size, 0)
+        full = gather_prefill_pages(shard, pages, comm, page_size=page_size)
+
+    assert full.dtype == torch.float8_e4m3fn
+    expected = _dequant_nvfp4_index(codes, scales)[pages]
+    assert torch.equal(full.float(), expected)
 
 
 def _assert_forced_tail_topk(

@@ -116,8 +116,9 @@ class AttentionConfig:
     indexer_cache_sharding: IndexerCacheSharding = "off"
     """Shard the indexer cache across TP ranks on supported backends.
     Layout is fixed at startup. MSA supports FP8 and NVFP4 index K on
-    single-node NVLink TP2/TP4; unsupported configurations retain replicated
-    storage."""
+    single-node NVLink TP2/TP4; NVFP4 also needs indexer_prefill_cp="gather"
+    and is not sharded where indexer_decode_cp applies (TP4). Unsupported
+    configurations retain replicated storage."""
 
     indexer_prefill_cp: Literal["gather", "local_score", "local_score_unified"] = (
         "gather"

@@ -31,6 +31,16 @@ PREFILL_CHUNK_SIZE = 1024
 PREFILL_SCORE_BYTES = 32 << 20
 
 
+def _nvfp4_rows_to_fp8(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """e4m3 ``[..., 128]`` rows: e2m1 * scale, clamped and rounded once."""
+    values = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), device=codes.device)
+    nibbles = torch.stack((codes & 15, codes >> 4), -1).flatten(-2).long()
+    # Multiply rather than negate so that code 8 stays -0.
+    k = values[nibbles & 7] * torch.where(nibbles >= 8, -1.0, 1.0)
+    k = k.unflatten(-1, (8, 16)) * scales.float()[..., None]
+    return k.flatten(-2).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     from vllm.distributed.parallel_state import get_tp_group
@@ -415,6 +425,31 @@ def _check_indexer_forwards(config, device, rank, comm):
                 expected = cache.view(torch.uint8).index_select(0, pages)
                 assert torch.equal(actual.view(torch.uint8), expected)
 
+            # NVFP4 shard pages hold this rank's codes, then its scales; they
+            # reassemble as the e4m3 pages the unsharded NVFP4 prefill stages.
+            cpu = torch.Generator().manual_seed(page_size)
+            codes = torch.randint(0, 256, (num_pages, page_size, 64), generator=cpu)
+            codes = codes.to(torch.uint8).to(device)
+            scales = torch.rand(num_pages, page_size, 8, generator=cpu) * 448
+            scales = scales.to(device).to(torch.float8_e4m3fn)
+            rows = page_size // world
+            owned = (
+                slice(rank * rows, (rank + 1) * rows)
+                if page_size == 256
+                else slice(rank, None, world)
+            )
+            shard = torch.cat(
+                (
+                    codes[:, owned].flatten(1),
+                    scales[:, owned].view(torch.uint8).flatten(1),
+                ),
+                dim=1,
+            ).view(num_pages, rows, 72)
+            actual = msa.gather_prefill_pages(shard, pages, comm, page_size=page_size)
+            expected = _nvfp4_rows_to_fp8(codes, scales).index_select(0, pages)
+            assert actual.dtype == torch.float8_e4m3fn
+            assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
 
 @pytest.mark.timeout(600)
 @pytest.mark.skipif(
@@ -525,3 +560,22 @@ def _check_sharding_policy(config, original_comm):
         before = msa.get_comm()
         assert msa.resolve_index_k_shard(policy, 4, dtype, topk) == 1
         assert msa.get_comm() is before
+
+    # NVFP4 shards with the gather prefill only, and not where decode CP (TP4)
+    # splits decode over a replicated cache; decode CP never runs for FP8.
+    world = original_comm.world
+    policy.parallel_config = copy(config.parallel_config)
+    policy.speculative_config = None
+    policy.kv_transfer_config = None
+    for dtype, prefill_cp, decode_cp, expected in [
+        ("nvfp4", "gather", False, world),
+        ("nvfp4", "local_score", False, 1),
+        ("nvfp4", "gather", True, 1 if world == 4 else world),
+        ("fp8", "gather", True, world),
+    ]:
+        policy.attention_config = AttentionConfig(
+            indexer_cache_sharding="on",
+            indexer_prefill_cp=prefill_cp,
+            indexer_decode_cp=decode_cp,
+        )
+        assert msa.resolve_index_k_shard(policy, 4, dtype, 16) == expected

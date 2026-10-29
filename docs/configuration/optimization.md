@@ -533,3 +533,11 @@ TP2 owns a full block per rank, while TP4 owns half a block. Candidate exchange
 is still required to route results to the query-head owners. Page size and
 layout are fixed at startup; `gather` and `local_score` share that layout.
 P256 requires the corresponding MSA P256 NVFP4 kernel support.
+
+An NVFP4 index cache (MiniMax-M3.1) shards the same way with
+`--attention-config '{"indexer_kv_dtype":"nvfp4","indexer_cache_sharding":"on"}'`.
+Decode scores each rank's NVFP4 rows directly. The `gather` prefill, the only
+prefill mode it supports, dequantizes each rank's shard pages to FP8 as the
+unsharded NVFP4 prefill does and then all-gathers them, so it moves FP8 rather
+than NVFP4 bytes over NVLink. Other prefill modes, or `indexer_decode_cp` at
+TP4, keep a replicated NVFP4 index cache and log why.

@@ -872,6 +872,8 @@ def _unsupported_reason(
         # Only the NVFP4 indexer runs decode CP, and only at these TP sizes.
         if attention_config.indexer_decode_cp and tp in DECODE_CP_TP_SIZES:
             return "indexer_decode_cp splits decode over a replicated index cache"
+        if attention_config.indexer_prefill_cp != "gather":
+            return "an NVFP4 index cache supports only indexer_prefill_cp='gather'"
     if total_index_heads % tp:
         return f"{total_index_heads} index heads do not split over TP{tp}"
     if vllm_config.kv_transfer_config is not None:
@@ -1105,14 +1107,44 @@ def gather_prefill_pages(
     *,
     page_size: int = 128,
 ) -> torch.Tensor:
-    """Reassemble physical pages from interleaved P128 or contiguous P256 shards."""
+    """Reassemble physical pages from interleaved P128 or contiguous P256 shards.
+
+    NVFP4 shard pages hold all codes, then all scales, so they cannot be
+    reassembled row by row; they are staged to e4m3 first, rounded as the
+    unsharded NVFP4 prefill rounds them, and come back as FP8 pages.
+    """
     from vllm.distributed.parallel_state import get_tp_group
 
     group = get_tp_group() if comm is None else comm.group
     tp = group.world_size
     num_pages = pages.numel()
-    _, rows, dim = kv_shard.shape
-    local = kv_shard.view(torch.uint8).index_select(0, pages)
+    rows = kv_shard.shape[1]
+    if kv_shard.dtype == torch.uint8:
+        from vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k import (
+            HEAD_DIM,
+            minimax_m3_gather_nvfp4_index_k_fp8,
+        )
+
+        dtype = torch.float8_e4m3fn
+        staged = torch.empty(
+            (num_pages, rows, HEAD_DIM), dtype=dtype, device=kv_shard.device
+        )
+        # Pinned, so the copy cannot synchronize with the stream.
+        counts = torch.tensor([num_pages, 0], dtype=torch.int32, pin_memory=True)
+        counts = counts.to(kv_shard.device, non_blocking=True)
+        minimax_m3_gather_nvfp4_index_k_fp8(
+            kv_shard,
+            pages.view(1, -1),
+            counts[:1],
+            counts[1:],
+            num_pages,
+            staged,
+        )
+        local = staged.view(torch.uint8)
+    else:
+        dtype = kv_shard.dtype
+        local = kv_shard.view(torch.uint8).index_select(0, pages)
+    dim = local.shape[-1]
     gathered = group.all_gather(local, dim=0)
     order = (1, 0, 2, 3) if page_size == 256 else (1, 2, 0, 3)
     full = (
@@ -1120,4 +1152,4 @@ def gather_prefill_pages(
         .permute(order)
         .reshape(num_pages, rows * tp, dim)
     )
-    return full.view(kv_shard.dtype)
+    return full.view(dtype)
