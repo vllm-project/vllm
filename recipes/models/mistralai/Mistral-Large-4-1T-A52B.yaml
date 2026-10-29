@@ -1,0 +1,869 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+#
+# Every flag below comes from a launcher that ran on GB300, B300, B200, H200 or
+# MI350X; untested options are left out.
+
+meta:
+  title: "Mistral-Large-4-1T-A52B"
+  slug: "mistral-large-4-1t-a52b"
+  provider: "Mistral AI"
+  description: "Mistral Large 4: a 1T-total / 49B-active multimodal MoE with sparse MLA attention, a built-in DSpark drafter, tool calling and reasoning, in FP8, NVFP4 and AMD MXFP4 checkpoints."
+  date_added: 2026-10-28
+  date_updated: 2026-10-29
+  tasks:
+    - multimodal
+  performance_headline: "8x GB300, NVFP4 + DSpark: TP8 c1 TPOT 3.1 ms; 1P1D (4+4) P DP4/EP → D TP4 reaches 241 output tok/s/GPU at 32k input"
+  related_recipes:
+    - mistralai/Mistral-Large-3-675B-Instruct-2512
+  default_hardware: gb300
+  # NVFP4 doesn't run on ROCm: AMD defaults to the FP8 checkpoint.
+  default_variant:
+    amd: fp8
+  hardware:
+    gb300: verified
+    b300: verified
+    b200: verified
+    h200: verified
+    mi350x: verified
+
+model:
+  model_id: "mistralai/Mistral-Large-4-1T-A52B"
+  min_vllm_version: "0.34.0"
+  docker_image:
+    nvidia: "vllm/vllm-openai:mistral-large-4"
+    # Not published yet.
+    amd: "vllm/vllm-openai-rocm:mistral-4-large"
+  install:
+    docker:
+      note: "Mistral Large 4 support ships in these images; no vLLM release or nightly wheel includes it yet. The ROCm image also carries the MXFP4 expert path and the AITER tuning tables."
+    pip: false
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "49B"
+  context_length: 1048576
+  supports_dcp: true
+  base_args:
+    - "--tokenizer-mode"
+    - "mistral"
+    - "--config-format"
+    - "mistral"
+    - "--load-format"
+    - "mistral"
+    # Validated up to 256k; the checkpoint advertises 1,048,576 positions.
+    - "--max-model-len"
+    - "262144"
+    # Every validated run used these; current vLLM defaults on B200/GB300
+    # (16384 / 1024) are untested with this model.
+    - "--max-num-batched-tokens"
+    - "8192"
+    - "--max-num-seqs"
+    - "128"
+    - "--gpu-memory-utilization"
+    - "0.85"
+  base_env:
+    # Cold starts (weight load + DeepGEMM warmup + CUDA graph capture) took
+    # 1300-1800 s, past the 600 s default.
+    VLLM_ENGINE_READY_TIMEOUT_S: "6000"
+
+dependencies:
+  - note: "Mistral tokenizer and image processing for Mistral Large 4"
+    command: 'uv pip install -U "mistral_common[image]>=1.13.0"'
+  - note: "Only for the MegaMoE kernel (flashinfer_moe_ep_cutedsl) used by the P/D presets with expert parallelism"
+    command: 'uv pip install "nvshmem4py-cu13==0.4.1"'
+    optional: true
+    brand: NVIDIA
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  reasoning:
+    description: "Mistral reasoning parser: thinking goes to the `reasoning` field instead of `content`."
+    args:
+      - "--reasoning-parser"
+      - "mistral"
+  spec_decoding:
+    description: "DSpark speculative decoding with the drafter shipped in both checkpoints. Depth 3 is fixed by the checkpoint."
+    # Not validated with pipeline parallelism.
+    strategies:
+      - single_node_tp
+      - multi_node_tp
+      - multi_node_dep
+      - pd_cluster
+    default_mode: dspark
+    modes:
+      dspark:
+        label: "DSpark"
+        description: "Greedy drafting (default). Same acceptance as probabilistic at T ≤ 1 with top-p."
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":3}'
+      dspark_probabilistic:
+        label: "DSpark (probabilistic)"
+        description: "Probabilistic drafting for sampled serving at T ≥ 1 without top-p: AL 2.04 → 2.36–2.53 at T=1.5."
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
+  text_only:
+    description: "Skip the Pixtral vision encoder for text-only serving. Required by prefill context parallelism (PCP)."
+    args:
+      - "--language-model-only"
+
+opt_in_features:
+  - text_only
+
+variants:
+  # NVFP4 is the default on Blackwell; H200 falls back to FP8.
+  default:
+    model_id: "mistralai/Mistral-Large-4-1T-A52B-NVFP4"
+    precision: nvfp4
+    # ModelOpt mixed precision: size from the 610.1 GB checkpoint, × 1.2
+    vram_minimum_gb: 733
+    supported_hardware: [gb300, b300, b200]
+    description: "ModelOpt NVFP4 experts with FP8 attention and shared experts (~76 GiB per GPU on 8 GPUs), with the DSpark drafter. ~1.5x the KV capacity of FP8. Validated on GB300, B300 and B200."
+  fp8:
+    precision: fp8
+    # ceil(1060.6 GB checkpoint × 1.2)
+    vram_minimum_gb: 1273
+    supported_hardware: [gb300, b300, h200, mi350x, mi355x]
+    description: "FP8 block-scaled weights with the DSpark drafter (~128 GiB of weights per GPU on 8 GPUs). On AMD the routed experts are re-quantized to MXFP4 at load, which also fits TP4. Validated on GB300, B300, H200 and MI350X."
+    hardware_overrides:
+      amd:
+        extra_env:
+          # FP8 → MXFP4 routed experts, layer by layer at load (peak memory:
+          # the MXFP4 model plus one layer of FP8 experts). a8w4 = FP8
+          # activations; a4w4 (MXFP4 activations) measured level with it at TP4.
+          VLLM_FP8_MOE_REQUANT: "mxfp4"
+          VLLM_FP8_MOE_REQUANT_ACT: "a8w4"
+      # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.
+      mi350x:
+        install:
+          pip: false
+      mi355x:
+        install:
+          pip: false
+  mxfp4:
+    model_id: "amd/Mistral-Large-4-1T-A52B-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (Quark)"
+    # ceil(578 GB checkpoint × 1.2)
+    vram_minimum_gb: 694
+    supported_hardware: [mi350x, mi355x]
+    hardware_overrides:
+      # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.
+      mi350x:
+        install:
+          pip: false
+      mi355x:
+        install:
+          pip: false
+    description: "AMD Quark OCP MXFP4 routed experts (static weight, dynamic activation scales); attention, shared experts, dense layers, router, head, vision encoder and the DSpark drafter keep the original precision. ~578 GB, fits four MI350 Series GPUs."
+
+# Only the validated layouts are offered:
+#   GB300: one 4-GPU tray (TP4, NVFP4), 2 trays (TP8, DP8/EP) and 1P1D with
+#          one tray per side
+#   B300:  one 8-GPU node (TP8, NVFP4 and FP8)
+#   B200:  one 8-GPU node (TP8) and 1P1D with one node per side
+#   H200:  2 x 8-GPU nodes (TP16, PP2 x TP8)
+compatible_strategies: []
+
+strategy_hardware:
+  single_node_tp:
+    gb300: supported
+    b300: supported
+    b200: supported
+    mi350x: supported
+    mi355x: supported
+  multi_node_tp:
+    gb300: supported
+    h200: supported
+  multi_node_dep:
+    gb300: supported
+  multi_node_tp_pp:
+    h200: supported
+  pd_cluster:
+    gb300: supported
+    b200: supported
+
+default_strategy: single_node_tp
+
+strategy_min_gpus:
+  h200: 16
+
+hardware_overrides:
+  amd:
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      # AITER's Triton sparse MLA, and AITER custom all-reduce up to 128 MiB
+      # (large prefill steps): +2–5% output tok/s at TP4.
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+      AITER_CUSTOM_AR_MAX_SIZE: "134217728"
+
+strategy_overrides:
+  multi_node_tp_pp:
+    env:
+      # Each stage must own layer 35 (the KV-sharing source) and the indexer
+      # layers its shared-index layers reuse. Valid for PP2 only.
+      VLLM_PP_LAYER_PARTITION: "35,37"
+  pd_cluster:
+    # Validated: P DP/EP on one node → D TP on one node
+    # (4+4 GB300, 8+8 B200).
+    prefill:
+      nodes: 1
+      parallelism: dep
+    decode:
+      nodes: 1
+      parallelism: tp
+
+presets:
+  gb300_dcp8:
+    label: "TP8 DCP8 (long context)"
+    hardware: gb300
+    strategy: multi_node_tp
+    workload: "Long context, KV-capacity-bound"
+    description: "Decode context parallelism shards the latent KV cache across the 8 ranks: ~8x KV capacity at a higher per-step latency. Works with DSpark."
+    select:
+      nodes: 2
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+    runbook: |
+      Measured on 2x GB300 (8 GPUs), NVFP4 revision 4359ec6, `--max-model-len 65536`.
+
+      | | TP8 | TP8 DCP8 |
+      |---|---:|---:|
+      | KV cache, NVFP4 (no spec) | 3.60M tokens | 28.76M tokens |
+      | KV cache, FP8 (no spec) | 2.38M tokens | 18.88M tokens |
+      | GSM8K-200 (NVFP4, no spec / DSpark) | 0.970 / 0.965 | 0.975 / 0.970 |
+      | c1 TPOT p50, 32k input, DSpark | 4.02 ms | 5.44 ms |
+
+      On NVFP4, 28.76M tokens is room for ~27 concurrent 1M-token requests
+      (KV only; serving at 1M context is not validated, the recipe caps
+      `--max-model-len` at 262144). With DSpark the draft's per-block
+      admission bound costs some of that capacity (~0.69x of plain DCP8 at
+      64k context; it doesn't bind at `--max-num-seqs 128` below ~99k
+      average context).
+
+      DCP8 only pays off when KV capacity binds: at `--max-num-seqs 128`
+      and ≤60k input its TPOT is worse than TP8 at every load we measured.
+      On the final stack, TP8 DCP8 FP8 at 60k input / 1k output measured
+      c1 TTFT 4.73 s, c1 TPOT 12.50 ms and 204 output tok/s at c64; with
+      DSpark c1 TPOT is 6.16 ms (AL 2.81).
+  gb300_pcp8_dcp8:
+    label: "TP1×PCP8×DCP8 + EP (lowest TTFT)"
+    hardware: gb300
+    strategy: multi_node_tp
+    workload: "Long prompts, low load"
+    description: "Prefill context parallelism splits each prompt across the 8 ranks: ~3x lower c1 TTFT than TP8 on long prompts, but the lowest throughput. Text-only for now."
+    select:
+      nodes: 2
+      features:
+        text_only: true
+    args:
+      - "--tensor-parallel-size"
+      - "1"
+      - "--prefill-context-parallel-size"
+      - "8"
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+    runbook: |
+      Measured on 2x GB300 (8 GPUs), NVFP4 revision 4359ec6, DSpark, real-text
+      prompts, 1k output tokens, `--max-model-len 65536`, without
+      `--enable-expert-parallel`. The preset adds EP, as used by the PCP
+      prefill side of the P/D presets; it was not benchmarked in this layout.
+
+      | c1 TTFT p50 / TPOT p50 | 8k | 32k | 60k |
+      |---|---|---|---|
+      | TP1×PCP8×DCP8 + DSpark | 0.16 s / 8.75 ms | 0.54 s / 8.77 ms | 1.08 s / 9.35 ms |
+      | TP8 + DSpark | 0.45 s / 3.45 ms | 1.87 s / 4.02 ms | 3.65 s / 3.82 ms |
+
+      Under load (DSpark, p50 / p99 TTFT): 60k at ~0.1 req/s 3.30 / 5.91 s
+      (TP8: 3.70 / 7.28 s). Best throughput is 86.2 output tok/s/GPU at 8k
+      (c16, 47 tok/s/user), vs 178.3 for TP8 + DSpark. GSM8K-200 0.965–0.970
+      with DSpark, 0.980 without. KV capacity 24.48M tokens without spec.
+
+      PCP requires `--language-model-only` (text only) for now.
+  h200_dcp8:
+    label: "TP16 DCP8 (long context)"
+    hardware: h200
+    strategy: multi_node_tp
+    workload: "Long context, KV-capacity-bound"
+    description: "Decode context parallelism shards the latent KV cache across 8 ranks of the TP16 group. Validated with DSpark."
+    select:
+      nodes: 2
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+    runbook: |
+      Served correctly on 2x 8 H200 with the FP8 checkpoint, TP16 + DCP8 with
+      DSpark (3 tokens). TP16 without DCP scored 0.960 on GSM8K (500
+      questions, 5-shot, chat template, greedy). No performance numbers were
+      taken on H200.
+  gb300_pd_dep_tp:
+    label: "P DP4/EP → D TP4"
+    hardware: gb300
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Throughput at 32k/60k input"
+    default: true
+    description: "Default 1P1D layout (4+4 GPUs): the best throughput at 32k and 60k input. MegaMoE kernel on the expert-parallel prefill side."
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        args:
+          - "--kernel-config"
+          - '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+      decode:
+        nodes: 1
+        parallelism: tp
+        remove_args: ["--compilation-config"]
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+    runbook: |
+      Measured 1P1D on 4+4 GB300 (one NVL72 rack), NVFP4 revision 4359ec6, DSpark
+      depth 3 on both sides, CUDA graphs, no prefix caching, `--max-model-len 65536`.
+      Workload: 320 unique real-text prompts per input length (8k / 32k / 60k
+      tokens), 1,024 output tokens, greedy, EOS ignored. Routed with the NIXL
+      toy proxy (`tests/v1/kv_connector/nixl_integration/toy_proxy_server.py`),
+      not vllm-router.
+
+      Best output tok/s per GPU (8 GPUs) at a minimum per-user speed:
+
+      | | 8k ≥40 | 8k ≥100 | 32k ≥40 | 32k ≥100 | 60k ≥40 / ≥100 |
+      |---|---:|---:|---:|---:|---:|
+      | P DP4/EP (MegaMoE) → D TP4 | 596 | 200 | 241 | 154 | 129 / 129 |
+      | P DP4/EP (default MoE) → D TP4 | 588 | 192 | 206 | 149 | not run |
+
+      c1 TTFT 0.43 / 1.78 / 3.48 s and c1 TPOT 3.9–4.2 ms at 8k / 32k / 60k.
+      Max 4.65 / 1.88 / 1.01 req/s. GSM8K-200 through the proxy ≥ 0.965.
+      DSpark acceptance ~2.98 / 2.85 / 2.79 at 8k / 32k / 60k.
+
+      MegaMoE (`flashinfer_moe_ep_cutedsl`) needs `nvshmem4py-cu13`; drop the
+      prefill `--kernel-config` to use the default MoE backend.
+  gb300_pd_pcp_tp:
+    label: "P PCP4×DCP4+EP → D TP4"
+    hardware: gb300
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Lowest TTFT, ≥100 tok/s/user at 32k"
+    description: "Prefill with TP1×PCP4×DCP4 + EP and a 32k-token batch: 2–3.5x lower TTFT than P DP4/EP, within 7–9% of its throughput. Text only."
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tp
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--prefill-context-parallel-size"
+          - "4"
+          - "--decode-context-parallel-size"
+          - "4"
+          - "--cp-kv-cache-interleave-size"
+          - "64"
+          - "--enable-expert-parallel"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--kernel-config"
+          - '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'
+          - "--language-model-only"
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_producer, kv_load_failure_policy: null } }
+      decode:
+        nodes: 1
+        parallelism: tp
+        remove_args: ["--compilation-config"]
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+    runbook: |
+      Same setup as the default P/D preset (4+4 GB300, NVFP4 4359ec6, DSpark on
+      both sides, toy proxy).
+
+      | | 8k ≥40 | 8k ≥100 | 32k ≥40 | 32k ≥100 | 60k ≥40 / ≥100 | c1 TTFT 8k / 32k / 60k |
+      |---|---:|---:|---:|---:|---:|---|
+      | P PCP4×DCP4+EP → D TP4 | 596 | 201 | 223 | 174 | 118 / 118 | 0.35 / 0.64 / 1.21 s |
+      | P DP4/EP → D TP4 (default) | 596 | 200 | 241 | 154 | 129 / 129 | 0.43 / 1.78 / 3.48 s |
+
+      Fixed-QPS TTFT p50 / p99: 0.76 / 1.73 s at 32k and 0.87 req/s (default
+      preset: 2.53 / 4.80 s); 1.35 / 4.47 s at 60k and 0.46 req/s (default:
+      4.77 / 8.33 s).
+
+      `--max-num-batched-tokens` was PCP's real limit: at 8192 the 32k / 60k
+      req/s drops to 0.74 / 0.40 and c1 TTFT rises to 1.43 / 2.62 s. 65536
+      adds nothing over 32768.
+  gb300_pd_dep_dep:
+    label: "P DP4/EP → D DP4/EP"
+    hardware: gb300
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Short inputs, high concurrency"
+    description: "Expert-parallel decode: the highest throughput at 8k input and high concurrency, with higher per-user latency. MegaMoE on both sides; the decode side keeps a 256-token batch so the kernel uses its low-latency profile."
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        args:
+          - "--kernel-config"
+          - '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+      decode:
+        nodes: 1
+        parallelism: dep
+        args:
+          - "--max-num-batched-tokens"
+          - "256"
+          - "--kernel-config"
+          - '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'
+        remove_args: ["--compilation-config"]
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+    runbook: |
+      Same setup as the default P/D preset (4+4 GB300, NVFP4 4359ec6, DSpark on
+      both sides, toy proxy).
+
+      | | 8k ≥40 | 8k ≥100 | 32k ≥40 | 32k ≥100 | 60k ≥40 / ≥100 | c1 TPOT |
+      |---|---:|---:|---:|---:|---:|---|
+      | P DP4/EP → D DP4/EP (D mnbt 256) | 766 | 98 | 238 | 83 | 128 / 68 | 6.0–6.5 ms |
+
+      Max 5.98 req/s at 8k. With the default MoE on both sides: 723 / 178
+      output tok/s/GPU at 8k (≥40 / ≥100 tok/s/user). MegaMoE on the decode
+      side picks its low-latency profile only when `--max-num-batched-tokens`
+      is below 512; at 8192 it lost 10% at 8k. Use session-sticky routing to
+      the DP ranks when prefix caching is on.
+  gb300_pd_agentic:
+    label: "Agentic: P PCP4×DCP4+EP → D TP4 DCP4"
+    hardware: gb300
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Agentic, KV-capacity-bound (AgentX traces)"
+    description: "No spec decoding, prefix caching on: DCP4 on the decode node gives 4x its KV capacity, so long multi-turn sessions keep their cache. Text only."
+    select:
+      features:
+        spec_decoding: false
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tp
+        args:
+          - "--tensor-parallel-size"
+          - "1"
+          - "--prefill-context-parallel-size"
+          - "4"
+          - "--decode-context-parallel-size"
+          - "4"
+          - "--cp-kv-cache-interleave-size"
+          - "64"
+          - "--enable-expert-parallel"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--kernel-config"
+          - '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'
+          - "--language-model-only"
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_producer, kv_load_failure_policy: null } }
+      decode:
+        nodes: 1
+        parallelism: tp
+        args:
+          - "--decode-context-parallel-size"
+          - "4"
+          - "--cp-kv-cache-interleave-size"
+          - "64"
+        remove_args: ["--compilation-config"]
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+    runbook: |
+      Measured 1P1D on 4+4 GB300 with `agentx-harness==1.0.7` on
+      `semianalysisai/cc-traces-weka-062126-256k` (393 sessions, ISL mean
+      100.9k / max 255.8k, OSL p50 376), 900 s per point, NVFP4 4359ec6,
+      no spec decoding, prefix caching on, `--max-model-len 262144`.
+
+      | | KV tokens (D) | c16 out tok/s/GPU | c32 TTFT p50 | c32 out tok/s/GPU | c32 req/s |
+      |---|---:|---:|---:|---:|---:|
+      | P PCP4×DCP4 → D TP4 DCP4 | 7.81M | 57.6 | 0.72 s | 92.5 | 1.185 |
+      | P PCP4×DCP4 → D TP4 | 1.96M | 60.9 | 14.95 s | 78.3 | 0.939 |
+      | P DP4/EP → D TP4 | 1.96M | 61.0 | 12.66 s | 78.9 | 0.969 |
+      | P DP4/EP → D DP4/EP | 4 x 1.51M | 54.3 | 0.98 s | 89.7 | 1.155 |
+
+      At ~32 sessions D TP4 runs out of KV (local hit rate 17–33%) and TTFT
+      explodes; DCP4 on D fixes it. DCP4 decode costs 12–25% ITL, so at ≤16
+      sessions P PCP4×DCP4 → D TP4 is better (it is the "P PCP4×DCP4+EP → D
+      TP4" preset with spec decoding switched off). Everything is past the
+      knee at c64.
+
+      Route each session to the same DP rank on DP sides (our proxy set the
+      `X-data-parallel-rank` header): without it the hit rate drops 14–22
+      points and TTFT p99 is 2–3x worse. DSpark on a DCP decode node is not
+      supported yet.
+  b200_pd_dep_tp:
+    label: "P DP8/EP → D TP8"
+    hardware: b200
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Throughput at 32k/60k input"
+    default: true
+    description: "1P1D on one 8-GPU B200 node per side: the best B200 layout we measured."
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+      decode:
+        nodes: 1
+        parallelism: tp
+        remove_args: ["--compilation-config"]
+        json_args:
+          --kv-transfer-config: { NixlConnector: { kv_role: kv_both, kv_load_failure_policy: null } }
+    runbook: |
+      Measured 1P1D on 8+8 B200 (one node per side, IB between them), NVFP4
+      revision 4359ec6, DSpark depth 3 on both sides, default MoE backend,
+      `--max-model-len 65536`, no prefix caching, NIXL toy proxy. Unique
+      real-text prompts of 32k / 60k tokens, 1,024 output tokens, greedy.
+
+      Best output tok/s per GPU over all 16 GPUs (concurrency, tok/s/user):
+
+      | P → D | 32k | 60k | c1 TPOT 32k / 60k |
+      |---|---|---|---|
+      | P DP8/EP → D TP8 | 164.4 (c256, 100) | 82.8 (c128, 150) | 3.95 / 4.11 ms |
+      | P DP8/EP → D DP8/EP | 162.9 (c256, 104) | 84.8 (c256, 112) | 6.77 / 5.87 ms |
+      | P TP8 → D TP8 | 31.7 (c32, 229) | 15.8 (c16, 243) | 4.19 / 3.75 ms |
+
+      Both DP8/EP prefill layouts are prefill-bound at 32k and 60k. GSM8K-200
+      (vLLM `tests/evals/gsm8k`, through the proxy) 0.855–0.900, within noise
+      of colocated TP8 + DSpark (0.890 / 0.885). B200 per-GPU throughput is
+      ~0.8x GB300 in the same layouts.
+
+  mi350x_tp4:
+    label: "TP4 (two replicas per node)"
+    hardware: mi350x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Interactive and mid concurrency"
+    select:
+      features:
+        spec_decoding: dspark
+    description: "MXFP4 experts fit four MI350X GPUs, so one 8-GPU node runs two TP4 replicas (start the second with HIP_VISIBLE_DEVICES=4,5,6,7 and another port). Validated with DSpark and the FP8 KV cache."
+    tp: 4
+    runbook: |
+      Measured on MI350X, TP4, FP8 checkpoint with MXFP4 experts at load
+      (a4w4), FP8 KV cache, DSpark depth 3. 200 real prompts (80 MT-Bench
+      first turns + 120 GSM8K questions), greedy, ≤ 512 output tokens.
+
+      | DSpark vs no spec | c1 | c8 | c32 |
+      |---|---:|---:|---:|
+      | TPOT p50 speedup | 2.7x | 1.9x | 1.8x |
+      | Output tok/s | 2.1x | 1.6x | 1.4x |
+
+      AL 3.1 at every concurrency. a8w4 and a4w4 experts measured level
+      (within 3% tok/s, same AL). KV cache 1.79–1.90M tokens per replica
+      without spec, 1.02M with DSpark at `--max-model-len 32768`.
+
+      The prompt set is not the one behind the NVIDIA acceptance numbers, so
+      don't compare AL across hardware.
+  mi350x_tp4_specialized:
+    label: "TP4 specialized decode (lowest latency)"
+    hardware: mi350x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "1–4 concurrent requests"
+    description: "Runs every MoE layer of a 1-, 2- or 4-request decode step as one persistent FlyDSL kernel (attention, indexer, router, MXFP4 experts and both all-reduces in one launch). Larger batches and prefill run the standard path. Needs TP4 and a4w4 experts; refuses to start otherwise."
+    tp: 4
+    args:
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+      - "--max-num-seqs"
+      - "64"
+    env:
+      VLLM_FP8_MOE_REQUANT_ACT: "a4w4"
+    runbook: |
+      Measured on MI350X, TP4, a4w4 experts, FP8 KV cache, against the
+      standard decode on the same GPUs.
+
+      | TPOT speedup vs standard decode | c1 | c4 |
+      |---|---:|---:|
+      | Specialized decode (8k in / 1k out) | 1.5x | 1.1x |
+      | Specialized decode + DSpark, vs no spec (real prompts) | 2.9x | n/a |
+
+      With DSpark only single-request verify blocks run fused: at c1 it is
+      1.09x faster per token than DSpark on the standard decode, at c8 equal.
+
+      `--max-num-seqs 64` is required for now: with vLLM's default batch
+      limits and `AITER_CUSTOM_AR_MAX_SIZE`, CUDA graph capture aborts at
+      startup. The specialized decode only runs 1–4-request steps, so the cap
+      costs this preset nothing.
+
+notes:
+  - title: "Two GB300 trays per 8-GPU instance"
+    when:
+      hardware: [gb300]
+      strategies: [multi_node_tp]
+    body: |
+      The colocated configurations were validated on 8 GPUs: two 4-GPU GB300
+      trays in one NVL72 rack. Node 1 runs `--headless`; send requests to node 0.
+  - title: "DP8/EP load balancing"
+    when:
+      hardware: [gb300]
+      strategies: [multi_node_dep]
+    body: |
+      DP8/EP over two GB300 trays was validated with vLLM's internal load
+      balancer: node 0 served the API for all 8 DP ranks, and node 1 ran with
+      `--headless --data-parallel-start-rank 4` instead of
+      `--data-parallel-hybrid-lb`. Measured with DSpark: 209.8 output tok/s/GPU
+      at 8k input (c32, 55 tok/s/user) and 50.6 at 32k (c8, 58 tok/s/user),
+      GSM8K-200 0.975, 1.97M KV tokens per DP rank.
+  - title: "Use NVFP4 for P/D on GB300"
+    when:
+      hardware: [gb300]
+      strategies: [pd_cluster]
+      variants: [fp8]
+    body: |
+      The P/D presets run one 4-GPU tray per side, which holds the NVFP4 weights
+      but not the FP8 ones (~128 GiB per GPU at 8 GPUs). Pick the NVFP4 variant.
+  - title: "Probabilistic drafting"
+    when:
+      features: [spec_decoding]
+    body: |
+      For sampled serving at T ≥ 1 without top-p, pick **DSpark (probabilistic)**:
+      at T=1.5 it raises AL from 2.04 to 2.36–2.53 (+12–22% throughput). At
+      T=1.0 with top-p 0.95 both modes give the same acceptance (AL 2.81 vs 2.80
+      at c8), and greedy is ~1% faster per step. Both are lossless.
+  - title: "H200: two 8-GPU nodes"
+    when:
+      hardware: [h200]
+    body: |
+      FP8 only (NVFP4 needs Blackwell). The ~1.06 TB of FP8 weights need two
+      8x H200 nodes: TP16 is the primary layout, PP2 x TP8 the alternative.
+      FlashMLA sparse with the `fp8_ds_mla` KV cache runs on SM90 as is (DCP
+      top-k compaction is disabled automatically), so no extra flags are needed.
+      Node 1 runs `--headless`; send requests to node 0.
+
+      TP16 with DSpark (3 tokens), `fp8_ds_mla` and CUDA graphs scored 0.960 on
+      GSM8K (500 questions, 5-shot, chat template, greedy). No performance
+      numbers were taken on H200.
+  - title: "AMD: MXFP4 experts and AITER"
+    when:
+      hardware: [amd]
+    body: |
+      ROCm has no NVFP4 kernels. Serve the FP8 checkpoint, whose routed
+      experts are re-quantized to OCP MXFP4 at load
+      (`VLLM_FP8_MOE_REQUANT=mxfp4`; expert weights drop from ~125 to ~69 GiB
+      per GPU at TP8), or the AMD Quark MXFP4 checkpoint.
+      `VLLM_FP8_MOE_REQUANT_ACT` picks the activation format: `a8w4` (FP8, the
+      default) or `a4w4` (MXFP4, required by the specialized decode).
+      `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs, MLA decode, RMSNorm and the
+      TP all-reduce on AITER; every AMD number here was measured with it on.
+      The latent KV cache is FP8 (E4M3) by default on ROCm, 1.86x the capacity
+      of bf16; `--kv-cache-dtype bfloat16` opts out.
+  - title: "AMD: TP8 with DSpark not yet validated"
+    when:
+      hardware: [amd]
+      features: [spec_decoding]
+    body: |
+      DSpark was measured at TP4 on MI350X (see the TP4 presets). TP8 serves
+      without spec decoding; TP8 with DSpark has not been run yet.
+  - title: "Pipeline parallelism needs a layer partition"
+    when:
+      strategies: [multi_node_tp_pp]
+    body: |
+      `VLLM_PP_LAYER_PARTITION=35,37` is required for PP2 so each stage owns
+      layer 35 (the source of the cross-layer KV sharing) and the indexer
+      layers its shared-index layers reuse. PP2 x TP8 on 2x 8 H200 scored
+      GSM8K 0.960, the same as TP16. DSpark is not offered with PP.
+
+troubleshooting:
+  - title: "NIXL_ERR_BACKEND / UCX \"Invalid value for SCOPY_\" at startup"
+    when:
+      strategies: [pd_cluster]
+    body: |
+      NCCL auto-loaded the HPC-X net plugin, which loads a second UCX into the
+      process next to NIXL's bundled UCX. Set `NCCL_NET_PLUGIN=none` on the
+      prefill and decode nodes (fine when each side is a single node), and keep
+      HPC-X out of `LD_LIBRARY_PATH`.
+  - title: "ModuleNotFoundError: nvshmem"
+    body: |
+      The MegaMoE backend (`--kernel-config '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'`)
+      needs `nvshmem4py-cu13`. Install `nvshmem4py-cu13==0.4.1` (the optional
+      dependency above), or drop the `--kernel-config` to use the default MoE backend.
+  - title: "SIGBUS in FlashInfer JIT or autotune"
+    body: |
+      Seen on shared filesystems. Give each job a private
+      `FLASHINFER_WORKSPACE_BASE`, or add
+      `--kernel-config '{"enable_flashinfer_autotune": false}'`.
+  - title: "DSpark on a DCP decode node"
+    when:
+      strategies: [pd_cluster]
+      features: [spec_decoding]
+    body: |
+      Not supported yet: a P/D decode node with `--decode-context-parallel-size`
+      can't run DSpark. DCP prefill → TP decode with DSpark on both sides works,
+      and colocated DCP works with DSpark.
+  - title: "Custom allreduce is capturing on the registered path, but a collective buffer cannot be IPC-exported"
+    when:
+      hardware: [amd]
+    body: |
+      Startup abort during CUDA graph capture with the specialized decode,
+      `AITER_CUSTOM_AR_MAX_SIZE` and vLLM's default batch limits. Add
+      `--max-num-seqs 64` (the specialized-decode preset sets it).
+  - title: "Mistral Large 4 specialized decode unsupported: …"
+    when:
+      hardware: [amd]
+    body: |
+      The specialized decode is default-deny: it starts only at TP4 on
+      gfx950, with MXFP4 a4w4 experts (`VLLM_FP8_MOE_REQUANT=mxfp4
+      VLLM_FP8_MOE_REQUANT_ACT=a4w4`), Model Runner V2, an FP8 (E4M3) or bf16
+      latent KV cache and no context, data, pipeline or expert parallelism.
+      The error lists every reason; fix them or drop `--additional-config`.
+
+guide: |
+  ## Overview
+
+  Mistral Large 4 is Mistral AI's frontier mixture-of-experts multimodal model: 1T
+  parameters in total, 49B active per token (52B including embeddings and output
+  layers). It has 72 layers, 128 routed experts (top-4) plus one shared expert, MLA
+  attention with a DSA sparse indexer (top-2048 keys), cross-layer KV sharing, a
+  Pixtral vision encoder and a built-in DSpark drafter. It supports tool calling and
+  reasoning (`reasoning_effort`).
+
+  | Variant | Checkpoint | Weights | Validated on |
+  |---|---|---|---|
+  | NVFP4 (default) | [`mistralai/Mistral-Large-4-1T-A52B-NVFP4`](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B-NVFP4) | ModelOpt NVFP4 experts, FP8 attention / shared experts, ~610 GB | GB300, B200 |
+  | FP8 (default on AMD) | [`mistralai/Mistral-Large-4-1T-A52B`](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B) | FP8 block-scaled, ~1.06 TB (on AMD: MXFP4 experts at load) | GB300, H200, MI350X |
+  | MXFP4 (Quark) | [`amd/Mistral-Large-4-1T-A52B-Quark-MXFP4`](https://huggingface.co/amd/Mistral-Large-4-1T-A52B-Quark-MXFP4) | AMD Quark OCP MXFP4 routed experts, rest unchanged, ~578 GB | MI350 Series |
+
+  Both checkpoints ship the DSpark drafter. The speculative depth is fixed at 3 by
+  the checkpoint.
+
+  vLLM serves the model on model runner V2 (the default) with breakable CUDA graphs,
+  FlashMLA sparse attention and an FP8 latent KV cache (`fp8_ds_mla`) by default, so
+  no attention or KV-cache flags are needed. The checkpoint advertises 1,048,576
+  positions; we validated up to 256k, which is the `--max-model-len` set here.
+
+  ## Prerequisites
+
+  - **vLLM**: the `vllm/vllm-openai:mistral-large-4` image. No vLLM release or
+    nightly wheel includes Mistral Large 4 support yet.
+  - **AMD**: the ROCm image `vllm/vllm-openai-rocm:mistral-4-large`.
+  - **mistral_common**: `mistral_common[image] >= 1.13.0` (included in both images).
+  - **MegaMoE** (P/D presets only): the image does not include `nvshmem4py-cu13`;
+    install it in the container, or drop the `--kernel-config` flag.
+  - **Hardware**: validated on NVIDIA GB300 (one 4-GPU tray with NVFP4, or 8 GPUs as
+    two trays with NVFP4 and FP8), 8x B300 (NVFP4 and FP8), 8x B200 (NVFP4) and
+    2x 8 H200 (FP8, TP16 or PP2 x TP8). FP8 needs ~128 GiB of weights per GPU on
+    8 GPUs, NVFP4 ~76 GiB. AMD Instinct MI350X (8 GPUs, TP8 or two TP4 replicas)
+    with the ROCm image.
+
+  ## Choosing a configuration
+
+  All numbers are NVFP4 on 8x GB300 with DSpark unless stated; the presets carry
+  the full tables. On H200 use TP16 (or TP16 DCP8 for long context), with PP2 x TP8
+  as the alternative; we took no performance numbers there.
+
+  | Goal | Configuration | Why |
+  |---|---|---|
+  | Default, best interactivity | TP8 + DSpark | c1 TPOT 3.13 ms (NVFP4) / 3.56 ms (FP8), AL ~2.9; 1.9–2.2x output throughput vs no spec |
+  | Throughput, short/medium inputs | DP8 + EP + DSpark | 209.8 output tok/s/GPU at 8k (c32, 55 tok/s/user), 50.6 at 32k |
+  | Long context, KV-bound | TP8 DCP8 (+ DSpark) | 28.76M KV tokens vs 3.60M on TP8 (~27 concurrent 1M-token requests by KV size) |
+  | Lowest TTFT on long prompts | TP1×PCP8×DCP8 + EP (+ DSpark) | c1 TTFT 0.16 / 0.54 / 1.08 s at 8k / 32k / 60k, ~3x faster than TP8; text only |
+  | Disaggregated throughput | P DP4/EP → D TP4 | 241 output tok/s/GPU at 32k (≥40 tok/s/user), 129 at 60k |
+  | Disaggregated, lowest TTFT | P PCP4×DCP4+EP → D TP4 | c1 TTFT 0.35 / 0.64 / 1.21 s at 8k / 32k / 60k |
+  | Disaggregated, short inputs | P DP4/EP → D DP4/EP | 766 output tok/s/GPU at 8k |
+  | Agentic, KV-bound, no spec | P PCP4×DCP4+EP → D TP4 DCP4 | at 32 sessions TTFT p50 0.72 s vs 14.95 s with D TP4 |
+
+  Colocated TP8 + DSpark at ≥100 tok/s/user: 110.2 output tok/s/GPU at 8k (c8),
+  30.5 at 32k (c2), 21.4 at 60k (c2). DCP8 doesn't pay off colocated until KV
+  capacity binds. Disaggregated 4+4 beats colocated 8-GPU serving by 1.8–2.2x at 8k
+  and 4–5x at 32k/60k, because colocated decode shares steps with prefill chunks.
+
+  Tuning knobs used by the presets:
+
+  - `--kernel-config '{"moe_backend":"flashinfer_moe_ep_cutedsl"}'` (MegaMoE) with
+    expert parallelism, +14–17% prefill req/s at 32k. Needs `nvshmem4py-cu13`. On EP
+    decode nodes only with `--max-num-batched-tokens` below 512 (256 here).
+  - `--cp-kv-cache-interleave-size 64` on the side that runs DCP in P/D.
+  - Prefix caching (on by default) for agentic workloads, with session-sticky routing
+    to the DP ranks of DP sides.
+
+  NVFP4 vs FP8 at TP8: 1.09–1.18x faster per token without spec and 1.14–1.22x with
+  DSpark, and ~1.5x the KV capacity.
+
+  ## AMD (ROCm)
+
+  Mistral Large 4 runs on AMD Instinct MI350 Series GPUs (gfx950) with the ROCm build
+  of vLLM (image `vllm/vllm-openai-rocm:mistral-4-large`). The routed experts run as OCP MXFP4 on AITER's fused MoE, either from the
+  AMD Quark MXFP4 checkpoint or from the FP8 checkpoint re-quantized at load
+  (`VLLM_FP8_MOE_REQUANT=mxfp4`, layer by layer, so peak load memory stays low). With
+  MXFP4 experts the model fits four GPUs, so one 8-GPU node serves two TP4 replicas.
+  The sparse MLA runs on AITER's MLA decode kernels (`ROCM_AITER_MLA_SPARSE`), the
+  DSA indexer on AITER's gfx950 indexer kernels, and the latent KV cache is plain FP8
+  (E4M3) by default, 1.86x the capacity of bf16. The builder adds the AITER
+  environment on AMD.
+
+  | Goal | Configuration | Why |
+  |---|---|---|
+  | Default | TP8 | one replica per node; DSpark at TP8 not yet validated on ROCm |
+  | Interactive, more replicas | TP4 + DSpark (preset) | AL 3.1; TPOT 2.7x / 1.9x / 1.8x lower than no spec at c1 / c8 / c32 |
+  | Lowest latency, 1–4 users | TP4 specialized decode (preset) | one fused kernel per MoE layer: TPOT 1.5x lower at c1; 2.9x with DSpark |
+
+  MXFP4 vs FP8 experts at TP8: +22–71% output tok/s at 1–64 concurrent requests.
+
+  ## Accuracy
+
+  Validated against Mistral's reference implementation on 2x GB300 TP8: per-layer
+  parity and 256k long-context perplexity equal to the reference. GSM8K (1319
+  questions, 5-shot) scores 0.909 on the FP8 checkpoint and 0.918 with DSpark, which
+  sits at the base server's own noise floor. All P/D and colocated configurations
+  scored 0.965–0.980 on GSM8K-200 (zero-shot chat).
+
+  ## Client usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+    "model": "mistralai/Mistral-Large-4-1T-A52B",
+    "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}],
+    "reasoning_effort": "high"
+  }'
+  ```
+
+  Image input (allow more images per prompt with `--limit-mm-per-prompt '{"image": N}'`):
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  response = client.chat.completions.create(
+      model="mistralai/Mistral-Large-4-1T-A52B",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "What does this chart show?"},
+              {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+          ],
+      }],
+  )
+  print(response.choices[0].message.reasoning, response.choices[0].message.content)
+  ```
+
+  ## Limitations
+
+  - Prefill context parallelism is text-only (`--language-model-only`).
+  - DSpark doesn't run on a DCP decode node in P/D yet.
+  - DSpark wasn't validated with pipeline parallelism.
+  - AMD: NVFP4 checkpoints, DCP / PCP, NIXL P/D and HiSparse aren't supported on
+    ROCm yet; TP8 with DSpark and MI300 Series (gfx942) are not validated.
+
+  ## References
+
+  - [Mistral-Large-4-1T-A52B (FP8)](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B)
+  - [Mistral-Large-4-1T-A52B-NVFP4](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B-NVFP4)
+  - [Mistral-Large-4-1T-A52B-Quark-MXFP4](https://huggingface.co/amd/Mistral-Large-4-1T-A52B-Quark-MXFP4)
+  - [Cross-layer MLA KV sharing (vllm#64095)](https://github.com/vllm-project/vllm/pull/64095)
+  - [DSpark sliding-window MLA drafts (vllm#63795)](https://github.com/vllm-project/vllm/pull/63795) and [DSpark under DCP (vllm#63796)](https://github.com/vllm-project/vllm/pull/63796)
+  - [NIXL connector](https://docs.vllm.ai/en/latest/features/nixl_connector_usage.html)
