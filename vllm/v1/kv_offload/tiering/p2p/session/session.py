@@ -738,7 +738,13 @@ class P2PSession:
         self._do_send(msg)
 
     def _do_send(self, msg: dict) -> None:
-        if self._conn is None:
+        if self._conn is None or not self._conn.alive:
+            return
+        if (
+            msg[TYPE_KEY] == FetchMsg.TYPE
+            and msg[FetchMsg.BLOCK_INDEXES]
+            and not self._client.mark_fetch_sent(msg)
+        ):
             return
         try:
             self._conn.send(msg)
