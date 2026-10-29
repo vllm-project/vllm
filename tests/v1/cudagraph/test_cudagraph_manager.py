@@ -30,11 +30,9 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
-
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     speculator as spec_module,
 )
-from vllm.v1.worker.gpu.spec_decode import cudagraph_utils as spec_cudagraph_utils
 
 pytestmark = pytest.mark.cpu_test
 

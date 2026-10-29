@@ -26,8 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.cudagraph_utils import SpeculatorCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
@@ -244,6 +242,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        num_speculative_steps: int,
     ) -> None:
         """Prepare metadata and run all draft steps in one fused loop."""
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -277,6 +276,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             slot_mappings_by_layer,
             num_tokens_across_dp,
             batch_desc.cg_mode,
+            num_speculative_steps,
         )
 
     def _multi_step_decode(
@@ -286,6 +286,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        num_speculative_steps: int,
     ) -> None:
         """Rebuild attention metadata on the host before each draft step."""
         num_reqs_padded = batch_desc.num_reqs or num_reqs
@@ -293,21 +294,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
         idx_mapping = self.idx_mapping[:num_reqs_padded]
 
-        for step in range(1, self.num_speculative_steps):
-            self.input_buffers.input_ids[:num_reqs_padded].copy_(
-                self.draft_tokens[:num_reqs_padded, step - 1].int()
-            )
-            torch.clamp(
-                positions + 1,
-                max=self.max_model_len - 1,
-                out=positions,
-            )
-            torch.clamp(
-                self.input_buffers.seq_lens[:num_reqs_padded] + 1,
-                max=self.max_model_len,
-                out=self.input_buffers.seq_lens[:num_reqs_padded],
-            )
-
+        for step in range(1, num_speculative_steps):
             attn_metadata = None
             slot_mappings_by_layer = None
             if not skip_attn:
@@ -342,10 +329,8 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                     slot_mappings_by_layer,
                     num_tokens_across_dp,
                     batch_desc.cg_mode,
+                    num_speculative_steps,
                 )
-            self.draft_tokens[:num_reqs_padded, step].copy_(
-                self.decode_output[:num_reqs_padded]
-            )
 
     def _generate_fused_drafts(
         self,
@@ -395,7 +380,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 cudagraph_runtime_mode,
                 self.decode_cudagraph_manager,
             )
-            self.decode_output[:num_reqs] = self.sample_draft(
+            draft_tokens = self.sample_draft(
                 hidden_states[:num_reqs],
                 self.input_buffers.positions[:num_reqs],
                 self.idx_mapping[:num_reqs],
@@ -404,7 +389,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 self.current_draft_step,
                 self.draft_logits,
             )
-            self.draft_tokens[:num_reqs, step].copy_(self.decode_output[:num_reqs])
+            self.draft_tokens[:num_reqs, step].copy_(draft_tokens)
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         # Every draft logits write goes through sample_draft.
