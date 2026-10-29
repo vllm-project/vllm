@@ -88,7 +88,6 @@ def dspark_vllm_config():
         parallel_config=SimpleNamespace(
             enable_eplb=True,
             enable_elastic_ep=False,
-            eplb_config=SimpleNamespace(num_redundant_experts=4),
         ),
         speculative_config=SimpleNamespace(
             method="dspark",

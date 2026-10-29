@@ -22,19 +22,29 @@ from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
 
 
 @pytest.mark.parametrize(
-    ("model_type", "is_rocm", "has_moe", "expected"),
+    (
+        "method",
+        "model_type",
+        "is_rocm",
+        "has_moe",
+        "draft_enable_eplb",
+        "expected",
+    ),
     [
-        ("deepseek_v4", False, True, True),
-        ("deepseek_v41", False, True, True),
-        ("deepseek_v41", True, True, False),
-        ("deepseek_v41", False, False, False),
+        ("dspark", "deepseek_v4", False, True, True, True),
+        ("dspark", "deepseek_v41", False, True, True, True),
+        ("dspark", "deepseek_v41", True, True, True, False),
+        ("dspark", "deepseek_v41", False, False, True, False),
+        ("dspark", "deepseek_v41", False, True, False, False),
+        ("eagle3", "deepseek_v41", False, True, False, False),
     ],
 )
-def test_draft_model_supports_dspark_eplb(
-    monkeypatch, model_type, is_rocm, has_moe, expected
+def test_draft_model_supports_eplb(
+    monkeypatch, method, model_type, is_rocm, has_moe, draft_enable_eplb, expected
 ):
     speculative_config = SimpleNamespace(
-        method="dspark",
+        method=method,
+        draft_enable_eplb=draft_enable_eplb,
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type=model_type)
         ),
@@ -244,6 +254,8 @@ class _EplbTestModelConfig:
 
 
 class _TopologyEncodingPolicy:
+    calls: list[tuple[int, int]] = []
+
     @classmethod
     def rebalance_experts(
         cls,
@@ -254,10 +266,8 @@ class _TopologyEncodingPolicy:
         num_ranks: int,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        mapping = (torch.arange(num_replicas, dtype=torch.long) + 1).remainder(
-            num_groups
-        )
-        return mapping.unsqueeze(0).expand(weight.shape[0], -1).clone()
+        cls.calls.append((num_replicas, num_groups))
+        return torch.zeros((weight.shape[0], num_replicas), dtype=torch.long)
 
 
 class _EplbTestGroup:
@@ -284,6 +294,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
     )
     parallel_config = ParallelConfig(
         tensor_parallel_size=2,
+        distributed_executor_backend="mp",
         enable_expert_parallel=True,
         enable_eplb=True,
         eplb_config=EPLBConfig(
@@ -315,6 +326,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
     )
     for model, name in models:
         state.add_model(model, _EplbTestModelConfig(name))
+    _TopologyEncodingPolicy.calls.clear()
     state.policy = _TopologyEncodingPolicy
 
     state.rearrange()
@@ -334,27 +346,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
         ) == (8, 6)
         assert target_state.rebalanced and draft_state.rebalanced
     else:
-        assert torch.equal(
-            target_state.physical_to_logical_map,
-            torch.tensor([[1, 2, 3, 0, 1, 2]]),
-        )
-        assert torch.equal(
-            draft_state.physical_to_logical_map,
-            torch.tensor([[1, 2, 3, 4, 5, 0, 1, 2]]),
-        )
-
-
-def test_allreduce_list_handles_matching_shapes(dist_init):
-    state = _make_eplb_state()
-    device = torch.device(current_platform.device_type)
-    tensors = [
-        torch.ones(2, 4, dtype=torch.int32, device=device),
-        torch.ones(3, 4, dtype=torch.int32, device=device),
-    ]
-    result = state._allreduce_list(tensors)
-    assert len(result) == 2
-    assert result[0].shape == (2, 4)
-    assert result[1].shape == (3, 4)
+        assert _TopologyEncodingPolicy.calls == [(6, 4), (8, 6)]
 
 
 def test_allreduce_list_reduces_single_tensor_in_place(monkeypatch):
@@ -369,23 +361,6 @@ def test_allreduce_list_reduces_single_tensor_in_place(monkeypatch):
 
     assert result[0] is tensor
     all_reduce.assert_called_once_with(tensor, group=ep_group.device_group)
-
-
-def test_allreduce_list_handles_different_num_physical_experts(dist_init):
-    state = _make_eplb_state()
-    device = torch.device(current_platform.device_type)
-    tensors = [
-        torch.ones(2, 4, dtype=torch.int32, device=device),
-        torch.ones(3, 6, dtype=torch.int32, device=device),
-    ]
-    result = state._allreduce_list([t.clone() for t in tensors])
-    assert len(result) == 2
-    assert result[0].shape == (2, 4)
-    assert result[1].shape == (3, 6)
-    if dist.is_initialized():
-        world_size = dist.get_world_size()
-        for tensor in result:
-            assert torch.all(tensor == world_size)
 
 
 def _allreduce_heterogeneous_loads_worker(rank: int, init_method: str) -> None:

@@ -82,6 +82,25 @@ def test_dspark_parallel_config_preserves_eplb_for_dsv4_and_dsv41(
     assert draft_config.eplb_config is target_config.eplb_config
 
 
+def test_dspark_parallel_config_can_disable_draft_eplb():
+    target_config = _FakeParallelConfig()
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v41")
+    )
+
+    draft_config = _get_dspark_parallel_config(
+        target_config,
+        tensor_parallel_size=4,
+        draft_model_config=draft_model_config,
+        draft_enable_eplb=False,
+    )
+
+    assert not draft_config.enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == 0
+    assert target_config.enable_eplb
+    assert target_config.eplb_config.num_redundant_experts == 32
+
+
 @pytest.mark.parametrize("pcp_size", [1, 4])
 @pytest.mark.parametrize("dcp_size", [1, 4])
 @pytest.mark.parametrize("use_mla", [False, True])

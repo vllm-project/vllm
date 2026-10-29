@@ -157,16 +157,24 @@ for DeepSeek V4.1 DSpark, where draft layers use `dspark_n_routed_experts`
 while the target backbone uses the full routed-expert count. Each model is
 load-balanced independently.
 
+For supported MoE drafts, target EPLB also enables draft EPLB by default. Set
+`draft_enable_eplb` to `false` in the speculative config to disable EPLB for
+the draft while keeping it enabled for the target. In that case,
+`draft_num_redundant_experts` cannot be set.
+
 For every registered model, `(num_routed_experts + num_redundant_experts)` must
 be divisible by the EP world size.
 
 For EPLB-backed MoE drafts, configure the draft-specific count with
 `draft_num_redundant_experts` in the speculative config. This applies to
 Eagle, Eagle3, MTP, DFlash, and supported DSpark drafts. When unset, the draft
-uses the target model's `num_redundant_experts`. If that count does not make the
-draft's total expert count divisible by its EP size, config validation reports
-the lowest valid draft count. An explicit value must satisfy the same
-divisibility rule.
+inherits the target model's `num_redundant_experts` only when target and draft
+have the same routed expert counts. If their routed expert counts differ, set
+`draft_num_redundant_experts` explicitly; config validation reports the lowest
+valid draft count. An explicit value must satisfy the same divisibility rule.
+For DSpark drafts, divisibility is checked against the target EP group. If EPLB
+is enabled and `draft_tensor_parallel_size` is `1`, prefill context parallelism
+or data parallelism must also be greater than `1`.
 
 ### EPLB Parameters
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
@@ -1573,8 +1573,7 @@ class ModelConfig:
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
 
-        if parallel_config.enable_eplb:
-            self.verify_eplb_config(parallel_config)
+        self.verify_eplb_config(parallel_config)
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
@@ -1638,24 +1637,17 @@ class ModelConfig:
         *,
         num_experts: int | None = None,
         config_name: str = "eplb_config.num_redundant_experts",
+        disable_config_name: str | None = None,
     ) -> None:
         """Validate that this model's experts can be evenly distributed by EPLB."""
-        if not (parallel_config.enable_eplb and parallel_config.enable_expert_parallel):
+        if not parallel_config.enable_eplb:
             return
 
-        compression_config = getattr(self.hf_config, "compression_config", None)
-        transform_config = (
-            compression_config.get("transform_config")
-            if isinstance(compression_config, Mapping)
-            else None
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            get_expert_substitution_spec,
         )
-        if any(
-            getattr(config, "approximate_experts", None) is not None
-            for config in (self.hf_text_config, self.hf_config)
-        ) or (
-            isinstance(transform_config, Mapping)
-            and transform_config.get("expert_substitution") is not None
-        ):
+
+        if get_expert_substitution_spec(self) is not None:
             return
 
         ep_size = (
@@ -1667,17 +1659,7 @@ class ModelConfig:
             return
 
         redundant_experts = parallel_config.eplb_config.num_redundant_experts
-        if num_experts is None:
-            arch_config = self.model_arch_config
-            expert_counts = {arch_config.num_experts}
-            if arch_config.per_layer_overrides is not None:
-                expert_counts.update(
-                    layer.get("num_experts", arch_config.num_experts)
-                    for layer in arch_config.per_layer_overrides
-                )
-        else:
-            expert_counts = {num_experts}
-        expert_counts.discard(0)
+        expert_counts = self.get_eplb_expert_counts(num_experts)
         if not expert_counts:
             return
 
@@ -1699,6 +1681,8 @@ class ModelConfig:
                 f"({', '.join(str(count) for count in sorted(expert_counts))}) "
                 "divisible by the EP size."
             )
+        if disable_config_name is not None:
+            remediation += f" To disable EPLB, set {disable_config_name} to false."
 
         raise ValueError(
             "EPLB requires each model's routed experts plus redundant experts "
@@ -1708,6 +1692,20 @@ class ModelConfig:
             f"EP size {ep_size}, and {config_name}={redundant_experts}. "
             f"{remediation}"
         )
+
+    def get_eplb_expert_counts(self, num_experts: int | None = None) -> set[int]:
+        if num_experts is not None:
+            return {num_experts} if num_experts > 0 else set()
+
+        arch_config = self.model_arch_config
+        expert_counts = {arch_config.num_experts}
+        if arch_config.per_layer_overrides is not None:
+            expert_counts.update(
+                layer.get("num_experts", arch_config.num_experts)
+                for layer in arch_config.per_layer_overrides
+            )
+        expert_counts.discard(0)
+        return expert_counts
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
