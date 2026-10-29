@@ -113,12 +113,7 @@ impl ControlServiceImpl {
 const GRPC_API_VERSION: &str = "vllm";
 
 fn utility_status(method: &'static str, error: vllm_llm::Error) -> Status {
-    match error {
-        vllm_llm::Error::EngineCoreClient(source) => {
-            Status::internal(format!("{method} failed: {}", source.to_report_string()))
-        }
-        error => Status::internal(format!("{method} failed: {}", error.to_report_string())),
-    }
+    Status::internal(format!("{method} failed: {}", error.to_report_string()))
 }
 
 fn pause_mode(mode: i32) -> Result<EnginePauseMode, Status> {

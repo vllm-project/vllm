@@ -25,7 +25,7 @@ pub trait EngineClient: Send + Sync {
     fn abort<'a>(&'a self, request_ids: &'a [String]) -> BoxFuture<'a, Result<()>>;
     fn shutdown(self: Box<Self>) -> BoxFuture<'static, Result<()>>;
     fn max_model_len(&self) -> u32;
-    fn model_dtype(&self) -> Option<ModelDtype>;
+    fn model_dtype(&self) -> ModelDtype;
     fn is_healthy(&self) -> bool;
     fn supports_lora(&self) -> bool;
 
@@ -140,8 +140,8 @@ impl EngineClient for Llm {
         self.engine_core_client().max_model_len()
     }
 
-    fn model_dtype(&self) -> Option<ModelDtype> {
-        Some(self.engine_core_client().model_dtype())
+    fn model_dtype(&self) -> ModelDtype {
+        self.engine_core_client().model_dtype()
     }
 
     fn is_healthy(&self) -> bool {

@@ -97,11 +97,12 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor with the effective context limit and optional multimodal dtype.
-    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
+    /// Create a processor with multimodal support using the effective model
+    /// dtype reported by the engine.
+    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
         Self {
             backend,
-            model_dtype,
+            model_dtype: Some(model_dtype),
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
