@@ -21,9 +21,15 @@ from vllm import SamplingParams
 from vllm.engine.protocol import StreamingInput
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
+
+if not (current_platform.is_cuda() or current_platform.is_xpu()):
+    pytest.skip(
+        reason="V1 currently only supported on CUDA and XPU.", allow_module_level=True
+    )
 
 # Use a small model that doesn't require authentication for fast tests
 MODEL = "facebook/opt-125m"
