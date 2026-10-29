@@ -606,13 +606,25 @@ requires_td = pytest.mark.skipif(
 )
 
 
-def _tile(m, n, k):
-    return {"BLOCK_SIZE_M": m, "BLOCK_SIZE_N": n, "BLOCK_SIZE_K": k}
+def _ssd_pins(scan_cfg, state_cfg):
+    """(kernel, kwargs, (num_stages, num_warps) or None) for each autotuned SSD
+    kernel; scan_cfg and state_cfg are (M, N, K, num_stages, num_warps)."""
+
+    def tile(m, n, k):
+        return {"BLOCK_SIZE_M": m, "BLOCK_SIZE_N": n, "BLOCK_SIZE_K": k}
+
+    return [
+        (ssd_chunk_scan._chunk_scan_fwd_kernel, tile(*scan_cfg[:3]), scan_cfg[3:]),
+        (ssd_chunk_state._chunk_state_fwd_kernel, tile(*state_cfg[:3]), state_cfg[3:]),
+        (ssd_bmm._bmm_chunk_fwd_kernel, tile(64, 64, 32), (4, 2)),
+        (ssd_chunk_state._chunk_cumsum_fwd_kernel, {"BLOCK_SIZE_H": 8}, None),
+        (ssd_state_passing._state_passing_fwd_kernel, {"BLOCK_SIZE": 256}, None),
+    ]
 
 
 def _find_config(kernel, kwargs, stages_warps):
-    """The config of ``kernel`` with these kwargs and (num_stages, num_warps), or
-    None if this platform drops it (``_drop_racy_wgmma_configs`` on sm90)."""
+    """The matching config of ``kernel``, or None if this platform drops it
+    (e.g. ``_drop_racy_wgmma_configs`` on sm90)."""
     matches = [
         c
         for c in kernel.configs
@@ -622,24 +634,24 @@ def _find_config(kernel, kwargs, stages_warps):
     return matches[0] if matches else None
 
 
-def _pin_ssd_configs(
-    monkeypatch, scan_cfg=(64, 64, 32, 4, 2), state_cfg=(64, 64, 32, 4, 2)
-):
-    """Pin each autotuned SSD kernel to one config: (M, N, K, num_stages, num_warps).
-
-    The default scan config has num_warps=2, so sm90 keeps it."""
-    pins = [
-        (ssd_chunk_scan._chunk_scan_fwd_kernel, _tile(*scan_cfg[:3]), scan_cfg[3:]),
-        (
-            ssd_chunk_state._chunk_state_fwd_kernel,
-            _tile(*state_cfg[:3]),
-            state_cfg[3:],
-        ),
-        (ssd_bmm._bmm_chunk_fwd_kernel, _tile(64, 64, 32), (4, 2)),
-        (ssd_chunk_state._chunk_cumsum_fwd_kernel, {"BLOCK_SIZE_H": 8}, None),
-        (ssd_state_passing._state_passing_fwd_kernel, {"BLOCK_SIZE": 256}, None),
+def _dropped_pins(scan_cfg, state_cfg) -> list[str]:
+    return [
+        kernel.fn.__name__
+        for kernel, kwargs, stages_warps in _ssd_pins(scan_cfg, state_cfg)
+        if _find_config(kernel, kwargs, stages_warps) is None
     ]
-    for kernel, kwargs, stages_warps in pins:
+
+
+# Exist on every platform; sm90 keeps the one-stage scan config.
+DEFAULT_SCAN_CFG = (64, 64, 32, 1, 4)
+DEFAULT_STATE_CFG = (64, 64, 32, 4, 2)
+
+
+def _pin_ssd_configs(
+    monkeypatch, scan_cfg=DEFAULT_SCAN_CFG, state_cfg=DEFAULT_STATE_CFG
+):
+    """Pin each autotuned SSD kernel to one config."""
+    for kernel, kwargs, stages_warps in _ssd_pins(scan_cfg, state_cfg):
         config = _find_config(kernel, kwargs, stages_warps)
         assert config is not None, (kernel.fn.__name__, kwargs, stages_warps)
         monkeypatch.setattr(kernel, "configs", [config])
@@ -830,21 +842,26 @@ def test_ssd_td_matches_pointer(
 @pytest.mark.parametrize(
     "dstate, scan_cfg, state_cfg",
     [
-        # (M, N, K, num_stages, num_warps); first case: tiles picked in E2E runs
-        (128, (32, 64, 32, 1, 4), (32, 64, 32, 5, 2)),
+        # (M, N, K, num_stages, num_warps). Scan tiles (chunk, headdim, dstate),
+        # state tiles (headdim, dstate, chunk). sm90 drops the multi-stage
+        # m128, n256 and k64 scan configs; the -sm90 cases are the nearest
+        # configs it keeps.
+        pytest.param(128, (32, 64, 32, 1, 4), (32, 64, 32, 5, 2), id="e2e-tiles"),
         # M=128: taller than the ragged chunks and headdim
-        (128, (128, 64, 32, 1, 4), (128, 32, 32, 4, 4)),
-        # N=256: wider than headdim; sm90 has no such scan config
-        (256, (64, 256, 32, 4, 4), (64, 256, 32, 4, 4)),
+        pytest.param(128, (128, 32, 32, 4, 4), (128, 32, 32, 4, 4), id="m128"),
+        pytest.param(128, (128, 64, 32, 1, 4), (128, 32, 32, 4, 4), id="m128-sm90"),
+        # N=256: wider than headdim (scan), all of dstate in one tile (state)
+        pytest.param(256, (64, 256, 32, 4, 4), (64, 256, 32, 4, 4), id="n256"),
+        pytest.param(256, DEFAULT_SCAN_CFG, (64, 256, 32, 4, 4), id="n256-sm90"),
         # K=64: K-looped prev_states step
-        (256, (64, 64, 64, 1, 4), (64, 128, 64, 2, 4)),
+        pytest.param(256, (128, 64, 64, 4, 4), (64, 128, 64, 2, 4), id="k64"),
+        pytest.param(256, (64, 64, 64, 1, 4), (64, 128, 64, 2, 4), id="k64-sm90"),
     ],
 )
 def test_ssd_td_matches_pointer_across_tiles(dstate, scan_cfg, state_cfg, monkeypatch):
     """Same check at other tile shapes."""
-    scan_kernel = ssd_chunk_scan._chunk_scan_fwd_kernel
-    if _find_config(scan_kernel, _tile(*scan_cfg[:3]), scan_cfg[3:]) is None:
-        pytest.skip(f"no chunk-scan config {scan_cfg} on this platform")
+    if dropped := _dropped_pins(scan_cfg, state_cfg):
+        pytest.skip(f"this platform drops the pinned config of {dropped}")
     _pin_ssd_configs(monkeypatch, scan_cfg, state_cfg)
     nheads, headdim, chunk_size = 4, 80, 128
     inputs = _make_td_inputs(
