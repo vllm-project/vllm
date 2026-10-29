@@ -471,7 +471,8 @@ steps:
     1)
     pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
     pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
-    VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;;
+    VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' &&
+    pytest -v -s models/test_mimo_v2_attention_backend.py ;;
     2)
     pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
     --ignore models/multimodal/generation/test_whisper.py &&
@@ -2153,7 +2154,9 @@ steps:
   - vllm/model_executor/model_loader/
   - vllm/model_executor/models/extract_hidden_states.py
   - vllm/model_executor/models/llama.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/registry.py
   - vllm/transformers_utils/configs/extract_hidden_states.py
@@ -3573,6 +3576,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/models/qwen2.py
@@ -5024,6 +5028,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/models/qwen2.py
@@ -5278,7 +5283,9 @@ steps:
   - vllm/v1/attention/
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/qwen3_dflash2.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/kernels/linear/
