@@ -1127,7 +1127,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                         deferred_release=lr.deferred_release,
                     )
                 )
-                if not lr.success:
+                if not lr.success and not lr.request_finished:
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(

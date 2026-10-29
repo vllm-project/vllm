@@ -61,6 +61,7 @@ class _InboundLoadState:
     release: threading.Event | None = None
     # Its AbortAck timed out; only close() can release it now.
     ack_expired: bool = False
+    request_finished: bool = False
 
 
 @dataclass
@@ -109,6 +110,7 @@ class LoadResult(NamedTuple):
     # A failed load whose blocks the peer may still write: release them
     # once this is set.
     deferred_release: threading.Event | None = None
+    request_finished: bool = False
 
 
 class ClientCloseResult(NamedTuple):
@@ -211,6 +213,7 @@ class ClientRole:
                 kv_request_id=kv_request_id,
                 success=False,
                 deferred_release=load.release,
+                request_finished=load.request_finished,
             )
         )
 
@@ -307,10 +310,17 @@ class ClientRole:
         at once and kept until their AbortAck (or the session's close)
         releases their blocks.
         """
+        self._completed_loads = [
+            result._replace(request_finished=True)
+            if result.kv_request_id == kv_request_id
+            else result
+            for result in self._completed_loads
+        ]
         st = self._requests.get(kv_request_id)
         if st is None:
             return
         for round_seq, load in st.loads.items():
+            load.request_finished = True
             if load.aborted_at is None:
                 self._abort_load(kv_request_id, round_seq, load)
         if st.peer_lookup_open:
@@ -346,6 +356,7 @@ class ClientRole:
                     job_id=load.job_id,
                     kv_request_id=kv_request_id,
                     success=success,
+                    request_finished=load.request_finished,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
@@ -569,7 +580,8 @@ class ClientRole:
         failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
-            if st.loads or any(hit is None for hit in st.probes.values())
+            if any(not load.request_finished for load in st.loads.values())
+            or any(hit is None for hit in st.probes.values())
         ]
         self._requests.clear()
         self._flush_pending.clear()

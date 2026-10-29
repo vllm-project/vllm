@@ -698,6 +698,7 @@ class TestClientFlows:
         session.finish_request("req-1")
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (8, False)
+        assert failure.request_finished
         assert not _released(failure)
         assert session._client.has_active_loads is True
 
@@ -750,6 +751,7 @@ class TestClientFlows:
         )
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (10, False)
+        assert failure.request_finished
         assert _released(failure)
 
         conn.enqueue(
@@ -3017,6 +3019,71 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize(
+        "completion", ["abort_ack", "transfer_done", "timeout", "close"]
+    )
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_late_failure_preserves_request_finish(
+        self, lookup_clock, completion, finished
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        if completion == "close":
+            result = session.close()
+            assert result.failed_jobs == [7]
+            assert result.failed_req_ids == ([] if finished else ["req-7"])
+            return
+        loads = []
+        if not finished and completion in ("timeout", "abort_ack"):
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+            loads.extend(session.poll().loads)
+        if completion == "timeout":
+            if finished:
+                lookup_clock.now = _ABORT_ACK_TIMEOUT_S + 1
+            else:
+                lookup_clock.now += _ABORT_ACK_TIMEOUT_S + 1
+        else:
+            terminal = AbortAckMsg if completion == "abort_ack" else TransferDoneMsg
+            msg = {
+                TYPE_KEY: terminal.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+            }
+            if terminal is TransferDoneMsg:
+                msg[TransferDoneMsg.SUCCESS] = False
+            conn.enqueue(msg)
+        loads.extend(session.poll().loads)
+        assert len(loads) == 1
+        assert (loads[0].job_id, loads[0].kv_request_id, loads[0].success) == (
+            7,
+            "req-7",
+            False,
+        )
+        assert getattr(loads[0], "request_finished", False) is finished
+
+    def test_finish_marks_buffered_result_before_request_id_reuse(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"old")], [0])
+        session._client.on_transfer_done("req-7", success=False, round_seq=0)
+        session.finish_request("req-7")
+        session.request_blocks(8, "req-7", [OffloadKey(b"new")], [1])
+        loads = session.poll().loads
+        assert len(loads) == 1 and loads[0].job_id == 7 and not loads[0].success
+        assert getattr(loads[0], "request_finished", False)
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.SUCCESS: False,
+            }
+        )
+        assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -3761,3 +3828,97 @@ class TestPeerFaultEscalation:
         transport._peer_faults["peer:8000"] = "late"
         session.poll()
         assert session.death_reason == "peer disconnected"
+
+
+def test_inference_reuses_a_finished_kv_request_id(
+    vllm_runner, monkeypatch, p2p_control_peer
+):
+    """A cancellation's late failure must not suppress a later request's fetch."""
+    from vllm import SamplingParams
+    from vllm.config import KVTransferConfig
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
+    peer_port, handshake, reply_to_fetch, fetches = p2p_control_peer
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        local_port = sock.getsockname()[1]
+    config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_load_failure_policy="recompute",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 16 * 1024 * 1024,
+            "secondary_tiers": [
+                {"type": "p2p", "host": "127.0.0.1", "port": local_port}
+            ],
+        },
+    )
+    with vllm_runner(
+        "HuggingFaceTB/SmolLM2-135M",
+        skip_tokenizer_init=True,
+        dtype="float16",
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.35,
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        kv_transfer_config=config,
+    ) as runner:
+        llm = runner.llm
+        params = SamplingParams(
+            temperature=0,
+            max_tokens=4,
+            ignore_eos=True,
+            extra_args={
+                "kv_transfer_params": {
+                    "remote_prefiller": {
+                        "remote_host": "127.0.0.1",
+                        "remote_port": peer_port,
+                        "kv_request_id": "retired",
+                    }
+                }
+            },
+        )
+        prompt = {"prompt_token_ids": [3 + i % 100 for i in range(192)]}
+
+        handshake.set()
+        request_ids = llm.enqueue([prompt], params, use_tqdm=False)
+        deadline = time.monotonic() + 30
+        while fetches.empty():
+            assert time.monotonic() < deadline, "no initial P2P fetch"
+            llm.llm_engine.step()
+        fetches.get_nowait()
+        llm.llm_engine.abort_request(request_ids, internal=True)
+        from vllm.v1.metrics.reader import Counter
+
+        deadline = time.monotonic() + 30
+        while True:
+            llm.generate(
+                [{"prompt_token_ids": [0]}],
+                SamplingParams(temperature=0, max_tokens=1),
+                use_tqdm=False,
+            )
+            failures = [
+                metric.value
+                for metric in llm.get_metrics()
+                if isinstance(metric, Counter)
+                and "promotion_job_failures" in metric.name
+            ]
+            if sum(failures) > 0:
+                break
+            assert time.monotonic() < deadline, (
+                f"cancelled load was not drained: {failures}"
+            )
+        reply_to_fetch.set()
+        second_prompt = {"prompt_token_ids": [103 + i % 100 for i in range(192)]}
+        result = llm.generate([second_prompt], params, use_tqdm=False)[0]
+        assert len(result.outputs[0].token_ids) == 4
+        assert not fetches.empty(), "late failure poisoned the reused KV request id"
+        assert fetches.get_nowait()["kv_request_id"] == "retired"

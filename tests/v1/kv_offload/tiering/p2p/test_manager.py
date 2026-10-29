@@ -1822,7 +1822,8 @@ class TestPollOnce:
         assert mgr._kv_to_session["req-fast"] is sess
         assert sess.stores_added == []
 
-    def test_failed_load_records_kv_request_id(self):
+    @pytest.mark.parametrize("request_finished", [False, True])
+    def test_failed_load_records_kv_request_id(self, request_finished):
         """A LoadResult(success=False) from session.poll() must add its
         kv_request_id to _failed_req_ids so future lookups return MISS."""
         mgr = _make_manager()
@@ -1831,7 +1832,14 @@ class TestPollOnce:
             peer_id=peer,
             alive=True,
             connected=True,
-            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+            loads=[
+                LoadResult(
+                    job_id=5,
+                    kv_request_id="req-5",
+                    success=False,
+                    request_finished=request_finished,
+                )
+            ],
         )
         mgr._sessions[peer] = sess
 
@@ -1844,7 +1852,7 @@ class TestPollOnce:
         mgr._poll_once()
 
         assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
-        assert "req-5" in mgr._failed_req_ids
+        assert ("req-5" in mgr._failed_req_ids) is not request_finished
 
 
 # ---------------------------------------------------------------------------
