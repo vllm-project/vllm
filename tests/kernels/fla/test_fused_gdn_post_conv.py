@@ -441,3 +441,48 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
         )
 
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+
+
+@torch.inference_mode()
+def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
+    """Packed b/a chunk views (row stride 2*HV) must match contiguous inputs
+    bitwise."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = "cuda"
+    num_tokens = 33
+    H, HV, K, V = 2, 4, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+
+    conv_output = torch.randn(num_tokens, qkv_dim, dtype=dtype, device=device)
+    ba = torch.randn(num_tokens, 2 * HV, dtype=dtype, device=device)
+    b_view, a_view = ba.chunk(2, dim=-1)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
+
+    ref = fused_post_conv_prep(
+        conv_output=conv_output,
+        a=a_view.contiguous(),
+        b=b_view.contiguous(),
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+        apply_l2norm=True,
+        output_g_exp=False,
+    )
+    got = fused_post_conv_prep(
+        conv_output=conv_output,
+        a=a_view,
+        b=b_view,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+        apply_l2norm=True,
+        output_g_exp=False,
+    )
+    for r, g in zip(ref, got, strict=True):
+        torch.testing.assert_close(g, r, rtol=0, atol=0)
