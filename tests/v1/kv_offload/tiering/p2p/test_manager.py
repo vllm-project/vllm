@@ -52,7 +52,11 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     StoreResult,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
-from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+    TYPE_KEY,
+    ConnectMsg,
+    DisconnectMsg,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1358,6 +1362,20 @@ class TestBidirectionalManager:
         assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
         mgr_a.on_request_finished(ctx)
         assert "req-1" not in mgr_a._failed_req_ids
+
+    def test_lookup_before_handshake_ack_falls_back_to_local_prefill(self):
+        """A probe never waits on a pending handshake: a gone peer would hold
+        it until VLLM_P2P_HANDSHAKE_TIMEOUT_S. The peer gets no lookup."""
+        mgr_a, _ = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        list(mgr_a.get_finished_jobs())
+        assert not mgr_a._sessions["B:2"].ready
+
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+        sent = mgr_a._control._inbound_outbound["B:2"]._outbox  # type: ignore[attr-defined]  # _LoopbackControl
+        assert [m[TYPE_KEY] for m in sent] == [ConnectMsg.TYPE]
 
     def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
         """The peer must retire the timed-out session before a new handshake."""
