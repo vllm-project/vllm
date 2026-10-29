@@ -1109,7 +1109,7 @@ def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
     layer.quant_method.process_weights_after_loading(layer)
 
     assert layer.w13_weight is w13
-    assert not hasattr(layer, "w13_weight_packed")
+    assert layer.w13_weight_packed is w13
 
 
 @pytest.mark.skipif(
@@ -1270,9 +1270,9 @@ def test_compressed_fp8_preprocessed_shared_weights(
 @pytest.mark.parametrize("strategy", ["tensor", "attn_head"])
 @torch.inference_mode()
 def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
-    """Restore scalar/head scales without reading consumed meta placeholders."""
+    """Restore scale metadata while preserving registered shared parameters."""
     from vllm.config import AttentionConfig, CacheConfig, ModelConfig
-    from vllm.model_executor.utils import weights_already_processed
+    from vllm.model_executor.utils import replace_parameter, weights_already_processed
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     config = VllmConfig(
@@ -1311,6 +1311,10 @@ def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
                 torch.arange(1, param.numel() + 1).reshape(param.shape) * offset * 0.1
             )
         source.quant_method.process_weights_after_loading(source)
+        shared_parameters = dict(source.named_parameters())
+        snapshots = {
+            name: getattr(source, f"_{name}_scale").clone() for name in ("k", "v", "q")
+        }
         with torch.device("meta"):
             attached = Attention(
                 num_heads=4,
@@ -1321,6 +1325,8 @@ def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
                 quant_config=quant_config,
                 prefix="attached",
             )
+        for name, parameter in shared_parameters.items():
+            replace_parameter(attached, name, parameter)
         for name in ("_k_scale", "_v_scale", "_q_scale"):
             attached.register_buffer(name, getattr(source, name))
         with weights_already_processed():
@@ -1329,8 +1335,13 @@ def test_compressed_fp8_preprocessed_attention_scales(strategy, dist_init):
             scale = getattr(attached, f"_{name}_scale")
             assert scale.data_ptr() == getattr(source, f"_{name}_scale").data_ptr()
             assert getattr(attached, f"_{name}_scale_float") == scale.max().item()
-            assert not hasattr(attached, f"{name}_scale")
-            assert not hasattr(attached, f"{name}_zero_point")
+            torch.testing.assert_close(scale, snapshots[name], rtol=0, atol=0)
+            for suffix in ("scale", "zero_point"):
+                parameter_name = f"{name}_{suffix}"
+                assert (
+                    attached.get_parameter(parameter_name)
+                    is shared_parameters[parameter_name]
+                )
         for name in ("k", "v"):
             host = getattr(attached, f"_{name}_scale_cpu")
             assert host.device.type == "cpu"
