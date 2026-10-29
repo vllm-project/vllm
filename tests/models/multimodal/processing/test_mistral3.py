@@ -253,18 +253,19 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
-    assert isinstance(normalized_values, list)
+    assert isinstance(normalized_values, (list, torch.Tensor))
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
-    assert isinstance(raw_values, list)
+    assert isinstance(raw_values, (list, torch.Tensor))
     assert all(
         isinstance(value, torch.Tensor) and value.dtype == torch.uint8
         for value in raw_values
     )
 
-    input_norm = build_mm_input_norm(ctx.model_config)
+    device = torch.device(current_platform.device_type)
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
     patch_size = processor.info.get_hf_config().vision_config.patch_size
 
     def pack_patches(image: torch.Tensor) -> torch.Tensor:
@@ -281,9 +282,9 @@ def test_mm_device_do_normalize():
     for raw, normalized in zip(raw_values, normalized_values):
         assert isinstance(raw, torch.Tensor)
         assert isinstance(normalized, torch.Tensor)
-        output = input_norm(pack_patches(raw), normalized.dtype)
+        output = input_norm(pack_patches(raw).to(device), normalized.dtype)
         torch.testing.assert_close(
-            output, pack_patches(normalized), rtol=1e-5, atol=1e-6
+            output, pack_patches(normalized).to(device), rtol=1e-5, atol=1e-6
         )
 
 
