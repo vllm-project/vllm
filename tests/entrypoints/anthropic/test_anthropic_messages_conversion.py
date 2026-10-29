@@ -1007,6 +1007,136 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[1]["content"] == "Real system content."
 
 
+class TestFoldInlineSystemForSystemFirstTemplates:
+    """With ``merge_inline_system=True`` (system-first templates such as
+    Qwen's), non-leading system messages are folded into the neighbouring
+    user or tool message so a change in one does not alter the prompt
+    prefix (#63331).
+    """
+
+    def test_changing_inline_system_keeps_earlier_messages_identical(self):
+        def convert(reminder: str):
+            request = _make_request(
+                [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "system", "content": reminder},
+                    {"role": "assistant", "content": "Hi"},
+                    {"role": "user", "content": "Next"},
+                ],
+                system="Top-level prompt.",
+            )
+            return _convert(request, merge_inline_system=True).messages
+
+        turn1 = convert("Reminder A")
+        turn2 = convert("Reminder B")
+
+        assert (
+            turn1[0] == turn2[0] == {"role": "system", "content": "Top-level prompt."}
+        )
+        assert turn1[1] == {"role": "user", "content": "Hello\n\nReminder A"}
+        assert turn2[1] == {"role": "user", "content": "Hello\n\nReminder B"}
+        assert turn1[2:] == turn2[2:]
+        assert [m["role"] for m in turn1] == ["system", "user", "assistant", "user"]
+
+    def test_inline_system_after_tool_result_appends_to_tool_message(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Run it"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "run", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                    ],
+                },
+                {"role": "system", "content": "Reminder"},
+            ]
+        )
+        messages = _convert(request, merge_inline_system=True).messages
+
+        assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
+        assert messages[2]["content"] == "ok\n\nReminder"
+
+    def test_inline_system_not_folded_into_tool_reference_content(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Find a tool"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "search", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": [{"type": "tool_reference", "tool_name": "run"}],
+                        }
+                    ],
+                },
+                {"role": "system", "content": "Reminder"},
+                {"role": "user", "content": "Go on"},
+            ]
+        )
+        messages = _convert(request, merge_inline_system=True).messages
+
+        assert messages[-2]["content"] == [{"type": "tool_reference", "name": "run"}]
+        assert messages[-1] == {"role": "user", "content": "Reminder\n\nGo on"}
+
+    def test_inline_system_after_assistant_prepends_to_next_user(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "What is 2 + 2?"},
+            ]
+        )
+        messages = _convert(request, merge_inline_system=True).messages
+
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert messages[2]["content"] == "Be brief.\n\nWhat is 2 + 2?"
+
+    def test_trailing_inline_system_after_assistant_becomes_user_message(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "system", "content": "One."},
+                {"role": "system", "content": "Two."},
+            ]
+        )
+        messages = _convert(request, merge_inline_system=True).messages
+
+        assert messages[-2:] == [
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "One.\n\nTwo."},
+        ]
+
+    def test_leading_inline_system_still_merges_into_system_prompt(self):
+        request = _make_request(
+            [
+                {"role": "system", "content": " Leading."},
+                {"role": "user", "content": "Hello"},
+            ],
+            system="Top-level prompt.",
+        )
+        messages = _convert(request, merge_inline_system=True).messages
+
+        assert messages == [
+            {"role": "system", "content": "Top-level prompt. Leading."},
+            {"role": "user", "content": "Hello"},
+        ]
+
+
 # ======================================================================
 # Streaming conversion: message_stream_converter
 # ======================================================================
