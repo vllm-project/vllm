@@ -45,10 +45,11 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         from vllm.utils.platform_utils import get_device_name_as_file_name
 
         n, k = c.weight_shape
-        configs = get_w8a8_per_token_fp8_configs(
-            n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
+        self.has_tuned_configs = bool(
+            get_w8a8_per_token_fp8_configs(
+                n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
+            )
         )
-        self.has_tuned_configs = bool(configs)
         self.use_heuristic = False
         if current_platform.is_rocm() and current_platform.supports_fp8():
             from vllm.platforms.rocm import on_rdna
@@ -65,21 +66,6 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
             device = torch.accelerator.current_device_index()
             self.num_processors = num_compute_units(device)
             self.cache_size_bytes = get_device_cache_size(device)
-        if self.use_heuristic:
-            from vllm.config import get_current_vllm_config
-            from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
-                fp8_per_token_warmup,
-            )
-
-            fp8_per_token_warmup.register_warmup(
-                n=n,
-                k=k,
-                out_dtype=c.out_dtype,
-                max_tokens=get_current_vllm_config().scheduler_config.max_num_batched_tokens,
-                num_processors=self.num_processors,
-                cache_size_bytes=self.cache_size_bytes,
-                tuned_m_range=(min(configs), max(configs)) if configs else None,
-            )
 
     @classmethod
     def is_supported(

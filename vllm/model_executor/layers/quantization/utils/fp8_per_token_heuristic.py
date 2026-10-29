@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
 from vllm.model_executor.layers.quantization.utils import (
     fp8_per_token_heuristic_rules as heuristic_rules,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.triton_utils import tl, triton
 
 knobs = triton.knobs
@@ -97,13 +96,8 @@ def can_use_fp8_per_token_heuristic(a, b, sa, sb, out_dtype, bias) -> bool:
     )
 
 
-def _launch(kernel, grid, args, options, key, tensors, *, warmup=False):
+def _launch(kernel, grid, args, options, key, tensors):
     """Reuse specialization after checking its pointer attributes and options."""
-    if warmup:
-        compiled = kernel.warmup(*args, grid=grid, **options)
-        if compiled is not None:
-            _ = compiled.run
-        return compiled
     enter = knobs.runtime.launch_enter_hook
     exit_hook = knobs.runtime.launch_exit_hook
     if (
@@ -308,20 +302,11 @@ def launch_fp8_per_token(
     out_dtype: torch.dtype,
     bias: torch.Tensor | None,
     config: dict,
-    *,
-    _warmup: bool = False,
 ) -> torch.Tensor:
     """Launch already-validated contiguous FP8 inputs with an explicit choice."""
     m, k = a.shape
     n = b.shape[1]
-    if _warmup:
-        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-            TritonWarmupTensor,
-        )
-
-        result = TritonWarmupTensor(out_dtype)
-    else:
-        result = torch.empty((m, n), device=a.device, dtype=out_dtype)
+    result = torch.empty((m, n), device=a.device, dtype=out_dtype)
     bm, bn, bk = (
         config[key] for key in ("block_size_m", "block_size_n", "block_size_k")
     )
@@ -395,7 +380,6 @@ def launch_fp8_per_token(
             options,
             key,
             (a, b, sa, sb, result, bias),
-            warmup=_warmup,
         )
         return result
     if variant == "gemv":
@@ -407,7 +391,6 @@ def launch_fp8_per_token(
             options,
             key,
             (a, b, sa, sb, result, bias),
-            warmup=_warmup,
         )
         return result
     split = config.get("split_k", 1)
@@ -417,11 +400,7 @@ def launch_fp8_per_token(
         grid = min(grid, config.get("programs", 32))
     target = result
     if split > 1:
-        target = (
-            TritonWarmupTensor(torch.float32)
-            if _warmup
-            else torch.empty((split, m, n), device=a.device, dtype=torch.float32)
-        )
+        target = torch.empty((split, m, n), device=a.device, dtype=torch.float32)
     args = (
         a,
         b,
@@ -448,7 +427,6 @@ def launch_fp8_per_token(
         options,
         key + (split, persistent),
         (a, b, sa, sb, target, bias),
-        warmup=_warmup,
     )
     if split > 1:
         _launch(
@@ -458,77 +436,5 @@ def launch_fp8_per_token(
             {"num_warps": 4, "num_stages": 2},
             (m, n, split, out_dtype, bias is not None, 256, 4, 2),
             (target, sa, sb, result, bias),
-            warmup=_warmup,
         )
     return result
-
-
-class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
-    def get_warmup_keys(
-        self,
-        *,
-        n,
-        k,
-        out_dtype,
-        max_tokens,
-        num_processors=0,
-        cache_size_bytes=-1,
-        tuned_m_range=None,
-    ):
-        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-            triton_scalar_specialization_rep,
-        )
-
-        if num_processors == 0:
-            from vllm.utils.platform_utils import num_compute_units
-
-            num_processors = num_compute_units(torch.accelerator.current_device_index())
-        if cache_size_bytes < 0:
-            cache_size_bytes = get_device_cache_size(
-                torch.accelerator.current_device_index()
-            )
-        choices: dict[tuple, int] = {}
-        for m in range(1, max_tokens + 1):
-            if tuned_m_range is not None and tuned_m_range[0] <= m <= tuned_m_range[1]:
-                continue
-            config = get_heuristic_config(m, n, k, num_processors, cache_size_bytes)
-            bm, bn, bk = (
-                config[key] for key in ("block_size_m", "block_size_n", "block_size_k")
-            )
-            unmasked = (
-                config.get("unmasked_loads", False) and m % bm == n % bn == k % bk == 0
-            )
-            key = (
-                tuple(sorted(config.items())),
-                triton_scalar_specialization_rep(m),
-                unmasked,
-            )
-            choices.setdefault(key, m)
-        return [
-            (m, n, k, out_dtype, bias, num_processors, cache_size_bytes)
-            for m in choices.values()
-            for bias in (False, True)
-        ]
-
-    def compile(self, compile_key):
-        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-            TritonWarmupTensor,
-        )
-
-        m, n, k, out_dtype, bias, num_processors, cache_size_bytes = compile_key
-        a = TritonWarmupTensor(torch.float8_e4m3fn, shape=(m, k))
-        b = TritonWarmupTensor(torch.float8_e4m3fn, shape=(k, n), strides=(1, k))
-        scale = TritonWarmupTensor(torch.float32)
-        launch_fp8_per_token(
-            a,
-            b,
-            scale,
-            scale,
-            out_dtype,
-            TritonWarmupTensor(out_dtype) if bias else None,
-            get_heuristic_config(m, n, k, num_processors, cache_size_bytes),
-            _warmup=True,
-        )
-
-
-fp8_per_token_warmup = _Fp8PerTokenWarmup()

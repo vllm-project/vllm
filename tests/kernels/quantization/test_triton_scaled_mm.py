@@ -378,7 +378,7 @@ def test_triton_fp8_per_token_large_parent_storage(per_token_fp8_configs):
     reason="Requires ROCm FP8",
 )
 def test_triton_fp8_per_token_preserves_launch_hooks(per_token_fp8_configs):
-    """Instrumentation added after warmup must still observe launches."""
+    """Instrumentation added after the first launch must still observe calls."""
     from vllm.triton_utils import triton
 
     knobs = triton.knobs
@@ -503,34 +503,14 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
 @pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048), (2048, 4096), (4096, 4096)])
 @pytest.mark.parametrize("num_processors", [16, 32])
 @pytest.mark.parametrize("cache_size_bytes", [32 * 1024**2, 64 * 1024**2])
-def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
-    n, k, num_processors, cache_size_bytes, monkeypatch
+def test_triton_fp8_per_token_heuristic_handles_token_counts(
+    n, k, num_processors, cache_size_bytes
 ):
-    """Startup compilation must cover odd and aligned serving token counts."""
+    """Hardware-based launch rules must handle odd and aligned token counts."""
     from vllm.model_executor.layers.quantization.utils import (
         fp8_per_token_heuristic as heuristic,
     )
-    from vllm.triton_utils import triton
 
-    heuristic.fp8_per_token_warmup.warmup(
-        n=n,
-        k=k,
-        out_dtype=torch.bfloat16,
-        max_tokens=257,
-        num_processors=num_processors,
-        cache_size_bytes=cache_size_bytes,
-    )
-    misses = []
-    monkeypatch.setattr(
-        triton.knobs.runtime,
-        "jit_cache_hook",
-        lambda **kwargs: misses.append(kwargs),
-    )
-    monkeypatch.setattr(
-        triton.knobs.runtime,
-        "kernel_load_end_hook",
-        lambda *args: misses.append(args),
-    )
     for m in (1, 3, 15, 17, 33, 63, 65, 127, 129, 161, 191, 192, 193, 255, 257):
         a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
         b = (0.2 * torch.randn(n, k, device=device)).to(a.dtype).t()
@@ -550,4 +530,3 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
             rtol=1e-2,
             atol=1e-2,
         )
-    assert not misses

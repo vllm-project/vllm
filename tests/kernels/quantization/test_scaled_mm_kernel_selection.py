@@ -255,30 +255,6 @@ def test_fp8_heuristic_device_cache_discovery_and_fallback(monkeypatch):
         heuristic.get_device_cache_size.cache_clear()
 
 
-def test_fp8_heuristic_warmup_excludes_only_tuned_token_counts():
-    from vllm.model_executor.layers.quantization.utils import (
-        fp8_per_token_heuristic as heuristic,
-    )
-
-    kwargs = dict(
-        n=2048,
-        k=4096,
-        out_dtype=torch.bfloat16,
-        max_tokens=257,
-        num_processors=16,
-        cache_size_bytes=32 * 1024**2,
-    )
-    keys = heuristic.fp8_per_token_warmup.get_warmup_keys(
-        **kwargs, tuned_m_range=(64, 128)
-    )
-    assert keys and all(not 64 <= key[0] <= 128 for key in keys)
-    assert all(key[-2:] == (16, 32 * 1024**2) for key in keys)
-    assert (
-        heuristic.fp8_per_token_warmup.get_warmup_keys(**kwargs, tuned_m_range=(1, 257))
-        == []
-    )
-
-
 def test_is_supported_is_abstract():
     """Test that is_supported() is properly defined as abstract."""
     assert issubclass(ScaledMMLinearKernel, ABC)
