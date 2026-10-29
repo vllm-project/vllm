@@ -1245,37 +1245,21 @@ class TieringOffloadingManager(OffloadingManager):
         poll_tiers() collects -- is left out, so an engine that only serves
         peers can still go idle and finish a pause or graceful shutdown.
         """
+    if self._polled_tiers:
+        # A step is the only driver without a live tier-poll thread, and the
+        # only way to submit a promotion a peer lookup takes from another tier.
         thread = self._tier_poll_thread
-        thread_alive = thread is not None and thread.is_alive()
-        polled_idx = (
-            {self._tier_index[tier] for tier in self._polled_tiers}
-            if thread_alive
-            else set()
-        )
-        if (
-            any(job.tier_idx not in polled_idx for job in self._jobs.values())
-            or any(
-                d.tier_idx not in polled_idx for d in self._deferred_releases.values()
-            )
-            or any(state.pending_cascade_keys for state in self._req_state.values())
-            or any(
-                tier.has_pending_work()
-                for i, tier in enumerate(self.secondary_tiers)
-                if i not in polled_idx
-            )
-        ):
+        if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
             return True
-        if not self._polled_tiers:
-            return False
-        # A tier-poll round can serve a peer whose lookup promotes a chunk out
-        # of another secondary tier. Only a step submits that promotion and
-        # collects its completion, so keep stepping when one could exist. A
-        # lone p2p tier can only hit the primary on a peer lookup.
-        if len(self.secondary_tiers) > 1:
-            return True
-        # Without a live thread (tier_poll_interval_s <= 0) the engine tick is
-        # the only driver of the polled tiers, so keep the engine stepping.
-        return not thread_alive
+        # A lone polled tier: the thread collects its jobs and deferred
+        # releases, so only primary-tier cascades need a step.
+        return any(state.pending_cascade_keys for state in self._req_state.values())
+    return (
+        bool(self._jobs)
+        or bool(self._deferred_releases)
+        or any(state.pending_cascade_keys for state in self._req_state.values())
+        or any(tier.has_pending_work() for tier in self.secondary_tiers)
+    )
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
