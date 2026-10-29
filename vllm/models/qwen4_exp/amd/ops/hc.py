@@ -379,7 +379,8 @@ def _hc_combine_norm(
 
 # Fused decode path (csrc/rocm/qwen4_hc_rdna3.cu, gfx1100 only), built for
 # (hc_count, hidden_size, lora_rank). Measured at 96 calls per step with cold
-# weights: M=1 2.85 -> 2.18 ms, M=4 3.36 -> 2.87 ms; slower from M=5.
+# weights: M=1 2.42 -> 2.18 ms, M=2 2.47 -> 2.40 ms against the M <= 32 path,
+# which is faster from M=3.
 _HC_FUSED_SHAPE = (4, 2560, 320)
 
 
@@ -406,7 +407,7 @@ def _hc_combine_and_mix(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``GatedResidual.combine_and_mix`` with ``use_combine``, as one op.
 
-    Decode batches of up to four tokens take the fused HIP kernel; up to 32
+    Decode batches of up to two tokens take the fused HIP kernel; up to 32
     run combine+RMSNorm, the down GEMM and one kernel for SiLU, the up GEMM
     and the gate mix; larger batches run the unfused chain (combine+RMSNorm,
     skinny GEMM, SiLU, skinny GEMM, gate mix), which is what the module did
@@ -421,32 +422,22 @@ def _hc_combine_and_mix(
     lora_rank = up_weight.shape[1]
     if (
         _HC_FUSED
-        and 1 <= num_tokens <= 4
+        and 1 <= num_tokens <= 2
         and (hc_count, block_output.shape[1], lora_rank) == _HC_FUSED_SHAPE
         and residual.dtype == torch.float16
         and norm_weight.is_contiguous()
-        and down_weight.is_contiguous()
+        and down_weight.stride(1) == 1
+        and down_weight.stride(0) % 8 == 0
         and up_weight.is_contiguous()
     ):
-        residual = residual.contiguous()
-        block_output = block_output.contiguous()
-        injection_logits = injection_logits.contiguous()
-        if num_tokens <= 2:
-            hidden, block_input, injection = torch.ops._rocm_C.qwen4_hc_combine_mix(
-                residual,
-                block_output,
-                injection_logits,
-                norm_weight,
-                down_weight,
-                up_weight,
-                eps,
-            )
-            return hidden, block_input, injection
-        hidden, xn = _hc_combine_norm(
-            residual, block_output, injection_logits, norm_weight, eps, hc_count
-        )
-        block_input, injection = torch.ops._rocm_C.qwen4_hc_mix_xn(
-            xn, down_weight, up_weight
+        hidden, block_input, injection = torch.ops._rocm_C.qwen4_hc_combine_mix(
+            residual.contiguous(),
+            block_output.contiguous(),
+            injection_logits.contiguous(),
+            norm_weight,
+            down_weight,
+            up_weight,
+            eps,
         )
         return hidden, block_input, injection
 

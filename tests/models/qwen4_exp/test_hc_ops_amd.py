@@ -61,16 +61,23 @@ def _rel_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return ((actual.float() - expected.float()).norm() / expected.float().norm()).item()
 
 
-# 1-2 tokens: fully fused kernel; 3-4: Triton combine+norm then the fused mix;
-# 8-32: combine+norm, down GEMM, then the fused up + gate mix; 40: unfused chain.
+# 1-2 tokens: fully fused kernel; 3-32: combine+norm, down GEMM, then the fused
+# up + gate mix; 40: unfused chain.
 @pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 16, 17, 24, 32, 40])
 @pytest.mark.parametrize("shared_norm", [False, True])
+@pytest.mark.parametrize("padded_down", [False, True])
 def test_hc_combine_and_mix_matches_reference(
-    num_tokens: int, shared_norm: bool
+    num_tokens: int, shared_norm: bool, padded_down: bool
 ) -> None:
+    from vllm.model_executor.layers.utils import (
+        maybe_pad_weight_avoid_cache_aliasing,
+    )
     from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_and_mix
 
     args = _inputs(num_tokens, shared_norm)
+    if padded_down:
+        # gfx11 loads the down weight with a row stride one cache line wider.
+        args = (*args[:4], maybe_pad_weight_avoid_cache_aliasing(args[4]), args[5])
     # The first layer's injection is a split() view of the down projection.
     padded = torch.zeros(num_tokens, 2 * HC, dtype=torch.float16, device="cuda")
     padded[:, :HC] = args[2]
