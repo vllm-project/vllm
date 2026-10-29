@@ -938,6 +938,7 @@ async def test_cpu_ep_internal_lb_matches_reference_after_idle(
     env = {
         "OMP_NUM_THREADS": "1",
         "VLLM_CPU_OMP_THREADS_BIND": "nobind",
+        "VLLM_CPU_SIM_MULTI_NUMA": "0",
         "VLLM_HOST_IP": "127.0.0.1",
         "VLLM_LOG_STATS_INTERVAL": "0.1",
         "VLLM_SERVER_DEV_MODE": "1",
