@@ -93,7 +93,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 # import overhead.
 GDN_AITER_TRITON_AVAILABLE = (
     rocm_aiter_ops.are_gdn_triton_kernels_available()
-    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+    or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
 )
 
 if GDN_AITER_TRITON_AVAILABLE:
@@ -703,6 +703,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        # Off by default; the Qwen3.5 NVIDIA variant installs a fused gated
+        # RMS norm that reads z as a strided view of the packed qkvz
+        # projection, removing the z reshape copy (see Qwen3_5DecoderLayer).
+        self._fused_gdn_gated_rms_norm: Callable[..., None] | None = None
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
@@ -1181,7 +1185,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
             z_size = self.value_dim // self.tp_size
             mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            if self._fused_gdn_gated_rms_norm is None:
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self.split_ba(ba)
 
         # ============================================================
@@ -1195,13 +1200,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        # b/a may stay strided chunk views of ba: the packed decode, prefill
+        # (fused_post_conv_prep) and ROCm fallback kernels consume row strides
+        # directly, and fused_sigmoid_gating_delta_rule_update contiguous()
+        # internally where needed.
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
+
+        if (
+            self._fused_gdn_gated_rms_norm is not None
+            and not self.gqa_interleaved_layout
+        ):
+            out2d = core_attn_out.view(num_tokens, -1)
+            self._fused_gdn_gated_rms_norm(
+                x=out2d,
+                z=z,
+                weight=self.norm.weight,
+                out=out2d,
+                eps=self.norm.eps,
+                num_v_heads=self.num_v_heads // self.tp_size,
+                head_v_dim=self.head_v_dim,
+                norm_before_gate=self.norm.norm_before_gate,
+                activation=self.norm.activation,
+            )
+            output, _ = self.out_proj(out2d)
+            return output
 
         # ============================================================
         # Part 3: Output Projection
@@ -1530,6 +1558,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
+            and not is_conv_state_dim_first()
         ):
             return self._forward_core_decode_aiter(
                 qkvz=qkvz,
