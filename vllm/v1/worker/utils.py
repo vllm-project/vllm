@@ -602,9 +602,7 @@ def allocate_kv_cache(
             kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=layer_kernel_block_size(
-                spec, group_id, kernel_block_sizes
-            ),
+            kernel_block_size=layer_kernel_block_size(group_id, kernel_block_sizes),
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -627,9 +625,9 @@ def layer_spec_for_tensor(
 
 
 def layer_kernel_block_size(
-    spec: KVCacheSpec, group_id: int, kernel_block_sizes: list[int] | None
+    group_id: int, kernel_block_sizes: list[int] | None
 ) -> int | None:
-    """Kernel block size to view spec's pages with, if it differs."""
+    """Kernel block size to view the group's pages with, if it differs."""
     kernel_block_size = None
     if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
         kernel_block_size = kernel_block_sizes[group_id]

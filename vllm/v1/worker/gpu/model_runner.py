@@ -1046,13 +1046,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
-        try:
-            self.sampler(logits, dummy_input_batch)
-        finally:
-            default_params = SamplingParams()
-            for req_idx in range(num_reqs):
-                self.sampler.add_request(req_idx, default_params)
-            self.sampler.apply_staged_writes()
+        self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -1113,6 +1107,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
+        if self.cache_config.enable_extensible_kv_cache:
+            # The extensible KV cache measures the capture footprint after warmup.
+            return 0
         # Runs before the KV cache exists, outside compile_or_warm_up_model.
         with self.eplb.suppress():
             return _profile_cudagraph_memory(self)
