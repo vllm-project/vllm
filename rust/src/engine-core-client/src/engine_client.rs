@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use futures::{future::BoxFuture, stream::FusedStream};
 use serde_json::Value as JsonValue;
@@ -14,14 +13,17 @@ use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
 use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
-use crate::{EngineCoreClient, EngineCoreOutputStream, EngineCoreStreamDelivery, Error, Result};
+use crate::{EngineCoreClient, EngineCoreOutputStream, EngineCoreStreamDelivery, Result};
 
 /// Per-request engine output. Dropping a live stream must abort its request.
 /// Mark the stream terminated when delivering its terminal output, so dropping
 /// it immediately afterward does not abort a completed request.
+/// Outputs must belong to this request. An unexpected close must yield an
+/// error, not end the stream without a terminal output. Errors terminate the stream.
 pub trait EngineOutputStream:
     FusedStream<Item = Result<EngineCoreStreamDelivery>> + Send + Unpin
 {
+    /// Internal engine request ID, matching the submitted request.
     fn request_id(&self) -> &str;
     fn engine_index(&self) -> u32;
 }
@@ -37,44 +39,65 @@ impl EngineOutputStream for EngineCoreOutputStream {
 }
 
 /// Request submission, lifecycle, metadata, and engine operations used by the frontend.
+///
+/// Metadata is available when the client is constructed. Submitted utility
+/// calls wait for every connected engine's outcome before reporting failure.
 pub trait EngineClient: Send + Sync {
     /// Submit an engine request and return its output stream.
     /// The stream's engine index must be one of [`Self::engine_indices`].
+    /// Cancelling submission must clean up any registered request, including
+    /// aborting it if it may already have reached the engine.
     fn call(
         &self,
         request: EngineCoreRequest,
     ) -> BoxFuture<'_, Result<Box<dyn EngineOutputStream>>>;
 
+    /// Abort by internal engine IDs and deliver terminal abort outputs to the
+    /// affected streams. Unknown IDs and an empty list are no-ops.
     fn abort<'a>(&'a self, request_ids: &'a [String]) -> BoxFuture<'a, Result<()>>;
+    /// Close client resources and background tasks, not the engine processes.
     fn shutdown(self: Box<Self>) -> BoxFuture<'static, Result<()>>;
     fn model_name(&self) -> &str;
+    /// Engine indices used for request metrics, fixed for this client's lifetime.
     fn engine_indices(&self) -> Vec<u32>;
     fn engine_stats_enabled(&self) -> bool;
+    /// Minimum effective context limit across connected engines.
     fn max_model_len(&self) -> u32;
+    /// Effective model dtype reported by the first connected engine.
     fn model_dtype(&self) -> ModelDtype;
     fn is_healthy(&self) -> bool;
     fn supports_lora(&self) -> bool;
 
-    fn health_error(&self) -> Option<Arc<Error>>;
-
+    /// First connected engine's cached metadata; per-engine values require
+    /// [`Self::ready_responses`].
     fn ready_response(&self) -> &EngineCoreReadyResponse;
 
+    /// Cached metadata for every connected engine, in order; never empty.
     fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse>;
 
+    /// Deployment-wide DP size, which can differ from the connected-engine count
+    /// and the effective DP size in an individual engine's metadata.
     fn data_parallel_size(&self) -> usize;
 
+    /// Number of engines connected to this client.
     fn engine_count(&self) -> usize;
 
+    /// First engine's world size, excluding deployment-wide data parallelism.
     fn world_size(&self) -> u64;
 
+    /// Python vLLM version reported by the first connected engine.
     fn vllm_version(&self) -> &str;
 
+    /// GPU blocks summed across connected engines.
     fn total_num_gpu_blocks(&self) -> u64;
 
+    /// Attention block size only when every engine reports the same value.
     fn effective_attention_block_size(&self) -> Option<u64>;
 
+    /// Current health and subsequent changes, consistent with [`Self::is_healthy`].
     fn subscribe_health(&self) -> watch::Receiver<bool>;
 
+    /// Execute on every engine and flatten their worker results into one list.
     fn collective_rpc<'a>(
         &'a self,
         method: &'a str,
@@ -98,28 +121,34 @@ pub trait EngineClient: Send + Sync {
 
     fn set_weight_version<'a>(&'a self, weight_version: &'a str) -> BoxFuture<'a, Result<()>>;
 
+    /// Return the version shared by all engines; disagreement is an error.
     fn get_weight_version<'a>(&'a self) -> BoxFuture<'a, Result<String>>;
 
+    /// Return the sleep state shared by all engines; disagreement is an error.
     fn is_sleeping<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
 
     fn reset_mm_cache<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
     fn reset_encoder_cache<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
+    /// Return true only when every engine confirms the reset.
     fn reset_prefix_cache<'a>(
         &'a self,
         reset_running_requests: bool,
         reset_connector: bool,
     ) -> BoxFuture<'a, Result<bool>>;
 
+    /// Load on every engine; return true only when all confirm success.
     fn add_lora<'a>(&'a self, lora_request: &'a LoraRequest) -> BoxFuture<'a, Result<bool>>;
 
+    /// Remove from every engine; return true only when all confirm success.
     fn remove_lora<'a>(&'a self, lora_id: u64) -> BoxFuture<'a, Result<bool>>;
 
     fn sleep<'a>(&'a self, level: SleepLevel, mode: PauseMode) -> BoxFuture<'a, Result<()>>;
 
     fn release_kv_cache_memory<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
+    /// Return true only when every engine is fully awake after applying the tags.
     fn wake_up<'a>(&'a self, tags: Option<Vec<String>>) -> BoxFuture<'a, Result<bool>>;
 
     fn pause_generation<'a>(
@@ -130,12 +159,16 @@ pub trait EngineClient: Send + Sync {
 
     fn resume_scheduler<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
+    /// Return the first refusal, if any; other engines may already have started.
     fn checkpoint_prepare<'a>(&'a self, mode: PauseMode) -> BoxFuture<'a, Result<Option<String>>>;
 
     fn checkpoint_restore<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
+    /// Prefer any failed state, then unanimous state, then preparing if any
+    /// engine is preparing, otherwise restoring. Include the failure's error.
     fn checkpoint_state<'a>(&'a self) -> BoxFuture<'a, Result<(CheckpointState, Option<String>)>>;
 
+    /// Return the pause state shared by all engines; disagreement is an error.
     fn is_scheduler_paused<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
 
     fn start_profile<'a>(
@@ -194,10 +227,6 @@ impl EngineClient for EngineCoreClient {
 
     fn supports_lora(&self) -> bool {
         self.ready_response().supports_lora
-    }
-
-    fn health_error(&self) -> Option<Arc<Error>> {
-        self.health_error()
     }
 
     fn ready_response(&self) -> &EngineCoreReadyResponse {
