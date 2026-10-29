@@ -11,6 +11,10 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
+    FlashInferSSDBackend,
+    get_mamba_ssd_backend,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -119,13 +123,116 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     prep_initial_states: bool = False
     chunk_size: int = 0
 
-    # Chunk-related metadata (only for prefill)
+    # Sequence index of each scan unit (only for prefill): each Triton chunk
+    # (see the base cu_chunk_seqlen_p and last_chunk_indices_p), or each
+    # FlashInfer token.
     seq_idx_p: torch.Tensor | None = None
 
-    # Internal prefill checkpoints, one entry per prefill row. The chunk
-    # index selects the varlen_states row holding the checkpoint state.
+    # Internal prefill checkpoints, one entry per prefill row. The index
+    # selects the row's checkpoint in the states the SSD backend returns:
+    # a Triton chunk state, or the row itself for FlashInfer.
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
+
+    # FlashInfer SSD inputs (only for prefill): segments on its packed token
+    # chunk grid, zero initial states for batches without cached state
+    # (FlashInfer takes the state dtype from them), and each row's
+    # checkpoint token with the checkpoint output.
+    chunk_indices_p: torch.Tensor | None = None
+    chunk_offsets_p: torch.Tensor | None = None
+    zero_initial_states_p: torch.Tensor | None = None
+    checkpoint_token_indices_p: torch.Tensor | None = None
+    checkpoint_states_p: torch.Tensor | None = None
+
+
+# FlashInfer's SSD tiles packed tokens in fixed 128-token chunks.
+_FLASHINFER_SSD_CHUNK_SIZE = 128
+
+
+def build_ssd_prefill_metadata(
+    metadata: Mamba2AttentionMetadata,
+    num_computed_tokens_p_cpu: torch.Tensor,
+    query_start_loc_p_cpu: torch.Tensor,
+    state_shape: tuple[int, ...],
+    state_dtype: torch.dtype,
+) -> Mamba2AttentionMetadata:
+    """Add the prefill tensors read by the selected SSD backend."""
+    query_start_loc_p = metadata.query_start_loc_p
+    assert query_start_loc_p is not None
+    device = query_start_loc_p.device
+    checkpoint = metadata.checkpoint_meta
+    checkpoint_offsets_p = checkpoint.offsets if checkpoint is not None else None
+    if not isinstance(get_mamba_ssd_backend(), FlashInferSSDBackend):
+        # The host offsets place a chunk boundary on each checkpoint.
+        cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, checkpoint_chunk_idx = (
+            BaseMambaAttentionMetadataBuilder._build_chunk_metadata_tensors(
+                metadata.chunk_size,
+                num_computed_tokens_p_cpu,
+                query_start_loc_p_cpu,
+                device,
+                checkpoint_offsets_p,
+            )
+        )
+        return replace(
+            metadata,
+            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+            seq_idx_p=seq_idx_p,
+            last_chunk_indices_p=last_chunk_indices_p,
+            checkpoint_chunk_idx=checkpoint_chunk_idx,
+        )
+
+    num_prefills = query_start_loc_p_cpu.numel() - 1
+    num_tokens = int(query_start_loc_p_cpu[-1])
+    starts = query_start_loc_p_cpu[:-1]
+    # Segments start at each sequence, each checkpoint, and each grid line
+    # inside a sequence. Sequences tile the tokens, so that is every line.
+    segment_starts = [
+        starts,
+        torch.arange(
+            _FLASHINFER_SSD_CHUNK_SIZE,
+            num_tokens,
+            _FLASHINFER_SSD_CHUNK_SIZE,
+            dtype=starts.dtype,
+        ),
+    ]
+    if checkpoint_offsets_p is not None:
+        offsets = torch.tensor(checkpoint_offsets_p, dtype=starts.dtype)
+        segment_starts.append((starts + offsets)[offsets > 0])
+    segment_starts_cpu = torch.cat(segment_starts).unique()
+    rows = torch.arange(num_prefills, dtype=torch.int32, device=device)
+    states_shape = (num_prefills, *state_shape)
+    metadata = replace(
+        metadata,
+        seq_idx_p=rows.repeat_interleave(
+            query_start_loc_p.diff(), output_size=num_tokens
+        ),
+        chunk_indices_p=async_tensor_h2d(
+            segment_starts_cpu // _FLASHINFER_SSD_CHUNK_SIZE,
+            dtype=torch.int32,
+            device=device,
+        ),
+        chunk_offsets_p=async_tensor_h2d(
+            segment_starts_cpu % _FLASHINFER_SSD_CHUNK_SIZE,
+            dtype=torch.int32,
+            device=device,
+        ),
+        zero_initial_states_p=None
+        if metadata.prep_initial_states
+        else torch.zeros(states_shape, dtype=state_dtype, device=device),
+    )
+    if checkpoint is None:
+        return metadata
+    checkpoint_offsets = checkpoint.checkpoint_offsets
+    # Each row's checkpoint goes to its own row of the output; rows without
+    # one have no token to capture.
+    return replace(
+        metadata,
+        checkpoint_chunk_idx=rows,
+        checkpoint_token_indices_p=torch.where(
+            checkpoint_offsets > 0, query_start_loc_p[:-1] + checkpoint_offsets, -1
+        ),
+        checkpoint_states_p=torch.empty(states_shape, dtype=state_dtype, device=device),
+    )
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -171,60 +278,37 @@ class Mamba2AttentionMetadataBuilder(
             num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
         )
 
-        seq_idx_p = None
-        cu_chunk_seqlen_p = None
-        last_chunk_indices_p = None
-        checkpoint_chunk_idx = None
-        checkpoint_meta = None
+        if common.num_prefills == 0:
+            return replace(common, chunk_size=self.chunk_size)
+
+        num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
+            common_attn_metadata,
+            common.num_reqs,
+            common.num_prefills,
+            common.num_decode_tokens,
+        )
         prep_initial_states = False
-
-        # Compute seq_idx for prefill only
-        if common.num_prefills > 0:
-            prep_initial_states = False
-            if common.has_initial_states_p is not None:
-                # Same condition as `has_initial_states_p`, but derived from CPU
-                # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
-                # for prefill rows, which is all this slice covers.
-                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
-                    common_attn_metadata,
-                    common.num_reqs,
-                    common.num_prefills,
-                    common.num_decode_tokens,
-                )
-                prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
-
-            checkpoint_offsets_p = None
-            first = common.num_reqs - common.num_prefills
-            checkpoint = self.checkpoint_builder.build(
-                common_attn_metadata,
-                list(range(first, common.num_reqs)),
-            )
-            if checkpoint is not None:
-                # The host offsets place a chunk boundary on the checkpoint.
-                checkpoint_offsets_p = checkpoint.offsets
-                checkpoint_meta = checkpoint
-
-            (
-                cu_chunk_seqlen_p,
-                seq_idx_p,
-                last_chunk_indices_p,
-                checkpoint_chunk_idx,
-            ) = self._build_chunk_metadata_tensors(
-                self.chunk_size,
-                common,
-                common_attn_metadata,
-                checkpoint_offsets_p,
-            )
-
-        return replace(
+        if common.has_initial_states_p is not None:
+            # Same condition as `has_initial_states_p`, but derived from CPU
+            # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
+            # for prefill rows, which is all this slice covers.
+            prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
+        first = common.num_reqs - common.num_prefills
+        metadata = replace(
             common,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
-            seq_idx_p=seq_idx_p,
-            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
-            last_chunk_indices_p=last_chunk_indices_p,
-            checkpoint_chunk_idx=checkpoint_chunk_idx,
-            checkpoint_meta=checkpoint_meta,
+            checkpoint_meta=self.checkpoint_builder.build(
+                common_attn_metadata,
+                list(range(first, common.num_reqs)),
+            ),
+        )
+        return build_ssd_prefill_metadata(
+            metadata,
+            num_computed_tokens_p_cpu,
+            query_start_loc_p_cpu,
+            self.kv_cache_spec.shapes[1],
+            self.kv_cache_spec.dtypes[1],
         )
 
     def update_block_table(

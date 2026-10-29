@@ -174,30 +174,39 @@ def test_engram_config_cli_optional(options, provided, dp_shared_memory):
 
 
 @pytest.mark.parametrize(
-    ("nested", "overrides", "expected"),
+    ("nested", "options", "expected"),
     [
-        (MambaConfig(backend="flashinfer"), {}, ("triton", "triton")),
+        (MambaConfig(backend="flashinfer"), [], ("triton", "triton", "triton")),
         (
             {"decode_backend": "triton"},
-            {"mamba_backend": "flashinfer"},
-            ("flashinfer", "triton"),
+            ["--mamba-backend", "flashinfer"],
+            ("flashinfer", "triton", "flashinfer"),
         ),
         (
             {"decode_backend": "flashinfer"},
-            {"mamba_decode_backend": "triton"},
-            ("triton", "triton"),
+            ["--mamba-decode-backend", "triton"],
+            ("triton", "triton", "triton"),
+        ),
+        (
+            {"prefill_backend": "flashinfer", "decode_backend": "triton"},
+            ["--mamba-backend", "flashinfer", "--mamba-prefill-backend", "triton"],
+            ("flashinfer", "triton", "triton"),
         ),
     ],
 )
-def test_mamba_config_backend_precedence(nested, overrides, expected):
+def test_mamba_config_backend_precedence(nested, options, expected):
     original = deepcopy(nested)
-    args = EngineArgs(model="facebook/opt-125m", mamba_config=nested, **overrides)
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    namespace = parser.parse_args(["--model", "facebook/opt-125m", *options])
+    namespace.mamba_config = nested
+    args = EngineArgs.from_cli_args(namespace)
     unmerged = deepcopy(args.mamba_config)
     config = args.create_engine_config().mamba_config
 
     assert (
         config.backend.value,
         config.effective_decode_backend.value,
+        config.effective_prefill_backend.value,
     ) == expected
     assert nested == original
     assert args.mamba_config == unmerged

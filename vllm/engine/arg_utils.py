@@ -836,7 +836,7 @@ class EngineArgs:
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_decode_backend: MambaBackendEnum | None = None
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
-    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
+    mamba_prefill_backend: MambaBackendEnum | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
