@@ -36,6 +36,52 @@ MAX_POS = 4096
 CUTEDSL_MODULE = "vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl"
 
 
+def quantize_to_nvfp4(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference NVFP4 quantization.
+
+    Args:
+        x: [..., head_dim] where head_dim is divisible by 16
+    Returns:
+        packed: [..., head_dim//2]  uint8            2 E2M1 nibbles/byte
+        scales: [..., head_dim//16] float8_e4m3fn    exact amax/6.0 per block
+
+    """
+    NVFP4_BLOCK_SIZE = 16
+    orig_shape = x.shape
+    head_dim = orig_shape[-1]
+    n_blocks = head_dim // NVFP4_BLOCK_SIZE
+
+    x_f32 = x.float().reshape(-1, n_blocks, NVFP4_BLOCK_SIZE)
+
+    amax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=6.0 * (2**-126))
+    # Use float64 to get the correctly-rounded float32 quotient, matching
+    # tl.div_rn(amax, 6.0) in the Triton kernel (CUDA fdiv can be 1 ULP off).
+    scale = (amax.double() / 6.0).float()
+    scales = scale.squeeze(-1).to(torch.float8_e4m3fn)
+
+    x_scaled = (x_f32 / scale).clamp(-6.0, 6.0)
+    abs_x = x_scaled.abs()
+    code = torch.zeros_like(abs_x, dtype=torch.int32)
+    code = torch.where(abs_x > 0.25, 1, code)
+    code = torch.where(abs_x >= 0.75, 2, code)
+    code = torch.where(abs_x > 1.25, 3, code)
+    code = torch.where(abs_x >= 1.75, 4, code)
+    code = torch.where(abs_x > 2.5, 5, code)
+    code = torch.where(abs_x >= 3.5, 6, code)
+    code = torch.where(abs_x > 5.0, 7, code)
+    sign = ((x_scaled.view(torch.int32) >> 31) & 1).to(torch.uint8)
+    nibble = code.to(torch.uint8) | (sign << 3)
+
+    nibble_flat = nibble.reshape(-1, head_dim)
+    packed = (nibble_flat[:, 0::2] | (nibble_flat[:, 1::2] << 4)).contiguous()
+    packed = packed.reshape(*orig_shape[:-1], head_dim // 2)
+
+    scales = scales.view(*orig_shape[:-1], n_blocks)
+    return packed, scales
+
+
 def quantize_to_mxfp4(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -95,7 +141,7 @@ def _reference(
     softmax_scale: float,
     head_scale: float,
     n_head: int,
-    use_fp4: bool = False,
+    quant_mode: str = "fp8",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_rot = q.clone()
     ops.rotary_embedding(
@@ -109,53 +155,58 @@ def _reference(
         False,
     )
 
-    if use_fp4:
+    if quant_mode == "mxfp4":
         q_packed, ue8m0 = quantize_to_mxfp4(q_rot.view(-1, n_head, HEAD_DIM))
         # Pack 4 ue8m0 bytes into 1 int32
         q_scale = ue8m0.view(torch.int32).squeeze(-1)
-        # FP4 path: q_scale stays separate (cannot be folded into a per-token scalar)
         weights_out = weights.to(torch.float32) * softmax_scale * head_scale
         return (q_packed, q_scale), weights_out
 
-    else:
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q_rot.view(-1, HEAD_DIM).contiguous(),
-            HEAD_DIM,
-            use_ue8m0=True,
-        )
-        q_fp8 = q_fp8.view(-1, n_head, HEAD_DIM)
-        q_scale = q_scale.view(-1, n_head)
+    if quant_mode == "nvfp4":
+        q_packed, q_scale = quantize_to_nvfp4(q_rot.view(-1, n_head, HEAD_DIM))
+        weights_out = weights.to(torch.float32) * softmax_scale * head_scale
+        return (q_packed, q_scale), weights_out
 
-        weights_out = weights.to(torch.float32) * q_scale * softmax_scale * head_scale
-        return q_fp8, weights_out
+    # fp8
+    q_fp8, q_scale = per_token_group_quant_fp8(
+        q_rot.view(-1, HEAD_DIM).contiguous(),
+        HEAD_DIM,
+        use_ue8m0=True,
+    )
+    q_fp8 = q_fp8.view(-1, n_head, HEAD_DIM)
+    q_scale = q_scale.view(-1, n_head)
+    weights_out = weights.to(torch.float32) * q_scale * softmax_scale * head_scale
+    return q_fp8, weights_out
+
+
+_REQUIRES_SM100 = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="FP4 indexer Q requires an SM100-family GPU",
+)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 257, 1023])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    "use_fp4",
+    "quant_mode",
     [
-        False,
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(
-                not (
-                    current_platform.is_cuda()
-                    and current_platform.is_device_capability_family(100)
-                ),
-                reason="MXFP4 indexer cache requires an SM100-family GPU",
-            ),
-        ),
+        "fp8",
+        pytest.param("mxfp4", marks=_REQUIRES_SM100),
+        pytest.param("nvfp4", marks=_REQUIRES_SM100),
     ],
 )
 @pytest.mark.parametrize("use_cutedsl", [False, True])
 @pytest.mark.parametrize("n_head", [32, 64])
 @torch.inference_mode()
 def test_fused_indexer_q_rope_quant_matches_unfused(
-    num_tokens, cache_dtype, use_fp4, use_cutedsl, n_head
+    num_tokens, cache_dtype, quant_mode, use_cutedsl, n_head
 ):
     if use_cutedsl and not has_cutedsl():
         pytest.skip("cutedsl (cutlass) not installed")
+    if use_cutedsl and quant_mode == "nvfp4":
+        pytest.skip("IndexerQNvFp4Kernel (CuteDSL) not implemented yet")
 
     device = "cuda"
     torch.manual_seed(0)
@@ -182,7 +233,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
         softmax_scale,
         head_scale,
         n_head,
-        use_fp4,
+        quant_mode,
     )
     # use_cutedsl=False: force the triton path even when cutedsl is installed
     # by patching the dispatcher's has_cutedsl() binding to return False.
@@ -202,25 +253,28 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
             weights,
             softmax_scale,
             head_scale,
-            use_fp4,
+            use_fp4=(quant_mode == "mxfp4"),
+            use_nvfp4=(quant_mode == "nvfp4"),
         )
 
-    if use_fp4:
+    if quant_mode in ("mxfp4", "nvfp4"):
         q_quant_ref, q_scale_ref = q_quant_ref
         q_quant_fused, q_scale_fused = q_quant_fused
 
-        assert torch.equal(q_scale_ref, q_scale_fused), (
+        ref_scale_bits = q_scale_ref.view(torch.int8)
+        fused_scale_bits = q_scale_fused.view(torch.int8)
+        assert torch.equal(ref_scale_bits, fused_scale_bits), (
             f"q_scale mismatch: "
-            f"{(q_scale_ref != q_scale_fused).sum().item()} "
-            f"/ {q_scale_ref.numel()} bytes differ"
+            f"{(ref_scale_bits != fused_scale_bits).sum().item()} "
+            f"/ {ref_scale_bits.numel()} bytes differ"
         )
 
-    # fp8 tensors aren't directly comparable via torch.equal — reinterpret as int8.
+    # fp8 and packed fp4 tensors aren't directly comparable — reinterpret as int8.
     assert isinstance(q_quant_fused, torch.Tensor)
     ref_bits = q_quant_ref.view(torch.int8)
     fused_bits = q_quant_fused.view(torch.int8)
     assert torch.equal(ref_bits, fused_bits), (
-        f"q_quant_fused mismatch: "
+        f"q_quant mismatch: "
         f"{(ref_bits != fused_bits).sum().item()} / {ref_bits.numel()} bytes differ"
     )
 
@@ -596,7 +650,7 @@ def test_fused_indexer_q_rope_quant_writes_bf16_weights(use_cutedsl):
     softmax_scale, head_scale = HEAD_DIM**-0.5, 0.125  # pow2 head_scale, see above
 
     _, weights_ref = _reference(
-        positions, q, cos_sin_cache, weights, softmax_scale, head_scale, n_head, True
+        positions, q, cos_sin_cache, weights, softmax_scale, head_scale, n_head, "mxfp4"
     )
     cutedsl_patch = (
         mock.patch(

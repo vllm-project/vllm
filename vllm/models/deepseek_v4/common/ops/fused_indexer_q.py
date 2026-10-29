@@ -18,6 +18,8 @@ from vllm.utils.import_utils import has_cutedsl
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
+# NVFP4: 16 elements per block, packed 2 nibbles per byte, float8_e4m3fn block scale.
+NVFP4_BLOCK_SIZE = 16
 
 
 @triton.jit
@@ -74,6 +76,24 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
     inv_scale = 1.0 / scale
     packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale)
     return packed, ue8m0
+
+
+@triton.jit
+def _quantize_nvfp4_block(x_lo, x_hi):
+    """Quantize a block of NVFP4_BLOCK_SIZE fp32 values given as two
+    interleaved halves. Returns:
+        - packed      : uint8[BLOCK/2]  (low nibble = quant(x_lo), high = quant(x_hi))
+        - nvfp4_scale : scalar float8e4nv  (block scale = amax / 6.0)
+    Unlike MXFP4's ue8m0 (power-of-2 only), NVFP4 stores the exact scale
+    as float8_e4m3fn, matching the flashinfer/CUTLASS NVFP4 convention.
+    """
+    amax = tl.maximum(tl.max(tl.abs(x_lo)), tl.max(tl.abs(x_hi)))
+    amax = tl.maximum(amax, 6.0 * (2**-126))
+    # tl.div_rn (div.rn.f32) for correct rounding at E2M1 boundaries.
+    scale = tl.div_rn(amax, 6.0)
+    nvfp4_scale = scale.to(tl.float8e4nv)
+    packed = _fp32x2_to_fp4x2(tl.div_rn(x_lo, scale), tl.div_rn(x_hi, scale))
+    return packed, nvfp4_scale
 
 
 class FusedIndexerQRopeQuantTritonKernel(
@@ -546,6 +566,212 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         )
 
 
+class FusedIndexerQRopeNvFp4TritonKernel(
+    VllmTritonJitKernel["FusedIndexerQRopeNvFp4TritonKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        weights_out_dtype: torch.dtype
+        num_heads: int
+        index_q_half_rot_dim: int
+        index_q_head_dim: int
+        nvfp4_block: int
+
+    @staticmethod
+    @triton.jit
+    def kernel(
+        pos_ptr,
+        # Index Q RoPE input (fp/bf16)
+        index_q_ptr,
+        index_q_stride0,
+        index_q_stride1,
+        index_q_cos_sin_ptr,
+        index_q_cos_sin_stride,
+        INDEX_Q_HALF_ROT_DIM: tl.constexpr,
+        # NVFP4 Q outputs
+        index_q_nvfp4_ptr,  # uint8, (T, H, HEAD_DIM // 2)
+        index_q_nvfp4_stride0,
+        index_q_nvfp4_stride1,
+        index_q_scale_ptr,  # float8e4nv, (T, H, HEAD_DIM // NVFP4_BLOCK)
+        index_q_scale_stride0,
+        index_q_scale_stride1,
+        INDEX_Q_HEAD_DIM: tl.constexpr,
+        NVFP4_BLOCK: tl.constexpr,
+        # Weights (NO per-token q_scale fold; per-block scales stay with Q values).
+        index_weights_ptr,
+        index_weights_stride,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_weights_out_ptr,
+        index_weights_out_stride,
+    ):
+        INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
+        INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
+        NUM_NOPE_BLOCKS: tl.constexpr = INDEX_Q_NOPE_DIM // NVFP4_BLOCK
+        NUM_ROPE_BLOCKS: tl.constexpr = INDEX_Q_ROT_DIM // NVFP4_BLOCK
+        HALF_BLOCK: tl.constexpr = NVFP4_BLOCK // 2
+        tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
+        tl.static_assert(INDEX_Q_NOPE_DIM % NVFP4_BLOCK == 0)
+        tl.static_assert(INDEX_Q_ROT_DIM % NVFP4_BLOCK == 0)
+        tl.static_assert(NVFP4_BLOCK % 2 == 0)
+
+        tok_idx = tl.program_id(0)
+        head_idx = tl.program_id(1)
+
+        pos = tl.load(pos_ptr + tok_idx)
+
+        q_base = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
+        out_base = (
+            index_q_nvfp4_ptr
+            + tok_idx * index_q_nvfp4_stride0
+            + head_idx * index_q_nvfp4_stride1
+        )
+        scale_base = (
+            index_q_scale_ptr
+            + tok_idx * index_q_scale_stride0
+            + head_idx * index_q_scale_stride1
+        )
+
+        half_off = tl.arange(0, HALF_BLOCK)
+
+        # ---- NoPE blocks ----
+        for b in tl.static_range(NUM_NOPE_BLOCKS):
+            base = b * NVFP4_BLOCK
+            x_lo = tl.load(q_base + base + half_off * 2).to(tl.float32)
+            x_hi = tl.load(q_base + base + half_off * 2 + 1).to(tl.float32)
+            packed, nvfp4_scale = _quantize_nvfp4_block(x_lo, x_hi)
+            tl.store(out_base + base // 2 + half_off, packed)
+            tl.store(scale_base + b, nvfp4_scale)
+
+        # ---- RoPE blocks ----
+        rot_q_base = q_base + INDEX_Q_NOPE_DIM
+        for b in tl.static_range(NUM_ROPE_BLOCKS):
+            pair_off = b * HALF_BLOCK + half_off  # indices in [0, HALF_ROT_DIM)
+            cos_b = tl.load(
+                index_q_cos_sin_ptr + pos * index_q_cos_sin_stride + pair_off
+            ).to(tl.float32)
+            sin_b = tl.load(
+                index_q_cos_sin_ptr
+                + pos * index_q_cos_sin_stride
+                + pair_off
+                + INDEX_Q_HALF_ROT_DIM
+            ).to(tl.float32)
+            x_even = tl.load(rot_q_base + pair_off * 2).to(tl.float32)
+            x_odd = tl.load(rot_q_base + pair_off * 2 + 1).to(tl.float32)
+            r_even = x_even * cos_b - x_odd * sin_b
+            r_odd = x_odd * cos_b + x_even * sin_b
+            r_even = r_even.to(tl.bfloat16).to(tl.float32)
+            r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
+            packed, nvfp4_scale = _quantize_nvfp4_block(r_even, r_odd)
+            rope_byte_off = (INDEX_Q_NOPE_DIM + b * NVFP4_BLOCK) // 2
+            tl.store(out_base + rope_byte_off + half_off, packed)
+            tl.store(scale_base + NUM_NOPE_BLOCKS + b, nvfp4_scale)
+
+        # NVFP4 weight-fold contract (same as MXFP4: no per-token q_scale fold).
+        index_weights = tl.load(
+            index_weights_ptr + tok_idx * index_weights_stride + head_idx
+        ).to(tl.float32)
+        index_weights *= index_weights_softmax_scale
+        index_weights *= index_weights_head_scale
+        tl.store(
+            index_weights_out_ptr + tok_idx * index_weights_out_stride + head_idx,
+            index_weights,
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        weights_out_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        rope_dim: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            weights_out_dtype=weights_out_dtype,
+            num_heads=num_heads,
+            index_q_half_rot_dim=rope_dim // 2,
+            index_q_head_dim=head_dim,
+            nvfp4_block=NVFP4_BLOCK_SIZE,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        # No model selects the NVFP4 indexer cache yet; compile on first use.
+        return []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
+        packed_head_dim = compile_key.index_q_head_dim // 2
+        scale_head_dim = compile_key.index_q_head_dim // compile_key.nvfp4_block
+        return dict(
+            positions=TritonWarmupTensor(torch.int64),
+            index_q=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
+                strides=(q_stride0, compile_key.index_q_head_dim, 1),
+            ),
+            index_q_cos_sin_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.index_q_half_rot_dim * 2),
+            ),
+            index_weights=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.num_heads),
+            ),
+            index_weights_softmax_scale=1.0,
+            index_weights_head_scale=1.0,
+            index_q_packed=TritonWarmupTensor(
+                torch.uint8,
+                shape=(1, compile_key.num_heads, packed_head_dim),
+            ),
+            index_q_scale=TritonWarmupTensor(
+                torch.float8_e4m3fn,
+                shape=(1, compile_key.num_heads, scale_head_dim),
+            ),
+            index_weights_out=TritonWarmupTensor(
+                compile_key.weights_out_dtype,
+                shape=(1, compile_key.num_heads),
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        positions: torch.Tensor,
+        index_q: torch.Tensor,
+        index_q_cos_sin_cache: torch.Tensor,
+        index_weights: torch.Tensor,
+        index_weights_softmax_scale: float,
+        index_weights_head_scale: float,
+        index_q_packed: torch.Tensor,
+        index_q_scale: torch.Tensor,
+        index_weights_out: torch.Tensor,
+    ) -> LaunchSpec:
+        num_tokens = positions.shape[0]
+        num_index_q_heads = index_q.shape[1]
+        return (num_tokens, num_index_q_heads), dict(
+            pos_ptr=positions,
+            index_q_stride0=index_q.stride(0),
+            index_q_stride1=index_q.stride(1),
+            index_q_cos_sin_ptr=index_q_cos_sin_cache,
+            index_q_cos_sin_stride=index_q_cos_sin_cache.stride(0),
+            INDEX_Q_HALF_ROT_DIM=index_q_cos_sin_cache.shape[-1] // 2,
+            index_q_nvfp4_ptr=index_q_packed,
+            index_q_nvfp4_stride0=index_q_packed.stride(0),
+            index_q_nvfp4_stride1=index_q_packed.stride(1),
+            index_q_scale_stride0=index_q_scale.stride(0),
+            index_q_scale_stride1=index_q_scale.stride(1),
+            INDEX_Q_HEAD_DIM=index_q.shape[2],
+            NVFP4_BLOCK=NVFP4_BLOCK_SIZE,
+            index_weights_stride=index_weights.stride(0),
+            index_weights_out_stride=index_weights_out.stride(0),
+            enable_fp_fusion=True,
+            num_warps=1,
+        )
+
+
 def fused_indexer_q_rope_quant(
     positions: torch.Tensor,
     index_q: torch.Tensor,
@@ -556,6 +782,7 @@ def fused_indexer_q_rope_quant(
     index_weights_head_scale: float,
     use_fp4: bool = False,
     weights_out_dtype: torch.dtype = torch.float32,
+    use_nvfp4: bool = False,
 ) -> tuple[
     torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
@@ -566,9 +793,9 @@ def fused_indexer_q_rope_quant(
     fp32 for the dense MQA-logits kernels, bf16 for DeepGEMM's sparse
     MQA-logits kernels (CUDA MXFP4 path only).
 
-    Weight-fold semantics (important — the two paths differ):
+    Weight-fold semantics (important — the three paths differ):
 
-    FP8 path (use_fp4=False, default):
+    FP8 path (use_fp4=False, use_nvfp4=False, default):
         q_fp8      : (T, H, HEAD_DIM) platform fp8 (e4m3fnuz on gfx942,
                      e4m3fn elsewhere); per-token-per-head scalar scale
                      (NOT stored — folded into weights below)
@@ -585,10 +812,18 @@ def fused_indexer_q_rope_quant(
         the Q values — they cannot be folded into a per-token weight
         scalar, so `weights` carries only the softmax and head scales.
 
+    NVFP4 path (use_nvfp4=True):
+        q_packed   : (T, H, HEAD_DIM // 2) uint8 (2 E2M1 nibbles per byte)
+        q_scale    : (T, H, HEAD_DIM // NVFP4_BLOCK_SIZE) float8_e4m3fn
+        weights_out = weights * softmax_scale * head_scale
+        Same fold contract as MXFP4. Differs from MXFP4 in block size (16
+        vs 32) and scale format (float8_e4m3fn vs ue8m0).
+
     Returns (q_quant, weights_out) where q_quant is either a Tensor (FP8) or
-    a (values, scales) tuple (MXFP4). This matches the union type accepted
-    by `SparseAttnIndexer.forward_*`.
+    a (values, scales) tuple (MXFP4/NVFP4). This matches the union type
+    accepted by `SparseAttnIndexer.forward_*`.
     """
+    assert not (use_fp4 and use_nvfp4), "use_fp4 and use_nvfp4 are mutually exclusive"
     assert positions.ndim == 1
     assert index_q.ndim == 3
     assert index_q_cos_sin_cache.ndim == 2
@@ -598,6 +833,37 @@ def fused_indexer_q_rope_quant(
     index_q_head_dim = index_q.shape[2]
 
     index_weights_out = torch.empty_like(index_weights, dtype=weights_out_dtype)
+
+    if use_nvfp4:
+        assert index_q_head_dim % NVFP4_BLOCK_SIZE == 0, (
+            f"head_dim={index_q_head_dim} must be a multiple of NVFP4 block "
+            f"size {NVFP4_BLOCK_SIZE}"
+        )
+        num_scale_blocks = index_q_head_dim // NVFP4_BLOCK_SIZE
+        index_q_packed = torch.empty(
+            (num_tokens, num_index_q_heads, index_q_head_dim // 2),
+            dtype=torch.uint8,
+            device=index_q.device,
+        )
+        index_q_scale = torch.empty(
+            (num_tokens, num_index_q_heads, num_scale_blocks),
+            dtype=torch.float8_e4m3fn,
+            device=index_q.device,
+        )
+        # TODO: add has_cutedsl() branch once IndexerQNvFp4Kernel is implemented
+        # in fused_indexer_q_cutedsl.py (mirrors the MXFP4 dispatch below).
+        _FUSED_INDEXER_Q_ROPE_NVFP4_TRITON_KERNEL(
+            positions,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_packed,
+            index_q_scale,
+            index_weights_out,
+        )
+        return (index_q_packed, index_q_scale), index_weights_out
 
     if use_fp4:
         assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
@@ -731,3 +997,4 @@ def fused_indexer_q_rope_quant(
 
 _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL = FusedIndexerQRopeQuantTritonKernel()
 _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL = FusedIndexerQRopeMxFp4TritonKernel()
+_FUSED_INDEXER_Q_ROPE_NVFP4_TRITON_KERNEL = FusedIndexerQRopeNvFp4TritonKernel()
