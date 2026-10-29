@@ -258,26 +258,34 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
         device=device,
     )
     cu_seqlens = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    ssm_state_indices = torch.empty((1, 1), dtype=torch.int32, device=device)
-    ssm_state_indices.zero_()
-
-    fused_sigmoid_gating_delta_rule_update(
-        A_log=config.a_log,
-        a=a,
-        b=b,
-        dt_bias=config.dt_bias,
-        q=q,
-        k=k,
-        v=v,
-        beta=1.0,
-        threshold=20.0,
-        initial_state=state,
-        inplace_final_state=True,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        use_qk_l2norm_in_kernel=True,
-        is_kda=False,
-    )
+    # The null slot 0 makes each launch return early; the launches only compile.
+    # 2-D indices: speculative decode. 1-D indices with has_initial_state:
+    # short prefills that join the non-spec decodes.
+    spec_indices = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    non_spec_indices = torch.zeros((1,), dtype=torch.int32, device=device)
+    has_initial_state = torch.zeros((1,), dtype=torch.bool, device=device)
+    for ssm_state_indices, initial_state_mask in (
+        (spec_indices, None),
+        (non_spec_indices, has_initial_state),
+    ):
+        fused_sigmoid_gating_delta_rule_update(
+            A_log=config.a_log,
+            a=a,
+            b=b,
+            dt_bias=config.dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            beta=1.0,
+            threshold=20.0,
+            initial_state=state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+            is_kda=False,
+            has_initial_state=initial_state_mask,
+        )
 
 
 def _warm_fused_gdn_decode_post_conv_mtp_kernel(
