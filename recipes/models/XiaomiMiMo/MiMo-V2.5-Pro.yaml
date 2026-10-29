@@ -21,7 +21,8 @@ model:
   context_length: 1048576
   base_args:
     - "--trust-remote-code"
-    - "--max-model-len auto"
+    - "--max-model-len"
+    - "auto"
     - "--generation-config"
     - "vllm"
   base_env: {}
