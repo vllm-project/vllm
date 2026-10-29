@@ -101,6 +101,10 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.tokenizers.control_tokens import (
+    encode_marked_prompt,
+    mark_chat_control_tokens,
+)
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -774,6 +778,28 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
             return self._melody.render_cmd3(config_dict)
         return self._melody.render_cmd4(config_dict)
 
+    def _build_config(
+        self, conversation: list[ConversationMessage], params: ChatParams
+    ) -> tuple[str, dict[str, Any], bool]:
+        chat_template_kwargs = dict(params.chat_template_kwargs)
+        sanitize = chat_template_kwargs.pop("sanitize_control_tokens", False)
+        fmt, config_dict = _build_render_config(
+            conversation, chat_template_kwargs, params.chat_template
+        )
+        if sanitize:
+            template = config_dict.pop("template_jinja", None)
+            config_dict = mark_chat_control_tokens(self.get_tokenizer(), config_dict)
+            if template is not None:
+                config_dict["template_jinja"] = template
+        return fmt, config_dict, sanitize
+
+    def _build_prompt(self, prompt_text: str, sanitize: bool) -> DictPrompt:
+        if sanitize:
+            return parse_dec_only_prompt(
+                encode_marked_prompt(self.get_tokenizer(), prompt_text)
+            )
+        return parse_dec_only_prompt(prompt_text)
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -787,12 +813,8 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        chat_template_kwargs = dict(params.chat_template_kwargs)
-        fmt, config_dict = _build_render_config(
-            conversation, chat_template_kwargs, params.chat_template
-        )
-        prompt_text = self._render(fmt, config_dict)
-        prompt = parse_dec_only_prompt(prompt_text)
+        fmt, config_dict, sanitize = self._build_config(conversation, params)
+        prompt = self._build_prompt(self._render(fmt, config_dict), sanitize)
 
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
@@ -814,12 +836,9 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        chat_template_kwargs = dict(params.chat_template_kwargs)
-        fmt, config_dict = _build_render_config(
-            conversation, chat_template_kwargs, params.chat_template
-        )
+        fmt, config_dict, sanitize = self._build_config(conversation, params)
         prompt_text = await self._render_async(fmt, config_dict)
-        prompt = parse_dec_only_prompt(prompt_text)
+        prompt = self._build_prompt(prompt_text, sanitize)
 
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data

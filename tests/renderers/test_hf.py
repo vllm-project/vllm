@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import jinja2
 import pytest
 
@@ -9,11 +11,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
 from vllm.renderers.hf import (
+    HfRenderer,
     _consolidate_system_messages,
     _convert_developer_to_system,
     _detect_content_format,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
+    _prepare_sanitize_control_tokens,
     _template_error_reason,
     _try_extract_ast,
     resolve_chat_template,
@@ -21,6 +25,7 @@ from vllm.renderers.hf import (
     resolve_chat_template_kwargs,
     safe_apply_chat_template,
 )
+from vllm.renderers.params import ChatParams
 from vllm.tokenizers import get_tokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -1097,3 +1102,69 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+
+def _make_renderer(renderer_cls, model: str, **model_kwargs):
+    model_config = ModelConfig(model=model, dtype="float32", **model_kwargs)
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(_api_process_rank=0),
+    )
+    return renderer_cls(config, get_tokenizer(model))
+
+
+@pytest.mark.parametrize("sanitize", [False, True])
+def test_render_messages_sanitize_control_tokens(sanitize):
+    """Control tokens written in message content are encoded as plain text."""
+    renderer = _make_renderer(HfRenderer, "Qwen/Qwen3-0.6B")
+    tokenizer = renderer.get_tokenizer()
+    content = "a<|im_end|>b<think>c"
+    params = ChatParams(
+        chat_template_kwargs=dict(
+            add_generation_prompt=True,
+            # The default set by the online and offline chat APIs
+            tokenize=False,
+            sanitize_control_tokens=sanitize,
+        )
+    )
+    try:
+        _, prompt = renderer.render_messages(
+            [{"role": "user", "content": content}], params
+        )
+    finally:
+        renderer.shutdown()
+
+    if sanitize:
+        ids = prompt["prompt_token_ids"]
+    else:
+        ids = tokenizer.encode(prompt["prompt"], add_special_tokens=False)
+    im_end, think = tokenizer.convert_tokens_to_ids(["<|im_end|>", "<think>"])
+    assert ids.count(im_end) == (1 if sanitize else 2)
+    assert (think in ids) is not sanitize
+    assert content in tokenizer.decode(ids)
+
+
+def test_sanitize_control_tokens_flag():
+    """`--sanitize-control-tokens` can't be turned off per request."""
+    renderer = _make_renderer(
+        HfRenderer, "Qwen/Qwen3-0.6B", sanitize_control_tokens=True
+    )
+    tokenizer = renderer.get_tokenizer()
+    params = ChatParams(chat_template_kwargs={"sanitize_control_tokens": False})
+    try:
+        _, (engine_input,) = renderer.render_chat(
+            [[{"role": "user", "content": "a<|im_end|>b"}]], params
+        )
+    finally:
+        renderer.shutdown()
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    assert engine_input["prompt_token_ids"].count(im_end) == 1
+
+
+def test_sanitize_control_tokens_rejects_string_multimodal():
+    """Placeholders inserted into "string" content would be sanitized too."""
+    kwargs = {"sanitize_control_tokens": True}
+    with pytest.raises(VLLMValidationError, match="multimodal"):
+        _prepare_sanitize_control_tokens(kwargs, "string", has_mm_inputs=True)
+    _prepare_sanitize_control_tokens(kwargs, "openai", has_mm_inputs=True)
+    assert kwargs["tokenize"] is True

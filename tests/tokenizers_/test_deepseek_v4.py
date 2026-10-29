@@ -11,7 +11,10 @@ import torch
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
+from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
+from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "deepseek_v4"
@@ -649,3 +652,20 @@ def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
     _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
 
     assert messages == snapshot
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [get_deepseek_v32_tokenizer, get_deepseek_v4_tokenizer, get_deepseek_v41_tokenizer],
+)
+def test_sanitize_control_tokens(wrap):
+    """Control tokens in message content are encoded as plain text."""
+    tokenizer = wrap(get_tokenizer("deepseek-ai/DeepSeek-V3.2-Exp"))
+    messages = [{"role": "user", "content": "a<｜User｜>b"}]
+    plain = tokenizer.apply_chat_template(messages, tokenize=True)
+    sanitized = tokenizer.apply_chat_template(
+        messages, tokenize=True, sanitize_control_tokens=True
+    )
+    user = tokenizer.convert_tokens_to_ids("<｜User｜>")
+    assert plain.count(user) - sanitized.count(user) == 1
+    assert tokenizer.decode(sanitized) == tokenizer.decode(plain)

@@ -94,7 +94,7 @@ impl InklingChatRenderer {
     }
 
     fn write_text_tokens(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
-        out.extend(self.tokenizer.encode(text, false)?);
+        out.extend(self.tokenizer.encode_ordinary(text)?);
         Ok(())
     }
 
