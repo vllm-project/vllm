@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
+from .policy import EplbPlan, EplbRebalanceContext, EplbTopology
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
+            stream.synchronize()
         except Exception as exc:  # pragma: no cover - diagnostic path
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
@@ -51,25 +53,25 @@ def run_rebalance_experts(
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
     stream: torch.Stream,
-) -> torch.Tensor:
+) -> EplbPlan:
     assert model_state.eplb_stats is not None
-    eplb_stats = model_state.eplb_stats
-
-    # Move the global expert load window to CPU for computation.
+    stats = model_state.eplb_stats
     with device_stream(stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
-    # Compute new expert mappings for the model
-    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
-        global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
-        physical_to_logical_map_cpu,
+        load_window_cpu = stats.global_expert_load_window.cpu().unsqueeze(0)
+    context = EplbRebalanceContext(
+        load_window_cpu=load_window_cpu,
+        physical_to_logical_map_cpu=physical_to_logical_map_cpu,
+        topology=EplbTopology(
+            num_groups=stats.num_groups,
+            num_nodes=stats.num_nodes,
+            num_ranks=stats.num_gpus,
+        ),
+        num_replicas=stats.num_replicas,
+        cpu_group=get_eplb_group().cpu_group,
     )
-    assert new_physical_to_logical_map.device == torch.device("cpu")
+    plan = eplb_state.rebalance_experts(model_state, context)
 
-    return new_physical_to_logical_map
+    return plan
 
 
 def transfer_run_periodically(
@@ -77,9 +79,7 @@ def transfer_run_periodically(
     stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
-    while True:
-        state.rearrange_event.wait(stream=stream)
-
+    while state.wait_for_rearrangement(stream):
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
         ep_rank = eplb_group.rank()
@@ -96,9 +96,10 @@ def transfer_run_periodically(
             with device_stream(stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
-            new_physical_to_logical_map = run_rebalance_experts(
+            plan = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
             )
+            new_physical_to_logical_map = plan.physical_to_logical_map
 
             migration_batches_by_layer = None
             if state.parallel_config.eplb_config.migration_batching_enabled:
@@ -173,7 +174,7 @@ def transfer_run_periodically(
 
                 model_state.pending_result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
-                    new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
+                    plan=plan,
                     transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )
