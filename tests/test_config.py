@@ -4280,6 +4280,30 @@ def test_watermark_key_is_excluded_from_serialization():
     assert "key" not in serialized
 
 
+def test_watermark_key_and_key_file_are_exclusive(tmp_path):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    with pytest.raises(ValidationError, match="either key or key_file"):
+        WatermarkConfig(key=42, key_file=str(key_file))
+
+
+@pytest.mark.parametrize("content", ["not-a-key", "-5", str(2**64)])
+def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, content):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text(content)
+
+    with pytest.raises(ValidationError, match="decimal integer") as error:
+        WatermarkConfig(key_file=str(key_file))
+
+    assert content not in str(error.value)
+
+
+def test_missing_watermark_key_file_is_rejected(tmp_path):
+    with pytest.raises(ValidationError, match="Cannot read watermark key file"):
+        WatermarkConfig(key_file=str(tmp_path / "missing"))
+
+
 @patch("vllm.config.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original

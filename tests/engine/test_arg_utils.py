@@ -93,6 +93,26 @@ def test_watermark_config_cli():
     assert config.deduplicate_contexts_max_history == 32
 
 
+def test_watermark_config_cli_reads_key_file(tmp_path):
+    """A mounted secret keeps the key off the command line."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("1234567890\n")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            json.dumps({"key_file": str(key_file)}),
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.key == 1234567890
+
+
 @pytest.mark.parametrize(
     "option",
     ["--gpu-memory-utilization", "--device-memory-utilization"],
