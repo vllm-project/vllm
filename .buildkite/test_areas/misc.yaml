@@ -748,8 +748,6 @@ steps:
   - vllm/entrypoints/generate/base/protocol.py
   - vllm/env_override.py
   - vllm/envs.py
-  - vllm/model_hub.py
-  - vllm/model_executor/model_loader/
   - vllm/exceptions.py
   - vllm/inputs/
   - vllm/logging_utils/
