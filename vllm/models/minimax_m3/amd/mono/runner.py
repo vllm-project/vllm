@@ -235,8 +235,8 @@ class MonoDecodeRunner:
         positions: torch.Tensor,
         res: torch.Tensor,
     ) -> torch.Tensor:
-        """Sparse layer ``i``: (ars[i % 2][:n], res) -> (ars[(i + 1) % 2][:n], the
-        returned residual)."""
+        """Sparse layer `i`: `(ars[i % 2][:n], res)` ->
+        `(ars[(i + 1) % 2][:n], returned residual)`."""
         n = res.shape[0]
         block_table, seq_lens, slots, q_len = tables
         k16, v16 = self.kv_views[lw.layer_id]
