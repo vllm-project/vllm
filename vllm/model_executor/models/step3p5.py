@@ -44,7 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -63,10 +63,7 @@ logger = init_logger(__name__)
 
 
 def _get_layer_type(config: PreTrainedConfig, layer_idx: int) -> str:
-    # Upstream configs move the trailing MTP layers to `mtp_layer_types`;
-    # Step-5 keeps them in `layer_types_with_mtp`.
-    if layer_types := getattr(config, "layer_types_with_mtp", None):
-        return layer_types[layer_idx]
+    # Upstream configs move the trailing MTP layers to `mtp_layer_types`
     mtp_layer_types = getattr(config, "mtp_layer_types", None) or []
     return [*config.layer_types, *mtp_layer_types][layer_idx]
 
@@ -271,13 +268,13 @@ class Step3p5Attention(nn.Module):
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
-            attn_backend=self._attn_backend(),
         )
 
         self.max_position_embeddings = max_position
-
-    def _attn_backend(self) -> type[AttentionBackend] | None:
-        return None
+        assert self.partial_rotary_factor == 1 or self.partial_rotary_factor == 0.5
+        self.rotary_dim = (
+            self.head_dim if self.partial_rotary_factor == 1 else self.head_dim // 2
+        )
 
     def forward(
         self,
@@ -419,8 +416,6 @@ class FusedMoEBlock(nn.Module):
 
 
 class Step3p5DecoderLayer(nn.Module):
-    attention_cls: type[Step3p5Attention] = Step3p5Attention
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -441,7 +436,7 @@ class Step3p5DecoderLayer(nn.Module):
         layer_type = _get_layer_type(config, layer_idx)
         use_rope_layers = getattr(config, "use_rope_layers", None)
         assert config.max_position_embeddings is not None
-        self.self_attn = self.attention_cls(
+        self.self_attn = Step3p5Attention(
             hidden_size=self.hidden_size,
             num_heads=_get_num_attention_heads(config, layer_idx, layer_type),
             max_position=config.max_position_embeddings,
@@ -515,8 +510,6 @@ class Step3p5DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Step3p5Model(nn.Module):
-    decoder_layer_cls: type[Step3p5DecoderLayer] = Step3p5DecoderLayer
-
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -539,7 +532,7 @@ class Step3p5Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: self.decoder_layer_cls(
+            lambda prefix: Step3p5DecoderLayer(
                 vllm_config,
                 prefix=prefix,
             ),
@@ -862,7 +855,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
-    model_cls: type[Step3p5Model] = Step3p5Model
 
     def __init__(
         self,
@@ -872,7 +864,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.model = self.model_cls(
+        self.model = Step3p5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:

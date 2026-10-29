@@ -1208,8 +1208,8 @@ class Step5Attention(nn.Module):
             **sparse_impl_args,
         )
         if self.use_dsa_backend:
-            from .csa_tail_ring import Step5CSATailRing
-            from .sparse_summary_cache import Step5SparseSummaryCacheLayer
+            from ..common.csa_tail_ring import Step5CSATailRing
+            from ..common.sparse_summary_cache import Step5SparseSummaryCacheLayer
 
             sparse_config = typing.cast(Step5SparseConfig, sparse_config)
             proxy_dim = int(sparse_config.proxy_dim)
@@ -1644,7 +1644,7 @@ class Step5SparseAttention:
         torch.Tensor,
         bool,
     ]:
-        from .ops.indexer_norm_rope import indexer_norm_rope
+        from ..common.ops.indexer_norm_rope import indexer_norm_rope
 
         owner = self.owner
         index_q, index_k, index_z, extra_dims = owner.qkv_indexer_proj.split_indexer(

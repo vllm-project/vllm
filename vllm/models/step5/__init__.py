@@ -16,8 +16,9 @@ def __getattr__(name: str) -> Any:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        from .amd.model import Step5ForCausalLM, Step5ForConditionalGeneration
+        from .amd.model import Step5ForCausalLM
         from .amd.mtp import Step5MTP
+        from .amd.vl import Step5ForConditionalGeneration
     else:
         from .nvidia.model import Step5ForCausalLM
         from .nvidia.mtp import Step5MTP

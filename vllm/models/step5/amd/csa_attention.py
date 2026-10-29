@@ -9,18 +9,18 @@ import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
-from vllm.models.step5.common.csa_cache import Step5CSAMetadata
-from vllm.models.step5.common.ops.csa_paged import sparse_attention_paged
-from vllm.models.step5.nvidia.ops.sparse_decode_attention import (
+from vllm.models.step5.amd.csa_cache import Step5CSAMetadata
+from vllm.models.step5.amd.ops.csa_paged import sparse_attention_paged
+from vllm.models.step5.common.ops.sparse_decode_attention import (
     sparse_decode_attention,
     sparse_decode_splits,
 )
-from vllm.models.step5.nvidia.ops.sparse_indexer import (
+from vllm.models.step5.common.ops.sparse_indexer import (
     pack_summary_pages,
     select_all_regions,
     select_regions,
 )
-from vllm.models.step5.nvidia.ops.sparse_indexer_scores import (
+from vllm.models.step5.common.ops.sparse_indexer_scores import (
     decode_summary_scores,
     paged_mqa_logits_sm90,
 )

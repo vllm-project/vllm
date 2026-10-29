@@ -11,12 +11,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.models.step5.common.config import get_step5_sparse_config
-from vllm.models.step5.nvidia.ops.prefill_indexer_metadata import (
+from vllm.models.step5.common.ops.prefill_indexer_metadata import (
     PrefillIndexerMetadata,
     prepare_prefill_indexer,
 )
-from vllm.models.step5.nvidia.ops.summary_update import build_prefill_groups
-from vllm.models.step5.nvidia.sparse_summary_cache import (
+from vllm.models.step5.common.ops.summary_update import build_prefill_groups
+from vllm.models.step5.common.sparse_summary_cache import (
     Step5SparseSummaryCacheLayer,
 )
 from vllm.utils.math_utils import cdiv
@@ -146,9 +146,9 @@ class Step5CSABackend(AttentionBackend):
 
 
 class Step5CSASummaryCacheLayer(Step5SparseSummaryCacheLayer):
-    """NVIDIA's FP8 summary layer. Under the layer-outer ROCm KV layout it
-    gets its own KV cache group (a 384-token block), so the CSA op reads it
-    through that group's metadata instead of the main layer's."""
+    """FP8 region summaries in their own KV cache group: under the
+    layer-outer ROCm KV layout they use a 384-token block, so the CSA op
+    reads them through that group's metadata."""
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Step5CSABackend

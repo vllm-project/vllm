@@ -55,8 +55,6 @@ class SharedHead(nn.Module):
 
 
 class Step3p5AMultiTokenPredictorLayer(nn.Module):
-    decoder_layer_cls: type[Step3p5DecoderLayer] = Step3p5DecoderLayer
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -71,7 +69,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, quant_config=quant_config, prefix=f"{prefix}.shared_head"
         )
-        self.mtp_block = self.decoder_layer_cls(
+        self.mtp_block = Step3p5DecoderLayer(
             vllm_config,
             prefix=f"{prefix}.mtp_block",
         )
@@ -97,8 +95,6 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
 
 
 class Step3p5AMultiTokenPredictor(nn.Module):
-    layer_cls: type[Step3p5AMultiTokenPredictorLayer] = Step3p5AMultiTokenPredictorLayer
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -111,7 +107,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): self.layer_cls(
+                str(idx): Step3p5AMultiTokenPredictorLayer(
                     vllm_config,
                     f"{prefix}.layers.{idx}",
                 )
@@ -162,7 +158,6 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 class Step3p5MTP(nn.Module):
     # Each MTP layer's shared_head carries its own LM head weights.
     has_own_lm_head = True
-    predictor_cls: type[Step3p5AMultiTokenPredictor] = Step3p5AMultiTokenPredictor
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -176,7 +171,7 @@ class Step3p5MTP(nn.Module):
         vllm_config.quant_config = draft_quant_config
         self.config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
-        self.model = self.predictor_cls(
+        self.model = Step3p5AMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 

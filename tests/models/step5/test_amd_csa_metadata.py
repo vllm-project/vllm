@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.models.step5.common.csa_cache import Step5CSAMetadataBuilder
+from vllm.models.step5.amd.csa_cache import Step5CSAMetadataBuilder
 from vllm.platforms import current_platform
 
 REGION = 8
