@@ -231,6 +231,9 @@ def rank_worker(
             # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
             # on hardware), instead of raising. Only smoke-test until the
             # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
+            # SWIGLUOAI_UNINTERLEAVE isn't exempted here: its kernel math is
+            # identical to SWIGLUOAI's on this path (see reference_moe_impl),
+            # and it passes the full numerical check below.
             if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
                 assert mk_out.shape == ref_out.shape, (
                     f"AiterMxfp4Experts output shape {mk_out.shape} != "
@@ -293,6 +296,12 @@ MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
     MoEActivation.SWIGLUOAI,
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    # SITU currently generates zero test cases: is_nyi_config() below gates
+    # it off entirely because the installed AITER build's kernel codegen
+    # doesn't support it yet. Kept here so coverage turns on automatically
+    # (no test-harness changes needed) once AITER catches up.
+    MoEActivation.SITU,
 ]
 
 
@@ -308,17 +317,35 @@ def is_nyi_config(config: Config) -> bool:
     ):
         return True
 
+    is_aiter = issubclass(config.fused_experts_type, AiterExperts)
+
     # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
-    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
-    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
-    # heuristic dispatch" at runtime despite being declared supported by
-    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
-    is_w4a16_mxfp4 = (
-        issubclass(config.fused_experts_type, AiterExperts) and config.is_w4a16_mxfp4
+    # has a heuristic-dispatch kernel specialization for the SWIGLUOAI family
+    # (matching gpt-oss' own usage); SWIGLUOAI_UNINTERLEAVE hits the same
+    # kernel as SWIGLUOAI here since rocm_aiter_fused_experts() forces
+    # gate_mode=INTERLEAVE for any W4A16 mxfp4 call regardless of activation,
+    # overriding the uninterleaved hint. SILU/GELU/SITU hit "Unsupported
+    # kernel config for moe heuristic dispatch" at runtime despite being
+    # declared supported by AiterExperts._supports_activation().
+    # https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = is_aiter and config.is_w4a16_mxfp4
+    is_swigluoai_family = config.activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
     )
-    if config.activation == MoEActivation.SWIGLUOAI:
+    if is_swigluoai_family:
         return not is_w4a16_mxfp4
     if is_w4a16_mxfp4:
+        return True
+
+    # AITER's W4A4 MXFP4 (mxfp4 weight, mxfp4 activation) path is the only
+    # candidate kernel specialization for SITU (Kimi-K3 convention), but the
+    # installed AITER build's heuristic dispatch routes this shape through a
+    # ck2stages kernel whose JIT codegen (gen_instances.py) doesn't accept
+    # the "situv2" activation (only silu/gelu/swiglu/gelutanh are valid
+    # choices), so the kernel build itself fails before any numerics can be
+    # compared. Mark NYI until AITER's dispatch/codegen supports it.
+    if config.activation == MoEActivation.SITU:
         return True
 
     if config.activation != MoEActivation.SILU:
@@ -1004,6 +1031,22 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
             "scheme."
         )
 
+    if (
+        quant_config is not None
+        and quant_config.block_shape is None
+        and not pad_intermediate
+    ):
+        pytest.skip(
+            "AITER v0.1.26's ck_moe_stage2 kernel doesn't support the raw "
+            f"(unpadded) intermediate_size={_PADDING_N_UNPADDED} for fp8 "
+            "per-channel/per-tensor schemes -- 'wrong! device_gemm ... "
+            "does not support this GEMM problem'. Regressed vs v0.1.25 "
+            "(https://github.com/vllm-project/vllm/pull/62486); unrelated "
+            "to this test file. Only intermediate_pad-forcing modes "
+            f"(intermediate_size={_PADDING_N_PADDED}) are exercised here "
+            "until AITER fixes it upstream."
+        )
+
     k = _PADDING_K_PADDED if pad_hidden else _PADDING_K_UNPADDED
     n = _PADDING_N_PADDED if pad_intermediate else _PADDING_N_UNPADDED
 
@@ -1200,6 +1243,17 @@ def test_aiter_moe_token_padding_garbage_rows(
             "Batch-wide dynamic per-tensor quant scale is poisoned by a "
             "real inf garbage row. See "
             "https://github.com/ROCm/aiter/issues/6275."
+        )
+
+    if (
+        quant_config is not None
+        and config.fp8_quant_key_pair()[0] == kFp8StaticTensorSym
+    ):
+        pytest.skip(
+            "AITER fused_moe_2stages allocates a2 with torch.empty and stage1 "
+            "never writes the topk_ids=-1 slots, so the dynamic per-tensor a2 "
+            "quant scale is taken over stale memory and can zero every real "
+            "row. Remove once AITER_BRANCH includes https://github.com/ROCm/aiter/pull/6568."
         )
 
     weights = WeightTensors.make(config)

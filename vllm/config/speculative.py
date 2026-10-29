@@ -3,6 +3,7 @@
 
 import copy
 import functools
+import os
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
@@ -16,6 +17,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
+from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -45,6 +47,7 @@ MTPModelTypes = Literal[
     "glm_ocr_mtp",
     "ernie_mtp",
     "nemotron_h_mtp",
+    "nemotron3_5_transcribe_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -111,6 +114,31 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+_MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
+_MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
+
+
+def _get_minimax_m3_dspark_draft(
+    target_model_config: ModelConfig, cache_dir: str | None
+) -> str:
+    """MiniMax-M3 checkpoints ship the DSpark draft as a standalone checkpoint
+    in their `dspark/` subfolder."""
+    draft = get_subfolder_path(
+        target_model_config.model,
+        _MINIMAX_M3_DSPARK_SUBFOLDER,
+        revision=target_model_config.revision,
+        cache_dir=cache_dir,
+    )
+    if not os.path.isfile(os.path.join(draft, "config.json")):
+        raise ValueError(
+            f"MiniMax-M3 DSpark found no draft checkpoint in the "
+            f"'{_MINIMAX_M3_DSPARK_SUBFOLDER}/' subfolder of "
+            f"{target_model_config.model}. Set speculative_config.model to the "
+            "draft checkpoint."
+        )
+    return draft
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -475,6 +503,12 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    disable_lookahead_block_hashes: bool = False
+    """Disable lookahead block hashes for EAGLE-like speculative methods and
+    fall back to dropping the trailing prefix-cache block. Lookahead hashes
+    also cover the tokens the drafter reads after each block, so engines
+    sharing a KV store and external consumers of KV cache events must use the
+    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the
@@ -702,7 +736,15 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
+    def hf_config_override(
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        if transformers_mtp_overrides is not None:
+            # The Transformers modeling backend builds the MTP draft from the
+            # target's config, so it needs none of the rewrites below
+            hf_config.update(transformers_mtp_overrides)
+            return hf_config
         initial_architecture = hf_config.architectures[0]
         if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
             getattr(hf_config, "decoder", None), "causal_vision_prefix", False
@@ -877,6 +919,25 @@ class SpeculativeConfig:
         ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
+
+        if (
+            hf_config.architectures[0]
+            == "Nemotron3_5TranscribeForConditionalGeneration"
+        ):
+            # Its MTP head reads NeMo checkpoint names and takes the audio
+            # embeddings, so it has its own draft class.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.text_config
+            if quantization_config is not None:
+                # The FP8 and NVFP4 checkpoints quantize the MTP head too.
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+            hf_config.model_type = "nemotron3_5_transcribe_mtp"
+            hf_config.update(
+                {
+                    "n_predict": hf_config.num_nextn_predict_layers,
+                    "architectures": ["Nemotron3_5TranscribeMTPModel"],
+                }
+            )
 
         if (
             hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
@@ -1100,7 +1161,25 @@ class SpeculativeConfig:
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
-        if (
+        if initial_architecture == "DSparkMiniMaxDraftModel":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            dflash_config = dict(getattr(hf_config, "dflash_config", None) or {})
+            dflash_config.setdefault("causal", False)
+            hf_config.model_type = "minimax_m3_dspark"
+            hf_config.update(
+                {
+                    "architectures": ["DSparkMiniMaxDraftModel"],
+                    "dflash_config": dflash_config,
+                    "markov_rank": hf_config.dspark_markov_rank,
+                }
+            )
+        elif (
             hf_config.model_type == "minimax_m3_vl"
             or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
         ):
@@ -1158,13 +1237,17 @@ class SpeculativeConfig:
     def _apply_composed_hf_override(
         target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
         hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> PreTrainedConfig:
-        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        hf_config = SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
@@ -1182,10 +1265,15 @@ class SpeculativeConfig:
         method instead.
         """
         if not callable(target_hf_overrides):
-            return SpeculativeConfig.hf_config_override
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+            SpeculativeConfig._apply_composed_hf_override,
+            target_hf_overrides,
+            transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
     @staticmethod
@@ -1226,7 +1314,11 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        # DSpark drafts carry their own width (block size), so the default
+        # draft is resolved even without num_speculative_tokens.
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.method == "dspark"
+        ):
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1244,12 +1336,24 @@ class SpeculativeConfig:
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
             elif self.method == "dspark":
-                # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for dspark")
-                self.model = self.target_model_config.model
-                if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
+                if (
+                    self.target_model_config.hf_config.model_type
+                    in _MINIMAX_M3_MODEL_TYPES
+                ):
+                    self.model = _get_minimax_m3_dspark_draft(
+                        self.target_model_config,
+                        self.draft_load_config.download_dir
+                        if self.draft_load_config
+                        else None,
+                    )
+                else:
+                    # DeepSeek DSpark can ship the weights inside the target
+                    # checkpoint
+                    self.model = self.target_model_config.model
+                    if not self.quantization:
+                        self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
@@ -1354,11 +1458,31 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
+                target = self.target_model_config
+                using_transformers_mtp = (
+                    self.method == "mtp"
+                    and target is not None
+                    and target.using_transformers_backend()
+                    and getattr(target.hf_text_config, "num_mtp_layers", None)
+                    is not None
+                )
+                transformers_mtp_overrides = None
+                if using_transformers_mtp:
+                    if target.hf_config is not target.hf_text_config:
+                        raise NotImplementedError(
+                            "The Transformers modeling backend does not support "
+                            "MTP for multimodal models yet."
+                        )
+                    moe = "MoE" if target.is_moe else ""
+                    transformers_mtp_overrides = {
+                        "architectures": [f"Transformers{moe}ForMTP"],
+                        "n_predict": target.hf_text_config.num_mtp_layers,
+                    }
                 # Compose any callable hf_overrides set on the target so the
                 # draft config receives the same transform (e.g. the test
                 # shrink). Dict overrides stay target-only.
                 draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                    self.target_model_config.hf_overrides
+                    self.target_model_config.hf_overrides, transformers_mtp_overrides
                 )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
@@ -1423,8 +1547,9 @@ class SpeculativeConfig:
                     )
                 ):
                     self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
+                elif using_transformers_mtp or (
+                    self.draft_model_config.hf_config.model_type
+                    in get_args(MTPModelTypes)
                 ):
                     self.method = "mtp"
                     if (
@@ -1504,6 +1629,8 @@ class SpeculativeConfig:
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and "DSparkMiniMaxDraftModel"
+                    not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.
