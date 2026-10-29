@@ -662,9 +662,13 @@ def _index_k_merge_candidates_kernel(
         selected = (0xFFFFFFFF - selected_keys.to(tl.uint32)).to(tl.int32)
         selected = tl.where(selected_keys != 0, selected, 0x7FFFFFFF)
         selected = tl.sort(selected, descending=False)
+        output = tl.where(selected == 0x7FFFFFFF, -1, selected)
+        if PREFILL:
+            # Keep graph-padding rows nonempty for downstream CSR construction.
+            output = tl.where((nvalid == 0) & (positions == 0), 0, output)
         tl.store(
             out_ptr + t * out_stride_t + h * out_stride_h + positions,
-            tl.where(selected == 0x7FFFFFFF, -1, selected),
+            output,
             mask=t < tokens if PREFILL or ROWS > 1 else True,
         )
         if not PREFILL:

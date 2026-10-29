@@ -2612,9 +2612,16 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
         spin_limit=1 << 20,
         prefill=prefill,
     )
+    nonempty = counts > 0
     _assert_sharded_topk(
-        actual, scores.max(dim=0).values.unsqueeze(1), counts, init_blocks, local_blocks
+        actual[nonempty],
+        scores.max(dim=0).values[nonempty].unsqueeze(1),
+        counts[nonempty],
+        init_blocks,
+        local_blocks,
     )
+    empty = [0] + [-1] * 15 if prefill else [-1] * 16
+    assert actual[~nonempty, 0].tolist() == [empty]
     tie_ids = list(range(1 - init_blocks, 16 - init_blocks)) + [47]
     assert actual[2, 0].tolist() == tie_ids
     assert errors.item() == 0
