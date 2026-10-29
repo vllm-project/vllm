@@ -42,10 +42,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             get_w8a8_per_token_fp8_configs,
         )
-        from vllm.utils.platform_utils import (
-            cuda_get_device_properties,
-            get_device_name_as_file_name,
-        )
+        from vllm.utils.platform_utils import get_device_name_as_file_name
 
         n, k = c.weight_shape
         self.has_tuned_configs = bool(
@@ -54,13 +51,10 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
             )
         )
         self.use_heuristic = False
-        if current_platform.is_rocm():
-            arch, processors = cuda_get_device_properties(
-                torch.accelerator.current_device_index(),
-                ("gcnArchName", "multi_processor_count"),
-                init_cuda=True,
-            )
-            self.use_heuristic = arch.split(":")[0] == "gfx1201" and processors == 32
+        if current_platform.is_rocm() and current_platform.supports_fp8():
+            from vllm.platforms.rocm import on_rdna
+
+            self.use_heuristic = on_rdna()
         if self.use_heuristic and not self.has_tuned_configs:
             from vllm.config import get_current_vllm_config
             from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501

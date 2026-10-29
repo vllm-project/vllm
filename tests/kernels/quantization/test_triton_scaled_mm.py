@@ -178,8 +178,9 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("tuned", [False, True])
+@pytest.mark.parametrize("rdna", [False, True])
 def test_triton_fp8_per_token_backend_preserves_linear_shape(
-    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned
+    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned, rdna
 ):
     """Select the backend and validate quantization, weight layout and 3D output."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
@@ -192,6 +193,9 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
         kFp8DynamicTokenSym,
         kFp8StaticChannelSym,
     )
+
+    if current_platform.is_rocm():
+        monkeypatch.setattr("vllm.platforms.rocm.on_rdna", lambda: rdna)
 
     if tuned:
         per_token_fp8_configs[33] = {
@@ -214,6 +218,7 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
             weight_shape=(n, k),
         )
     assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
+    assert kernel.use_heuristic == (current_platform.is_rocm() and rdna)
     if not tuned:
 
         def unexpected_lookup(*_args):
