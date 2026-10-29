@@ -26,9 +26,11 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import (
     _uniform64_from_random53,
+    apply_temperature,
     gumbel_sample,
     murmur3_hash32,
 )
+from vllm.v1.worker.gpu.sample.penalties import apply_penalties
 
 DEVICE = current_platform.device_type
 VOCAB_SIZE = 200_000
@@ -528,3 +530,46 @@ def test_logits_cache_narrower_than_logits_is_rejected():
             logits_cache=cache,
             logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
         )
+
+
+def test_apply_temperature_and_penalties_ieee_rounding():
+    """apply_temperature and apply_penalties must use IEEE round-to-nearest
+    division (tl.div_rn), matching torch tensor division bitwise.
+    """
+    torch.manual_seed(0)
+    num_reqs, vocab_size = 4, 4096
+    base = torch.randn(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    temps = torch.tensor([0.6, 0.7, 1.1, 1.83], dtype=torch.float32, device=DEVICE)
+
+    actual = base.clone()
+    apply_temperature(actual, idx_mapping, temps)
+    expected = base / temps.unsqueeze(1)
+    assert torch.equal(_float_bits(actual), _float_bits(expected))
+
+    # Positive logits penalized by repetition_penalty must also match IEEE division.
+    pos_base = base.abs() + 0.1
+    actual_pen = pos_base.clone()
+    rep_pen = torch.tensor([1.05, 1.1, 1.2, 1.3], dtype=torch.float32, device=DEVICE)
+    zero_pen = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
+    token_ids = torch.zeros(num_reqs + 1, dtype=torch.int32, device=DEVICE)
+    local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE)
+    prompt_mask = torch.full(
+        (num_reqs, (vocab_size + 31) // 32), -1, dtype=torch.int32, device=DEVICE
+    )
+    output_counts = torch.zeros(
+        (num_reqs, vocab_size), dtype=torch.int32, device=DEVICE
+    )
+    apply_penalties(
+        actual_pen,
+        idx_mapping,
+        token_ids,
+        local_pos,
+        rep_pen,
+        zero_pen,
+        zero_pen,
+        prompt_mask,
+        output_counts,
+    )
+    expected_pen = pos_base / rep_pen.unsqueeze(1)
+    assert torch.equal(_float_bits(actual_pen), _float_bits(expected_pen))
