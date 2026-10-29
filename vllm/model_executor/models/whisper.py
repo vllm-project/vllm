@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (
@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
+from vllm.model_executor.offloader import get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -60,7 +61,9 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -93,11 +96,10 @@ class WhisperPosEmbedType(enum.Enum):
 
 
 class WhisperAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -114,10 +116,13 @@ class WhisperEncoderAttention(MMEncoderAttention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Input shape: batch_size x seq_len x hidden_size
-                     or seq_len x hidden_size
+        """Input shape: batch_size x seq_len x hidden_size
+        or seq_len x hidden_size
         """
         is_2d = query.dim() == 2
         if is_2d:
@@ -126,7 +131,14 @@ class WhisperEncoderAttention(MMEncoderAttention):
             value = value.unsqueeze(0)
 
         # Call the parent forward method
-        out = super().forward(query, key, value)
+        out = super().forward(
+            query,
+            key,
+            value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
 
         if is_2d:
             out = out.squeeze(0)
@@ -240,11 +252,29 @@ class WhisperAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q, k, v)
+        if cu_seqlens is None:
+            attn_output = self.attn(q, k, v)
+        else:
+            assert self.attn_type == AttentionType.ENCODER, (
+                "Variable-length attention metadata is only supported for "
+                "encoder self-attention."
+            )
+            attn_output = self.attn(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
 
         output, _ = self.out_proj(attn_output)
 
@@ -296,7 +326,7 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
@@ -381,10 +411,19 @@ class WhisperEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -457,7 +496,12 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
     def __init__(
-        self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        init_in_fp32: bool = False,
+        enable_pp: bool = True,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -474,13 +518,27 @@ class WhisperEncoder(nn.Module):
         self.conv2 = nn.Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3, padding=1)
 
         self.total_stride = self.conv1.stride[0] * self.conv2.stride[0]
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.encoder_layers,
-            lambda prefix: WhisperEncoderLayer(
+
+        def create_layer(prefix: str) -> nn.Module:
+            return WhisperEncoderLayer(
                 vllm_config=vllm_config, prefix=f"{prefix}.layers"
-            ),
-            prefix=f"{prefix}.layers",
-        )
+            )
+
+        if enable_pp:
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.encoder_layers,
+                create_layer,
+                prefix=f"{prefix}.layers",
+            )
+        else:
+            self.start_layer = 0
+            self.end_layer = config.encoder_layers
+            self.layers = nn.ModuleList(
+                get_offloader().wrap_modules(
+                    create_layer(prefix=f"{prefix}.layers.{idx}")
+                    for idx in range(config.encoder_layers)
+                )
+            )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         if self.pos_embed_type not in (
@@ -667,68 +725,52 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
         # num_audio_tokens. So that we can create dummy data from this
         # for encoder profiling.
         return [0]
 
-    def _call_hf_processor(
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                truncation=True,
             )
-        # The HF WhisperProcessor passes **kwargs to both the tokenizer
-        # and the feature extractor. Text-tokenizer kwargs like
-        # `truncation` and `max_length` must be removed when audio data
-        # is present, otherwise the feature extractor interprets
-        # `max_length` as raw audio samples and truncates the audio.
-        tok_kwargs = {
-            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
-        }
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -780,6 +822,7 @@ class WhisperForConditionalGeneration(
             ".encoder_attn.k_proj": (".encoder_attn.kv_proj", 0),
             ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
         },
+        orig_to_new_prefix={"proj_out.": None},
     )
 
     # Whisper only supports audio-conditioned generation.
@@ -830,7 +873,7 @@ class WhisperForConditionalGeneration(
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: TokenizerLike,
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
@@ -866,14 +909,13 @@ class WhisperForConditionalGeneration(
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
-    ) -> str | None:
+        tokenizer: TokenizerLike,
+    ) -> str:
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
         ``<|xx|>`` format. Expects a valid language token from constrained generation.
         """
-
         decoded = tokenizer.decode(
             [token_ids[0]],
             skip_special_tokens=False,
@@ -963,6 +1005,7 @@ class WhisperForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         # Split concatenated encoder outputs into one tensor per audio input
         enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        assert enc_output is not None
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
 
@@ -980,8 +1023,12 @@ class WhisperForConditionalGeneration(
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
 
+        def to_dtype(value: object) -> torch.Tensor:
+            assert isinstance(value, torch.Tensor)
+            return value.to(self.dtype)
+
         if input_features is not None:
-            input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
+            input_features = json_map_leaves(to_dtype, input_features)
 
         return WhisperAudioInputs(input_features=input_features)
 
@@ -990,23 +1037,56 @@ class WhisperForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
+        loader = AutoWeightsLoader(self)
 
-        # add fake zeros bias for k_proj to state_dict
-        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        # add fake zeros bias for k_proj to state_dict. Covers the
+        # ``.k_proj.weight`` and the compressed-tensors packed
+        # ``.k_proj.weight_packed`` checkpoints.
+        k_proj_weight_suffixes = (".k_proj.weight", ".k_proj.weight_packed")
+        for suffix in k_proj_weight_suffixes:
+            weights = _create_fake_bias_for_k_proj(
+                weights, suffix, out_features=self.config.d_model
+            )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[tuple[str, torch.Tensor]], fake_bias_key_name: str
+    weights: Iterable[tuple[str, torch.Tensor]],
+    fake_bias_key_name: str,
+    out_features: int | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
+    """Create full zeros bias for k_proj weight in self-attn and x-attn layers.
+    So that the bias for k_proj in qkv_proj or kv_proj can be initialized with
+    zeros.
+
+    If the checkpoint already provides a real ``.bias`` entry for the given
+    weight, it is forwarded as-is and no fake bias is injected for that layer.
     """
-    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
-    So that the bias for k_proj in qkv_proj can be initialized with zeros.
-    """
+    # Map the weight-name suffix to the corresponding bias-name suffix, e.g.
+    # ".k_proj.weight_packed" / ".k_proj.weight" -> ".k_proj.bias",
+    # ".wk.weight" -> ".wk.bias". ``.weight_packed`` is stripped first so the
+    # longer suffix wins.
+    bias_key_name = (
+        fake_bias_key_name.removesuffix(".weight_packed").removesuffix(".weight")
+        + ".bias"
+    )
+
+    real_bias_names: set[str] = set()
+    pending: dict[str, torch.Tensor] = {}
     for name, weight in weights:
         yield name, weight
+
+        if name.endswith(bias_key_name):
+            real_bias_names.add(name)
+            pending.pop(name, None)
+            continue
+
         if name.endswith(fake_bias_key_name):
-            bias = torch.zeros(weight.size(0))
-            bias_name = name.replace("weight", "bias")
-            yield bias_name, bias
+            bias_name = name[: -len(fake_bias_key_name)] + bias_key_name
+            if bias_name not in real_bias_names:
+                pending[bias_name] = torch.zeros(
+                    out_features if out_features is not None else weight.size(0)
+                )
+
+    for bias_name, bias in pending.items():
+        yield bias_name, bias

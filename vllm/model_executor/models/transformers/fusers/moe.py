@@ -1,32 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MoE fuser: route an HF MoE block through `FusedMoE` with vLLM's own routing."""
+"""MoE fuser: run an HF MoE block's gate, experts and shared experts in `FusedMoE`."""
 
 import ast
+import functools
 import inspect
 import textwrap
 import types
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from itertools import chain
 
 import torch
 from torch import fx, nn
+from typing_extensions import TypeIs
 
 from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
+    is_complete,
     is_op,
+    output_value,
     peel,
     trace,
 )
+from vllm.model_executor.models.transformers.utils import named_state
 from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
 
-
-def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
-    """`module`'s own state (i.e. named parameters and buffers)."""
-    return chain(module.named_parameters(), module.named_buffers())
+logger = init_logger(__name__)
 
 
 def _own_returns(node: ast.AST) -> Iterator[ast.Return]:
@@ -79,6 +82,25 @@ def _is_scalar_gate(module: nn.Module) -> bool:
     )
 
 
+def _forced_dtype(nodes: Iterable[fx.Node]) -> torch.dtype | None:
+    """The floating dtype `nodes` cast to, if any.
+
+    Computations that must run in higher precision say so in their forward (e.g.
+    `hidden_states.type(torch.float32)`), so the dtype is readable from the graph
+    even when the config does not name it."""
+    for node in nodes:
+        if node.op not in ("call_method", "call_function"):
+            continue
+        name = str(node.target).rsplit(".", 1)[-1]
+        if name == "float":
+            return torch.float32
+        if name in ("to", "type"):
+            for arg in (*node.args[1:], *node.kwargs.values()):
+                if isinstance(arg, torch.dtype) and arg.is_floating_point:
+                    return arg
+    return None
+
+
 def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
     """Returns the set of nodes reachable from `node` by following `key` edges."""
     seen: set[fx.Node] = set()
@@ -90,6 +112,53 @@ def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
         seen.add(n)
         stack.extend(getattr(n, key))
     return seen
+
+
+def _renormalizes(topk: fx.Node) -> bool:
+    """Are the top-k weights divided by their own sum?
+
+    Every HF router spells renormalization as a division by a sum over the
+    selection, optionally offset by an epsilon."""
+    downstream = _reaches(topk, "users")
+    for node in downstream:
+        if not (is_op(node, "div") or is_op(node, "truediv")) or len(node.args) < 2:
+            continue
+        denominator = node.args[1]
+        if not isinstance(denominator, fx.Node):
+            continue
+        cone = _reaches(denominator, "all_input_nodes")
+        if any(is_op(n, "sum") and n in downstream for n in cone):
+            return True
+    return False
+
+
+def _unwrap(node: object, moe_block: nn.Module) -> object:
+    """Strip reshapes, dtype casts and `nn.Identity` calls."""
+    while True:
+        node = peel(node)
+        if (
+            is_op(node, "reshape")
+            or is_op(node, "view")
+            or (
+                isinstance(node, fx.Node)
+                and node.op == "call_module"
+                and isinstance(moe_block.get_submodule(node.target), nn.Identity)
+            )
+        ):
+            node = node.args[0]
+        else:
+            return node
+
+
+def _reads_input(node: object, x: fx.Node, moe_block: nn.Module) -> TypeIs[fx.Node]:
+    """Is `node` a child module of `moe_block` called on just `x`?"""
+    return (
+        isinstance(node, fx.Node)
+        and node.op == "call_module"
+        and len(node.args) == 1
+        and not node.kwargs
+        and _unwrap(node.args[0], moe_block) is x
+    )
 
 
 class SharedExpertMLP(nn.Module):
@@ -128,118 +197,220 @@ class MoEBlockFuser:
     """Fuser for MoE block `experts`, `gate` and `shared_experts` (optional)."""
 
     gate_name: str
-    scoring_func: str
+    scoring_func: str | None
+    """`None` if routing stays in the Transformers gate."""
     shared_name: str | None
     shared_gate_name: str | None
+    router_dtype: torch.dtype | None = None
+    renormalize: bool | None = None
 
     @staticmethod
-    def _match_router(gate: nn.Module) -> str | None:
-        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`."""
-        if [name for name, _ in named_state(gate)] != ["weight"]:
+    def _match_router(
+        gate: nn.Module,
+    ) -> tuple[str, torch.dtype | None, bool | None] | None:
+        """Matches `topk(score(linear(x)))` or `score(topk(linear(x)))`, `score` being
+        `softmax`/`sigmoid`.
+
+        Returns the scoring function, the dtype the router computes in, and
+        whether the top-k weights are renormalized (`None` if the trace was cut
+        short before it could say)."""
+        state = {name for name, _ in named_state(gate)}
+        if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
         graph = trace(gate)
         if graph is None:
             return None
-        topk = find_node(graph, lambda n: is_op(n, "topk"))
-        if topk is None:
+        # The routing top-k is the last one; any earlier one scores expert groups.
+        topks = [node for node in graph.nodes if is_op(node, "topk")]
+        if not topks:
             return None
-        # Exactly one scoring op upstream of the top-k, fed (transitively) by a linear.
-        scorers = [
-            n
-            for n in _reaches(topk, "all_input_nodes")
-            if is_op(n, "softmax") or is_op(n, "sigmoid")
-        ]
+        topk = topks[-1]
+        is_scorer = lambda n: is_op(n, "softmax") or is_op(n, "sigmoid")
+        post_topk = False
+        # Find all scoring functions that reach the top-k node.
+        scorers = [n for n in _reaches(topk, "all_input_nodes") if is_scorer(n)]
+        if not scorers:
+            # Find all scoring functions that are users of the top-k node.
+            scorers = [n for n in _reaches(topk, "users") if is_scorer(n)]
+            post_topk = True
         if len(scorers) != 1:
             return None
         scorer = scorers[0]
-        if not any(is_op(n, "linear") for n in _reaches(scorer, "all_input_nodes")):
+        logits_cone = _reaches(scorer, "all_input_nodes")
+        if not any(is_op(n, "linear") for n in logits_cone):
             return None
-        return "softmax" if is_op(scorer, "softmax") else "sigmoid"
+        is_softmax = is_op(scorer, "softmax")
+        # vLLM always scores every expert, so matching a router that softmaxes
+        # the selection alone takes renormalizing. Otherwise look for the
+        # division, reading its absence as "no" only from a complete trace.
+        renormalize: bool | None
+        if (post_topk and is_softmax) or _renormalizes(topk):
+            renormalize = True
+        else:
+            renormalize = False if is_complete(graph) else None
+        scoring_func = "softmax" if is_softmax else "sigmoid"
+        return scoring_func, _forced_dtype(logits_cone), renormalize
+
+    @staticmethod
+    def _match_experts(
+        graph: fx.Graph, experts_name: str, moe_block: nn.Module
+    ) -> tuple[fx.Node, fx.Node, fx.Node] | None:
+        """Matches `experts(x, ids, weights)` with `_, weights, ids = gate(x)`, `x`
+        being the block's input.
+
+        Returns the experts call, `x` and the gate call."""
+        experts = find_node(
+            graph, lambda n: n.op == "call_module" and n.target == experts_name
+        )
+        if experts is None:
+            return None
+        # Bind by signature so keyword calls match too. Fail closed on any other
+        # argument: the rewritten forward would drop it.
+        forward = inspect.signature(moe_block.get_submodule(experts_name).forward)
+        try:
+            bound = forward.bind(*experts.args, **experts.kwargs)
+        except TypeError:
+            return None
+        if len(bound.arguments) != 3:
+            return None
+        x, ids, weights = (_unwrap(a, moe_block) for a in bound.arguments.values())
+        if not (isinstance(x, fx.Node) and x.op == "placeholder"):
+            return None
+        if not (is_op(ids, "getitem") and is_op(weights, "getitem")):
+            return None
+        gate = ids.args[0]
+        if not (
+            _reads_input(gate, x, moe_block)
+            and ids.args == (gate, 2)
+            and weights.args == (gate, 1)
+        ):
+            return None
+        return experts, x, gate
 
     @staticmethod
     def _match_shared_experts(
-        graph: fx.Graph, experts: str
-    ) -> tuple[str | None, str | None]:
-        """Detects the shared expert and its optional gate by dataflow."""
-        experts_predicate = lambda n: n.op == "call_module" and n.target == experts
-        if (experts_node := find_node(graph, experts_predicate)) is None:
-            return None, None
-        from_experts = _reaches(experts_node, "users")
-        for add in graph.nodes:
-            if not is_op(add, "add"):
+        node: object, x: fx.Node, moe_block: nn.Module
+    ) -> tuple[str, str | None] | None:
+        """Matches `shared(x)` or `sigmoid(shared_gate(x)) * shared(x)`.
+
+        Returns the shared expert's name and its optional gate's name."""
+        if _reads_input(node, x, moe_block):
+            return node.target, None
+        if not (is_op(node, "mul") and len(node.args) == 2):
+            return None
+        for gated, shared in (node.args, node.args[::-1]):
+            gated, shared = peel(gated), peel(shared)
+            if not (is_op(gated, "sigmoid") and _reads_input(shared, x, moe_block)):
                 continue
-            operands = [a for a in add.args if isinstance(a, fx.Node)]
-            # Exactly one side is the experts' output; the other is the shared path.
-            sides = [a in from_experts for a in operands]
-            if len(operands) != 2 or sides.count(True) != 1:
-                continue
-            cone = _reaches(operands[sides.index(False)], "all_input_nodes")
-            modules = [n for n in cone if n.op == "call_module" and n.target != experts]
-            # A sigmoid wrapping one of those modules marks the shared-expert gate.
-            gate = next(
-                (
-                    src
-                    for n in cone
-                    if is_op(n, "sigmoid")
-                    and isinstance(src := peel(n.args[0]), fx.Node)
-                    and src in modules
-                ),
-                None,
-            )
-            shared = [n for n in modules if n is not gate]
-            if len(shared) != 1:
-                return None, None
-            return shared[0].target, (gate.target if gate is not None else None)
-        return None, None
+            gate = peel(gated.args[0])
+            if _reads_input(gate, x, moe_block) and _is_scalar_gate(
+                moe_block.get_submodule(gate.target)
+            ):
+                return shared.target, gate.target
+        return None
 
     @classmethod
-    def match(cls, moe_block: nn.Module, experts_name: str) -> "MoEBlockFuser | None":
+    def match(
+        cls,
+        moe_block: nn.Module,
+        experts_name: str,
+        divides_shared_output: bool = False,
+    ) -> "MoEBlockFuser | None":
+        """Matches a block returning `experts(x, ids, weights) [* c] [+ shared(x)]`
+        with `_, weights, ids = gate(x)`, `x` being the block's input, up to
+        reshapes, casts and `nn.Identity`.
+
+        Args:
+            moe_block: The MoE block.
+            experts_name: The name of the experts in `moe_block`.
+            divides_shared_output: Whether vLLM routing would divide the shared
+                expert's output by `routed_scaling_factor` (fp16 overflow
+                protection), which Transformers decoder layers do not undo.
+
+        Returns:
+            A fuser if more than the experts can run in vLLM, else `None`.
+
+        """
         # Standard MoE block returns a single tensor.
         if _returns_tuple(type(moe_block)):
             return None
-        # Router: the child that scores + top-k selects.
-        gate_name = scoring_func = None
-        for name, child in moe_block.named_children():
-            if name != experts_name and (func := cls._match_router(child)) is not None:
-                gate_name, scoring_func = name, func
-                break
-        if gate_name is None or scoring_func is None:
+        if (graph := trace(moe_block)) is None:
             return None
-        # Shared expert: a child the block adds to the experts' output.
-        shared_name = shared_gate_name = None
-        others = [
-            n
-            for n, _ in moe_block.named_children()
-            if n not in {experts_name, gate_name}
-        ]
-        if others:
-            graph = trace(moe_block)
-            if graph is None:
-                return None
-            shared_name, shared_gate_name = cls._match_shared_experts(
-                graph, experts_name
+        if (matched := cls._match_experts(graph, experts_name, moe_block)) is None:
+            return None
+        experts, x, gate = matched
+        unwrap = functools.partial(_unwrap, moe_block=moe_block)
+        gate_name = gate.target
+        router = cls._match_router(getattr(moe_block, gate_name))
+        scoring_func, router_dtype, renormalize = router or (None, None, None)
+
+        def is_routed(n: object) -> bool:
+            return n is experts or (
+                is_op(n, "mul")
+                and not isinstance(n.args[1], fx.Node)
+                and unwrap(n.args[0]) is experts
             )
-            if shared_gate_name is not None and not _is_scalar_gate(
-                getattr(moe_block, shared_gate_name)
-            ):
+
+        # Output: the experts' output, plus the shared expert's if any.
+        routed = out = unwrap(output_value(graph))
+        shared = None
+        if not is_routed(out):
+            if not (is_op(out, "add") and len(out.args) == 2):
                 return None
+            routed, shared = map(unwrap, out.args)
+            if is_routed(shared):
+                routed, shared = shared, routed
+            if not is_routed(routed):
+                return None
+        shared_name = shared_gate_name = None
+        if shared is not None:
+            if (match := cls._match_shared_experts(shared, x, moe_block)) is None:
+                return None
+            shared_name, shared_gate_name = match
         # Fail closed: `rewrite_forward` runs only the experts and the detected
         # shared expert, so any other stateful child would be dropped.
         accounted = {experts_name, gate_name, shared_name, shared_gate_name}
         for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
-        return cls(gate_name, scoring_func, shared_name, shared_gate_name)
+        if scoring_func is not None and shared_name and divides_shared_output:
+            logger.warning_once(
+                "%s could be fused but routing it in vLLM would apply "
+                "`routed_scaling_factor` by dividing the shared expert output, "
+                "which only fp16 overflow protection expects the decoder layer to "
+                "compensate for. Falling back to routing in Transformers; run in "
+                "bfloat16 to fuse it.",
+                type(moe_block).__name__,
+            )
+            scoring_func = router_dtype = renormalize = None
+        # Without vLLM routing, only a shared expert can move to vLLM, and only
+        # if the block does not scale the experts' output (vLLM routing does).
+        if scoring_func is None and (shared_name is None or routed is not experts):
+            return None
+        return cls(
+            gate_name,
+            scoring_func,
+            shared_name,
+            shared_gate_name,
+            router_dtype,
+            renormalize,
+        )
 
-    def gate(self, moe_block: nn.Module, prefix: str) -> ReplicatedLinear:
-        """Rebuild the HF gate as a `ReplicatedLinear` for vLLM's fused MoE."""
-        num_experts, hidden_size = getattr(moe_block, self.gate_name).weight.shape
-        gate = ReplicatedLinear(
+    def gate(
+        self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
+    ) -> GateLinear:
+        """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
+        hf_gate = getattr(moe_block, self.gate_name)
+        num_experts, hidden_size = hf_gate.weight.shape
+        gate = GateLinear(
             hidden_size,
             num_experts,
             bias=False,
+            out_dtype=out_dtype or self.router_dtype,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
+        if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:
+            gate.register_buffer("e_score_correction_bias", bias)
         setattr(moe_block, self.gate_name, gate)
         return gate
 

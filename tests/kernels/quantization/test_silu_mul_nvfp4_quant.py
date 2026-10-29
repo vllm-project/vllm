@@ -23,7 +23,7 @@ FP4_DTYPE = torch.uint8
 FP8_DTYPE = current_platform.fp8_dtype()
 
 DTYPES = [torch.float16, torch.bfloat16]
-SHAPES = [(128, 256), (128, 128), (256, 256), (256, 128)]
+SHAPES = [(128, 256), (128, 128), (256, 256), (256, 128), (1, 256), (64, 256)]
 BLOCK_SIZE = 16
 
 
@@ -76,3 +76,44 @@ def test_silu_mul_nvfp4_quant(
     torch.testing.assert_close(
         ref_output_dequant, fused_output_dequant, atol=atol, rtol=rtol
     )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", [(90, 160), (1, 160), (130, 96), (128, 256)])
+@torch.inference_mode()
+def test_silu_mul_nvfp4_quant_scale_padding_initialized(
+    default_vllm_config,
+    dtype: torch.dtype,
+    shape: tuple[int, int],
+) -> None:
+    """The kernel must overwrite dirty scale padding (rows and columns)
+    without relying on a zero-initialized allocation."""
+    set_random_seed(42)
+    device = "cuda:0"
+    torch.set_default_device(device)
+
+    m, two_d = shape
+    d = two_d // 2
+    round_up = lambda x, y: (x + y - 1) // y * y
+    rounded_m = round_up(m, 128)
+    rounded_scale_n = round_up(d // BLOCK_SIZE, 4)
+
+    x = torch.randn(shape, dtype=dtype)
+    global_scale = torch.tensor(1.0, dtype=torch.float32)
+
+    out = torch.empty((m, d // 2), dtype=FP4_DTYPE)
+    out_scale = torch.full(
+        (rounded_m, rounded_scale_n // 4), 0x7F7F7F7F, dtype=torch.int32
+    )
+    torch.ops._C.silu_and_mul_nvfp4_quant(out, out_scale, x, global_scale)
+
+    tmp = out_scale.view(FP8_DTYPE).reshape(
+        1, rounded_m // 128, rounded_scale_n // 4, 32, 4, 4
+    )
+    full_scale = tmp.permute(0, 1, 4, 3, 2, 5).reshape(rounded_m, rounded_scale_n)
+    full_scale = full_scale.to(torch.float32)
+
+    assert torch.count_nonzero(full_scale[m:, :]) == 0
+    assert torch.count_nonzero(full_scale[:m, d // BLOCK_SIZE :]) == 0
+    # Valid entries must have been written (no leftover 0x7F == NaN fill).
+    assert not torch.isnan(full_scale[:m, : d // BLOCK_SIZE]).any()

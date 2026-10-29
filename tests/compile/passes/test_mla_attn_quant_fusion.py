@@ -8,6 +8,7 @@ import torch._dynamo
 from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.mla_attn_quant_fusion import (
@@ -141,7 +142,6 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         the full output[:num_actual_toks] buffer after both forward_mha and
         forward_mqa have written their results.
         """
-
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
@@ -150,27 +150,14 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # MLA KV cache is 3D: (num_blocks, block_size, head_size)
-        attn_backend = self.mla_attn.attn_backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, 1, self.head_size
+        # MLA KV cache is 4D: (num_blocks, num_heads=1, block_size, head_size)
+        kv_cache = torch.zeros(
+            (num_blocks, 1, self.block_size, self.head_size),
+            dtype=self.kv_cache_dtype,
+            device=self.device,
         )
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        ordered_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        raw_tensor = torch.zeros(
-            ordered_shape, dtype=self.kv_cache_dtype, device=self.device
-        )
-        kv_cache = raw_tensor.permute(*inv_order)
-
-        self.mla_attn.kv_cache = kv_cache
+        self.mla_attn.bind_kv_cache(kv_cache)
 
         self.attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -222,6 +209,18 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             output_shape=(q.shape[0], self.output_dim),
         )
         return self.fp8_linear(attn_output)
+
+
+class TestMLAAttentionAiterFp8StaticQuantPatternModel(
+    TestMLAAttentionFp8StaticQuantPatternModel
+):
+    aiter_quant = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fp8_linear.kernel.quant_fp8.use_aiter = True
+        assert self.fp8_linear.input_scale is not None
+        self.fp8_linear.input_scale.fill_(0.125)
 
 
 class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
@@ -285,7 +284,6 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
 
     quant_key = kFp8Dynamic128Sym
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         weight_block_size=[128, 128],
     )
 
@@ -376,13 +374,27 @@ if current_platform.is_cuda():
     ]
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
     BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
+elif current_platform.is_rocm():
+    # ROCm supports the static-FP8 output-quant fusion through AITER MLA.
+    # Per-group FP8 still relies on the CUDA-only CUTLASS block-scaled
+    # kernel, and NVFP4 is NVIDIA-specific.
+    MLA_DIMS = [(16, 128, 64, 128, 512)]
+    PATTERN_TEST_MODELS_MLA_FP8 = [
+        (
+            "deepseek-ai/DeepSeek-V2-Lite",
+            TestMLAAttentionFp8StaticQuantPatternModel,
+        )
+    ]
+    BACKENDS_MLA_FP8 = [AttentionBackendEnum.ROCM_AITER_MLA]
 
 
 @pytest.mark.parametrize(
     "num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank",
     MLA_DIMS,
 )
-@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
+@pytest.mark.parametrize(
+    "batch_size", [7, 256] if current_platform.is_cuda_alike() else [8]
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
@@ -419,17 +431,15 @@ def test_mla_attention_quant_pattern(
     model_class: type[MLAAttentionQuantPatternModel],
     backend: AttentionBackendEnum,
     dist_init,
-    monkeypatch,
-    use_fresh_inductor_cache,
+    disable_vllm_compile_cache,
+    workspace_init,
 ):
-    """Test MLA AttentionQuantPattern fusion pass"""
+    """Test MLA AttentionQuantPattern fusion pass."""
     if (
         model_class is TestMLAAttentionNvfp4QuantPatternModel
         and not is_nvfp4_supported()
     ):
         pytest.skip("NVFP4 is not supported on this GPU (requires SM 100+).")
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -484,6 +494,12 @@ def test_mla_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config_unfused,
         )
+        if (
+            model_class is TestMLAAttentionFp8GroupQuantPatternModel
+            and type(model_unfused.block_fp8_linear.kernel)
+            is not CutlassFp8BlockScaledMMKernel
+        ):
+            pytest.skip("CUTLASS FP8 block kernel is not supported on this platform")
         model_unfused = model_unfused.to(device)
         # HACK: See #131044
         result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841
@@ -547,12 +563,16 @@ def test_mla_attention_quant_pattern(
 
     # Check quantization ops in the graph
     is_per_group = quant_key.scale.group_shape.is_per_group()
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
+    aiter_quant = getattr(model_class, "aiter_quant", False)
+    if "-quant_fp8" in custom_ops_list:
+        quant_op = torch.ops.aten.reciprocal
+    elif aiter_quant or rocm_aiter_ops.is_linear_fp8_enabled():
+        quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+    else:
+        quant_op = QUANT_OPS[quant_key]
+    test_backend.check_before_ops(
+        [quant_op], fully_replaced=is_per_group or aiter_quant
     )
-    test_backend.check_before_ops([quant_op], fully_replaced=is_per_group)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
@@ -585,3 +605,31 @@ def test_mla_attention_quant_pattern(
 
     # Check numerical correctness
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="Requires ROCm AITER MLA attention and quantization",
+)
+def test_rocm_aiter_static_quant_mla_attention(
+    dist_init, disable_vllm_compile_cache, workspace_init, monkeypatch
+):
+    """Fuse AITER's static FP8 quant into the AITER MLA attention output."""
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            test_mla_attention_quant_pattern(
+                *MLA_DIMS[0],
+                batch_size=8,
+                dtype=torch.bfloat16,
+                custom_ops="+quant_fp8",
+                model_name="deepseek-ai/DeepSeek-V2-Lite",
+                model_class=TestMLAAttentionAiterFp8StaticQuantPatternModel,
+                backend=AttentionBackendEnum.ROCM_AITER_MLA,
+                dist_init=dist_init,
+                disable_vllm_compile_cache=disable_vllm_compile_cache,
+                workspace_init=workspace_init,
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()

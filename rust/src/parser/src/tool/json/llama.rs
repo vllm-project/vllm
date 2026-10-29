@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::seq;
 use winnow::error::{ModalResult, StrContext};
@@ -12,7 +13,9 @@ use super::{
     argument_delta_event, tool_call_header_event,
 };
 use crate::tool::utils::{JsonObjectScanState, parse_buffered_event};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{
+    Result, StructuralTagBuilder, Tool, ToolCallDelta, ToolParser, ToolParserOutput,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LlamaJsonMode {
@@ -129,19 +132,19 @@ impl Llama3JsonToolParser {
 }
 
 impl ToolParser for Llama3JsonToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Llama)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Llama.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         if !self.commit_start() {
             return Ok(());
@@ -206,6 +209,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Llama JSON",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),

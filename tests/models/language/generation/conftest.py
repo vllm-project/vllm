@@ -2,45 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pytest configuration for vLLM language generation tests."""
 
-import os
-import warnings
+import pytest
 
-import torch
-
+from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
 from vllm.platforms import current_platform
 
+_previous_model: str | None = None
 
-def pytest_configure(config):
-    """Early ROCm configuration that must happen before test collection."""
+
+@pytest.fixture(autouse=True)
+def release_previous_checkpoint_cache(request):
+    """Free the previous test's checkpoint page cache when the model changes.
+
+    Page cache counts against the container's memory cgroup, so on ROCm CI the
+    checkpoints these tests read would otherwise fill the pod's memory limit.
+    """
+    global _previous_model
     if not current_platform.is_rocm():
         return
-
-    # Disable skinny GEMM on ROCm to avoid non-deterministic results
-    # from atomic reductions in wvSplitKrc kernel.
-    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-    os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
-    warnings.warn(
-        "ROCm: Set VLLM_ROCM_USE_SKINNY_GEMM=0 to avoid non-deterministic "
-        "results from skinny GEMM atomic reductions",
-        UserWarning,
-        stacklevel=1,
-    )
-
-
-def pytest_sessionstart(session):
-    """Configure ROCm-specific settings before test session starts."""
-    if not current_platform.is_rocm():
+    callspec = getattr(request.node, "callspec", None)
+    model = callspec.params.get("model") if callspec else None
+    if not isinstance(model, str):
         return
-
-    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-    warnings.warn(
-        "ROCm: Disabled flash_sdp and mem_efficient_sdp, enabled math_sdp "
-        "to avoid HuggingFace Transformers accuracy issues",
-        UserWarning,
-        stacklevel=1,
-    )
+    if _previous_model is not None and _previous_model != model:
+        drop_checkpoint_cache(_previous_model)
+    _previous_model = model

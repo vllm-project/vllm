@@ -86,25 +86,28 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         params = self._get_layer_params(layer)
         assert layer.weight_block_size is not None
 
+        is_bmm = getattr(layer, "is_bmm", False)
+
         if self.is_deep_gemm_supported:
-            weight_scale_invs = params.weight_scale_inv
-            scale_attr = (
-                params.WEIGHT_SCALE_INV
-                if weight_scale_invs is not None
-                else params.WEIGHT_SCALE
-            )
             dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
                 wq=params.weight,
-                ws=weight_scale_invs
-                if weight_scale_invs is not None
-                else params.weight_scale,
+                ws=params.block_scale,
                 quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=self.use_deep_gemm_e8m0,
-                is_bmm=getattr(layer, "is_bmm", False),
+                is_bmm=is_bmm,
                 bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
-            replace_parameter(layer, scale_attr, dg_weight_scale)
+            replace_parameter(layer, params.block_scale_attr, dg_weight_scale)
+        # bmm layers bypass this kernel and run through fp8_einsum.
+        if not is_bmm:
+            layer.deep_gemm_warmup_provider = self
+
+    def get_deep_gemm_warmup_weights(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        params = self._get_layer_params(layer)
+        return params.weight, params.block_scale
 
     def apply_block_scaled_mm(
         self,
@@ -139,20 +142,8 @@ def _fp8_gemm_nt_op(
     )
 
 
-def _fp8_gemm_nt_op_fake(
-    q_input: torch.Tensor,
-    input_scale: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    output: torch.Tensor,
-    use_deep_gemm_e8m0: bool,
-) -> None:
-    return None
-
-
 direct_register_custom_op(
     "fp8_gemm_nt_op",
     _fp8_gemm_nt_op,
     mutates_args=["output"],
-    fake_impl=_fp8_gemm_nt_op_fake,
 )

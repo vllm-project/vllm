@@ -8,12 +8,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.hy_v3_tool_parser import HYV3ToolParser
 
@@ -159,6 +159,7 @@ def _collect_streaming_tool_calls(results: list[DeltaMessage | None]) -> list[di
             continue
         for tc in result.tool_calls:
             idx = tc.index
+            assert tc.function is not None
             if idx not in tool_calls:
                 tool_calls[idx] = {
                     "name": tc.function.name or "",
