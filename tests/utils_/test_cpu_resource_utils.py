@@ -223,6 +223,16 @@ def test_visible_memory_node_assigned_ids_are_limited_to_allowed_nodes(
     assert cru.get_visible_memory_node([1, 4]) == [1]
 
 
+def test_visible_memory_node_falls_back_when_device_ids_are_not_numa_nodes(
+    monkeypatch,
+):
+    """DP×TP device ranks past the last NUMA node must not yield an empty list."""
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    monkeypatch.delenv(cru.DEVICE_CONTROL_ENV_VAR, raising=False)
+    assert cru.get_visible_memory_node([2, 3]) == [0, 1]
+
+
 def test_visible_memory_node_sim_multi_numa_ignores_assigned_ids(
     six_numa_nodes, monkeypatch
 ):

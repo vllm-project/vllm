@@ -265,7 +265,14 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
         return allowed_memory_node_list
 
     if assigned_node_ids is not None:
-        return [node for node in assigned_node_ids if node in allowed_memory_node_list]
+        # DP×TP on CPU hands out device ranks (for example [2, 3] on DP rank 1
+        # with TP=2). Those are not NUMA node ids. Dropping every id leaves an
+        # empty list and CPUWorker then indexes [0].
+        assigned_nodes = [
+            node for node in assigned_node_ids if node in allowed_memory_node_list
+        ]
+        if assigned_nodes:
+            return assigned_nodes
 
     env_key = DEVICE_CONTROL_ENV_VAR
     if env_key in os.environ and os.environ[env_key] != "":
