@@ -656,7 +656,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
-    # Under VLLM_BATCH_INVARIANT, keep the EAGLE/MTP drafter batch invariant.
+    # Under VLLM_BATCH_INVARIANT, keep the speculative drafter batch invariant.
     # Set to 0 to let the drafter use faster non-batch-invariant kernels.
     # Target tokens, logprobs and the output distribution are unaffected
     # (lossless rejection sampling), but with temperature > 0 the token a

@@ -15,6 +15,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.scope import drafter_build_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -234,7 +235,8 @@ class DraftModelSpeculator(BaseSpeculator):
             ).keys()
         )
 
-        self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        with drafter_build_context():
+            self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
         if self.use_draft_logits:
             self._init_draft_logits(target_model)

@@ -3,7 +3,7 @@
 """Which modules must be built from batch-invariant kernels."""
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 
 import vllm.envs as envs
@@ -26,9 +26,16 @@ def batch_invariance_exempt() -> Iterator[None]:
 def requires_batch_invariant_kernels() -> bool:
     """Whether kernels chosen now must be batch invariant.
 
-    Today only the modular MoE experts selection consults this, and only the
-    model runner V2 EAGLE/MTP drafter, with ``VLLM_BI_DRAFTER=0``, is built
-    inside :func:`batch_invariance_exempt`; other batch-invariant kernel
-    choices still read ``VLLM_BATCH_INVARIANT`` directly.
+    Today only the modular MoE experts selection consults this, and only
+    model runner V2 drafters, with ``VLLM_BI_DRAFTER=0``, are built inside
+    :func:`batch_invariance_exempt`; other batch-invariant kernel choices
+    still read ``VLLM_BATCH_INVARIANT`` directly.
     """
     return envs.VLLM_BATCH_INVARIANT and not _exempt.get()
+
+
+def drafter_build_context() -> AbstractContextManager[None]:
+    """Exempt the drafter from batch invariance when VLLM_BI_DRAFTER=0."""
+    if envs.VLLM_BI_DRAFTER:
+        return nullcontext()
+    return batch_invariance_exempt()
