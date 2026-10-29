@@ -1494,7 +1494,8 @@ class MooncakeStoreWorker:
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         # Device KV regions (addr -> len) registered with the store.
         self._device_regions: dict[int, int] = {}
-        self._kv_unregistered = False
+        # Device regions unregistered for sleep and not yet registered again.
+        self._released_regions: set[int] = set()
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
@@ -1943,21 +1944,17 @@ class MooncakeStoreWorker:
 
     def unregister_kv_caches(self) -> None:
         """Unregister device KV buffers after the engine has drained transfers."""
-        if self._kv_unregistered:
-            return
-        for addr in self._device_regions:
+        for addr in self._device_regions.keys() - self._released_regions:
             if self.store.unregister_buffer(addr) != 0:
                 raise RuntimeError(f"Mooncake unregister_buffer failed for {addr:#x}")
-        self._kv_unregistered = True
+            self._released_regions.add(addr)
 
     def restore_kv_caches(self) -> None:
         """Register the released regions again: same addresses, new pages."""
-        if not self._kv_unregistered:
-            return
-        for addr, length in self._device_regions.items():
-            if self.store.register_buffer(addr, length) != 0:
+        for addr in list(self._released_regions):
+            if self.store.register_buffer(addr, self._device_regions[addr]) != 0:
                 raise RuntimeError(f"Mooncake register_buffer failed for {addr:#x}")
-        self._kv_unregistered = False
+            self._released_regions.discard(addr)
 
     def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async loads.

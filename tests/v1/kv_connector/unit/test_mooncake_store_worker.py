@@ -3721,7 +3721,7 @@ def _make_bare_worker(
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
     worker._device_regions = {}
-    worker._kv_unregistered = False
+    worker._released_regions = set()
     worker.finished_store_req = set()
     worker.tp_size = 1
     worker.store_tp_size = None
@@ -4871,18 +4871,20 @@ def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("op", ["unregister", "register"])
-def test_failed_store_call_raises_without_rollback(op: str):
-    """Report failures without undoing already completed registrations."""
+def test_failed_store_call_raises_and_retry_converges(op: str):
+    """A failed region keeps its state and is the only one a retry touches."""
     worker, device, _ = _registered_worker()
     if op == "register":
         worker.unregister_kv_caches()
     step = worker.restore_kv_caches if op == "register" else worker.unregister_kv_caches
-    first, last = device
-    worker.store.fail = (op, last)
+    _, failing = device
+    worker.store.fail = (op, failing)
     with pytest.raises(RuntimeError, match=f"{op}_buffer failed"):
         step()
-    remaining = first if op == "register" else last
-    assert worker.store.registered == {remaining: device[remaining]}
+    assert (failing in worker.store.registered) == (op == "unregister")
+    worker.store.fail = None
+    step()
+    assert worker.store.registered == (device if op == "register" else {})
 
 
 # ---------------------------------------------------------------------------
