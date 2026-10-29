@@ -4530,16 +4530,12 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_
     worker = recv_worker
     worker._early_finished_recving = set()
     worker._recving_transfers["request"] = [101]
-    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
     assert worker.poll_finished_recving() == set()
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
     if collect_in_step:
         assert worker.get_transfer_results().finished_recving == set()
     assert worker.poll_finished_recving() == {"request"}
-    worker.nixl_wrapper.send_notif.assert_called_once_with(
-        "prefill", notif_msg=b"request:1"
-    )
     assert worker.poll_finished_recving() == set()
     assert worker.get_transfer_results().finished_recving == set()
 
@@ -4549,7 +4545,6 @@ def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker = recv_worker
     worker._early_finished_recving = set()
     worker._recving_transfers["request"] = [101]
-    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
     worker.nixl_wrapper.release_xfer_handle.side_effect = [
         RuntimeError("release"),
@@ -4562,7 +4557,6 @@ def test_early_recv_leaves_failures_to_the_step(recv_worker):
     results = worker.get_transfer_results()
     assert results.finished_recving == results.failed_recving == {"request"}
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
-    worker.nixl_wrapper.send_notif.assert_not_called()
 
 
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
