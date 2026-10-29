@@ -501,6 +501,9 @@ def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
     )
 
     weight = layer.weight
+    if weight.ndim != 2:
+        return
+
     if (
         not envs.VLLM_BATCH_INVARIANT
         and weight.dtype == torch.bfloat16
