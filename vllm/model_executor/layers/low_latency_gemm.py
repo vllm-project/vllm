@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     row_stride_ok,
@@ -127,6 +128,11 @@ class LowLatencyGemm:
             current_platform.get_device_capability(), {}
         )
         if dtype != torch.bfloat16 or not plans:
+            return
+        # Token counts without a plan fall back to F.linear, so leave an
+        # explicitly selected unquantized GEMM backend in charge.
+        config = get_current_vllm_config_or_none()
+        if config is not None and config.kernel_config.linear_backend != "auto":
             return
         if not shape_dynamic_skinny_gemm.is_available():
             return

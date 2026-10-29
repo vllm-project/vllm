@@ -43,7 +43,7 @@ from .model import (
 
 if current_platform.is_cuda():
     from vllm.models.glm5next.nvidia.low_latency_gemm import (
-        enable_glm5next_low_latency_gemm,
+        GLM5NEXT_LOW_LATENCY_GEMM,
     )
 
 
@@ -217,7 +217,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if current_platform.is_cuda():
-            enable_glm5next_low_latency_gemm(self, vllm_config.model_config.dtype)
+            GLM5NEXT_LOW_LATENCY_GEMM.enable(self, vllm_config.model_config.dtype)
         self.set_moe_parameters()
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"

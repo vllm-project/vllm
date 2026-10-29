@@ -1091,7 +1091,7 @@ def test_glm5next_installation_is_shape_specific_and_unquantized(
         lambda dtype, configs: warmup_configs.update(configs),
     )
 
-    glm5next_gemm.enable_glm5next_low_latency_gemm(root, torch.bfloat16)
+    glm5next_gemm.GLM5NEXT_LOW_LATENCY_GEMM.enable(root, torch.bfloat16)
 
     assert isinstance(
         root.in_proj.quant_method, low_latency_gemm.LowLatencyLinearMethod
@@ -1110,6 +1110,39 @@ def test_glm5next_installation_is_shape_specific_and_unquantized(
         for key in ((12576, 4096), (77440, 4096))
         for config in glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS[key].values()
     }
+
+
+def test_glm5next_installation_respects_linear_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = low_latency_gemm.UnquantizedLinearMethod()
+            self.weight = torch.empty(12576, 4096)
+
+    root = nn.Module()
+    root.in_proj = FakeLinear()
+    method = root.in_proj.quant_method
+
+    monkeypatch.setattr(low_latency_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(
+        low_latency_gemm.current_platform, "get_device_capability", lambda: (12, 1)
+    )
+    monkeypatch.setattr(
+        low_latency_gemm,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            kernel_config=SimpleNamespace(linear_backend="flashinfer_cutlass")
+        ),
+    )
+    monkeypatch.setattr(
+        low_latency_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
+    )
+
+    glm5next_gemm.GLM5NEXT_LOW_LATENCY_GEMM.enable(root, torch.bfloat16)
+
+    assert root.in_proj.quant_method is method
 
 
 @pytest.mark.parametrize("n,k,num_tokens,config", GLM5NEXT_SM121_CASES)

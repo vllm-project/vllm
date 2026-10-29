@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash decode GEMM selection on NVIDIA GPUs.
 
-Plans use the local ``(N, K)`` shape and token count.
-Plans contain measured CUDA graph capture sizes; other token counts use the
-standard linear implementation.
+Plans are keyed by the local ``(N, K)`` weight shape and token count, so they
+apply to any layer and TP size that produces a listed shape. Token counts
+without a plan use the standard linear implementation.
 """
-
-import torch
-from torch import nn
 
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
@@ -68,14 +65,7 @@ GLM5NEXT_GEMM_PLANS_BY_CAPABILITY: dict[
 }
 
 
-_GLM5NEXT_GEMM = LowLatencyGemm(
+GLM5NEXT_LOW_LATENCY_GEMM = LowLatencyGemm(
     op_name="glm5next_low_latency_gemm",
     plans_by_capability=GLM5NEXT_GEMM_PLANS_BY_CAPABILITY,
 )
-
-
-def enable_glm5next_low_latency_gemm(
-    module: nn.Module,
-    dtype: torch.dtype,
-) -> None:
-    _GLM5NEXT_GEMM.enable(module, dtype)
