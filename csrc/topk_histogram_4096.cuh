@@ -76,14 +76,18 @@ __device__ __forceinline__ float4 load_score4(const float* ptr) {
   return *reinterpret_cast<const float4*>(ptr);
 }
 __device__ __forceinline__ float4 load_score4(const __nv_bfloat16* ptr) {
-  return make_float4(to_float(ptr[0]), to_float(ptr[1]), to_float(ptr[2]),
-                     to_float(ptr[3]));
+  const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
+  return make_float4(
+      __uint_as_float(raw.x << 16), __uint_as_float(raw.x & 0xFFFF0000u),
+      __uint_as_float(raw.y << 16), __uint_as_float(raw.y & 0xFFFF0000u));
 }
 __device__ __forceinline__ float2 load_score2(const float* ptr) {
   return *reinterpret_cast<const float2*>(ptr);
 }
 __device__ __forceinline__ float2 load_score2(const __nv_bfloat16* ptr) {
-  return make_float2(to_float(ptr[0]), to_float(ptr[1]));
+  const uint32_t raw = *reinterpret_cast<const uint32_t*>(ptr);
+  return make_float2(__uint_as_float(raw << 16),
+                     __uint_as_float(raw & 0xFFFF0000u));
 }
 
 __device__ __forceinline__ void load_float4_predicated(const __nv_bfloat16* ptr,
