@@ -132,19 +132,21 @@ pub(super) fn render_request_with_media_order(
                     continue;
                 }
                 let content = if dialect == DsDialect::V4 {
-                    ChatContent::Text(format!(
-                        "{}{}{}",
-                        if message_index > 0 { "\n\n" } else { "" },
-                        content.try_flatten_to_text()?,
-                        if matches!(
-                            request.messages.get(message_index + 1),
-                            Some(ChatMessage::System { .. })
-                        ) {
-                            "\n\n"
-                        } else {
-                            ""
-                        },
-                    ))
+                    let mut text = String::from(if message_index > 0 { "\n\n" } else { "" });
+                    write_chat_content(
+                        &mut text,
+                        content,
+                        dialect,
+                        message_index,
+                        &mut Vec::new(),
+                    )?;
+                    if matches!(
+                        request.messages.get(message_index + 1),
+                        Some(ChatMessage::System { .. })
+                    ) {
+                        text.push_str("\n\n");
+                    }
+                    ChatContent::Text(text)
                 } else {
                     content.clone()
                 };

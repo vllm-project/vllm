@@ -84,6 +84,19 @@ fn converted_developer_separator_precedes_retained_system() {
 }
 
 #[test]
+fn converted_developer_keeps_content_part_separators() {
+    let request = thinking_request(vec![
+        ChatMessage::developer(
+            vec![ChatContentPart::text("P1"), ChatContentPart::text("P2")],
+            None,
+        ),
+        ChatMessage::user("q"),
+    ]);
+    expect!["<｜begin▁of▁sentence｜>P1\n\nP2<｜User｜>q<｜Assistant｜><think>"]
+        .assert_eq(&render_request(&request));
+}
+
+#[test]
 fn healthy_prefix_developers_keep_native_turns() {
     let renderers: [&dyn ChatRenderer; 2] = [
         &DeepSeekV4ChatRenderer::default(),
