@@ -1096,7 +1096,7 @@ class JointSchemaStrategy(ReadStrategy):
             prompt, schema, orders = self.encode(questions, state)
             engine_input = tokens_input(prompt, cache_salt=cache_salt)
         result = None
-        async for result in self.context.engine_client.encode(
+        async for result in self.context.engine_client.encode(  # noqa: B007
             engine_input,
             PoolingParams(task="token_classify", extra_kwargs={"joint_schema": schema}),
             f"{request_id}-0",
@@ -1406,7 +1406,7 @@ class D3Strategy(ReadStrategy):
 
         async def read_one(n: int, engine_input: EngineInput) -> list[float]:
             result = None
-            async for result in self.context.engine_client.encode(
+            async for result in self.context.engine_client.encode(  # noqa: B007
                 engine_input,
                 PoolingParams(task="classify", use_activation=False),
                 f"{request_id}-{n}",

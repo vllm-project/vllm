@@ -611,7 +611,7 @@ class InternS1ProForConditionalGeneration(
 
     def get_frope_params_map(self) -> dict[str, str]:
         mapper: dict[str, str] = {}
-        for name, params in self.language_model.model.named_parameters():
+        for name, _ in self.language_model.model.named_parameters():
             if "rotary_emb.sin_coef" in name:
                 mapper["language_model.model.rotary_emb.sin_coef"] = (
                     f"language_model.model.{name}"

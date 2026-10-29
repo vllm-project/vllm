@@ -288,7 +288,7 @@ class TestBackpressure:
         to have taken ``age_s`` seconds when completed."""
         self.manager._processed_jobs_this_step = False
         now = time.monotonic()
-        for job_id, meta in self.manager._jobs.items():
+        for meta in self.manager._jobs.values():
             tj = meta.transfer_job
             if not tj.is_promotion and tj.submit_time > 0:
                 tj.submit_time = now - age_s

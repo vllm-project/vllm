@@ -740,7 +740,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             audios = hf_data["audio"]
             if not isinstance(audios, (list, tuple)):
                 audios = [audios]
-            for i, waveform in enumerate(audios):
+            for waveform in audios:
                 duration_s = len(waveform) / sr
                 if duration_s > max_duration_s:
                     logger.warning(

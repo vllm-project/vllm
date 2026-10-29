@@ -693,7 +693,7 @@ class MessageQueue:
             # wait for all readers to connect
 
             # local readers
-            for i in range(self.n_local_reader):
+            for _ in range(self.n_local_reader):
                 # wait for subscription messages from all local readers
                 self.local_socket.recv()
             if self.n_local_reader > 0:
@@ -702,7 +702,7 @@ class MessageQueue:
                 self.local_socket.send(b"READY")
 
             # remote readers
-            for i in range(self.n_remote_reader):
+            for _ in range(self.n_remote_reader):
                 # wait for subscription messages from all remote readers
                 self.remote_socket.recv()
             if self.n_remote_reader > 0:

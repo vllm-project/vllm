@@ -197,7 +197,7 @@ class MooncakeEmbeddingStoreClient:
             confirmed = True
 
         try:
-            for owner, addr, size in buffers:
+            for _, addr, size in buffers:
                 ret = self.store.register_buffer(addr, size)
                 if ret != 0:
                     raise EmbeddingStoreOperationError(

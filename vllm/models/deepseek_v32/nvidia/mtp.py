@@ -436,7 +436,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             else:
                 num_chunks = 1
 
-                for j in range(num_chunks):
+                for _ in range(num_chunks):
                     chunk_name = name
                     weight_to_load = loaded_weight
 

@@ -362,7 +362,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         prompt = "How are you?"
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         outputs = llm.generate(prompt, sampling_params, request_id="test_request_id1")
-        async for output in outputs:
+        async for output in outputs:  # noqa: B007
             pass
 
         # Put the engine to deep sleep
@@ -377,7 +377,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         # now allocate kv cache and cuda graph memory
         await llm.wake_up(tags=["kv_cache"])
         outputs2 = llm.generate(prompt, sampling_params, request_id="test_request_id2")
-        async for output2 in outputs2:
+        async for output2 in outputs2:  # noqa: B007
             pass
 
         # cmp output

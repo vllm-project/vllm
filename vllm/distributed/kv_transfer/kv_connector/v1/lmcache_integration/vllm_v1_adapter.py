@@ -986,7 +986,7 @@ class LMCacheConnectorV1Impl:
 
             is_first = True
 
-            for idx, request in enumerate(connector_metadata.requests):
+            for request in connector_metadata.requests:
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
                     continue
@@ -1375,7 +1375,7 @@ class LMCacheConnectorV1Impl:
         # In the latest vllm version, the type of scheduled_cached_reqs has
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
-            for i, req in enumerate(cached_reqs):
+            for req in cached_reqs:
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
 

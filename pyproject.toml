@@ -98,8 +98,6 @@ ignore = [
     "E731",
     # zip without `strict=`
     "B905",
-    # Loop control variable not used within loop body
-    "B007",
 ]
 
 [tool.ruff.lint.pydocstyle]

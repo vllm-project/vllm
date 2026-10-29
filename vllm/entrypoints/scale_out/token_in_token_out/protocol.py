@@ -198,9 +198,7 @@ class MultiModalFeatures(BaseModel):
             )
 
         flattened_ranges.sort()
-        for (offset, end), (next_offset, _) in zip(
-            flattened_ranges, flattened_ranges[1:]
-        ):
+        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
             if next_offset < end:
                 raise ValueError(
                     "mm_placeholders must be globally non-overlapping and sorted"

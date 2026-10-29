@@ -203,7 +203,7 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
             stream = engine.generate(
                 request_id="0", prompt="foo", sampling_params=sampling_params
             )
-            async for x in stream:
+            async for _ in stream:
                 ...
 
         asyncio.run(t())

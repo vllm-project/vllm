@@ -101,7 +101,7 @@ def _update_output_token_ids_for_bad_words(
     for batch_idx, bad_words_token_ids in metadata.bad_words_token_ids.items():
         output_token_ids = metadata.output_token_ids[batch_idx]
         bad_words_last_token: list[int] = []
-        for i, bad_word_token_ids in enumerate(bad_words_token_ids):
+        for bad_word_token_ids in bad_words_token_ids:
             if len(bad_word_token_ids) == 1:
                 # Single token id always affects logits
                 bad_words_last_token.append(bad_word_token_ids[0])

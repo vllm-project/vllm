@@ -1115,7 +1115,7 @@ class TestStreamLogprobs:
         last_chunk = None
         # One token per chunk: every entry after the first needs cross-chunk
         # context to resolve without U+FFFD.
-        for i, tid in enumerate(token_ids):
+        for tid in token_ids:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(

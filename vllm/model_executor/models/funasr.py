@@ -394,11 +394,11 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         xs_pad = self.embed(xs_pad)
 
-        for layer_idx, encoder_layer in enumerate(self.encoders0):
+        for encoder_layer in self.encoders0:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
-        for layer_idx, encoder_layer in enumerate(self.encoders):
+        for encoder_layer in self.encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -406,7 +406,7 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         olens = masks.squeeze(1).sum(1).int()
 
-        for layer_idx, encoder_layer in enumerate(self.tp_encoders):
+        for encoder_layer in self.tp_encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -595,7 +595,7 @@ class Transformer(nn.Module):
         olens = (ilens - 1) // self.k + 1
 
         if self.blocks is not None:
-            for layer, block in enumerate(self.blocks):
+            for block in self.blocks:
                 hidden_states = block(hidden_states)
         return hidden_states, olens
 

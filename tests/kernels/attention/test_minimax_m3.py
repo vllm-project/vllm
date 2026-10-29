@@ -2885,7 +2885,7 @@ def _build_decode_inputs(
         dtype=torch.int32,
     )
     token_id = 0
-    for req_id, seq_len in enumerate(seq_lens_list):
+    for seq_len in seq_lens_list:
         for local_q in range(decode_query_len):
             query_pos = seq_len - decode_query_len + local_q
             current_block = query_pos // BLOCK_SIZE

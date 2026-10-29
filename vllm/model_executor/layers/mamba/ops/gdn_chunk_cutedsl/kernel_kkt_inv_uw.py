@@ -263,7 +263,7 @@ class Sm100ChunkUWKernel:
             # LBO=BT*128 is ignored for K-major
             sdesc_template = _tcgen05.make_sdesc_128B_swizzle(BT * 128)
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_x):
+            for _ in range(bid, num_global_chunks, grid_x):
                 U_tmem = U_tmem_base + V_dim * stage_id
                 W_tmem = U_tmem | (16 << 16)
                 Ab_tmem = Ab_tmem_base

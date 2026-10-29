@@ -454,7 +454,7 @@ class CuMemAllocator:
     def get_current_usage(self) -> int:
         """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0
-        for ptr, data in self.pointer_to_data.items():
+        for data in self.pointer_to_data.values():
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes

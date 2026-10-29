@@ -259,7 +259,7 @@ async def test_streaming_input_cancel_output_stream(engine: AsyncLLM):
 
     # Collect a few outputs then cancel
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             if outputs_received >= 5:
                 # Cancel by breaking out of the loop (generator will be GC'd)
@@ -384,7 +384,7 @@ async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
     output_gen = engine.generate(many_inputs_generator(), sampling_params, request_id)
 
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             # Cancel after receiving some outputs
             if outputs_received >= 10:

@@ -1203,7 +1203,7 @@ class _LoopbackControl:
         # Peer is calling our poll → return all messages we've sent toward
         # peer_local_id (which is the peer's own local_id).
         out: list[tuple[str, dict]] = []
-        for pid, conn in list(self._inbound_outbound.items()):
+        for conn in list(self._inbound_outbound.values()):
             # Each outgoing message goes to peer_local_id and is tagged
             # with the sender's local_id (i.e., self._local_id).
             for msg in conn._outbox:

@@ -567,7 +567,7 @@ def one_read(
     d = upstream_chat(body)
     content = d["choices"][0]["logprobs"]["content"]
     out = []
-    for q, s in zip(schema["questions"], slots):
+    for _, s in zip(schema["questions"], slots):
         top = {
             int(t["token"].split(":")[1]): t["logprob"]
             for t in content[s["pos"]]["top_logprobs"]
@@ -617,7 +617,7 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
     d = upstream_completions(body)
     rows = d["choices"][0]["logprobs"]["top_logprobs"]
     out = []
-    for q, sl in zip(schema["questions"], slots):
+    for _, sl in zip(schema["questions"], slots):
         top = {int(k.split(":")[1]): v for k, v in rows[sl["pos"]].items()}
         out.append(slot_distribution(top, sl["label_ids"]))
     return out, d.get("usage", {})

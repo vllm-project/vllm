@@ -481,7 +481,7 @@ async def get_request(
 
     # if the traces have timing info then:
     if not self_timed:
-        for request_index, request in enumerate(input_requests):
+        for request_index in range(len(input_requests)):
             current_request_rate = _get_current_request_rate(
                 ramp_up_strategy,
                 ramp_up_start_rps,
@@ -525,7 +525,7 @@ async def get_request(
             normalize_factor = target_total_delay_s / delay_ts[-1]
             delay_ts = [delay * normalize_factor for delay in delay_ts]
     else:
-        for request_index, request in enumerate(input_requests):
+        for request in input_requests:
             # this is cumulative running ts, from which sleep is calculated later
             if request.timestamp is not None:
                 delay_ts.append(request.timestamp)
@@ -722,7 +722,7 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
+        for output in successful_outputs:
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]

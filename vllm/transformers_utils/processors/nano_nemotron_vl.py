@@ -936,7 +936,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         T = self.video_temporal_patch_size
 
-        for pixel_values, video_metadata, frames_indices, frame_duration_ms in zip(
+        for pixel_values, _, frames_indices, frame_duration_ms in zip(
             pixel_values_lst_video,
             video_metadata_lst,
             frames_indices_lst,
