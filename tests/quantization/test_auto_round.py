@@ -1058,7 +1058,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     method.process_weights_after_loading(layer)
 
     assert layer.weight.data.data_ptr() == packed_data.data_ptr()
-    assert not hasattr(layer, "weight_packed")
+    assert layer.weight_packed is layer.weight
     assert captured["processed_layer"] is layer
 
 
@@ -1146,8 +1146,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
 
     assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
     assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    assert layer.w13_weight_packed is layer.w13_weight
+    assert layer.w2_weight_packed is layer.w2_weight
     assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
     assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
     assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config

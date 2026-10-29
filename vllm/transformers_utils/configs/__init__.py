@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
+    "Alpamayo2SuperConfig": "vllm.transformers_utils.configs.alpamayo2_super",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -26,6 +27,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DeepseekV41Config": "vllm.transformers_utils.configs.deepseek_v41",
+    "DoryConfig": "vllm.transformers_utils.configs.dory",
     "Dots3NoteConfig": "vllm.transformers_utils.configs.dots3_note",
     "K3DSparkConfig": "vllm.transformers_utils.configs.k3_dspark",
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
@@ -48,9 +50,18 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MossTranscribeDiarizeConfig": (
         "vllm.transformers_utils.configs.moss_transcribe_diarize"
     ),
+    "Nemotron3_5TranscribeConfig": (
+        "vllm.transformers_utils.configs.nemotron3_5_transcribe"
+    ),
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
+    "MuseSpark1xTextConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkVisionConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkAudioConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkDSparkConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
@@ -67,6 +78,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Step5Config": "vllm.transformers_utils.configs.step5",
     "Step5VLConfig": "vllm.transformers_utils.configs.step5",
     "Qwen3ASRConfig": "vllm.transformers_utils.configs.qwen3_asr",
+    "FlintConfig": "vllm.models.flint.configs",
     "InklingModelConfig": "vllm.models.inkling.configs",
     "InklingAudioConfig": "vllm.models.inkling.configs",
     "InklingVisionConfig": "vllm.models.inkling.configs",
@@ -79,6 +91,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "Alpamayo2SuperConfig",
     "BagelConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
@@ -91,6 +104,7 @@ __all__ = [
     "Qwen3VLNemotronEmbedConfig",
     "DeepseekVLV2Config",
     "DeepseekV3Config",
+    "DoryConfig",
     "Dots3NoteConfig",
     "K3DSparkConfig",
     "DotsOCRConfig",
@@ -109,10 +123,17 @@ __all__ = [
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
     "MossTranscribeDiarizeConfig",
+    "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
     "Kimi_K25Config",
+    "MuseSpark1xTextConfig",
+    "MuseSparkTextConfig",
+    "MuseSparkVisionConfig",
+    "MuseSparkAudioConfig",
+    "MuseSparkDSparkConfig",
+    "MuseSparkConfig",
     "KimiK3Config",
     "KimiK3VisionConfig",
     "OpenVLAConfig",
@@ -130,6 +151,7 @@ __all__ = [
     "Step5Config",
     "Step5VLConfig",
     "Qwen3ASRConfig",
+    "FlintConfig",
     "InklingModelConfig",
     "InklingAudioConfig",
     "InklingVisionConfig",
