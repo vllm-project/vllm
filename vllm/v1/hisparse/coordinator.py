@@ -556,14 +556,19 @@ class HiSparseCoordinator:
         self._sized_import = None
 
     def size_import(self, request_id: str, num_pages: int) -> None:
-        """Note the full-sequence host pages of an import being admitted."""
+        """Note the full-sequence host pages of an import being admitted.
+
+        The admission gate runs in the same ``allocate_slots`` call as the
+        allocation, so the next ``record_pending_host_import`` is this
+        request's if it is admitted; a size left by a rejected admission is
+        discarded.
+        """
         self._sized_import = (request_id, num_pages)
 
-    def reserved_import_pages(self, request_id: str) -> int:
-        """Host pages other admitted imports still need for their sequence."""
-        return self._num_reserved_import_pages - self._import_reservations.get(
-            request_id, 0
-        )
+    @property
+    def reserved_import_pages(self) -> int:
+        """Host pages admitted imports still need for their sequence."""
+        return self._num_reserved_import_pages
 
     def update_import_reservation(self, request_id: str, num_held_pages: int) -> None:
         pages = self._import_pages.get(request_id)
@@ -941,7 +946,7 @@ class HiSparseCoordinator:
 def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
     *,
-    import_step_tokens: int = 0,
+    import_step_tokens: int | None = None,
 ) -> HiSparseCoordinator:
     """Return the coordinator shared by a KV cache manager's HiSparse groups.
 
@@ -953,13 +958,14 @@ def get_hisparse_coordinator(
         coordinator = getattr(manager, "coordinator", None)
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
+            assert import_step_tokens in (None, coordinator.import_step_tokens)
             return coordinator
     coordinator = HiSparseCoordinator(
         kv_cache_manager.kv_cache_config,
         managers,
         kv_cache_manager.max_model_len,
         num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
-        import_step_tokens=import_step_tokens,
+        import_step_tokens=import_step_tokens or 0,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")

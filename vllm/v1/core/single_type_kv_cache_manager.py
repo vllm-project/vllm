@@ -2271,7 +2271,7 @@ class HiSparseSourceManager(FullAttentionManager):
         available = self.block_pool.get_num_free_blocks()
         if apply_admission_cap and total_computed_tokens > num_local_computed_tokens:
             num_tokens += self.coordinator.import_step_tokens
-            available -= self.coordinator.reserved_import_pages(request_id)
+            available -= self.coordinator.reserved_import_pages
             self.coordinator.size_import(request_id, cdiv(num_tokens, self.block_size))
         required = super().get_num_blocks_to_allocate(
             request_id,

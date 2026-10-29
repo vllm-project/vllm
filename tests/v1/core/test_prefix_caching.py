@@ -142,14 +142,13 @@ def make_kv_cache_manager(
             prefix_cache_retention_interval=kwargs.pop("retention_interval"),
         )
     manager = KVCacheManager(kv_cache_config, **kwargs)
-    if kv_cache_config.hisparse_host_num_blocks is None:
-        pass
-    elif vllm_config is not None:
-        HiSparseConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        ).bind_kv_cache_manager(manager)
-    else:
-        get_hisparse_coordinator(manager)
+    if kv_cache_config.hisparse_host_num_blocks is not None:
+        if vllm_config is not None:
+            HiSparseConnector(
+                vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+            ).bind_kv_cache_manager(manager)
+        else:
+            get_hisparse_coordinator(manager)
     return manager
 
 
@@ -966,24 +965,40 @@ def _add_hisparse_request(
     return request
 
 
-@pytest.mark.parametrize("host_num_blocks,admitted", [(7, False), (8, True)])
-def test_hisparse_async_admission_requires_full_prompt_host_pages(
-    host_num_blocks, admitted, tmp_path
-):
-    """An async load is admitted only if its whole prompt's host pages fit.
-
-    The in-flight prefill's three prompt pages stay reserved, so the waiting
-    request's four prompt pages need eight host blocks including the null block.
-    """
-    scheduler, manager = _make_hisparse_scheduler(
-        tmp_path, host_num_blocks, HISPARSE_BLOCK_SIZE
-    )
+def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):
+    """The in-flight import's three prompt pages stay reserved, so the waiting
+    request's four prompt pages fit in eight host blocks including the null
+    block."""
+    scheduler, manager = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
     inflight = _add_hisparse_request(scheduler, "inflight", 3)
     assert inflight in scheduler._inflight_prefills
 
     request = _add_hisparse_request(scheduler, "waiting", 4)
-    assert (request in scheduler._inflight_prefills) == admitted
-    assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
+    assert request in scheduler._inflight_prefills
+    assert manager.get_blocks(request.request_id).blocks[0]
+
+
+@pytest.mark.parametrize("release,second_pages", [("free", 6), ("resume", 4)])
+def test_hisparse_import_reservation_released(release, second_pages, tmp_path):
+    """An import stops reserving host pages once it allocates them or is freed.
+
+    Seven usable host blocks: the first import holds one page and reserves two.
+    Once it is released, the second import fits only if nothing is still
+    reserved for the first.
+    """
+    scheduler, manager = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
+    first = _add_hisparse_request(scheduler, "first", 3)
+    assert first in scheduler._inflight_prefills
+    if release == "free":
+        # What abort and preemption run; the mock connector cannot finish a
+        # request over several cache groups.
+        manager.free(first)
+    else:
+        scheduler.finished_recving_kv_req_ids.add(first.request_id)
+        assert scheduler.schedule().num_scheduled_tokens[first.request_id] > 0
+
+    second = _add_hisparse_request(scheduler, "second", second_pages, offset=1000)
+    assert second in scheduler._inflight_prefills
 
 
 @pytest.mark.parametrize(
