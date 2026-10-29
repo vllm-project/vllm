@@ -39,7 +39,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -1925,22 +1925,11 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
                 )
-            if self.kv_transfer_config is not None and (
-                self.kv_transfer_config.kv_connector
-                not in (
-                    None,
-                    "NixlConnector",
-                    "MooncakeStoreConnector",
-                    "MultiConnector",
-                )
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (GPU-staged host imports) and "
-                    "MooncakeStoreConnector (shared-store offload) are the "
-                    "validated paths; other connectors are treated as "
-                    "debug/fallback paths.",
-                    self.kv_transfer_config.kv_connector,
+            if hisparse_host_pool_gib(self.kv_transfer_config) is None:
+                raise ValueError(
+                    "HiSparse requires a KV transfer config with "
+                    "HiSparseConnector and host_pool_gib; to combine it with "
+                    "another connector, nest both in MultiConnector."
                 )
 
         self._normalize_piecewise_cudagraph_mode(
