@@ -830,6 +830,7 @@ steps:
   commands:
   - pytest -v -s reasoning
   - pytest -v -s renderers
+  - pytest -v -s tokenizers_/test_deepseek_v32.py
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
