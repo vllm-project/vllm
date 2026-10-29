@@ -32,8 +32,8 @@ def pooling_task(request):
     yield request.param
 
 
-@pytest.fixture(scope="module", params=["", "hf://"])
-def server(pooling_task, request):
+@pytest.fixture(scope="module")
+def server(pooling_task):
     args = [
         "--max-model-len",
         str(MAX_MODEL_LEN),
@@ -43,7 +43,7 @@ def server(pooling_task, request):
         pooling_task,
     ]
 
-    with RemoteOpenAIServer(request.param + MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 

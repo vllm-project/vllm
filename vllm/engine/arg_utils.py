@@ -119,12 +119,12 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
-from vllm.model_hub import parse_model_source, resolve_model_source
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path, resolve_revision
+from vllm.transformers_utils.model_hub import parse_model_source, resolve_model_source
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -931,60 +931,60 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
-        resolve_source = functools.partial(
+        sources = [self.model, self.tokenizer, self.spec_model]
+        sources.append((self.speculative_config or {}).get("model"))
+        references = [parse_model_source(s) if s else None for s in sources]
+        if any(references):
+            if envs.VLLM_USE_RUST_FRONTEND:
+                raise ValueError("Hub prefixes require the Python frontend.")
+            if (
+                self.nnodes != 1
+                or self.distributed_executor_backend not in (None, "mp", "uni")
+                or self.data_parallel_backend != "mp"
+                or self.data_parallel_size_local not in (None, self.data_parallel_size)
+                or self.data_parallel_external_lb
+                or self.data_parallel_hybrid_lb
+                or self.data_parallel_rank not in (None, 0)
+            ):
+                raise ValueError(
+                    "Hub prefixes currently require single-node execution."
+                )
+            if (
+                self.distributed_executor_backend is None
+                and self.tensor_parallel_size
+                * self.pipeline_parallel_size
+                * self.data_parallel_size
+                > 1
+            ):
+                # Do not auto-select Ray with driver-local snapshots.
+                self.distributed_executor_backend = "mp"
+        original_model = self.model
+        resolve = functools.partial(
             resolve_model_source,
             download_dir=self.download_dir,
             hf_token=self.hf_token,
-            trust_remote_code=self.trust_remote_code,
+            load_format=self.load_format,
+            ignore_patterns=self.ignore_patterns,
         )
-        model = self.model
-        reference = parse_model_source(model)
-        if reference is not None:
-            self.revision = resolve_revision(model, self.revision, self.hf_token)
-            self.model = resolve_source(
-                model,
-                revision=self.revision,
-                code_revision=self.code_revision,
+        if reference := references[0]:
+            self.model = resolve(
+                self.model, revision=self.revision, code_revision=self.code_revision
             )
-            verifier, _, spec = maybe_override_with_speculators(
-                self.model,
-                self.tokenizer,
-                trust_remote_code=self.trust_remote_code,
-                vllm_speculative_config=self.speculative_config,
-                hf_token=self.hf_token,
-            )
-            if verifier != self.model:
-                assert spec is not None
-                spec["model"] = model
-                spec.setdefault("revision", self.revision)
-                spec.setdefault("code_revision", self.code_revision)
-                self.speculative_config = spec
-                model = f"{reference[0]}://{verifier}"
-                reference = (reference[0], verifier)
-                self.revision = resolve_revision(model, token=self.hf_token)
-                self.code_revision = None
-                self.model = resolve_source(model, revision=self.revision)
-                self.tokenizer = model
-                self.tokenizer_revision = self.revision
-            self.model_weights = model
             if not self.served_model_name:
                 self.served_model_name = [reference[1]]
             if self.tokenizer is None:
-                self.tokenizer = model
-        if self.tokenizer is not None and parse_model_source(self.tokenizer):
-            tokenizer_revision = self.tokenizer_revision or self.revision
-            if self.tokenizer == model and tokenizer_revision == self.revision:
+                self.tokenizer = original_model
+        if self.tokenizer and (
+            references[1] or (references[0] and self.tokenizer == original_model)
+        ):
+            revision = self.tokenizer_revision
+            if self.tokenizer == original_model:
+                revision = revision or self.revision
+            if self.tokenizer == original_model and revision == self.revision:
                 self.tokenizer = self.model
             else:
-                self.tokenizer_revision = resolve_revision(
-                    self.tokenizer, tokenizer_revision, self.hf_token
-                )
-                self.tokenizer = resolve_source(
-                    self.tokenizer,
-                    revision=self.tokenizer_revision,
-                    code_revision=self.code_revision
-                    if self.tokenizer == model
-                    else None,
+                self.tokenizer = resolve(
+                    self.tokenizer, revision=revision, tokenizer_only=True
                 )
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
@@ -2188,16 +2188,25 @@ class EngineArgs:
         self.speculative_config = {
             k.replace("-", "_"): v for k, v in self.speculative_config.items()
         }
-        draft = (
-            self.speculative_config.get("model") or target_model_config.model_weights
-        )
+
+        draft = self.speculative_config.get("model")
         if draft and parse_model_source(draft):
-            draft_load = self.speculative_config.get("draft_load_config")
-            if not isinstance(draft_load, LoadConfig):
-                draft_load = LoadConfig(
-                    **(asdict(self.create_load_config()) | (draft_load or {}))
-                )
-            self.speculative_config["draft_load_config"] = draft_load
+            load = self.speculative_config.get("draft_load_config")
+            if load is None:
+                load = self.create_load_config()
+            elif isinstance(load, dict):
+                load = LoadConfig(**load)
+            self.speculative_config["model"] = resolve_model_source(
+                draft,
+                revision=self.speculative_config.get("revision"),
+                code_revision=self.speculative_config.get("code_revision"),
+                download_dir=load.download_dir,
+                hf_token=self.hf_token,
+                load_format=load.load_format,
+                ignore_patterns=load.ignore_patterns,
+                draft=True,
+            )
+
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.

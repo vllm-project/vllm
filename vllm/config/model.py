@@ -153,13 +153,13 @@ class ModelConfig:
     """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
-    """Name or path of the model to use. It is also used as the
+    """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
-    not specified. Use `hf://owner/model` or `modelscope://owner/model` to
-    select a Hub independently of `VLLM_USE_MODELSCOPE`."""
+    not specified. Supports `hf://owner/model` and `modelscope://owner/model`
+    independently of `VLLM_USE_MODELSCOPE`."""
     model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object
-    storage or an explicit Hub to preserve the original URI while `model` points to
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -169,7 +169,7 @@ class ModelConfig:
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
     tokenizer: str = None  # type: ignore[assignment]
-    """Name or path of the tokenizer to use. If unspecified, model
+    """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used. Supports `hf://` and `modelscope://` prefixes."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
@@ -694,7 +694,6 @@ class ModelConfig:
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
-            weight_source=self.weight_source,
         )
         self.hf_config = hf_config
         if dict_overrides:
@@ -813,7 +812,7 @@ class ModelConfig:
             self._pooler_config_sources = pooler_config_sources
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
-            self.weight_source,
+            self.model,
             self.hf_config,
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
@@ -1261,14 +1260,6 @@ class ModelConfig:
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
-    @property
-    def weight_source(self) -> str:
-        from vllm.model_hub import parse_model_source
-
-        return (
-            self.model_weights if parse_model_source(self.model_weights) else self.model
-        )
-
     def maybe_untie_word_embeddings(self) -> None:
         """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
 
@@ -1283,7 +1274,7 @@ class ModelConfig:
         """
         if not getattr(self.hf_config, "tie_word_embeddings", False):
             return
-        if not checkpoint_has_lm_head(self.weight_source, revision=self.revision):
+        if not checkpoint_has_lm_head(self.model, revision=self.revision):
             return
 
         logger.debug(
@@ -2345,9 +2336,11 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
-        from vllm.model_hub import strip_model_source
+        from vllm.transformers_utils.model_hub import parse_model_source
 
-        return strip_model_source(model)
+        if reference := parse_model_source(model):
+            return reference[1]
+        return model
     if isinstance(served_model_name, list):
         return served_model_name[0]
     return served_model_name

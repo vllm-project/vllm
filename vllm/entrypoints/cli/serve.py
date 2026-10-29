@@ -357,7 +357,6 @@ def run_multi_api_server(args: argparse.Namespace):
                 grpc_sock=grpc_sock,
                 args=args,
                 input_listener=zmq_listeners.inputs[0],
-                model_config=vllm_config.model_config,
                 output_listener=zmq_listeners.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,

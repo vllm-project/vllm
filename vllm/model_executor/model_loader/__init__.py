@@ -25,7 +25,6 @@ from vllm.model_executor.model_loader.utils import (
     get_model_cls,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
-from vllm.model_hub import parse_model_source
 
 logger = init_logger(__name__)
 
@@ -139,13 +138,6 @@ def get_model(
     loader = get_model_loader(load_config or vllm_config.load_config)
     if model_config is None:
         model_config = vllm_config.model_config
-    if parse_model_source(model_config.model_weights) and not isinstance(
-        loader, (DefaultModelLoader, DummyModelLoader)
-    ):
-        raise ValueError(
-            "Explicit Hub sources require a standard checkpoint or dummy loader; "
-            "download to a local directory for other load formats."
-        )
     return loader.load_model(
         vllm_config=vllm_config, model_config=model_config, prefix=prefix
     )

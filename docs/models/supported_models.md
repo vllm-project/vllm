@@ -360,14 +360,13 @@ unchanged. Install `modelscope` for `modelscope://`. The default served name omi
 the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
 Use existing revision and download-directory options; URI revisions, subpaths,
 and queries are not supported.
-Standard checkpoint formats (`auto`, `hf`, `safetensors`, `pt`, `npcache`,
-`mistral`, `fastsafetensors`, `instanttensor`) and `dummy` are supported.
-For specialized loaders, download the repository first and use its local path.
-Cross-repository `auto_map` code uses the same Hub as its model or tokenizer,
-with the existing `code_revision` option. Executing custom code still requires
-`trust_remote_code`.
-Auto-detected speculators keep the chosen Hub for both the verifier and draft.
-Hugging Face revisions are resolved before downloading configuration and weights.
+Explicit sources download a local repository snapshot before loading, which may
+include multiple weight formats. Tokenizer-only sources download metadata without
+weights. The initial implementation supports single-node Python serving
+with `auto`, `hf`, `safetensors` or `pt` checkpoints. Cross-repository `auto_map`
+and separate code revisions require locally prepared repositories. Specify both
+the target and draft explicitly instead of using speculators target inference.
+Other loaders and distributed deployments should use pre-downloaded local paths.
 
 ## Feature Status Legend
 

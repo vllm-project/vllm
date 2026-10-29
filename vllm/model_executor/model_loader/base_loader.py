@@ -16,7 +16,6 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
-from vllm.model_hub import parse_model_source, resolve_model_source
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
@@ -51,18 +50,6 @@ class BaseModelLoader(ABC):
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         """Create a model with the given configurations."""
-        if parse_model_source(model_config.model_weights):
-            old_path = model_config.model
-            model_config.model = resolve_model_source(
-                model_config.model_weights,
-                revision=model_config.revision,
-                code_revision=model_config.code_revision,
-                download_dir=self.load_config.download_dir,
-                hf_token=model_config.hf_token,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            if model_config.tokenizer == old_path:
-                model_config.tokenizer = model_config.model
         model = initialize_model(
             vllm_config=vllm_config,
             model_config=model_config,

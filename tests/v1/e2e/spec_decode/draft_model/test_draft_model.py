@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
@@ -53,7 +51,6 @@ class ArgsTest:
     enable_prefix_caching: bool | None = None
     chat_template_kwargs: dict | None = None
     reject_full_acceptance: bool = False
-    trust_remote_code: bool = False
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
@@ -105,37 +102,16 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
     assert_draft_model_correctness(args, vllm_runner)
 
 
-@pytest.mark.parametrize("custom_code", [False, True])
 @single_gpu_only
-def test_draft_model_mixed_hubs(vllm_runner, monkeypatch, tmp_path, custom_code):
-    from vllm.transformers_utils.repo_utils import hf_api
+def test_draft_model_mixed_hubs(vllm_runner, monkeypatch):
+    from vllm.transformers_utils.model_hub import hf_snapshot_download
 
     model = "Qwen/Qwen3-0.6B"
-    snapshot = hf_api().snapshot_download(model)
-    target = Path(snapshot)
-    code = tmp_path / "code"
-    if custom_code:
-        target = tmp_path / "model"
-        target.mkdir()
-        code.mkdir()
-        for file in Path(snapshot).iterdir():
-            if file.name != "config.json":
-                (target / file.name).symlink_to(file)
-        config = json.loads((Path(snapshot) / "config.json").read_text())
-        config.update(
-            model_type="hub_qwen3",
-            auto_map={"AutoConfig": "owner/code--configuration.HubQwen3Config"},
-        )
-        (target / "config.json").write_text(json.dumps(config))
-        (code / "configuration.py").write_text(
-            "from transformers import Qwen3Config\n"
-            "class HubQwen3Config(Qwen3Config):\n"
-            "    model_type = 'hub_qwen3'\n"
-        )
+    snapshot = hf_snapshot_download(model)
 
     def modelscope_download(repo_id, **kwargs):
-        assert repo_id in (model, "owner/code")
-        return str(target if repo_id == model else code)
+        assert repo_id == model
+        return snapshot
 
     # Mock only the Hub boundary; both engines load real weights.
     monkeypatch.setattr("modelscope.snapshot_download", modelscope_download)
@@ -147,7 +123,6 @@ def test_draft_model_mixed_hubs(vllm_runner, monkeypatch, tmp_path, custom_code)
         expected_acceptance_len=0.98 * 4,
         expected_acceptance_rate=0.98,
         num_prompts=4,
-        trust_remote_code=custom_code,
     )
     assert_draft_model_correctness(args, vllm_runner)
 
@@ -427,7 +402,7 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
     with vllm_runner(
         args.target_model,
         block_size=None,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         speculative_config={

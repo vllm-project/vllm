@@ -6,7 +6,6 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm.transformers_utils.repo_utils import hf_api
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -14,8 +13,8 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # generation quality here
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["online", "offline"])
-def server(qwen3_lora_files, request):
+@pytest.fixture(scope="module")
+def server(qwen3_lora_files):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -35,10 +34,7 @@ def server(qwen3_lora_files, request):
         "128",
     ]
 
-    if request.param:
-        hf_api().snapshot_download(MODEL_NAME)
-    env = {"HF_HUB_OFFLINE": "1"} if request.param else {}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 

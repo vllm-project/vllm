@@ -942,7 +942,7 @@ class VllmConfig:
                     f"{supported_dtypes}"
                 )
             quant_config.maybe_update_config(
-                model_config.weight_source,
+                model_config.model,
                 hf_config=model_config.hf_config,
                 revision=model_config.revision,
             )
