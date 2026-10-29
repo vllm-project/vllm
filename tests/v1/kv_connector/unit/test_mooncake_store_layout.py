@@ -73,7 +73,8 @@ def test_rank_local_descriptors_match_reference(num_regions: int, num_block_lens
         assert type(block_id) is int
 
 
-def test_rank_local_scattered_heads_transfer_dense_extent_only():
+@pytest.mark.parametrize("block_id", [1, 2])
+def test_rank_local_scattered_heads_transfer_dense_extent_only(block_id: int):
     num_blocks, num_heads, num_layers, block_size, content = 3, 2, 3, 16, 4
     full = torch.zeros(
         num_blocks, num_heads, num_layers, block_size, content, dtype=torch.float16
@@ -91,31 +92,38 @@ def test_rank_local_scattered_heads_transfer_dense_extent_only():
     assert layout.block_len == [segment] * num_heads
     assert layout.block_stride == [block_stride] * num_heads
 
-    addrs, sizes = layout.prepare_value_for_block(1)
-    assert sizes == [segment] * num_heads
-    assert addrs == [
-        cache.data_ptr() + head * num_layers * segment + block_stride
-        for head in range(num_heads)
-    ]
+    storage_start = full.data_ptr()
+    storage_end = storage_start + full.numel() * element_size
+    for candidate in range(num_blocks):
+        candidate_addrs, candidate_sizes = layout.prepare_value_for_block(candidate)
+        assert candidate_sizes == [segment] * num_heads
+        assert candidate_addrs == [
+            cache.data_ptr() + head * num_layers * segment + candidate * block_stride
+            for head in range(num_heads)
+        ]
+        for addr, size in zip(candidate_addrs, candidate_sizes, strict=True):
+            assert storage_start <= addr and addr + size <= storage_end
 
     full.copy_(torch.arange(full.numel(), dtype=torch.float16).view(full.shape))
-    chunk_addrs, chunk_sizes, _ = layout.prepare_values([(0, block_size)], [1], [0])
+    chunk_addrs, chunk_sizes, _ = layout.prepare_values(
+        [(0, block_size)], [block_id], [0]
+    )
     payload = b"".join(
         ctypes.string_at(addr, size)
         for addr, size in zip(chunk_addrs[0], chunk_sizes[0], strict=True)
     )
     assert len(payload) == segment * num_heads
 
-    saved_block = cache[1].clone()
+    saved_block = cache[block_id].clone()
     full[:, :, 1:] += 1
-    full[2] += 1
+    full[(block_id + 1) % num_blocks] += 1
     expected = full.clone()
-    cache[1].zero_()
+    cache[block_id].zero_()
     offset = 0
     for addr, size in zip(chunk_addrs[0], chunk_sizes[0], strict=True):
         ctypes.memmove(addr, payload[offset : offset + size], size)
         offset += size
-    torch.testing.assert_close(cache[1], saved_block)
+    torch.testing.assert_close(cache[block_id], saved_block)
     torch.testing.assert_close(full, expected)
 
 
