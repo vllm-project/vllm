@@ -5789,6 +5789,14 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json["request_id"], "raw-req");
+    // Like Python's `model_dump()`, the envelope always carries the response
+    // level, the served model name, the creation time and usage.
+    assert_eq!(json["output_mode"], "tokens");
+    assert_eq!(json["model"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert!(json["created"].as_u64().is_some_and(|created| created > 0));
+    assert_eq!(json["usage"]["prompt_tokens"], 2);
+    assert_eq!(json["usage"]["completion_tokens"], 2);
+    assert_eq!(json["usage"]["total_tokens"], 4);
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
@@ -5941,6 +5949,14 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(usage["usage"]["completion_tokens"], 2);
     assert_eq!(usage["usage"]["total_tokens"], 4);
     assert_eq!(payloads[3], "[DONE]");
+
+    // Like Python, every chunk names its response level; the non-streaming
+    // `model` and `created` stay off the chunks.
+    for chunk in [&first, &second, &usage] {
+        assert_eq!(chunk["output_mode"], "tokens", "{chunk}");
+        assert!(chunk.get("model").is_none(), "{chunk}");
+        assert!(chunk.get("created").is_none(), "{chunk}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
