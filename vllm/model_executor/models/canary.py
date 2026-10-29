@@ -500,6 +500,21 @@ class CanaryForConditionalGeneration(
                     f"Unsupported target language {target_language!r}; expected "
                     f"one of {list(cls.supported_languages)}."
                 )
+            # Canary cannot detect the audio's language, and `validate_language`
+            # defaults a missing one to "en", so a translation without
+            # `language` would silently become English transcription.
+            if source_language == target_language:
+                raise ValueError(
+                    "Canary translation needs `language` (the audio's language) "
+                    f"to differ from `to_language` ({target_language!r}); it "
+                    "cannot detect the source language."
+                )
+            # canary-1b-v2 is trained to translate to or from English only.
+            if "en" not in (source_language, target_language):
+                raise ValueError(
+                    "Canary translates to or from English only; got "
+                    f"{source_language!r} -> {target_language!r}."
+                )
 
         tokenizer = cached_tokenizer_from_config(stt_params.model_config)
         tokens = cls.get_decoder_prompt_tokens(source_language, target_language)
