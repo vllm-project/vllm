@@ -148,7 +148,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 sample_pos - 1,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=self.draft_logits,
+                logits_cache=self.draft_logits.values,
                 logits_cache_col=self._step_cols[step],
                 use_fp64=self.use_fp64_gumbel,
             )
@@ -160,11 +160,10 @@ class DSparkSpeculator(DFlashSpeculator):
             sample_pos - 1,
             apply_temperature=True,
             is_drafting=True,
-            logits_cache=self.draft_logits,
+            logits_cache=self.draft_logits.values,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
-            logits_cache_num_shards=self.draft_logits_num_shards,
-            logits_cache_shard_idx=self.draft_logits_shard_idx,
+            logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
