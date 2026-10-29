@@ -457,6 +457,89 @@ direct_register_custom_op(
 )
 
 
+def cuda_skinny_unquantized_gemm_impl(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        row_stride_ok,
+        shape_dynamic_skinny_gemm,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    plan = get_skinny_gemm_plan(weight.shape[0], weight.shape[1])
+    config = None if plan is None else plan.get(x.shape[0])
+    if (
+        config is not None
+        and x.dtype == torch.bfloat16
+        and weight.is_cuda
+        and weight.is_contiguous()
+        and row_stride_ok(x, config)
+    ):
+        return shape_dynamic_skinny_gemm(x, weight, config)
+    return torch.nn.functional.linear(x, weight)
+
+
+def cuda_skinny_unquantized_gemm_fake(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="cuda_skinny_unquantized_gemm",
+    op_func=cuda_skinny_unquantized_gemm_impl,
+    fake_impl=cuda_skinny_unquantized_gemm_fake,
+)
+
+
+def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
+    """Route ``layer`` to the skinny GEMM if its weight shape has a plan.
+
+    Called once weights are final. Registers the planned configs for warmup
+    so they compile before CUDA graph capture.
+    """
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        shape_dynamic_skinny_gemm,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    weight = layer.weight
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        or weight.dtype != torch.bfloat16
+        or weight.dim() != 2
+        or getattr(layer, "bias", None) is not None
+    ):
+        return
+    plan = get_skinny_gemm_plan(weight.shape[0], weight.shape[1])
+    if plan is None:
+        return
+    layer.use_skinny_gemm = True
+    shape_dynamic_skinny_gemm.request_warmup_configs(weight.dtype, plan.values())
+
+
+def cuda_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # The op picks the config from the token count at runtime, so the choice
+    # stays out of the compiled graph.
+    if (
+        bias is None
+        and getattr(layer, "use_skinny_gemm", False)
+        and x.is_cuda
+        and x.dim() == 2
+    ):
+        return torch.ops.vllm.cuda_skinny_unquantized_gemm(x, weight)
+    return torch.nn.functional.linear(x, weight, bias)
+
+
 @functools.cache
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
@@ -688,7 +771,7 @@ def dispatch_unquantized_gemm(
 
     backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
     if backend_spec is None:
-        return default_unquantized_gemm
+        return cuda_unquantized_gemm
 
     if not backend_spec.is_supported():
         logger.warning_once(
@@ -698,7 +781,7 @@ def dispatch_unquantized_gemm(
             linear_backend,
             backend_spec.flashinfer_backend,
         )
-        return default_unquantized_gemm
+        return cuda_unquantized_gemm
 
     logger.info_once(
         "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",

@@ -14,9 +14,7 @@ from torch import nn
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
-from vllm.model_executor.layers import low_latency_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
-from vllm.models.glm5next.nvidia import low_latency_gemm as glm5next_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
@@ -103,12 +101,6 @@ QWEN4_EXP_SM100_CASES = [
 QWEN4_EXP_SM121_CASES = [
     (n, k, num_tokens, config)
     for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS.items()
-    for num_tokens, config in plans.items()
-]
-
-GLM5NEXT_SM121_CASES = [
-    (n, k, num_tokens, config)
-    for (n, k), plans in glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS.items()
     for num_tokens, config in plans.items()
 ]
 
@@ -1030,103 +1022,6 @@ def test_qwen4_exp_sm121_selected_shapes(
     selected = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
     output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
-
-    reference = torch.nn.functional.linear(x, weight)
-    cosine = torch.nn.functional.cosine_similarity(
-        output.float().flatten(), reference.float().flatten(), dim=0
-    ).item()
-    assert cosine > 0.999
-
-
-def test_glm5next_sm121_plans_are_valid() -> None:
-    plans = glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS
-
-    for (n, k), shape_plans in plans.items():
-        for num_tokens, config in shape_plans.items():
-            assert config.num_rows == num_tokens
-            assert n % config.outputs_per_block == 0
-            assert k % (config.block_size * config.vector_width) == 0
-            assert config.static_k in (None, k)
-
-
-def test_glm5next_installation_is_shape_specific_and_unquantized(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeLinear(nn.Module):
-        def __init__(self, quant_method: object, n: int, k: int) -> None:
-            super().__init__()
-            self.quant_method = quant_method
-            self.weight = torch.empty(n, k)
-
-    class FakeHead(FakeLinear):
-        pass
-
-    root = nn.Module()
-    root.in_proj = FakeLinear(low_latency_gemm.UnquantizedLinearMethod(), 12576, 4096)
-    # quantized: must be left untouched.
-    quantized_method = object()
-    root.quantized = FakeLinear(quantized_method, 12576, 4096)
-    # shape absent from the table: must be left untouched.
-    assert (4096, 128) not in glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS
-    root.unlisted = FakeLinear(low_latency_gemm.UnquantizedLinearMethod(), 4096, 128)
-    # A quant config that excludes lm_head (the modelopt NVFP4 checkpoint does)
-    # hands the head an UnquantizedLinearMethod, not an embedding method.
-    root.lm_head = FakeHead(low_latency_gemm.UnquantizedLinearMethod(), 77440, 4096)
-    root.plain_head = FakeHead(
-        low_latency_gemm.UnquantizedEmbeddingMethod(), 77440, 4096
-    )
-
-    monkeypatch.setattr(low_latency_gemm, "LinearBase", FakeLinear)
-    monkeypatch.setattr(low_latency_gemm, "ParallelLMHead", FakeHead)
-    monkeypatch.setattr(
-        low_latency_gemm.current_platform, "get_device_capability", lambda: (12, 1)
-    )
-    monkeypatch.setattr(
-        low_latency_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
-    )
-    warmup_configs: set[SkinnyGemmConfig] = set()
-    monkeypatch.setattr(
-        low_latency_gemm.shape_dynamic_skinny_gemm,
-        "request_warmup_configs",
-        lambda dtype, configs: warmup_configs.update(configs),
-    )
-
-    glm5next_gemm.enable_glm5next_low_latency_gemm(root, torch.bfloat16)
-
-    assert isinstance(
-        root.in_proj.quant_method, low_latency_gemm.LowLatencyLinearMethod
-    )
-    assert root.quantized.quant_method is quantized_method
-    assert type(root.unlisted.quant_method) is low_latency_gemm.UnquantizedLinearMethod
-    assert isinstance(
-        root.lm_head.quant_method, low_latency_gemm.LowLatencyLinearMethod
-    )
-    assert isinstance(
-        root.plain_head.quant_method,
-        low_latency_gemm.LowLatencyEmbeddingMethod,
-    )
-    assert warmup_configs == {
-        config
-        for key in ((12576, 4096), (77440, 4096))
-        for config in glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS[key].values()
-    }
-
-
-@pytest.mark.parametrize("n,k,num_tokens,config", GLM5NEXT_SM121_CASES)
-def test_glm5next_sm121_selected_shapes(
-    n: int,
-    k: int,
-    num_tokens: int,
-    config: SkinnyGemmConfig,
-) -> None:
-    _require_capability_and_cute((12, 1))
-    torch.manual_seed(42 + num_tokens)
-    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
-
-    selected = glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS[(n, k)][num_tokens]
-    assert selected == config
-    output = torch.ops.vllm.glm5next_low_latency_gemm(x, weight)
 
     reference = torch.nn.functional.linear(x, weight)
     cosine = torch.nn.functional.cosine_similarity(
