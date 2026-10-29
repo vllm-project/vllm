@@ -9,7 +9,11 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -183,7 +187,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -207,11 +211,11 @@ class DeepseekV32Model(torch.nn.Module):
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
+        residual = None
 
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -219,13 +223,15 @@ class DeepseekV32Model(torch.nn.Module):
             start=self.start_layer,
         ):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
+                aux_hidden_states.append(
+                    hidden_states if residual is None else hidden_states + residual
+                )
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
+            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
         if len(aux_hidden_states) > 0:
