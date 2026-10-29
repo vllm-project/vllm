@@ -46,7 +46,7 @@ variants:
       - "--gpu-memory-utilization"
       - "0.97"
       - "--compilation-config"
-      - '{"use_inductor": false}'
+      - '{"backend": "eager"}'
 
 compatible_strategies:
   - single_node_tp
@@ -95,7 +95,7 @@ guide: |
     --gpu-memory-utilization 0.97 \
     --max-num-seqs 32 \
     --kv-cache-dtype fp8 \
-    --compilation-config '{"use_inductor": false}' \
+    --compilation-config '{"backend": "eager"}' \
     --served-model-name Ring-1T-FP8
   ```
 
