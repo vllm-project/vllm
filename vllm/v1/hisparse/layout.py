@@ -203,7 +203,6 @@ def _lay_out_hisparse_groups(
     if current:
         append_hot_group(current)
 
-    # Fill the pool block the other device groups need with indexer pages.
     pages_per_block = max(
         max(
             _group_page_bytes(group)

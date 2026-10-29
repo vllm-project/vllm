@@ -432,6 +432,12 @@ class AttentionGroup:
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             (pages_per_block - 1) * page_step + 1
         )
+        if num_pages > torch.iinfo(torch.int32).max + 1:
+            raise ValueError(
+                f"{self.backend.get_name()} kernel block ids reach {num_pages}, "
+                "past the int32 block table range. Reduce the KV cache size or "
+                "set VLLM_KV_CACHE_LAYOUT to a layer-compact layout (e.g. LBNHC)."
+            )
         return kv_cache.as_strided(
             (num_pages, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
             (page_stride, *kv_cache.stride()[1:]),

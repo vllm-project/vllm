@@ -941,6 +941,22 @@ def test_packed_group_kernel_blocks_with_unaligned_block_stride():
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
 
 
+def test_packed_group_rejects_kernel_block_ids_past_int32():
+    """Kernel block ids of a large packed cache must fit the int32 table."""
+    row, stride_rows = 132, 5 * 64 + 16
+    group = _packed_group(4, row, [128, 256])
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    num_blocks = 2**31 // 21 + 2
+    manager = torch.empty_strided(
+        (num_blocks, 1, 256, row),
+        (stride_rows * row, 256 * row, row, 1),
+        dtype=torch.uint8,
+        device="meta",
+    )
+    with pytest.raises(ValueError, match="int32"):
+        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
+
+
 def test_split_group_maps_manager_block_table():
     """Groups split in a dense layout keep manager block tables; builders get
     b * blocks_per_kv_block + j against the view allocated in kernel blocks."""
