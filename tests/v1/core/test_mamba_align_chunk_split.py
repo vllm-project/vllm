@@ -302,6 +302,17 @@ def test_incremental_multimodal_sibling_reuses_mamba_boundary(
     """A sibling appending a new MM item reuses the producer's last item."""
     monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", mamba_block_size)
     manager = _make_hybrid_kv_cache_manager(use_eagle=False)
+    scheduler = create_scheduler(
+        block_size=mamba_block_size,
+        enable_prefix_caching=True,
+        kv_cache_spec=MambaSpec(
+            block_size=mamba_block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=NUM_SPEC,
+        ),
+    )
     last_mm_end = mamba_block_size + 100
     producer = create_requests(
         1,
@@ -315,7 +326,7 @@ def test_incremental_multimodal_sibling_reuses_mamba_boundary(
 
     while producer.num_computed_tokens < producer.num_tokens:
         remaining = producer.num_tokens - producer.num_computed_tokens
-        num_new_tokens = _split(producer, remaining, use_eagle=False)
+        num_new_tokens = scheduler._mamba_block_aligned_split(producer, remaining)
         assert num_new_tokens > 0
         assert (
             manager.allocate_slots(
