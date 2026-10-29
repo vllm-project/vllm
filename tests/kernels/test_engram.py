@@ -4,6 +4,7 @@ import bisect
 import inspect
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -718,6 +719,151 @@ def test_engram_head_shards_reconstruct_checkpoint(
         torch.testing.assert_close(
             module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA host prefetch")
+@pytest.mark.parametrize("sort_rows", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("mode", ["ready", "late", "wrong_hash"])
+def test_engram_host_prefetch_matches_regular_lookup(sort_rows, packed, mode):
+    """Use staging only for matching rows; preserve the regular lookup bits."""
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    torch.manual_seed(0)
+    rows, tokens, heads, dim = 4096, 17, 24, 256
+    weight = torch.empty(rows, dim, dtype=torch.uint8, pin_memory=True)
+    weight.random_(0, 120)
+    scales = torch.empty(rows, dim // 32, dtype=torch.uint8, pin_memory=True)
+    scales.random_(120, 134)
+    ids = torch.randint(0, rows, (tokens, 2, heads), device="cuda", dtype=torch.int32)
+    ids = ids[:, 1]  # Strided like one layer's slice of the hash matrix.
+    ids[0, 0], ids[-1, -1] = -1, rows
+    flat = ids.flatten()
+    cpu_rows = flat.clamp(0, rows - 1).cpu().long()
+    staged = weight[cpu_rows].cuda().view(torch.float8_e4m3fn)
+    staged_scales = scales[cpu_rows].cuda()
+    staged_hashes = flat.clone()
+    ready = torch.tensor([int(mode != "late")], device="cuda", dtype=torch.int64)
+    if mode == "late":
+        staged.view(torch.uint8).zero_()
+    elif mode == "wrong_hash":
+        staged_hashes[::7] += 1
+        staged.view(torch.uint8)[::7] = 0
+
+    ordered, destination = ids, ids
+    if sort_rows:
+        ordered, destination = flat.sort()
+        destination = destination.int()
+    width = dim + dim // 32 if packed else dim
+    expected = torch.empty(
+        tokens,
+        heads,
+        width,
+        device="cuda",
+        dtype=torch.uint8 if packed else torch.bfloat16,
+    )
+    actual = torch.empty_like(expected)
+    weight_uva = get_accelerator_view_from_cpu_tensor(weight.view(torch.float8_e4m3fn))
+    scales_uva = get_accelerator_view_from_cpu_tensor(scales)
+
+    def lookup(out, **kwargs):
+        engram_ops._engram_lookup_kernel[(4,)](
+            weight_uva,
+            scales_uva,
+            ordered,
+            destination,
+            out,
+            0,
+            rows,
+            flat.numel(),
+            *ids.stride(),
+            HEAD_START=0,
+            LOCAL_HEADS=heads,
+            TOTAL_HEADS=heads,
+            DIM=dim,
+            QUANT_BLOCK=32,
+            BLOCK_R=16,
+            GRID=4,
+            SORTED=sort_rows,
+            PACKED=packed,
+            OUT_STRIDE=out.stride(0),
+            **kwargs,
+        )
+
+    lookup(expected)
+    torch.accelerator.synchronize()
+    if mode == "ready":
+        # A fallback-only implementation must fail even when outputs look correct.
+        weight.zero_()
+    lookup(
+        actual,
+        prefetch_values=staged,
+        prefetch_scales=staged_scales,
+        prefetch_ids=staged_hashes,
+        prefetch_ready=ready,
+        prefetch_token=1,
+        prefetch_sorted=sort_rows,
+    )
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_engram_host_prefetch_hashes_match_gpu():
+    """Host prefetch stages the rows the GPU hashes to, across chunk lookback
+    and prompt-start padding; hashes past the table stage nothing."""
+    multipliers = engram_ops.compute_hash_multipliers((1,), 4, 50)
+    primes = torch.tensor([[[97, 89], [83, 79], [73, 71]]])
+    offsets = torch.tensor([[0, 97, 186, 269, 348, 421]])
+    tables_meta = (
+        torch.arange(50, dtype=torch.int32, device="cuda"),
+        multipliers.cuda(),
+        primes.cuda(),
+        offsets.cuda(),
+        4,
+    )
+    prompts = [list(range(30, 39)), list(range(40, 46)), list(range(23, 30))]
+    starts, counts, back = [0, 4, 1], [5, 2, 6], 3
+    requests = [
+        (
+            prompt[start : start + count],
+            start,
+            [prompt[start - 1 - j] if start > j else -1 for j in range(back)],
+        )
+        for prompt, start, count in zip(prompts, starts, counts)
+    ]
+    block_table = torch.zeros(3, 3, dtype=torch.int32, device="cuda")
+    expected = torch.cat(_hash_ids(requests, tables_meta, block_table))[:, 0]
+    expected = expected.flatten().cpu().numpy()
+
+    histories = [np.array(prompt, np.int32) for prompt in prompts]
+    window = engram_ops._prefetch_window(histories, starts, counts, back)
+    assert engram_ops._prefetch_window(histories, [4], [6], back) is None
+    rng = np.random.default_rng(0)
+    weight = rng.integers(0, 256, (400, 8), dtype=np.uint8)
+    scales = rng.integers(0, 256, (400, 1), dtype=np.uint8)
+    values = np.zeros((expected.size, 8), np.uint8)
+    staged_scales = np.zeros((expected.size, 1), np.uint8)
+    hashes = np.zeros(expected.size, np.int32)
+    engram_ops._build_prefetch_gather()(
+        window,
+        np.array(counts, np.int64),
+        np.arange(50, dtype=np.int64),
+        0,
+        multipliers[0].numpy(),
+        primes[0].numpy(),
+        offsets[0].numpy(),
+        weight,
+        scales,
+        values,
+        staged_scales,
+        hashes,
+    )
+
+    in_table = expected < len(weight)
+    assert in_table.any() and not in_table.all()
+    np.testing.assert_array_equal(hashes, np.where(in_table, expected, -1))
+    np.testing.assert_array_equal(values[in_table], weight[expected[in_table]])
+    np.testing.assert_array_equal(staged_scales[in_table], scales[expected[in_table]])
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

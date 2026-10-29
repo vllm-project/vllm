@@ -34,13 +34,17 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
   cache for the rest.
 """
 
+import concurrent.futures
 import ctypes
 import mmap
 import os
 import sys
 import tempfile
 import weakref
+from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -77,6 +81,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 logger = init_logger(__name__)
 
@@ -634,6 +642,7 @@ _SORTED_IS_CONSTEXPR = tl.constexpr(
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
+        "prefetch_token",
         *(() if _SORTED_IS_CONSTEXPR else ("SORTED",)),
     ]
 )
@@ -659,6 +668,12 @@ def _engram_lookup_kernel(
     PACKED: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
     PEER_ROWS: tl.constexpr = 0,
+    prefetch_values=None,
+    prefetch_scales=None,
+    prefetch_ids=None,
+    prefetch_ready=None,
+    prefetch_token=0,
+    prefetch_sorted: tl.constexpr = None,
 ):
     """Gather FP8 rows as packed values/scales or dequantized BF16.
 
@@ -672,7 +687,8 @@ def _engram_lookup_kernel(
     for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
         rows = base + tl.arange(0, BLOCK_R)
         valid = rows < num_rows
-        if SORTED:
+        # Prefetch variants specialize on the row order; SORTED may be runtime.
+        if SORTED if prefetch_sorted is None else prefetch_sorted:
             local = tl.load(ids + rows, mask=valid, other=-1).to(tl.int64)
             dst = tl.load(sorted_dst + rows, mask=valid, other=0).to(tl.int32)
             owned = (local >= 0) & (local < vocab_end - vocab_start)
@@ -689,6 +705,14 @@ def _engram_lookup_kernel(
             owned &= (index >= vocab_start) & (index < vocab_end)
             local = index - vocab_start
         local = tl.where(owned, local, 0)
+        if prefetch_values is not None:
+            # Read per tile, so rows uploaded mid-lookup serve the later tiles.
+            ready = tl.load(prefetch_ready, volatile=True) == prefetch_token
+            dst = dst.to(tl.int64)
+            staged = tl.load(
+                prefetch_ids + dst, owned & ready, other=-1, cache_modifier=".cg"
+            )
+            hit = staged == local + vocab_start
         if PEER_ROWS:
             # `weight` holds each rank's buffer: PEER_ROWS rows, then scales.
             owner = local // PEER_ROWS
@@ -700,12 +724,23 @@ def _engram_lookup_kernel(
             row_weight, row_scales = weight, scales
         row_weight += local * DIM
         row_scales += local * (DIM // QUANT_BLOCK)
-        values = tl.load(
-            row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
-        )
-        scale = tl.load(
-            row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
-        )
+        value_ptrs = row_weight[:, None] + cols[None, :]
+        scale_ptrs = row_scales[:, None] + scale_cols[None, :]
+        if prefetch_values is not None:
+            value_ptrs = tl.where(
+                hit[:, None],
+                prefetch_values + dst[:, None] * DIM + cols[None, :],
+                value_ptrs,
+            )
+            scale_ptrs = tl.where(
+                hit[:, None],
+                prefetch_scales
+                + dst[:, None] * (DIM // QUANT_BLOCK)
+                + scale_cols[None, :],
+                scale_ptrs,
+            )
+        values = tl.load(value_ptrs, mask=owned[:, None], other=0.0)
+        scale = tl.load(scale_ptrs, mask=owned[:, None], other=0)
         if PACKED:
             width: tl.constexpr = DIM + DIM // QUANT_BLOCK
             dst = dst.to(tl.int64)
@@ -1178,7 +1213,12 @@ class ParallelEngramEmbedding(nn.Module):
         return self._views
 
     def lookup(
-        self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
+        self,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+        prefetched: tuple[torch.Tensor, ...] | None = None,
+        prefetch_token: int = 0,
     ) -> None:
         """Look up local heads into BF16, or packed FP8 bytes followed by scales.
 
@@ -1188,6 +1228,7 @@ class ParallelEngramEmbedding(nn.Module):
         if not rows:
             return
         weight, scales = self._storage()
+        hp_values, hp_scales, hp_ids, hp_ready = prefetched or (None,) * 4
         ids_stride_t, ids_stride_h = indices.stride()
         sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
         sort = (
@@ -1232,6 +1273,14 @@ class ParallelEngramEmbedding(nn.Module):
             PACKED=out.dtype == torch.uint8,
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
+            prefetch_values=hp_values.view(torch.float8_e4m3fn)
+            if hp_values is not None
+            else None,
+            prefetch_scales=hp_scales,
+            prefetch_ids=hp_ids,
+            prefetch_ready=hp_ready,
+            prefetch_token=prefetch_token,
+            prefetch_sorted=sort if prefetched is not None else None,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -1597,6 +1646,8 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    _host_prefetch: "EngramHostPrefetch | None" = None
+    _host_hashes: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -1682,6 +1733,14 @@ class Engram(nn.Module):
         consume them; DP-sharded tables take the group's gathered hash IDs."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        hp = self._host_prefetch
+        if hp is not None and hp.covers(hash_ids.shape[0]):
+            self._host_hashes = hash_ids
+            if self.layer_hash_index:
+                # Looked up in _ready_rows, leaving the host worker more time.
+                return
+            # The first layer has little time to hide a host read, so it keeps
+            # the regular schedule: rows still uploading cost no extra wait.
         if self._prefetch_stream is None:
             self.embed_tokens.lookup(hash_ids, rows)
         else:
@@ -1699,7 +1758,9 @@ class Engram(nn.Module):
         # Big lookups stall persistent main-stream kernels anyway: run them inline.
         _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
         if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
-            self.embed_tokens.lookup(hash_ids, rows)
+            # Prefetched rows are looked up inline in _ready_rows, later.
+            if self._host_hashes is None:
+                self.embed_tokens.lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream
             assert stream is not None
@@ -1707,7 +1768,11 @@ class Engram(nn.Module):
             # Keep temporary hash storage alive until lookup finishes reading it.
             hash_ids.record_stream(stream)
             with torch.cuda.stream(stream):
-                self.embed_tokens.lookup(hash_ids, rows, background=True)
+                if self._host_hashes is None:
+                    self.embed_tokens.lookup(hash_ids, rows, background=True)
+                else:
+                    assert self._host_prefetch is not None
+                    self._host_prefetch.lookup(self, background=True)
         assert self._prefetch_done is not None
         self._prefetch_done.record(stream)
 
@@ -1717,7 +1782,10 @@ class Engram(nn.Module):
         torch.cuda.current_stream().wait_event(event)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
-        if self._prefetch_done is not None:
+        if self._host_hashes is not None:
+            assert self._host_prefetch is not None
+            self._host_prefetch.lookup(self)
+        elif self._prefetch_done is not None:
             self._finish_prefetch(self._prefetch_done)
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
@@ -1812,3 +1880,349 @@ class Engram(nn.Module):
             num_warps=num_warps,
         )
         return output
+
+
+def _build_prefetch_gather() -> Callable[..., None]:
+    """Build the nogil parallel hash-and-gather function.
+
+    Hashes outside the table are stored as -1, so their lookups miss."""
+    import numba
+
+    @numba.njit(nogil=True, parallel=True)
+    def prepare(
+        window,
+        counts,
+        token_map,
+        pad_id,
+        mult,
+        primes,
+        offsets,
+        weight,
+        scales,
+        out_v,
+        out_s,
+        out_h,
+    ):
+        ngram = mult.shape[0]
+        heads = primes.shape[1]
+        cols = (ngram - 1) * heads
+        # Each request's chunk follows its ngram - 1 lookback tokens in `window`.
+        base = np.empty(counts.sum(), np.int64)
+        k = 0
+        for req in range(counts.shape[0]):
+            for _ in range(counts[req]):
+                base[k] = k + (req + 1) * (ngram - 1)
+                k += 1
+        for i in numba.prange(base.shape[0]):
+            rolling = np.int64(0)
+            for shift in range(ngram):
+                tok = window[base[i] - shift]
+                v = token_map[tok] if tok >= 0 else np.int64(pad_id)
+                # Non-negative, so % agrees with the GPU's truncating modulo.
+                rolling ^= v * mult[shift]
+                if shift > 0:
+                    for h in range(heads):
+                        c = (shift - 1) * heads + h
+                        r = rolling % primes[shift - 1, h] + offsets[c]
+                        row = i * cols + c
+                        if 0 <= r < weight.shape[0]:
+                            out_h[row] = r
+                            out_v[row, :] = weight[r, :]
+                            out_s[row, :] = scales[r, :]
+                        else:
+                            out_h[row] = -1
+
+    return prepare
+
+
+def _prefetch_window(
+    histories: list[np.ndarray | None], starts: list[int], counts: list[int], back: int
+) -> np.ndarray | None:
+    """Each request's chunk after its `back` preceding tokens, -1 before the
+    prompt; None when a request's tokens are unknown."""
+    pieces = []
+    for tokens, start, count in zip(histories, starts, counts):
+        if tokens is None or start + count > len(tokens):
+            return None
+        pieces.append(np.full(max(0, back - start), -1, np.int32))
+        pieces.append(tokens[max(0, start - back) : start + count])
+    return np.concatenate(pieces)
+
+
+@dataclass
+class _EngramPrefetchSlot:
+    host: list[tuple[torch.Tensor, ...]]
+    device: list[tuple[torch.Tensor, ...]]
+    uploaded: list[torch.cuda.Event]
+    consumed: list[torch.cuda.Event]
+    token: int = 0
+    num_tokens: int = 0
+    future: concurrent.futures.Future | None = None
+
+
+class EngramHostPrefetch:
+    """Hashes and gathers prompt rows on the CPU ahead of eager prefill, then
+    stages them on the GPU for the Engram lookups of that step."""
+
+    def __init__(self, model: nn.Module, threads: int, max_graph_tokens: int):
+        import numba
+
+        modules = list(model.modules())
+        state = next((m for m in modules if isinstance(m, NgramHashState)), None)
+        layers = sorted(
+            (m for m in modules if isinstance(m, Engram)),
+            key=lambda m: m.layer_hash_index,
+        )
+        # EngramConfig admits only unsharded CPU tables.
+        assert state is not None and layers
+        assert [m.layer_hash_index for m in layers] == list(range(len(layers)))
+        assert all(
+            m.embed_tokens.cpu_offload
+            and m.embed_tokens.dp_size == m.embed_tokens.tp_size == 1
+            for m in layers
+        )
+        self.layers = layers
+        self.capacity = min(m.staged_rows.shape[0] for m in layers)
+        self.max_graph_tokens = max_graph_tokens
+        self.token_map = state.token_map.cpu().numpy().astype(np.int64)
+        self.pad_id = state.pad_id
+        self.params = list(
+            zip(
+                state.multipliers.cpu().numpy(),
+                state.primes.cpu().numpy(),
+                state.offsets.cpu().numpy(),
+            )
+        )
+        self.ngram = self.params[0][0].shape[0]
+        self.device = layers[0].staged_rows.device
+        self.stream = torch.cuda.Stream(device=self.device)
+        self.slots = [self._allocate() for _ in range(2)]
+        self.stream.wait_stream(torch.cuda.current_stream(self.device))
+        self.tokens: dict[str, np.ndarray] = {}
+        self.token = 0
+        self.pending: _EngramPrefetchSlot | None = None
+        # Dummy runs never take this path, so compile its lookup variants now.
+        sort_min_rows, _ = _engram_lookup_thresholds(self.device)
+        emb = layers[0].embed_tokens
+        sorted_tokens = triton.cdiv(sort_min_rows or 1, emb.part_n_hash_cols)
+        for n in {1, min(sorted_tokens, self.capacity)}:
+            emb.lookup(
+                torch.zeros(n, emb.n_hash_cols, dtype=torch.int32, device=self.device),
+                layers[0].staged_rows[:n],
+                prefetched=self.slots[0].device[0],
+            )
+        self.prepare = _build_prefetch_gather()
+        threads = min(threads, numba.config.NUMBA_NUM_THREADS)
+        device_index = self.device.index
+
+        def init_worker() -> None:
+            numba.set_num_threads(threads)
+            torch.accelerator.set_device_index(device_index)
+
+        self.pool = concurrent.futures.ThreadPoolExecutor(
+            1, thread_name_prefix="engram", initializer=init_worker
+        )
+        try:
+            self.pool.submit(
+                self._upload,
+                self.slots[0],
+                np.full(self.ngram, -1, np.int32),
+                np.array([1], np.int64),
+                self.slots[0].consumed,
+            ).result()
+            self.stream.synchronize()
+        except Exception:
+            self.pool.shutdown(wait=True)
+            self.stream.synchronize()
+            raise
+        for layer in layers:
+            layer._host_prefetch = self
+
+    def _allocate(self) -> _EngramPrefetchSlot:
+        host, device = [], []
+        for layer in self.layers:
+            emb = layer.embed_tokens
+            rows = self.capacity * emb.n_hash_cols
+            specs = (
+                ((rows, emb.dim), torch.uint8),
+                ((rows, emb.dim // emb.block_size), torch.uint8),
+                ((rows,), torch.int32),
+                ((1,), torch.int64),
+            )
+            buffers = tuple(
+                torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+                for shape, dtype in specs
+            )
+            host.append(buffers)
+            device.append(
+                tuple(torch.empty_like(t, device=self.device) for t in buffers)
+            )
+            device[-1][2].fill_(-1)
+            device[-1][3].fill_(-1)
+        return _EngramPrefetchSlot(
+            host,
+            device,
+            [torch.cuda.Event() for _ in self.layers],
+            [torch.cuda.Event() for _ in self.layers],
+        )
+
+    def covers(self, num_tokens: int) -> bool:
+        """Whether a lookup of `num_tokens` rows belongs to the pending step."""
+        return (
+            self.pending is not None
+            and self.pending.num_tokens <= num_tokens <= self.capacity
+        )
+
+    def begin_step(self, scheduler_output: "SchedulerOutput | None") -> None:
+        """Retire the previous step; track prompts unless this is a dummy run."""
+        self.token += 1
+        # Each lookup records its own consumption; skipped layers read nothing.
+        self.pending = None
+        for layer in self.layers:
+            layer._host_hashes = None
+        for slot in self.slots:
+            if slot.future is not None and slot.future.done():
+                self._retire(slot)
+        if scheduler_output is None:
+            return
+        for req_id in scheduler_output.finished_req_ids | (
+            scheduler_output.preempted_req_ids or set()
+        ):
+            self.tokens.pop(req_id, None)
+        for req in scheduler_output.scheduled_new_reqs:
+            self.tokens[req.req_id] = np.asarray(req.prefill_token_ids, dtype=np.int32)
+
+    def submit(self, batch: "BatchReqState", num_computed_tokens: np.ndarray) -> None:
+        """Hash and gather this batch's rows in the background when eligible.
+
+        `num_computed_tokens` is indexed by request state slot."""
+        from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+
+        n = batch.num_tokens
+        if not self.max_graph_tokens < n <= self.capacity:
+            return
+        # One worker runs tasks in order, so the older slot frees first.
+        slot = self.slots[0]
+        if slot.future is not None and not slot.future.done():
+            return
+        self._retire(slot)
+        counts = np.asarray(batch.num_scheduled_tokens, dtype=np.int64)
+        if counts.sum() != n:
+            return
+        starts = num_computed_tokens[batch.idx_mapping_np]
+        window = _prefetch_window(
+            [self.tokens.get(req) for req in batch.req_ids],
+            starts.tolist(),
+            counts.tolist(),
+            self.ngram - 1,
+        )
+        # Image tokens are dead on the GPU; larger ids would index past the map.
+        if (
+            window is None
+            or window.max() >= len(self.token_map)
+            or (window == IMAGE_SENTINEL_BASE_ID).any()
+        ):
+            return
+        previous = slot.consumed
+        slot.consumed = [torch.cuda.Event() for _ in self.layers]
+        self.slots.append(self.slots.pop(0))
+        self.token += 1
+        slot.token, slot.num_tokens = self.token, n
+        self.pending = slot
+        slot.future = self.pool.submit(self._upload, slot, window, counts, previous)
+
+    def _upload(
+        self,
+        slot: _EngramPrefetchSlot,
+        window: np.ndarray,
+        counts: np.ndarray,
+        previous: list[torch.cuda.Event],
+    ) -> None:
+        with torch.inference_mode():
+            for i, layer in enumerate(self.layers):
+                if slot.token != self.token:
+                    return
+                # Stable per-slot events retain the last actual DMA fence,
+                # including when an intervening task exits without uploading.
+                slot.uploaded[i].synchronize()
+                if slot.token != self.token:
+                    return
+                emb = layer.embed_tokens
+                values, scales, hashes, flag = slot.host[i]
+                rows = int(counts.sum()) * emb.n_hash_cols
+                try:
+                    self.prepare(
+                        window,
+                        counts,
+                        self.token_map,
+                        self.pad_id,
+                        *self.params[i],
+                        # Read per task: weight reloads may replace the storage.
+                        emb.weight.data.view(torch.uint8).numpy(),
+                        emb.weight_scale_inv.data.numpy(),
+                        values.numpy()[:rows],
+                        scales.numpy()[:rows],
+                        hashes.numpy()[:rows],
+                    )
+                except Exception:
+                    if slot.token == 0:  # The initialization warmup must fail loudly.
+                        raise
+                    logger.exception(
+                        "Engram host prefetch gather failed at layer %d", i
+                    )
+                    return
+                if slot.token != self.token:
+                    return
+                flag.numpy()[0] = slot.token
+                with torch.cuda.stream(self.stream):
+                    self.stream.wait_event(previous[i])
+                    try:
+                        for dst, src in zip(slot.device[i], slot.host[i]):
+                            dst[:rows].copy_(src[:rows], non_blocking=True)
+                    finally:
+                        slot.uploaded[i].record(self.stream)
+
+    def lookup(self, layer: "Engram", background: bool = False) -> None:
+        slot, index = self.pending, layer.layer_hash_index
+        assert slot is not None and layer._host_hashes is not None
+        hashes, layer._host_hashes = layer._host_hashes, None
+        layer.embed_tokens.lookup(
+            hashes,
+            layer.staged_rows[: hashes.shape[0]],
+            background,
+            prefetched=slot.device[index],
+            prefetch_token=slot.token,
+        )
+        slot.consumed[index].record(torch.cuda.current_stream(self.device))
+        if layer is self.layers[-1]:
+            self.pending = None
+
+    @staticmethod
+    def _retire(slot: _EngramPrefetchSlot) -> None:
+        # Clear first, so a task's error is raised only once.
+        future, slot.future = slot.future, None
+        if future is not None:
+            future.result()
+
+    def drain(self) -> None:
+        """Wait out in-flight uploads, e.g. before sleep releases the buffers."""
+        self.token += 1  # Stops in-flight tasks at their next layer.
+        concurrent.futures.wait(
+            [slot.future for slot in self.slots if slot.future is not None]
+        )
+        self.stream.synchronize()
+        for slot in self.slots:
+            self._retire(slot)
+
+    def close(self) -> None:
+        try:
+            self.drain()
+        finally:
+            self.pool.shutdown()
+            for layer in self.layers:
+                layer._host_prefetch = None
+                layer._host_hashes = None
+            self.pending = None
+            self.layers.clear()
+            self.slots.clear()
+            self.tokens.clear()

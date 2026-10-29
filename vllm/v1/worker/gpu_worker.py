@@ -299,6 +299,8 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if self.use_v2_model_runner:
+            cast("GPUModelRunnerV2", self.model_runner).drain_background_work()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -367,6 +369,8 @@ class Worker(WorkerBase):
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        if self.use_v2_model_runner:
+            cast("GPUModelRunnerV2", self.model_runner).drain_background_work()
         if has_kv_transfer_group() and "kv_cache" in tags:
             get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.discard(tags)
