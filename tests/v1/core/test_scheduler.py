@@ -2848,6 +2848,25 @@ def test_per_request_spec_decode_detailed_records_per_step(verified_per_step):
     assert payload["num_spec_steps"] == 3
 
 
+def test_per_request_spec_decode_counts_invalid_drafts():
+    # Sync structured output decoding schedules the valid draft tokens plus the
+    # first invalid one. The trimmed draft tokens still count as drafted, but
+    # the -1 padding does not.
+    scheduler = create_scheduler(
+        num_speculative_tokens=4,
+        per_request_spec_decode_metrics="summary",
+    )
+    # One verify step: [1, 2, 3] proposed, 1 valid, [1, 2] scheduled, 1 accepted.
+    req = _run_spec_verify_steps(
+        scheduler, [([1, 2, 3, -1], [1, 5])], grammar=_PrefixGrammar(num_valid=1)
+    )
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
+    assert payload["num_draft_tokens"] == 3
+    assert payload["num_verified_tokens"] == 2
+    assert payload["num_accepted_draft_tokens"] == 1
+    assert payload["acceptance_histogram"] == [0, 1, 0, 0, 0]
+
+
 class _PrefixGrammar(StructuredOutputGrammar):
     """Grammar that accepts only the first ``num_valid`` draft tokens."""
 
@@ -2871,25 +2890,6 @@ class _PrefixGrammar(StructuredOutputGrammar):
 
     def reset(self) -> None:
         pass
-
-
-def test_per_request_spec_decode_counts_invalid_drafts():
-    # Sync structured output decoding schedules the valid draft tokens plus the
-    # first invalid one. The trimmed draft tokens still count as drafted, but
-    # the -1 padding does not.
-    scheduler = create_scheduler(
-        num_speculative_tokens=4,
-        per_request_spec_decode_metrics="summary",
-    )
-    # One verify step: [1, 2, 3] proposed, 1 valid, [1, 2] scheduled, 1 accepted.
-    req = _run_spec_verify_steps(
-        scheduler, [([1, 2, 3, -1], [1, 5])], grammar=_PrefixGrammar(num_valid=1)
-    )
-    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
-    assert payload["num_draft_tokens"] == 3
-    assert payload["num_verified_tokens"] == 2
-    assert payload["num_accepted_draft_tokens"] == 1
-    assert payload["acceptance_histogram"] == [0, 1, 0, 0, 0]
 
 
 def test_spec_decode_stats_keep_batch_after_all_padding_draft():
