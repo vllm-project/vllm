@@ -180,16 +180,11 @@ class NCCLRendezvous(Protocol):
 
 
 def _require_usable_communicator(comm: "PyNcclCommunicator") -> "PyNcclCommunicator":
-    """Reject a disabled or unavailable communicator, since every collective on it
-    is a no-op and the transfer would leave the workers on stale weights.
-
-    Skipped on CUDA/ROCm.
-    """
-    if not current_platform.is_cuda_alike() and (comm.disabled or not comm.available):
+    """A disabled communicator makes every broadcast a no-op (stale weights)."""
+    if comm.disabled:
         raise RuntimeError(
-            "NCCL weight transfer needs a working PyNccl communicator, but it "
-            f"disabled itself on {current_platform.device_type} "
-            f"(rank={comm.rank}, world_size={comm.world_size})."
+            f"PyNccl communicator is disabled on {current_platform.device_type}; "
+            "NCCL weight transfer would be a no-op."
         )
     return comm
 
@@ -352,9 +347,8 @@ def trainer_init(
             - master_address: str
             - master_port: int
             - world_size: int
-        rank: This trainer process's rank in the group. The broadcast backends
-            have a single trainer at rank 0; multi-rank trainers (m2n) occupy
-            ranks `[0, num_trainer_ranks)` and the workers start after them.
+        rank: This trainer process's rank in the group. Trainer ranks occupy
+            `[0, num_trainer_ranks)` and the workers start after them.
 
     Returns:
         PyNcclCommunicator for weight transfer.
