@@ -25,8 +25,8 @@ Configuration via kv_connector_extra_config:
         via SecondaryTierFactory.register_tier()
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
-  - mirror_source, mirror_timeout_s: (optional) CPU region mirror settings
-    when secondary tiers span several nodes (see
+  - mirror_timeout_s: (optional) CPU region mirror transfer timeout when
+    secondary tiers span several nodes (see
     docs/features/kv_offloading_usage.md)
 
 Example configuration:
@@ -61,7 +61,6 @@ from typing import Any
 from typing_extensions import override
 
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -74,7 +73,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.region_mirror import (
-    MIRROR_SOURCES,
     MirrorTopology,
     SlotLayout,
     attach_region_mirror,
@@ -569,40 +567,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         topology = None
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             topology = self._mirror_topology()
-        head_layout = SlotLayout(
-            num_chunks=self.num_chunks,
-            row_stride=self.kv_bytes_per_chunk,
-            size=self.cpu_page_size_per_worker,
-        )
-        compact = topology is not None and not topology.on_head
-        local_layout = (
-            SlotLayout(
-                num_chunks=self.num_chunks,
-                row_stride=round_up(
-                    self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
-                ),
-                size=self.cpu_page_size_per_worker,
-            )
-            if compact
-            else head_layout
-        )
         worker_mmap: SharedOffloadRegion | None = None
         worker: CPUOffloadingWorker | None = None
         error: Exception | None = None
-        try:
-            if compact:
-                assert topology is not None
-                # Only this worker maps its compact region, so its name can go
-                # as soon as it is mapped.
-                worker_mmap = SharedOffloadRegion(
-                    engine_id=f"{self._engine_id}_r{topology.rank}",
-                    num_chunks=self.num_chunks,
-                    rank=0,
-                    kv_bytes_per_chunk=local_layout.row_stride,
-                    cpu_page_size=self.cpu_page_size_per_worker,
-                    barrier=lambda: None,
-                )
-            else:
+        # Off the head node the mirror moves GPU blocks straight to the head
+        # region, so no CPU memory is allocated there.
+        if topology is None or topology.on_head:
+            try:
                 worker_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
                     num_chunks=self.num_chunks,
@@ -610,36 +581,39 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
-            if self.config.canonical_layout:
-                self._validate_canonical_refs(kv_caches)
-            worker = CPUOffloadingWorker(
-                kv_caches=kv_caches,
-                blocks_per_chunk=self.blocks_per_chunk,
-                num_cpu_chunks=self.num_chunks,
-                mmap_region=worker_mmap,
-                canonical_layout=self.config.canonical_layout,
-            )
-        except Exception as e:
-            if worker_mmap is not None:
-                worker_mmap.cleanup()
-            if topology is None:
-                raise
-            error = e
+                if self.config.canonical_layout:
+                    self._validate_canonical_refs(kv_caches)
+                worker = CPUOffloadingWorker(
+                    kv_caches=kv_caches,
+                    blocks_per_chunk=self.blocks_per_chunk,
+                    num_cpu_chunks=self.num_chunks,
+                    mmap_region=worker_mmap,
+                    canonical_layout=self.config.canonical_layout,
+                )
+            except Exception as e:
+                if worker_mmap is not None:
+                    worker_mmap.cleanup()
+                if topology is None:
+                    raise
+                error = e
         if topology is None:
             assert worker is not None
             return worker
         # Every rank reaches the collectives below, even after a failure.
         try:
             gather_construction_errors(topology, error)
-            assert worker is not None and worker_mmap is not None
             return attach_region_mirror(
                 worker,
                 worker_mmap,
-                head_layout,
-                local_layout,
+                kv_caches,
+                self.blocks_per_chunk,
+                SlotLayout(
+                    num_chunks=self.num_chunks,
+                    row_stride=self.kv_bytes_per_chunk,
+                    size=self.cpu_page_size_per_worker,
+                ),
                 topology,
                 self._engine_id,
-                source=self._mirror_source(),
                 timeout_s=self._mirror_timeout_s(),
             )
         except BaseException:
@@ -691,14 +665,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         topology = mirror_topology()
         assert topology is not None
         return topology
-
-    def _mirror_source(self) -> str:
-        source = self.extra_config.get("mirror_source", "auto")
-        if source not in MIRROR_SOURCES:
-            raise ValueError(
-                f"mirror_source must be one of {MIRROR_SOURCES}, got {source!r}"
-            )
-        return source
 
     def _mirror_timeout_s(self) -> float:
         timeout_s = float(self.extra_config.get("mirror_timeout_s", 30))

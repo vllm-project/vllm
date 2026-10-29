@@ -4,33 +4,28 @@
 
 The tiering scheduler and its secondary tiers run in the engine core, which
 shares a node with worker rank 0 (the head node), and address only that node's
-shared region. A worker on another node moves its own slot of each chunk
-between its GPU and the head region with one-sided NIXL transfers (RDMA WRITE
-and READ), which the head serves without taking part: it only registers its
-region. A store is reported only after the worker's slot of every stored chunk
-is in the head region, and a load reads it from there before the request runs.
-The scheduler counts a transfer complete once every worker reports it, so a
-secondary tier never reads a chunk before all its slots arrived.
+shared region. A worker on another node allocates no CPU region: its copy plan
+addresses its slot of each chunk in the head region, and it moves its GPU
+blocks straight to and from there with one-sided NIXL transfers (RDMA WRITE and
+READ), which the head serves without taking part: it only registers its region.
+A store is reported only after the worker's slot of every stored chunk is in
+the head region, and a load writes the worker's GPU blocks before the request
+runs. The scheduler counts a transfer complete once every worker reports it,
+so a secondary tier never reads a chunk before all its slots arrived.
 
-Two sources are supported (``mirror_source``):
+The transfers need GPUDirect RDMA to run at network speed; without it UCX
+emulates them through host memory.
 
-- ``cpu``: the worker keeps a compact node-local region holding only its slot,
-  moves it to and from the GPU with the regular CPU offloading DMA, and
-  mirrors it to the head region.
-- ``gpu``: the worker transfers straight between its GPU blocks and the head
-  region. It needs GPUDirect RDMA; without it UCX emulates such transfers
-  through host memory, several times slower than ``cpu``.
-
-Copies run on a background thread; loads go ahead of stores. A copy that fails
-is reported as a failed transfer. A transfer that ends in no terminal state may
-still land later, onto a chunk or block that was reassigned, so it stops the
-engine instead.
+Copies run on a background thread, split into transfers of about
+``_MAX_TRANSFER_BYTES``; loads go ahead of stores, so a load waits for at most
+one transfer of a large store. A copy that fails is reported as a failed
+transfer. A transfer that ends in no terminal state may still land later, onto
+a chunk or block that was reassigned, so it stops the engine instead.
 
 Registered memory is reachable by any peer on the RDMA network that holds the
 head's metadata: the mirror needs an isolated network.
 """
 
-import ctypes
 import functools
 import queue
 import threading
@@ -45,54 +40,25 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    CopyPlanner,
+    CPUOffloadingWorker,
+    TensorRows,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
 
-MIRROR_SOURCES = ("auto", "cpu", "gpu")
 _TRANSFER_TIMEOUT_S = 30.0
-# Each transfer moves at most this many slot bytes, so a long store waits for
-# at most one transfer before a load queued behind it starts.
-_MAX_TRANSFER_BYTES = 256 * 1024 * 1024
 _SHUTDOWN_TIMEOUT_S = 60.0
-# The cpu source moves host memory only; without this UCX also wires up rc_gda
-# GPU lanes (see the p2p tier's NixlTransport).
-_HOST_ONLY_UCX_PARAMS = {"engine_config": "TLS=^rc_gda"}
-_CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED = 116
-_CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED = 124
-
-
-def gpu_direct_rdma_supported(device: int) -> bool:
-    """Whether a NIC may read and write this GPU's memory directly.
-
-    True when the driver reports GPUDirect RDMA or dma-buf export for the
-    device. Unified-memory parts such as GB10 report neither.
-    """
-    try:
-        cuda = ctypes.CDLL("libcuda.so.1")
-        handle = ctypes.c_int()
-        if cuda.cuInit(0) or cuda.cuDeviceGet(ctypes.byref(handle), device):
-            return False
-        for attribute in (
-            _CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED,
-            _CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED,
-        ):
-            value = ctypes.c_int()
-            if (
-                not cuda.cuDeviceGetAttribute(ctypes.byref(value), attribute, handle)
-                and value.value
-            ):
-                return True
-    except OSError:
-        pass
-    return False
+# Bytes of one NIXL transfer; a load queued meanwhile goes between them.
+_MAX_TRANSFER_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -103,21 +69,9 @@ class SlotLayout:
     row_stride: int
     size: int
 
-    @property
-    def num_slots(self) -> int:
-        return self.row_stride // self.size
-
     def base_address(self, region: SharedOffloadRegion) -> int:
         assert region.mmap_obj is not None
         return np.frombuffer(region.mmap_obj, dtype=np.uint8).ctypes.data
-
-    def slot_descs(self, base: int, slot: int) -> list[tuple[int, int, int]]:
-        """One NIXL descriptor per chunk, covering ``slot`` of its row."""
-        offset = base + slot * self.size
-        return [
-            (offset + chunk * self.row_stride, self.size, 0)
-            for chunk in range(self.num_chunks)
-        ]
 
 
 @dataclass(frozen=True)
@@ -168,7 +122,7 @@ def _is_remote_disconnect(error: Exception) -> bool:
     )
 
 
-def _new_agent(name: str, ucx_params: dict[str, str] | None = None):
+def _new_agent(name: str):
     from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 
     if NixlWrapper is None:
@@ -177,33 +131,67 @@ def _new_agent(name: str, ucx_params: dict[str, str] | None = None):
             "several nodes; install the nixl package."
         )
     agent = NixlWrapper(name, nixl_agent_config(backends=[]))
-    agent.create_backend("UCX", dict(ucx_params or {}))
+    agent.create_backend("UCX", {})
     return agent
 
 
-class _MirrorClientBase:
-    """A remote worker's NIXL agent, connected to the head region."""
+class RegionMirrorHead:
+    """Registers the head node's region for the remote workers' transfers."""
+
+    def __init__(self, region: SharedOffloadRegion, layout: SlotLayout, name: str):
+        self._agent = _new_agent(name)
+        self.base = layout.base_address(region)
+        self._reg = self._agent.register_memory(
+            [(self.base, layout.num_chunks * layout.row_stride, 0, "")], "DRAM"
+        )
+        self._peers: list[str] = []
+
+    @property
+    def metadata(self) -> bytes:
+        return self._agent.get_agent_metadata()
+
+    def add_peers(self, metadata: list[bytes]) -> None:
+        for peer in metadata:
+            self._peers.append(self._agent.add_remote_agent(peer))
+
+    def shutdown(self) -> None:
+        for peer in self._peers:
+            self._agent.remove_remote_agent(peer)
+        self._agent.deregister_memory(self._reg)
+
+
+class RegionMirrorClient:
+    """Moves one remote worker's GPU blocks to and from its slot of the head
+    region.
+
+    Each transfer takes (GPU address, head region address, size) triples.
+    ``stop`` aborts waiting transfers.
+    """
 
     def __init__(
         self,
-        name: str,
+        gpu_ranges: list[tuple[int, int, int]],
         head_metadata: bytes,
-        timeout_s: float,
-        ucx_params: dict[str, str] | None,
+        name: str,
+        *,
+        timeout_s: float = _TRANSFER_TIMEOUT_S,
     ):
         self._timeout_s = timeout_s
         self._stopped = threading.Event()
         self._stop_reason = "is shutting down"
-        self._agent = _new_agent(name, ucx_params)
+        self._agent = _new_agent(name)
         self._head = self._agent.add_remote_agent(head_metadata)
-        self._regs: list[Any] = []
+        self._device = gpu_ranges[0][2]
+        self._reg = self._agent.register_memory(
+            [(addr, size, dev, "") for addr, size, dev in gpu_ranges], "VRAM"
+        )
 
     @property
     def metadata(self) -> bytes:
         return self._agent.get_agent_metadata()
 
     def _run(self, handle: Any, what: str) -> None:
-        """Post a prepared transfer and wait for its terminal state."""
+        """Post a transfer and wait for its terminal state."""
         try:
             state = self._agent.transfer(handle)
             deadline = time.monotonic() + self._timeout_s
@@ -231,9 +219,25 @@ class _MirrorClientBase:
         if state == "ERR":
             raise RuntimeError(f"KV offload mirror {what} failed")
 
-    def _check_running(self) -> None:
+    def _transfer(
+        self, op: str, gpu: np.ndarray, head: np.ndarray, sizes: np.ndarray
+    ) -> None:
         if self._stopped.is_set():
             raise RuntimeError(f"KV offload mirror {self._stop_reason}")
+        local_descs = self._agent.get_xfer_descs(
+            [(int(a), int(s), self._device) for a, s in zip(gpu, sizes)], "VRAM"
+        )
+        remote_descs = self._agent.get_xfer_descs(
+            [(int(a), int(s), 0) for a, s in zip(head, sizes)], "DRAM"
+        )
+        handle = self._agent.initialize_xfer(op, local_descs, remote_descs, self._head)
+        self._run(handle, f"{op} of {len(sizes)} blocks")
+
+    def write(self, gpu: np.ndarray, head: np.ndarray, sizes: np.ndarray) -> None:
+        self._transfer("WRITE", gpu, head, sizes)
+
+    def read(self, gpu: np.ndarray, head: np.ndarray, sizes: np.ndarray) -> None:
+        self._transfer("READ", gpu, head, sizes)
 
     @property
     def stopped(self) -> bool:
@@ -246,156 +250,7 @@ class _MirrorClientBase:
 
     def shutdown(self) -> None:
         self._agent.remove_remote_agent(self._head)
-        for reg in self._regs:
-            self._agent.deregister_memory(reg)
-
-
-class RegionMirrorHead:
-    """Registers the head node's region for the remote workers' transfers."""
-
-    def __init__(
-        self,
-        region: SharedOffloadRegion,
-        layout: SlotLayout,
-        name: str,
-        ucx_params: dict[str, str] | None = None,
-    ):
-        self._agent = _new_agent(name, ucx_params)
-        self.base = layout.base_address(region)
-        self._reg = self._agent.register_memory(
-            [(self.base, layout.num_chunks * layout.row_stride, 0, "")], "DRAM"
-        )
-        self._peers: list[str] = []
-
-    @property
-    def metadata(self) -> bytes:
-        return self._agent.get_agent_metadata()
-
-    def add_peers(self, metadata: list[bytes]) -> None:
-        for peer in metadata:
-            self._peers.append(self._agent.add_remote_agent(peer))
-
-    def shutdown(self) -> None:
-        for peer in self._peers:
-            self._agent.remove_remote_agent(peer)
         self._agent.deregister_memory(self._reg)
-
-
-class RegionMirrorClient(_MirrorClientBase):
-    """Moves one remote worker's slot between its region and the head region.
-
-    The local region holds only this worker's slot (``local_layout``); in the
-    head region the slot is the worker's rank. Copies are split into transfers
-    of at most ``max_transfer_bytes``. ``stop`` aborts waiting transfers.
-    """
-
-    def __init__(
-        self,
-        region: SharedOffloadRegion,
-        local_layout: SlotLayout,
-        head_layout: SlotLayout,
-        rank: int,
-        head_metadata: bytes,
-        head_base: int,
-        name: str,
-        *,
-        timeout_s: float = _TRANSFER_TIMEOUT_S,
-        max_transfer_bytes: int = _MAX_TRANSFER_BYTES,
-    ):
-        super().__init__(name, head_metadata, timeout_s, _HOST_ONLY_UCX_PARAMS)
-        self.chunks_per_transfer = max(1, max_transfer_bytes // local_layout.size)
-        base = local_layout.base_address(region)
-        self._regs.append(
-            self._agent.register_memory(
-                [(base, local_layout.num_chunks * local_layout.row_stride, 0, "")],
-                "DRAM",
-            )
-        )
-        self._local = self._agent.prep_xfer_dlist(
-            "NIXL_INIT_AGENT",
-            self._agent.get_xfer_descs(local_layout.slot_descs(base, 0), "DRAM"),
-        )
-        self._remote = self._agent.prep_xfer_dlist(
-            self._head,
-            self._agent.get_xfer_descs(head_layout.slot_descs(head_base, rank), "DRAM"),
-        )
-
-    def _transfer(self, op: str, chunk_ids: np.ndarray) -> None:
-        self._check_running()
-        ids = chunk_ids.tolist()
-        handle = self._agent.make_prepped_xfer(op, self._local, ids, self._remote, ids)
-        self._run(handle, f"{op} of {len(ids)} chunks")
-
-    def push(self, chunk_ids: np.ndarray) -> None:
-        self._transfer("WRITE", chunk_ids)
-
-    def pull(self, chunk_ids: np.ndarray) -> None:
-        self._transfer("READ", chunk_ids)
-
-    def shutdown(self) -> None:
-        self._agent.release_dlist_handle(self._local)
-        self._agent.release_dlist_handle(self._remote)
-        super().shutdown()
-
-
-class GPUMirrorClient(_MirrorClientBase):
-    """Moves one remote worker's GPU blocks straight to and from its slot of
-    the head region.
-
-    Addresses come from the CPU offloading worker's copy plan for a compact
-    region laid out like ``local_layout`` at ``local_base``; each is mapped to
-    the same byte of the worker's slot in the head region.
-    """
-
-    def __init__(
-        self,
-        gpu_ranges: list[tuple[int, int, int]],
-        local_layout: SlotLayout,
-        local_base: int,
-        head_layout: SlotLayout,
-        rank: int,
-        head_metadata: bytes,
-        head_base: int,
-        name: str,
-        *,
-        timeout_s: float = _TRANSFER_TIMEOUT_S,
-    ):
-        super().__init__(name, head_metadata, timeout_s, None)
-        self._device = gpu_ranges[0][2]
-        self._regs.append(
-            self._agent.register_memory(
-                [(addr, size, dev, "") for addr, size, dev in gpu_ranges], "VRAM"
-            )
-        )
-        self._local_base = local_base
-        self._local_stride = local_layout.row_stride
-        self._head_base = head_base + rank * head_layout.size
-        self._head_stride = head_layout.row_stride
-
-    def head_addresses(self, local_addresses: np.ndarray) -> np.ndarray:
-        offsets = local_addresses - self._local_base
-        chunks, within = np.divmod(offsets, self._local_stride)
-        return self._head_base + chunks * self._head_stride + within
-
-    def _transfer(
-        self, op: str, gpu: np.ndarray, local: np.ndarray, sizes: np.ndarray
-    ) -> None:
-        self._check_running()
-        head = self.head_addresses(local)
-        local_descs = self._agent.get_xfer_descs(
-            [(int(a), int(s), self._device) for a, s in zip(gpu, sizes)], "VRAM"
-        )
-        remote_descs = self._agent.get_xfer_descs(
-            [(int(a), int(s), 0) for a, s in zip(head, sizes)], "DRAM"
-        )
-        handle = self._agent.initialize_xfer(op, local_descs, remote_descs, self._head)
-        self._run(handle, f"{op} of {len(sizes)} blocks")
-
-    def write(self, gpu: np.ndarray, local: np.ndarray, sizes: np.ndarray) -> None:
-        self._transfer("WRITE", gpu, local, sizes)
-
-    def read(self, gpu: np.ndarray, local: np.ndarray, sizes: np.ndarray) -> None:
-        self._transfer("READ", gpu, local, sizes)
 
 
 @dataclass
@@ -404,46 +259,105 @@ class _Copy:
     # Run one at a time, in order; loads queued meanwhile go between them.
     steps: list[Callable[[], None]]
     is_load: bool
-    # Reported once every step succeeded, unless on_success replaces it.
-    result: TransferResult | None = None
-    on_success: Callable[[], None] | None = None
+    result: TransferResult
     error: BaseException | None = None
     done: threading.Event = field(default_factory=threading.Event)
     next_step: int = 0
 
 
 # Loads go first, but a waiting store runs after this many consecutive loads,
-# so a stream of loads cannot keep stored chunks pinned indefinitely.
+# so a stream of loads cannot keep stored blocks pinned indefinitely.
 _LOADS_PER_STORE = 4
 
 
-class RegionMirrorWorker(OffloadingWorker):
-    """CPU offloading worker whose region slots are mirrored on the head node.
+class RegionMirrorHeadWorker(OffloadingWorker):
+    """Worker rank 0's CPU offloading worker, keeping the head region registered
+    for the remote workers until it shuts down."""
 
-    On the head node it only keeps the head region registered. On other nodes
-    a background thread runs the copies. With ``client`` (the cpu source) a
-    store's slots are pushed after its DMA and before it is reported, and a
-    load's slots are pulled before its DMA is submitted; ``wait`` covers the
-    jobs' GPU transfers, which is what GPU block reuse needs. With
-    ``gpu_client`` (the gpu source) the copies read and write the GPU blocks
-    themselves, so ``wait`` covers them too.
+    def __init__(self, inner: CPUOffloadingWorker, head: RegionMirrorHead):
+        self._inner = inner
+        self._head = head
+
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        return self._inner.submit_store(job_id, src_spec, dst_spec)
+
+    def submit_load(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
+    ) -> bool:
+        return self._inner.submit_load(job_id, src_spec, dst_spec, expedited=expedited)
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._inner.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        self._inner.wait(job_ids)
+
+    def shutdown(self) -> None:
+        try:
+            self._head.shutdown()
+        finally:
+            self._inner.shutdown()
+
+
+def slot_planners(
+    kv_caches: CanonicalKVCaches,
+    blocks_per_chunk: int,
+    layout: SlotLayout,
+    slot_base: int,
+) -> tuple[CopyPlanner, CopyPlanner]:
+    """Store and load copy planners between this worker's GPU blocks and its
+    slot of the head region, which starts at ``slot_base``.
+
+    The slot holds each KV tensor's chunk page in turn, as on the head node.
+    """
+    gpu_rows = [
+        TensorRows.of(t.tensor.view(torch.int8).view(-1, t.page_size_bytes))
+        for t in kv_caches.tensors
+    ]
+    cpu_rows = []
+    offset = 0
+    for rows in gpu_rows:
+        size = rows.size * blocks_per_chunk
+        cpu_rows.append(
+            TensorRows(slot_base + offset, layout.row_stride, size, layout.num_chunks)
+        )
+        offset += size
+    if offset > layout.size:
+        raise ValueError(
+            f"KV offload worker needs {offset} bytes per chunk, but its slot of "
+            f"the head region holds {layout.size}"
+        )
+    plan = functools.partial(
+        CopyPlanner, gpu_rows, cpu_rows, blocks_per_chunk, kv_caches.group_data_refs
+    )
+    return plan(gpu_to_cpu=True), plan(gpu_to_cpu=False)
+
+
+class RegionMirrorWorker(OffloadingWorker):
+    """Offloading worker on a node other than the head's.
+
+    A background thread copies the GPU blocks of each transfer to or from this
+    worker's slot of the head region, so ``wait`` covers those copies.
     """
 
     def __init__(
         self,
-        inner: CPUOffloadingWorker,
+        store_planner: CopyPlanner,
+        load_planner: CopyPlanner,
+        client: RegionMirrorClient,
         *,
-        client: RegionMirrorClient | None = None,
-        gpu_client: GPUMirrorClient | None = None,
-        head: RegionMirrorHead | None = None,
+        max_transfer_bytes: int = _MAX_TRANSFER_BYTES,
     ):
-        assert client is None or gpu_client is None
-        self._inner = inner
+        self._store_planner = store_planner
+        self._load_planner = load_planner
         self._client = client
-        self._gpu_client = gpu_client
-        self._mirror: _MirrorClientBase | None = client or gpu_client
-        self._head = head
-        self._pending_stores: dict[int, np.ndarray] = {}
+        self._max_transfer_bytes = max_transfer_bytes
         self._copies: dict[int, _Copy] = {}
         self._ready: list[TransferResult] = []
         self._cv = threading.Condition()
@@ -457,12 +371,10 @@ class RegionMirrorWorker(OffloadingWorker):
         # Set when a transfer may still land; ends the engine.
         self._stuck: MirrorStuckError | None = None
         self._completed: queue.Queue[_Copy] = queue.Queue()
-        self._thread: threading.Thread | None = None
-        if self._mirror is not None:
-            self._thread = threading.Thread(
-                target=self._copy_loop, name="kv-offload-mirror-io", daemon=True
-            )
-            self._thread.start()
+        self._thread = threading.Thread(
+            target=self._copy_loop, name="kv-offload-mirror-io", daemon=True
+        )
+        self._thread.start()
 
     def _next_copy(self) -> _Copy | None:
         with self._cv:
@@ -485,9 +397,8 @@ class RegionMirrorWorker(OffloadingWorker):
             except MirrorStuckError as e:
                 # A late write could land on a reassigned chunk or block:
                 # report nothing more and stop the engine.
-                assert self._mirror is not None
                 logger.error("KV offload mirror transfer is stuck: %s", e)
-                self._mirror.stop("stopped: a transfer may still land")
+                self._client.stop("stopped: a transfer may still land")
                 self._stuck = e
                 return
             except BaseException as e:
@@ -503,37 +414,65 @@ class RegionMirrorWorker(OffloadingWorker):
             self._completed.put(copy)
             copy.done.set()
 
-    def _enqueue(self, copy: _Copy) -> None:
-        self._copies[copy.job_id] = copy
+    def _enqueue(
+        self,
+        job_id: int,
+        copy_fn: Callable,
+        gpu: np.ndarray,
+        head: np.ndarray,
+        sizes: np.ndarray,
+        is_load: bool,
+    ) -> None:
+        # The copy reads or writes GPU blocks that the compute stream may
+        # still be writing (a store's KV, a load's zeroing), so it waits.
+        event = torch.Event()
+        event.record()
+        result = TransferResult(
+            job_id=job_id, success=True, transfer_size=int(sizes.sum())
+        )
+        result.transfer_time = 0.0
+
+        def step(gpu: np.ndarray, head: np.ndarray, sizes: np.ndarray) -> None:
+            event.synchronize()
+            start = time.perf_counter()
+            copy_fn(gpu, head, sizes)
+            result.transfer_time += time.perf_counter() - start
+
+        # Each transfer holds the blocks whose end falls in its byte window.
+        window = (np.cumsum(sizes) - 1) // self._max_transfer_bytes
+        bounds = np.flatnonzero(np.diff(window)) + 1
+        steps = [
+            functools.partial(step, *batch)
+            for batch in zip(*(np.split(a, bounds) for a in (gpu, head, sizes)))
+        ]
+        copy = _Copy(job_id, steps, is_load, result)
+        self._copies[job_id] = copy
         with self._cv:
-            (self._loads if copy.is_load else self._stores).append(copy)
+            (self._loads if is_load else self._stores).append(copy)
             self._cv.notify()
 
     def _finish_copy(self, copy: _Copy) -> None:
-        """Account a completed copy: report it, or run its follow-up.
+        """Report a completed copy.
 
         A failed copy reports its job as failed: the scheduler drops a failed
         store's chunks, and a failed load's blocks become load errors.
         """
         del self._copies[copy.job_id]
-        if copy.error is not None:
-            self._failed_since_log += 1
-            now = time.monotonic()
-            if now - self._failed_logged_at >= 10.0:
-                logger.warning(
-                    "%d KV offload mirror copies failed; last: job %d: %s",
-                    self._failed_since_log,
-                    copy.job_id,
-                    copy.error,
-                )
-                self._failed_since_log = 0
-                self._failed_logged_at = now
-            self._ready.append(TransferResult(job_id=copy.job_id, success=False))
-        elif copy.on_success is not None:
-            copy.on_success()
-        else:
-            assert copy.result is not None
+        if copy.error is None:
             self._ready.append(copy.result)
+            return
+        self._failed_since_log += 1
+        now = time.monotonic()
+        if now - self._failed_logged_at >= 10.0:
+            logger.warning(
+                "%d KV offload mirror copies failed; last: job %d: %s",
+                self._failed_since_log,
+                copy.job_id,
+                copy.error,
+            )
+            self._failed_since_log = 0
+            self._failed_logged_at = now
+        self._ready.append(TransferResult(job_id=copy.job_id, success=False))
 
     def _drain_completed(self) -> None:
         while True:
@@ -550,63 +489,11 @@ class RegionMirrorWorker(OffloadingWorker):
                 "reused CPU chunk or GPU block"
             ) from self._stuck
 
-    def _slot_steps(self, copy_fn: Callable, chunk_ids: np.ndarray) -> list:
-        assert self._client is not None
-        size = self._client.chunks_per_transfer
-        return [
-            functools.partial(copy_fn, chunk_ids[start : start + size])
-            for start in range(0, len(chunk_ids), size)
-        ]
-
-    def _collect_inner(self) -> None:
-        """Queue pushes for finished store DMAs; keep other results to report."""
-        assert self._client is not None
-        for result in self._inner.get_finished():
-            chunk_ids = self._pending_stores.pop(result.job_id, None)
-            if chunk_ids is None or not result.success:
-                self._ready.append(result)
-                continue
-            steps = self._slot_steps(self._client.push, chunk_ids)
-            self._enqueue(_Copy(result.job_id, steps, is_load=False, result=result))
-
-    def _gpu_copy(
-        self,
-        job_id: int,
-        copy_fn: Callable,
-        gpu: np.ndarray,
-        local: np.ndarray,
-        sizes: np.ndarray,
-        is_load: bool,
-    ) -> None:
-        # The copy reads or writes GPU blocks that the compute stream may
-        # still be writing (a store's KV, a load's zeroing), so it waits.
-        event = torch.Event()
-        event.record()
-        num_bytes = int(sizes.sum())
-        result = TransferResult(job_id=job_id, success=True, transfer_size=num_bytes)
-
-        def step() -> None:
-            event.synchronize()
-            start = time.perf_counter()
-            copy_fn(gpu, local, sizes)
-            result.transfer_time = time.perf_counter() - start
-
-        self._enqueue(_Copy(job_id, [step], is_load=is_load, result=result))
-
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
     ) -> bool:
-        if self._gpu_client is not None:
-            gpu, local, sizes = self._inner.store_copy_ops(src_spec, dst_spec)
-            self._gpu_copy(
-                job_id, self._gpu_client.write, gpu, local, sizes, is_load=False
-            )
-            return True
-        if not self._inner.submit_store(job_id, src_spec, dst_spec):
-            return False
-        if self._client is not None:
-            assert isinstance(dst_spec, CPULoadStoreSpec)
-            self._pending_stores[job_id] = np.unique(dst_spec.chunk_ids)
+        gpu, head, sizes = self._store_planner.copy_ops(src_spec, dst_spec)
+        self._enqueue(job_id, self._client.write, gpu, head, sizes, is_load=False)
         return True
 
     def submit_load(
@@ -616,83 +503,45 @@ class RegionMirrorWorker(OffloadingWorker):
         dst_spec: GPULoadStoreSpec,
         expedited: bool = False,
     ) -> bool:
-        if self._gpu_client is not None:
-            local, gpu, sizes = self._inner.load_copy_ops(src_spec, dst_spec)
-            self._gpu_copy(job_id, self._gpu_client.read, gpu, local, sizes, True)
-            return True
-        if self._client is None:
-            return self._inner.submit_load(
-                job_id, src_spec, dst_spec, expedited=expedited
-            )
-        assert isinstance(src_spec, CPULoadStoreSpec)
-
-        def submit_dma() -> None:
-            if not self._inner.submit_load(
-                job_id, src_spec, dst_spec, expedited=expedited
-            ):
-                raise RuntimeError(
-                    f"KV offload load job {job_id} could not be submitted"
-                )
-
-        steps = self._slot_steps(self._client.pull, np.unique(src_spec.chunk_ids))
-        self._enqueue(_Copy(job_id, steps, is_load=True, on_success=submit_dma))
+        head, gpu, sizes = self._load_planner.copy_ops(src_spec, dst_spec)
+        self._enqueue(job_id, self._client.read, gpu, head, sizes, is_load=True)
         return True
 
     def get_finished(self) -> list[TransferResult]:
-        if self._mirror is None:
-            return self._inner.get_finished()
         self._drain_completed()
         self._raise_if_stuck()
-        if self._client is not None:
-            self._collect_inner()
         results, self._ready = self._ready, []
         return results
 
     def wait(self, job_ids: set[int]) -> None:
-        if self._mirror is not None:
-            # A pending load's DMA must exist before the inner wait; a gpu
-            # source's copies are the GPU transfers themselves.
-            for job_id in job_ids:
-                copy = self._copies.get(job_id)
-                if copy is None or not (copy.is_load or self._gpu_client):
-                    continue
-                while not copy.done.wait(1.0):
-                    self._raise_if_stuck()
-                    assert self._thread is not None
-                    if not self._thread.is_alive():
-                        raise RuntimeError(
-                            "KV offload mirror thread stopped with a copy pending"
-                        )
-            self._drain_completed()
-        self._inner.wait(job_ids)
+        for job_id in job_ids:
+            copy = self._copies.get(job_id)
+            if copy is None:
+                continue
+            while not copy.done.wait(1.0):
+                self._raise_if_stuck()
+                if not self._thread.is_alive():
+                    raise RuntimeError(
+                        "KV offload mirror thread stopped with a copy pending"
+                    )
+        self._drain_completed()
 
     def shutdown(self) -> None:
-        stuck = False
-        try:
-            if self._thread is not None:
-                assert self._mirror is not None
-                # Pending copies cannot complete once the engine stops, and the
-                # head may be gone: fail them instead of retrying each one.
-                self._mirror.stop()
-                with self._cv:
-                    self._stopping = True
-                    self._cv.notify()
-                self._thread.join(_SHUTDOWN_TIMEOUT_S)
-                if self._thread.is_alive() or self._stuck is not None:
-                    # A transfer may still use the registered memory.
-                    logger.warning(
-                        "KV offload mirror did not stop cleanly; its region "
-                        "stays mapped"
-                    )
-                    stuck = True
-                else:
-                    self._mirror.shutdown()
-            if self._head is not None:
-                self._head.shutdown()
-        finally:
-            # The mirror's registrations are gone, so the region can close.
-            if not stuck:
-                self._inner.shutdown()
+        # Pending copies cannot complete once the engine stops, and the head
+        # may be gone: fail them instead of retrying each one.
+        self._client.stop()
+        with self._cv:
+            self._stopping = True
+            self._cv.notify()
+        self._thread.join(_SHUTDOWN_TIMEOUT_S)
+        if self._thread.is_alive() or self._stuck is not None:
+            # A transfer may still use the registered GPU memory.
+            logger.warning(
+                "KV offload mirror did not stop cleanly; its GPU memory stays "
+                "registered"
+            )
+            return
+        self._client.shutdown()
 
 
 def _all_gather(topology: MirrorTopology, value: Any) -> list[Any]:
@@ -727,100 +576,88 @@ def gather_construction_errors(
     _gather_raising(topology, error, None, "worker construction")
 
 
-def resolve_mirror_source(source: str, device: int) -> str:
-    """Resolve ``auto`` to ``gpu`` when the GPU supports GPUDirect RDMA."""
-    if source not in MIRROR_SOURCES:
-        raise ValueError(
-            f"mirror_source must be one of {MIRROR_SOURCES}, got {source!r}"
-        )
-    if source == "auto":
-        return "gpu" if gpu_direct_rdma_supported(device) else "cpu"
-    return source
-
-
 def attach_region_mirror(
-    worker: CPUOffloadingWorker,
-    region: SharedOffloadRegion,
+    worker: CPUOffloadingWorker | None,
+    region: SharedOffloadRegion | None,
+    kv_caches: CanonicalKVCaches,
+    blocks_per_chunk: int,
     head_layout: SlotLayout,
-    local_layout: SlotLayout,
     topology: MirrorTopology,
     engine_id: str,
     *,
-    source: str = "auto",
     timeout_s: float = _TRANSFER_TIMEOUT_S,
 ) -> OffloadingWorker:
-    """Connect this worker's region to the head region through the mirror.
+    """Connect this worker to the head region through the mirror.
 
     Collective over the engine's workers: every rank takes part in the same
-    exchanges, and any failure raises on all of them. On failure the caller
-    still owns ``worker``.
+    exchanges, and any failure raises on all of them. Workers whose head
+    layouts differ are rejected. On failure the caller still owns ``worker``.
 
     Args:
-        worker: The node-local CPU offloading worker.
-        region: The worker's shared region.
+        worker: The CPU offloading worker on the head node; None elsewhere.
+        region: Its shared region; None off the head node.
+        kv_caches: This worker's GPU KV caches.
+        blocks_per_chunk: GPU blocks per offloaded chunk.
         head_layout: Slot geometry of the head node's region.
-        local_layout: Slot geometry of this worker's region.
         topology: This worker's placement.
         engine_id: Names the NIXL agents of this engine.
-        source: ``auto``, ``cpu`` or ``gpu`` (see the module docstring).
         timeout_s: Wait for one transfer before the mirror counts it stuck.
 
     """
     name = f"kv-offload-mirror-{engine_id}-{topology.rank}"
     head = None
-    client: RegionMirrorClient | GPUMirrorClient | None = None
+    client: RegionMirrorClient | None = None
+    planners: tuple[CopyPlanner, CopyPlanner] | None = None
     error: BaseException | None = None
     try:
-        own_source = None
-        if not topology.on_head:
-            try:
-                own_source = resolve_mirror_source(
-                    source, torch.accelerator.current_device_index()
-                )
-            except Exception as e:
-                error = e
-        sources = _gather_raising(topology, error, own_source, "mirror source")
-        gpu_source = "gpu" in sources
-        # The head serves GPU memory only through UCX's GPU transports.
-        head_ucx = None if gpu_source else _HOST_ONLY_UCX_PARAMS
+        endpoint = None
         if topology.rank == 0:
+            assert region is not None
             try:
-                head = RegionMirrorHead(region, head_layout, name, head_ucx)
+                head = RegionMirrorHead(region, head_layout, name)
                 endpoint = (head.metadata, head.base)
             except Exception as e:
-                error, endpoint = e, None
-        else:
-            endpoint = None
-        head_metadata, head_base = _gather_raising(
-            topology, error, endpoint, "mirror head registration"
-        )[0]
+                error = e
+        gathered = _gather_raising(
+            topology, error, (endpoint, head_layout), "mirror head registration"
+        )
+        head_metadata, head_base = gathered[0][0]
+        # Each worker derives the layout from its own KV size; one that differs
+        # (uneven pipeline stages) would address the wrong bytes of every row.
+        mismatched = {
+            rank: layout
+            for rank, (_, layout) in enumerate(gathered)
+            if layout != gathered[0][1]
+        }
+        if mismatched:
+            raise ValueError(
+                "The KV offload mirror needs the same CPU region geometry on "
+                f"every worker; rank 0 has {gathered[0][1]}, other ranks have "
+                f"{mismatched}"
+            )
 
         metadata = None
         if not topology.on_head:
             try:
-                if sources[topology.rank] == "gpu":
-                    client = GPUMirrorClient(
-                        worker.gpu_memory_ranges(),
-                        local_layout,
-                        local_layout.base_address(region),
-                        head_layout,
-                        topology.rank,
-                        head_metadata,
-                        head_base,
-                        name,
-                        timeout_s=timeout_s,
-                    )
-                else:
-                    client = RegionMirrorClient(
-                        region,
-                        local_layout,
-                        head_layout,
-                        topology.rank,
-                        head_metadata,
-                        head_base,
-                        name,
-                        timeout_s=timeout_s,
-                    )
+                planners = slot_planners(
+                    kv_caches,
+                    blocks_per_chunk,
+                    head_layout,
+                    head_base + topology.rank * head_layout.size,
+                )
+                client = RegionMirrorClient(
+                    [
+                        (
+                            t.tensor.data_ptr(),
+                            t.tensor.numel() * t.tensor.element_size(),
+                            t.tensor.device.index or 0,
+                        )
+                        for t in kv_caches.tensors
+                    ],
+                    head_metadata,
+                    name,
+                    timeout_s=timeout_s,
+                )
                 metadata = client.metadata
             except Exception as e:
                 error = e
@@ -831,29 +668,19 @@ def attach_region_mirror(
             except Exception as e:
                 error = e
         _gather_raising(topology, error, None, "mirror peer registration")
-
-        if isinstance(client, RegionMirrorClient):
-            try:
-                # The head region has no data yet, so reading one chunk's slot
-                # proves the path without disturbing anything.
-                client.pull(np.zeros(1, dtype=np.int64))
-            except Exception as e:
-                error = e
-        _gather_raising(topology, error, None, "mirror handshake")
     except BaseException:
         if client is not None and not client.stopped:
             client.shutdown()
         if head is not None:
             head.shutdown()
         raise
-    if client is None:
-        return RegionMirrorWorker(worker, head=head)
-    logger.info(
-        "KV offload worker %d mirrors its region slots into the head node's "
-        "region over NIXL (mirror_source=%s)",
-        topology.rank,
-        sources[topology.rank],
-    )
-    if isinstance(client, GPUMirrorClient):
-        return RegionMirrorWorker(worker, gpu_client=client)
-    return RegionMirrorWorker(worker, client=client)
+    if client is not None:
+        assert planners is not None
+        logger.info(
+            "KV offload worker %d mirrors its GPU blocks into the head node's "
+            "region over NIXL",
+            topology.rank,
+        )
+        return RegionMirrorWorker(*planners, client)
+    assert worker is not None
+    return worker if head is None else RegionMirrorHeadWorker(worker, head)

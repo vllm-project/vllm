@@ -89,11 +89,27 @@ class Transfer:
     failed: bool = False
 
 
+class TensorRows(NamedTuple):
+    """Where the rows of a 2D int8 KV tensor are: row i starts at
+    ``base + i * stride`` and holds ``size`` bytes. Copy plans need nothing
+    more, so they can address memory that this process has not allocated."""
+
+    base: int
+    stride: int
+    size: int
+    num_rows: int
+
+    @classmethod
+    def of(cls, tensor: torch.Tensor) -> "TensorRows":
+        num_rows, size = tensor.shape
+        return cls(tensor.data_ptr(), tensor.stride(0), size, num_rows)
+
+
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     blocks_per_chunk: int,
     output: np.ndarray,
-    tensor: torch.Tensor,
+    rows: TensorRows,
     skip_count: int = 0,
 ):
     """Compute byte pointers for sub-blocks of the given block IDs.
@@ -102,7 +118,7 @@ def compute_sub_block_ptrs(
     The pointer for sub-block j of block b is:
         base_ptr + b * row_stride + j * block_page_size
 
-    where block_page_size = tensor.shape[1] // blocks_per_chunk (gpu page size).
+    where block_page_size = rows.size // blocks_per_chunk (gpu page size).
 
     This handles tensors where row_stride != blocks_per_chunk * block_page_size
     (e.g. non-contiguous CPU tensors).
@@ -111,15 +127,15 @@ def compute_sub_block_ptrs(
         block_ids: array of block IDs at the tensor's native granularity.
         blocks_per_chunk: number of sub-blocks per block.
         output: pre-allocated pointer array to write pointers into.
-        tensor: the source or destination tensor.
+        rows: the rows of the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
 
     """
     assert skip_count < blocks_per_chunk
 
     num_sub_blocks = len(output)
-    base_ptr = tensor.data_ptr()
-    row_stride = tensor.stride(0)
+    base_ptr = rows.base
+    row_stride = rows.stride
 
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
@@ -127,8 +143,8 @@ def compute_sub_block_ptrs(
         return
 
     # Vectorized expansion for blocks_per_chunk > 1.
-    assert tensor.shape[1] % blocks_per_chunk == 0
-    block_page_size = tensor.shape[1] // blocks_per_chunk
+    assert rows.size % blocks_per_chunk == 0
+    block_page_size = rows.size // blocks_per_chunk
     sub_offsets = np.arange(blocks_per_chunk, dtype=np.uint64) * block_page_size
     # (num_blocks, 1) + (1, blocks_per_chunk) -> (num_blocks, blocks_per_chunk)
     all_ptrs = (
@@ -293,77 +309,50 @@ def _new_descriptor_buffers(
     )
 
 
-class SingleDirectionOffloadingHandler:
-    """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
-    Transfers are guaranteed to be executed in order of their submission.
-    Each transfer uses a unique CUDA stream, and its stream will start
-    executing only after the streams of previous transfers have finished.
-    """
+class CopyPlanner:
+    """Computes the copy descriptors of transfers in one direction, either
+    CPU->GPU or GPU->CPU, from where the rows of each KV tensor are."""
 
     def __init__(
         self,
-        gpu_tensors: list[torch.Tensor],
-        cpu_tensors: list[torch.Tensor],
+        gpu_rows: list[TensorRows],
+        cpu_rows: list[TensorRows],
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
-        host_memory_is_pinned: bool = True,
     ):
-        """Initialize a SingleDirectionOffloadingHandler.
+        """Initialize a CopyPlanner.
 
         Args:
-            gpu_tensors: list of GPU KV cache tensors.
-                Each of shape (num_gpu_blocks, gpu_page_size_bytes) with dtype int8.
-            cpu_tensors: list of CPU KV cache tensors.
-                Each of shape (num_cpu_chunks, cpu_page_size_bytes) with dtype int8.
-                Order should match gpu_tensors.
+            gpu_rows: rows of each GPU KV cache tensor, one GPU block each.
+            cpu_rows: rows of each CPU KV cache tensor, one CPU chunk each.
+                Order should match gpu_rows.
             blocks_per_chunk: number of blocks transferred per chunk.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
-            host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
-                kernels may dereference them directly.
 
         """
-        assert len(gpu_tensors) == len(cpu_tensors)
-        assert len(gpu_tensors) > 0
+        assert len(gpu_rows) == len(cpu_rows)
+        assert len(gpu_rows) > 0
 
         canonical_bytes_per_block = (
-            _canonical_block_sizes(layer_refs_per_group, len(gpu_tensors))
+            _canonical_block_sizes(layer_refs_per_group, len(gpu_rows))
             if canonical_layout
             else None
         )
-
-        # assert input tensors are as expected
-        for t_idx, (gpu_tensor, cpu_tensor) in enumerate(zip(gpu_tensors, cpu_tensors)):
-            assert gpu_tensor.dtype == torch.int8
-            assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
-            assert cpu_tensor.dtype == torch.int8
-            assert cpu_tensor.ndim == 2
-            assert cpu_tensor.device.type == "cpu"
-            _, gpu_page_size = gpu_tensor.shape
-            _, cpu_page_size = cpu_tensor.shape
+        for t_idx, (gpu, cpu) in enumerate(zip(gpu_rows, cpu_rows)):
             if canonical_bytes_per_block is not None:
-                assert (
-                    cpu_page_size == canonical_bytes_per_block[t_idx] * blocks_per_chunk
-                )
+                assert cpu.size == canonical_bytes_per_block[t_idx] * blocks_per_chunk
             else:
-                assert cpu_page_size == gpu_page_size * blocks_per_chunk
+                assert cpu.size == gpu.size * blocks_per_chunk
 
-        self.src_tensors: list[torch.Tensor] = (
-            gpu_tensors if gpu_to_cpu else cpu_tensors
-        )
-        self.dst_tensors: list[torch.Tensor] = (
-            cpu_tensors if gpu_to_cpu else gpu_tensors
-        )
+        self.src_rows = gpu_rows if gpu_to_cpu else cpu_rows
+        self.dst_rows = cpu_rows if gpu_to_cpu else gpu_rows
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
-        self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
-        )
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * blocks_per_chunk.
@@ -384,20 +373,9 @@ class SingleDirectionOffloadingHandler:
         )
         # Reusable per-block base-pointer scratch for the canonical fill,
         # sized to the largest possible group (grown on demand)
-        num_scratch_blocks = gpu_tensors[0].shape[0] if canonical_layout else 0
+        num_scratch_blocks = gpu_rows[0].num_rows if canonical_layout else 0
         self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
         self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
-
-        # job_id -> event
-        self._transfer_events: dict[int, torch.Event] = {}
-        # queue of transfers (job_id, stream, event)
-        self._transfers: deque[Transfer] = deque()
-        # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
-        # list of CUDA events available for re-use
-        self._event_pool: list[torch.Event] = []
-        # list of pinned descriptor buffer sets available for re-use
-        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
         """Upper bound on the number of copy descriptors for a transfer.
@@ -442,14 +420,14 @@ class SingleDirectionOffloadingHandler:
                 group_src,
                 self.src_blocks_per_chunk,
                 all_src[op_idx:end_idx],
-                self.src_tensors[t_idx],
+                self.src_rows[t_idx],
                 skip_count=src_skip_count,
             )
             compute_sub_block_ptrs(
                 group_dst,
                 self.dst_blocks_per_chunk,
                 all_dst[op_idx:end_idx],
-                self.dst_tensors[t_idx],
+                self.dst_rows[t_idx],
                 skip_count=dst_skip_count,
             )
 
@@ -500,14 +478,14 @@ class SingleDirectionOffloadingHandler:
                 group_src,
                 self.src_blocks_per_chunk,
                 block_bases_src,
-                self.src_tensors[t_idx],
+                self.src_rows[t_idx],
                 skip_count=src_skip_count,
             )
             compute_sub_block_ptrs(
                 group_dst,
                 self.dst_blocks_per_chunk,
                 block_bases_dst,
-                self.dst_tensors[t_idx],
+                self.dst_rows[t_idx],
                 skip_count=dst_skip_count,
             )
 
@@ -685,6 +663,79 @@ class SingleDirectionOffloadingHandler:
         all_sizes = np.empty(num_copy_ops, dtype=np.int64)
         op_idx, _ = self._fill_ops(src_spec, dst_spec, all_src, all_dst, all_sizes)
         return all_src[:op_idx], all_dst[:op_idx], all_sizes[:op_idx]
+
+
+class SingleDirectionOffloadingHandler(CopyPlanner):
+    """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
+    Transfers are guaranteed to be executed in order of their submission.
+    Each transfer uses a unique CUDA stream, and its stream will start
+    executing only after the streams of previous transfers have finished.
+    """
+
+    def __init__(
+        self,
+        gpu_tensors: list[torch.Tensor],
+        cpu_tensors: list[torch.Tensor],
+        blocks_per_chunk: int,
+        layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+        gpu_to_cpu: bool,
+        canonical_layout: bool = False,
+        host_memory_is_pinned: bool = True,
+    ):
+        """Initialize a SingleDirectionOffloadingHandler.
+
+        Args:
+            gpu_tensors: list of GPU KV cache tensors.
+                Each of shape (num_gpu_blocks, gpu_page_size_bytes) with dtype int8.
+            cpu_tensors: list of CPU KV cache tensors.
+                Each of shape (num_cpu_chunks, cpu_page_size_bytes) with dtype int8.
+                Order should match gpu_tensors.
+            blocks_per_chunk: number of blocks transferred per chunk.
+            layer_refs_per_group: list of CanonicalKVCacheRef per group.
+            gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
+            canonical_layout: if True, CPU pages use the canonical layout
+                described by the refs' mappings.
+            host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
+                kernels may dereference them directly.
+
+        """
+        # assert input tensors are as expected
+        for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
+            assert gpu_tensor.dtype == torch.int8
+            assert gpu_tensor.ndim == 2
+            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
+            assert cpu_tensor.dtype == torch.int8
+            assert cpu_tensor.ndim == 2
+            assert cpu_tensor.device.type == "cpu"
+        super().__init__(
+            [TensorRows.of(t) for t in gpu_tensors],
+            [TensorRows.of(t) for t in cpu_tensors],
+            blocks_per_chunk,
+            layer_refs_per_group,
+            gpu_to_cpu,
+            canonical_layout,
+        )
+        # Kept alive while their rows are addressed.
+        self.src_tensors: list[torch.Tensor] = (
+            gpu_tensors if gpu_to_cpu else cpu_tensors
+        )
+        self.dst_tensors: list[torch.Tensor] = (
+            cpu_tensors if gpu_to_cpu else gpu_tensors
+        )
+        self._swap_blocks_batch = _select_swap_blocks_fn(
+            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
+        )
+
+        # job_id -> event
+        self._transfer_events: dict[int, torch.Event] = {}
+        # queue of transfers (job_id, stream, event)
+        self._transfers: deque[Transfer] = deque()
+        # list of CUDA streams available for re-use
+        self._stream_pool: list[torch.cuda.Stream] = []
+        # list of CUDA events available for re-use
+        self._event_pool: list[torch.Event] = []
+        # list of pinned descriptor buffer sets available for re-use
+        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def transfer_async(
         self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
@@ -965,30 +1016,10 @@ class CPUOffloadingWorker(OffloadingWorker):
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
         )
-        self._gpu_tensors = gpu_tensors
         self._store_handler = make_handler(gpu_to_cpu=True)
         self._load_handler = make_handler(gpu_to_cpu=False)
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
-
-    def gpu_memory_ranges(self) -> list[tuple[int, int, int]]:
-        """(address, bytes, device index) of every GPU KV cache tensor."""
-        return [
-            (t.data_ptr(), t.numel() * t.element_size(), t.device.index or 0)
-            for t in self._gpu_tensors
-        ]
-
-    def store_copy_ops(
-        self, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The copies a store makes, as (GPU address, CPU address, size)."""
-        return self._store_handler.copy_ops(src_spec, dst_spec)
-
-    def load_copy_ops(
-        self, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The copies a load makes, as (CPU address, GPU address, size)."""
-        return self._load_handler.copy_ops(src_spec, dst_spec)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec

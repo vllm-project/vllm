@@ -97,14 +97,24 @@ vllm serve <model> \
 
 ### Multiple Nodes
 
-Without secondary tiers, each node's CPU region serves only its own workers and nothing below applies. With secondary tiers, the tiering scheduler and its secondary tiers run in the engine core, which must share a node with worker rank 0 (the head node), and read that node's region:
+With secondary tiers enabled, worker rank 0 and the engine core must share
+a node, called the head node. Its CPU region holds the cached KV for all
+workers. Secondary-tier managers read and write this region.
 
-- The head node's region holds every worker's slot of each chunk; `cpu_bytes_to_use` is allocated there in full. Each worker on another node also allocates a region with its own slot of every chunk, about `cpu_bytes_to_use / world_size`, so the engine uses about `cpu_bytes_to_use * (1 + remote_workers / world_size)` of host memory in total.
-- Workers on other nodes mirror their slot through the head region with one-sided NIXL transfers (RDMA WRITE and READ over UCX): a store is reported once the worker's slot reached the head node, and a load reads the worker's slot before the request runs. Loads go ahead of stores. NIXL must be installed, and UCX picks the network unless `UCX_NET_DEVICES` names it.
-- `mirror_source` picks what a remote worker transfers from. With `cpu`, it keeps a region with only its own slot of every chunk, moves it to and from the GPU with the regular offloading DMA, and mirrors it in transfers of at most 256 MiB. With `gpu`, it transfers straight between its GPU blocks and the head region, which needs GPUDirect RDMA: without it UCX emulates the transfers through host memory, several times slower than `cpu`. `auto` picks `gpu` when the driver reports GPUDirect RDMA or dma-buf support for the GPU, and `cpu` otherwise (for example on GB10).
-- A transfer that ends in an error is reported as a failed transfer: a failed store is dropped, and a request whose load failed recomputes, or fails under `kv_load_failure_policy="fail"`. A transfer that reaches no terminal state within `mirror_timeout_s` might still land on a reused chunk, so the worker raises and the engine stops.
-- Secondary tiers that key storage through `FileMapper` (fs, obj, p2p) use their own namespace on engines that the executor reports across nodes (`--nnodes` > 1), since rows stored across nodes before the mirror lack the remote slots.
-- Data parallelism, `canonical_layout`, `replicated_layout` and the `kvcr` tier, whose keys carry no such namespace, are not supported across nodes.
+```text
+        other node                            head node
+ +---------------------+           +----------------------------------+
+ | worker r            |           | worker 0          engine core    |
+ |  GPU KV blocks  <---+-- RDMA ---+-> CPU region      (scheduler,    |
+ +---------------------+  (NIXL)   |   chunk: [w0|..|wr|..]  tiers)   |
+                                   +----------------------------------+
+```
+
+- **Where the KV lives:** each chunk row of the head region has one slot per worker. `cpu_bytes_to_use` is allocated there in full; workers on other nodes allocate no host memory for it.
+- **Stores and loads:** a worker on another node writes its GPU blocks to its slot with an RDMA WRITE, and reads them back with an RDMA READ. A store is reported once its bytes are in the head region; loads go ahead of stores.
+- **Failures:** a failed transfer is reported as failed (the store is dropped; the request recomputes, or fails under `kv_load_failure_policy="fail"`). A transfer with no result after `mirror_timeout_s` could still land on a reused chunk, so the engine stops.
+
+Supported: one engine (no data parallelism) with tensor or pipeline parallelism across nodes, the same KV geometry on every worker, NIXL installed, and GPUDirect RDMA between the GPUs and the network (without it, UCX moves the data through host memory at a fraction of the speed). Not supported across nodes: `canonical_layout`, `replicated_layout` and the `kvcr` tier. The fs, obj and p2p tiers store multi-node rows in their own namespace, since rows stored without the remote slots would be incomplete. Set `UCX_NET_DEVICES` to choose the network.
 
 See [Security](../usage/security.md#inter-node-communication) for the network the mirror needs.
 
@@ -113,7 +123,7 @@ See [Security](../usage/security.md#inter-node-communication) for the network th
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). With secondary tiers across nodes, workers off the head node also allocate their own slots (see [Multiple Nodes](#multiple-nodes)). |
+| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). With secondary tiers across nodes, all of it is on the head node (see [Multiple Nodes](#multiple-nodes)). |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
@@ -121,7 +131,6 @@ See [Security](../usage/security.md#inter-node-communication) for the network th
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
-| `mirror_source` | no | `auto` | multi-tier | `cpu`, `gpu` or `auto`: what a worker on another node transfers its slots from (see [Multiple Nodes](#multiple-nodes)). |
 | `mirror_timeout_s` | no | `30` | multi-tier | Seconds one CPU region mirror transfer may take when the engine spans several nodes before the engine stops (see [Multiple Nodes](#multiple-nodes)). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
