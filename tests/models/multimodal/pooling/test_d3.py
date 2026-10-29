@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""d3-edge against the checkpoint's own runtime (`trust_remote_code`).
+"""Decision 3.0 against the checkpoint's own runtime (`trust_remote_code`).
 
 The runtime reads a question's options from the 255 code logits of its readout
 at the last prompt token. vLLM's classify head must give the same code logits
 for the same prompt tokens, and for an image prompt that vLLM processes itself.
+d3-edge has an irregular layer layout; d3-nano ships its backbone as a single
+weight file without an index, next to the readout file.
 """
 
 import pytest
@@ -14,7 +16,7 @@ from transformers import AutoModel
 from vllm.assets.image import ImageAsset
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL = "vllm-sr/d3-edge"
+MODELS = ["vllm-sr/d3-edge", "vllm-sr/d3-nano"]
 STATE = (
     "The order arrived damaged yesterday. The customer has a receipt and asks "
     "for a replacement today."
@@ -47,7 +49,7 @@ def option_probs(logits: torch.Tensor, count: int) -> torch.Tensor:
     return torch.softmax(logits[:count].float(), dim=-1)
 
 
-@pytest.mark.parametrize("model", [MODEL])
+@pytest.mark.parametrize("model", MODELS)
 def test_d3_matches_the_checkpoint_runtime(vllm_runner, model: str) -> None:
     reference = AutoModel.from_pretrained(model, trust_remote_code=True)
     runtime = reference.runtime

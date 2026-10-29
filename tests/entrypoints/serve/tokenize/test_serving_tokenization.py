@@ -117,6 +117,37 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     )
 
 
+@pytest.mark.skip_global_cleanup
+def test_tokenize_chat_forwards_response_format_to_renderer():
+    """Structured formats must affect Mistral tokenization, not just generation."""
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+            "strict": True,
+        },
+    }
+    request = TokenizeChatRequest.model_validate(
+        {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": response_format,
+        }
+    )
+
+    params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert params.response_format is not None
+    assert (
+        params.response_format.model_dump(mode="json", by_alias=True, exclude_none=True)
+        == response_format
+    )
+
+
 @pytest.mark.asyncio
 async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
     mock_engine = MagicMock(spec=AsyncLLM)

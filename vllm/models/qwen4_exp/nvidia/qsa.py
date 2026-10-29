@@ -11,9 +11,10 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheConfig, CacheDType
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -33,10 +34,10 @@ from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    extract_layer_index,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
 )
@@ -59,9 +60,10 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
 from . import model
 from .indexer_qsa import QSAIndexer
+from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
@@ -128,13 +130,6 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
                 yield name, weight
 
         return super().load_weights(remap_shards())
-
-
-def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType:
-    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
-    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
-        return "auto"
-    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -505,13 +500,21 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 or current_platform.has_device_capability(89)
             )
         )
-        self.fuse_indexer_projection = vllm_config.lora_config is None
+        # Without a quant config here (BF16, or ModelOpt FP4, which keeps
+        # attention in BF16) the fused layer is unquantized. Otherwise the
+        # indexer shares the q/k/v GEMM only if it uses the same quant method.
+        fused_quant_config = model.without_modelopt_fp4(quant_config)
+        projection_method = type(self.qkv_proj.quant_method)
+        self.fuse_indexer_projection = vllm_config.lora_config is None and (
+            fused_quant_config is None
+            or projection_method is type(self.indexer.index_qk_proj.quant_method)
+        )
         if self.fuse_indexer_projection:
             self.index_qk_size = self.indexer.index_qk_proj.output_size
             self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
                 self.qkv_proj,
                 self.index_qk_size,
-                model.without_modelopt_fp4(quant_config),
+                fused_quant_config,
             )
             del self.indexer.index_qk_proj
 
@@ -577,6 +580,30 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
+            # Profiling/dummy run: the indexer allocates its selection scratch
+            # on demand, so touch its peak here for the memory profiler (as
+            # sparse_attn_indexer does): the prefill logits budget or the
+            # worst-case decode logits [decode tokens, compressed columns],
+            # plus the top-k workspace.
+            logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            cfg = get_current_vllm_config_or_none()
+            if cfg is not None:
+                spec = cfg.speculative_config
+                num_spec = spec.num_speculative_tokens if spec is not None else 0
+                decode_tokens = min(
+                    cfg.scheduler_config.max_num_seqs * (num_spec + 1),
+                    cfg.scheduler_config.max_num_batched_tokens,
+                )
+                block_size = cfg.cache_config.block_size
+                columns = cdiv(cfg.model_config.max_model_len, block_size) * cdiv(
+                    block_size, self.indexer.compress_ratio
+                )
+                logits_bytes = max(logits_bytes, decode_tokens * columns * 4)
+            _ = torch.empty(
+                logits_bytes + _TOPK_WORKSPACE_BYTES,
+                dtype=torch.uint8,
+                device=output.device,
+            )
             output.zero_()
             return
         main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
