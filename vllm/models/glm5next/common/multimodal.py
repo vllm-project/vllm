@@ -715,12 +715,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         video_fps = float(metadata["fps"])
         do_sample_frames = metadata.get("do_sample_frames", True)
 
-        if "frames_indices" in metadata or not do_sample_frames:
-            # Prefer indices the HF processor or the loader already selected.
-            # With do_sample_frames still true, the count is that selection;
-            # a pre-sampled loader reports the handed-in frame count.
+        if not do_sample_frames:
+            # Loader or HF write-back already picked the frames; use those
+            # indices for timestamps. After HF write-back, do_sample_frames is
+            # cleared so the count is len(frames_indices); a pre-sampled loader
+            # hands in frames whose count matches frames_indices.
             frame_indices = [int(idx) for idx in metadata["frames_indices"]]
-            num_frames = len(frame_indices) if do_sample_frames else int(total_frames)
+            num_frames = len(frame_indices)
         else:
             frame_indices = [
                 int(idx)

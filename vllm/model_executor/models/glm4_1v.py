@@ -1321,7 +1321,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
         do_sample_frames = metadata["do_sample_frames"]
-        if "frames_indices" in metadata or not do_sample_frames:
+        if not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             if duration <= video_processor.max_duration:
@@ -1373,7 +1373,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
 
         do_sample_frames = metadata.get("do_sample_frames", True)
-        if "frames_indices" in metadata or not do_sample_frames:
+        if not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             DYNAMIC_FPS_THRES = {30: 3, 300: 1, 2400: 0.5}
@@ -1459,7 +1459,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
 
         do_sample_frames = metadata.get("do_sample_frames", True)
-        if "frames_indices" in metadata or not do_sample_frames:
+        if not do_sample_frames:
             frame_indices = metadata["frames_indices"]
         else:
             target_fps = 2
@@ -1701,7 +1701,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         Input ``frames_indices`` can be the pre-sample range. The processor
         replaces them on the ``VideoMetadata`` it was given. GLM-5.3 uses this
-        direct path, so the timestamp helper must see that replacement.
+        direct path, so the timestamp helper must see that replacement. Also
+        clear ``do_sample_frames`` so the helper keeps these indices instead of
+        sampling again.
         """
         if not video_metadata:
             return
@@ -1720,6 +1722,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             if hasattr(indices, "tolist"):
                 indices = indices.tolist()
             item[1]["frames_indices"] = [int(idx) for idx in indices]
+            item[1]["do_sample_frames"] = False
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)

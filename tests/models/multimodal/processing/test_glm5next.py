@@ -322,7 +322,7 @@ def test_placeholder_rejects_timestamp_count_mismatch(processor):
 
 
 def test_video_timestamps_follow_supplied_frame_indices(processor):
-    """Indices already chosen by the processor win over a fresh resample."""
+    """When do_sample_frames is false, supplied indices win over a resample."""
     info = processor.info
     video_processor = info.get_video_processor()
     temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 1) or 1)
@@ -332,13 +332,16 @@ def test_video_timestamps_follow_supplied_frame_indices(processor):
         "total_num_frames": 256,
         "fps": fps,
         "duration": 32.0,
-        "do_sample_frames": True,
+        "do_sample_frames": False,
         "frames_indices": indices,
     }
 
     timestamps = info._get_video_second_idx_glm46v(metadata, 256)
     resampled = info._get_video_second_idx_glm46v(
-        {k: v for k, v in metadata.items() if k != "frames_indices"},
+        {
+            **{k: v for k, v in metadata.items() if k != "frames_indices"},
+            "do_sample_frames": True,
+        },
         256,
     )
 
