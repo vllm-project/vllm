@@ -2574,8 +2574,6 @@ class Scheduler(SchedulerInterface):
                             and params.temperature != 0
                             and params.trace_decode_token_ids is None
                         )
-            else:
-                prefill_stats = request.prefill_stats
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2620,7 +2618,7 @@ class Scheduler(SchedulerInterface):
                 sampled_progress_ids.add(req_id)
                 prefill_progress = self._update_prefill_progress(
                     request,
-                    prefill_stats,
+                    prefill_stats or request.prefill_stats,
                     bool(new_token_ids) and not output_is_stale,
                     finish_reason,
                     prefill_progress_timestamp,
