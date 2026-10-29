@@ -464,7 +464,7 @@ def _why_not(spec) -> str | None:
         return "no Markov head"
     if spec.draft_logits is None:
         return "greedy drafts"
-    if spec.draft_logits_num_shards != 1:
+    if spec.draft_logits.row_mapping is not None:
         return "a batch-sharded draft logits cache"
     if spec._draft_topk is not None:
         return "top-k drafting"
@@ -488,8 +488,8 @@ def _why_not(spec) -> str | None:
     lp = model.logits_processor
     if getattr(lp, "scale", 1.0) != 1.0 or getattr(lp, "soft_cap", None) is not None:
         return "a scaled or soft-capped logits processor"
-    if spec.draft_logits.dtype != torch.bfloat16:
-        return f"a {spec.draft_logits.dtype} draft logits cache"
+    if spec.draft_logits.values.dtype != torch.bfloat16:
+        return f"a {spec.draft_logits.values.dtype} draft logits cache"
     if w2.shape[0] > IDX_MASK:
         return "a vocabulary of 2**18 or more"
     if spec.num_speculative_steps > MAX_STEPS:
@@ -612,7 +612,7 @@ class ShardedMarkovSampler:
             spec.sample_pos[:num_sample].view(num_reqs, n_spec),
             spec.temperature,
             spec.seeds,
-            spec.draft_logits,
+            spec.draft_logits.values,  # replicated: row = request state
             spec.draft_tokens,
             emb,
             warmup=warmup,

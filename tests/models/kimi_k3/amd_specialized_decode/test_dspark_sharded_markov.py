@@ -46,6 +46,7 @@ class _LogitsProcessor:
 
 
 def _speculator(head, lp, base, base_local, device):
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -82,8 +83,6 @@ def _speculator(head, lp, base, base_local, device):
     s.draft_watermarker = None
     s._d2t_scatter_index = None
     s.use_fp64_gumbel = False
-    s.draft_logits_num_shards = 1
-    s.draft_logits_shard_idx = 0
     s.sample_indices = torch.arange(MAX_REQS * NSPEC, device=device)
     s.sample_idx_mapping = torch.zeros(
         MAX_REQS * NSPEC, dtype=torch.int32, device=device
@@ -96,8 +95,8 @@ def _speculator(head, lp, base, base_local, device):
     s._step_cols = torch.arange(NSPEC, dtype=torch.int32, device=device)
     s.temperature = torch.ones(MAX_REQS, dtype=torch.float32, device=device)
     s.seeds = torch.zeros(MAX_REQS, dtype=torch.int64, device=device)
-    s.draft_logits = torch.zeros(
-        MAX_REQS, NSPEC, V, dtype=torch.bfloat16, device=device
+    s.draft_logits = DraftLogitsCache(
+        MAX_REQS, NSPEC, V, dtype=torch.bfloat16, fill=0.0, device=device
     )
     s.draft_tokens = torch.zeros(MAX_REQS, NSPEC, dtype=torch.int64, device=device)
     return s
@@ -120,7 +119,7 @@ def _set_inputs(specs, rows, g, temp, pad_row):
         s.sample_idx_mapping[: rows * NSPEC] = idx.to(dev, torch.int32)
         s.temperature.fill_(temp)
         s.draft_tokens.fill_(-7)
-        s.draft_logits.fill_(0)
+        s.draft_logits.values.fill_(0)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -194,7 +193,10 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
                         if not valid[r]:
                             continue
                         for i in range(NSPEC):
-                            d = ref.draft_logits[r, i].float() - sp.draft_logits[r, i]
+                            d = (
+                                ref.draft_logits.values[r, i].float()
+                                - sp.draft_logits.values[r, i]
+                            )
                             # the bias's last bf16 bit, at the logits' scale
                             assert d.abs().max().item() <= 0.25, (rows, mode, temp)
                             if tr[r, i] != tf[r, i]:
@@ -208,18 +210,18 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             sp._sample_sequential(rows, hidden)
             torch.accelerator.synchronize()
             want_tok = sp.draft_tokens.clone()
-            want_logits = sp.draft_logits.clone()
+            want_logits = sp.draft_logits.values.clone()
             torch.distributed.barrier(group=cpu_group)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 sp._sample_sequential(rows, hidden)
             for _ in range(10):
                 sp.draft_tokens.fill_(-7)
-                sp.draft_logits.fill_(0)
+                sp.draft_logits.values.fill_(0)
                 graph.replay()
                 torch.accelerator.synchronize()
                 assert torch.equal(sp.draft_tokens, want_tok)
-                assert torch.equal(sp.draft_logits, want_logits)
+                assert torch.equal(sp.draft_logits.values, want_logits)
             assert not sampler.sharded.failed()
             torch.distributed.barrier(group=cpu_group)
 
