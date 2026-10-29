@@ -93,6 +93,27 @@ class TestCoerceToSchemaType:
             # A float is not an integer; keep the emitted text.
             assert coerce_to_schema_type("4.5", "integer") == "4.5"
 
+        def test_integral_float_text_coerces(self):
+            # JSON spells integral values as floats too; the value is an
+            # integer, so the emitted text becomes one.
+            result = coerce_to_schema_type("4.0", "integer")
+            assert result == 4
+            assert isinstance(result, int)
+
+        def test_integral_exponent_text_coerces(self):
+            assert coerce_to_schema_type("1e3", "integer") == 1000
+
+        def test_large_integral_float_text_is_exact(self):
+            # A float conversion would round this to 2**53; the exact
+            # decimal value must be preserved.
+            result = coerce_to_schema_type("9007199254740993.0", "integer")
+            assert result == 9007199254740993
+
+        def test_huge_exponent_text_not_expanded(self):
+            # A short exponent spelling must not expand into an enormous
+            # integer; keep the emitted text.
+            assert coerce_to_schema_type("1e999999999", "integer") == ("1e999999999")
+
         def test_uint32_alias(self):
             assert coerce_to_schema_type("5", "uint32") == 5
 
@@ -121,6 +142,12 @@ class TestCoerceToSchemaType:
             result = coerce_to_schema_type(str(value), schema_type)
             assert isinstance(result, int)
             assert json.loads(json.dumps(result)) == value
+
+        def test_large_integral_float_text_preserved(self):
+            # Same exactness rule as the integer branch: a float conversion
+            # would round this to 2**53.
+            result = coerce_to_schema_type("9007199254740993.0", "number")
+            assert result == 9007199254740993
 
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
@@ -486,6 +513,12 @@ class TestExtractTypesFromSchema:
 
     def test_non_dict_schema_defaults_to_string(self):
         assert extract_types_from_schema("string") == ["string"]
+
+    def test_none_schema_honors_fallback(self):
+        assert extract_types_from_schema(None, fallback=[]) == []
+
+    def test_non_dict_schema_honors_fallback(self):
+        assert extract_types_from_schema("string", fallback=[]) == []
 
     def test_empty_dict_defaults_to_string(self):
         assert extract_types_from_schema({}) == ["string"]

@@ -2237,13 +2237,27 @@ class TestCoercionInstabilityRegression:
         assert args == '{"a": 1, "x": 1e999}'
         assert json.loads(args)["x"] == float("inf")
 
-    def test_exponent_literal_kept_verbatim_under_integer(self):
-        """``5e3`` under an integer schema already carries the right value;
-        re-encoding it as the float ``5000.0`` would change its type."""
+    def test_exponent_literal_normalizes_under_integer(self):
+        """An integral exponent form under an integer schema becomes the
+        integer, matching the number-schema normalization."""
         tool = _make_tool("f", {"n": {"type": "integer"}})
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         args = _stream_tool_args(engine, "f", ['{"n": 5e3}'])
-        assert args == '{"n": 5e3}'
+        assert args == '{"n": 5000}'
+
+    def test_integral_numeric_string_coerces_under_integer(self):
+        """A quoted integral number is repaired to the declared integer."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": "4.0"}'])
+        assert args == '{"n": 4}'
+
+    def test_fractional_numeric_string_stays_text_under_integer(self):
+        """A fractional value has no exact integer form; keep the text."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": "4.5"}'])
+        assert args == '{"n": "4.5"}'
 
     def test_exponent_literal_normalizes_under_number(self):
         """Under a number schema the integral exponent form normalizes to

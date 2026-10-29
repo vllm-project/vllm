@@ -8,6 +8,7 @@ import math
 import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
@@ -1145,18 +1146,16 @@ def extract_types_from_schema(
 
     Handles ``type`` (string or list), ``enum``/``const`` value inference,
     and recursive ``anyOf``/``oneOf``/``allOf``.  Returns *fallback*
-    (default ``["string"]``) when no type is declared, including ``true``/
-    ``false``, ``$ref``-only, and over-deep (:data:`MAX_NESTING_DEPTH`)
-    schemas; coercion callers pass ``[]`` to leave such values verbatim.
-    Absent (``None``) and other non-dict schemas return ``["string"]``
-    instead.  Explicit ``type``/``enum`` siblings of a ``$ref`` still apply.
+    (default ``["string"]``) when the schema supplies no type information:
+    ``true``/``false``, absent or non-dict schemas, ``$ref``-only, and
+    over-deep (:data:`MAX_NESTING_DEPTH`) schemas.  Coercion callers pass
+    ``[]`` to leave such values verbatim.  Explicit ``type``/``enum``
+    siblings of a ``$ref`` still apply.
     """
     if fallback is None:
         fallback = ["string"]
-    if isinstance(schema, bool):
-        return list(fallback)
     if not isinstance(schema, dict):
-        return ["string"]
+        return list(fallback)
     if _depth >= MAX_NESTING_DEPTH:
         return list(fallback)
 
@@ -1244,13 +1243,48 @@ def is_undeclared_string(coerced: Any, types: Iterable[str]) -> bool:
     return isinstance(coerced, str) and "string" not in canonical_schema_types(types)
 
 
+def _exact_integer(value: str) -> int | None:
+    """The integer *value* spells exactly, or ``None``.
+
+    ``int()`` rejects float spellings (``"4.0"``, ``"1e3"``) even when they
+    denote an integer.  A float conversion cannot decide on its own:
+    ``"9007199254740993.0"`` rounds to ``2**53``, and a fractional text just
+    above ``2**52`` rounds to an integer, so an integral-looking float is
+    confirmed against the exact decimal value.  Float spellings of 19 or
+    more digits are rejected, so a short text such as ``"1e999999999"``
+    cannot expand into an enormous integer.
+    """
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        pass
+    try:
+        number = float(value)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(number) or not number.is_integer():
+        return None
+    if abs(number) < 2**52:
+        # Every integer below 2**52 is exactly representable.
+        return int(number)
+    try:
+        parsed = Decimal(value.strip())
+    except InvalidOperation:
+        return None
+    if parsed != parsed.to_integral_value() or parsed.adjusted() >= 19:
+        return None
+    return int(parsed)
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
     Tries each type in priority order (null > integer > number > boolean >
     object > array > string) and returns the first successful coercion.
-    If none matches, returns the original string; only when no requested
-    type name is recognized is the value parsed as JSON instead.
+    Integral text in any numeric spelling (``"42"``, ``"4.0"``, ``"1e3"``)
+    satisfies ``integer``.  If none matches, returns the original string;
+    only when no requested type name is recognized is the value parsed as
+    JSON instead.
 
     Args:
         value: The raw string value from the model output.
@@ -1287,15 +1321,14 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type == "string":
             return value
         if candidate_type == "integer":
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                continue
+            exact = _exact_integer(value)
+            if exact is not None:
+                return exact
+            continue
         if candidate_type == "number":
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                pass
+            exact = _exact_integer(value)
+            if exact is not None:
+                return exact
             try:
                 val = float(value)
             except (ValueError, TypeError):
