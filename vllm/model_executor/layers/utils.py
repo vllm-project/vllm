@@ -495,31 +495,19 @@ direct_register_custom_op(
 
 
 def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
-    """Route ``layer`` to the skinny GEMM if its weight shape has a plan.
-
-    Called once weights are final. Registers the planned configs for warmup
-    so they compile before CUDA graph capture.
-    """
-    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
-        shape_dynamic_skinny_gemm,
-    )
+    """Mark ``layer`` for the skinny GEMM if its weight shape has a plan."""
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
         get_skinny_gemm_plan,
     )
 
     weight = layer.weight
     if (
-        envs.VLLM_BATCH_INVARIANT
-        or weight.dtype != torch.bfloat16
-        or weight.dim() != 2
-        or getattr(layer, "bias", None) is not None
+        not envs.VLLM_BATCH_INVARIANT
+        and weight.dtype == torch.bfloat16
+        and getattr(layer, "bias", None) is None
+        and get_skinny_gemm_plan(*weight.shape) is not None
     ):
-        return
-    plan = get_skinny_gemm_plan(weight.shape[0], weight.shape[1])
-    if plan is None:
-        return
-    layer.use_skinny_gemm = True
-    shape_dynamic_skinny_gemm.request_warmup_configs(weight.dtype, plan.values())
+        layer.use_skinny_gemm = True
 
 
 def cuda_unquantized_gemm(

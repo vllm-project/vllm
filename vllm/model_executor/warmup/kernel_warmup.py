@@ -104,6 +104,27 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        SkinnyGemmConfig,
+        shape_dynamic_skinny_gemm,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    configs: set[SkinnyGemmConfig] = set()
+    for module in model.modules():
+        if not getattr(module, "use_skinny_gemm", False):
+            continue
+        plan = get_skinny_gemm_plan(*module.weight.shape)
+        if plan is not None:
+            configs.update(plan.values())
+    if configs:
+        # Compiled by cutedsl_warmup() below.
+        shape_dynamic_skinny_gemm.request_warmup_configs(torch.bfloat16, configs)
+
+
 def _warmup_bf16x3_router_gemm(
     model: torch.nn.Module,
     max_num_tokens: int,
@@ -222,6 +243,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.
         # https://github.com/vllm-project/vllm/pull/47451
+        _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
 
     if process_local_only:
