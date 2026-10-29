@@ -907,7 +907,7 @@ def prepare_dflash_inputs(
     # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
+    BLOCK_SIZE = 128
     num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
     # The padding loops get their OWN width, not the main kernel's. BLOCK_SIZE
     # above is min(256, next_pow2(max_tokens_per_req)) -- at decode that is

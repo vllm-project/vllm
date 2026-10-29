@@ -12,6 +12,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
+    _prepare_dflash_inputs_kernel,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -30,6 +31,7 @@ def _run_prepare(
     draft_dcp_size: int | None = None,
     max_num_reqs: int = 4,
     max_num_tokens: int = 16,
+    num_scheduled_tokens: int = 4,
 ):
     # upstream's device_type (XPU support), but max_num_reqs/max_num_tokens stay
     # PARAMETERS: the padding test drives this helper at max_num_tokens=4096 to
@@ -49,7 +51,7 @@ def _run_prepare(
     input_batch = SimpleNamespace(
         num_reqs=1,
         num_tokens=4,
-        num_scheduled_tokens=np.array([4], dtype=np.int32),
+        num_scheduled_tokens=np.array([num_scheduled_tokens], dtype=np.int32),
         seq_lens_cpu_upper_bound=torch.tensor([target_positions[-1] + 1]),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
@@ -291,3 +293,18 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
+    def compiled_variants() -> set:
+        return {
+            key
+            for caches in _prepare_dflash_inputs_kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    kwargs = dict(target_positions=[10, 11, 12, 13], block_table_values=[0, 7, 8])
+    _run_prepare(**kwargs)
+    warmed = compiled_variants()
+    _run_prepare(**kwargs, num_scheduled_tokens=300)
+    assert compiled_variants() == warmed
