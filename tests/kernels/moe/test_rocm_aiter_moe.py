@@ -1086,6 +1086,50 @@ def test_aiter_non_gated_activation_dispatch_gating(
         )
 
 
+def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    """Test that a relu2-activation MXFP4 MoE model actually
+    dispatches through select_mxfp4_moe_backend() to AiterMxfp4Experts on
+    ROCm.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        select_mxfp4_moe_backend,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+
+    moe_config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        activation=MoEActivation.RELU2_NO_MUL,
+    )
+
+    backend, kernel_cls = select_mxfp4_moe_backend(moe_config)
+
+    assert backend == Mxfp4MoeBackend.AITER_MXFP4_BF16, (
+        f"relu2 MXFP4 MoE on ROCm must dispatch through AITER_MXFP4_BF16, "
+        f"got {backend}"
+    )
+    assert kernel_cls is AiterMxfp4Experts, (
+        f"relu2 MXFP4 MoE must select AiterMxfp4Experts as the kernel "
+        f"class, got {kernel_cls}"
+    )
+
+
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
