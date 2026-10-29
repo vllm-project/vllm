@@ -4284,3 +4284,27 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Sécurité** : **aucune IP externe nouvelle avec 200** — site 894, interne `?` 740, web1 12, poste Paris 8 (IP connue et réclamée).
 
 **Annexes** : nbaudit ok 06:06:06Z (`Image/`). G: OK (708 Go libres). Condensation : **1 fallback cloud utilisé 05:33Z (#2719 succès)** pendant la montée matinale — dégradation gracieuse, aucun échec. Prouveur : aucune passe. Registre : **zéro question ouverte**.
+
+## Cycle 08:1xZ (29/10) — 🟢 moteur sain, sondes 0,70 s ; ★ le retrait po-2028 est MESURÉ côté moteur ; ⚠ commit 94,8 % et notre part quantifiée (32,0 GiB)
+
+**Prod** : health 200 (10,4 ms), RC=0, StartedAt stable 28/10 18:20:28Z (**14 h sans restart**), OOM 0, 3/3 Up, `/dev/shm` **33G/63G = 51 %**. KV GPU **75,5 %** (40,7 % au cycle précédent), running 5, waiting 0. **Préemptions 28 (Δ+0, 4ᵉ cycle consécutif)**. Watchdog : 3 900 `OK`, **WEDGE uniquement en `fail 1/2`** (derniers 06:38:52Z et **08:09:00Z**, 2 min avant la batterie), zéro 2/2, zéro restart.
+
+**Batterie : 0,70 / 0,71 / 0,70 s** (préchauffe 0,31 s, exclue) — **aucune sonde lente**, contraste net avec le timeout 90 s de 06:1xZ alors que le KV est plus haut (75,5 % vs 40,7 %). Le KV élevé seul ne prédit pas la lenteur des petits appelants : ce sont les prefills long-contexte en vol qui la font.
+
+**★ Amortissement des préfixes — excellent sur la fenêtre** : cumulé **165,9 M hits / 279,1 M queries = 59,4 %** (55,9 % il y a 2 h), tier externe **92,3 M / 113,3 M = 81,5 %** (82,4 %). **Delta 2 h : +24,4 M hits sur +26,2 M queries = 93,1 % de hit** — la montée matinale est servie par le cache, on ne re-paie quasi rien. C'est le régime attendu du §5quater.
+
+**★ Le retrait de la marche swift haiku de po-2028 est MESURÉ côté moteur.** Global a annoncé le retrait à 07:09:59 (locale = **06:09:59Z**) ; notre journal d'accès place **la dernière requête po-2028 à 06:09:37Z** — soit 22 s avant — et **zéro depuis** (601 requêtes sur 12 h, toutes antérieures). Trafic total 2 h : **417 lignes ~3,5 req/min** contre 530 ~4,4 il y a 2 h = **−21 %**. Attribution 2 h : **sans en-têtes 303** · po-2023 74 · po-2027 38 · po-2024 1 · ai-01 1 · **po-2028 0**. Le délestage se voit donc à la source, pas seulement sur le dashboard du hub.
+
+**⚠ MARGE COMMIT 94,8 % (364,5/384,4 Go, 19,9 Go libres)** — 93,6 → 94,8 en 2 h, **2ᵉ cycle au-dessus de la ligne d'alerte 93**. `vmmemWSL` **privé 161,9 Go / WS 84,3 Go** : le WS a **baissé** (106,3 → 84,3) pendant que le commit montait ⇒ **la croissance n'est pas dans le working set de la VM**, elle est en mémoire engagée non résidente (le ratio privé/WS ~1,9 le dit). Aucun travail lourd lancé.
+
+**★ Notre part, quantifiée pour la première fois** : `/dev/shm` contient **un seul `vllm_offload_*.mmap` de 34 357 542 912 o = 32,0 GiB exactement** (le tier RAM) + ~0,7 Go de `psm_*` tous postérieurs au `StartedAt` (donc non nettoyables par la recette). **Notre contribution au commit de `vmmemWSL` = 32 GiB**, soit ~20 % de ses 161,9 Go. Le levier que nous possédons (`KV_OFFLOAD_GB_SWIFT15=24`, recreate) rendrait **8 GiB = 2,1 points de commit (94,8 → ~92,7 %)**, **insuffisant à lui seul** pour rouvrir la porte d'admission 85 % de GPU 2 (Q-006, ai-01:CoursIA, 08:04:26Z). Mesure postée sur global, cross-post CoursIA — **aucun geste moteur, arbitrage user**.
+
+**⚠ Condensation : le primaire (notre moteur) expire et le cloud prend le relais.** 6 `primary attempt refused` aujourd'hui, dont **4 en 90 min** (07:32:35, 07:36:28, 08:04:52, 08:06:26) contre 13 sur la journée entière du 28/10. Mécanisme lu avec contexte : `"elapsed": "61244ms", "error": "Request timed out."` ⇒ appel de condensation **expiré à 61 s** derrière les prefills longs, bascule cloud, `cloud fallback condensation succeeded` (16 aujourd'hui). Dégradation **gracieuse** (aucune perte), mais **dépense cloud** et sortie dégradée dans la foulée (`Status contradictions detected #1502/#3329`, `LLM did not converge under 15KB → troncature déterministe`, `[COLLISION] stitching concurrent appends`). C'est la famine documentée du dense 27B appliquée aux petits appelants synchrones, pas une panne.
+
+**400 window+1 : 4/2 h** (2 po-2023, 1 po-2024, 1 po-2027, 06:23:21→07:18:44Z, tous corps >100 K) et **14/7 h** — isolés, **aucune rafale** (la rafale de 83 de la nuit n'a pas repris). 401 : 24/2 h, bruit d'auth connu.
+
+**VRAM** : GPU 0 **23 342** (−72 vs 23 414), GPU 1 **21 786** (plat), GPU 2 **191** (vide — c'est Q-006, pas un défaut vllm).
+
+**Sécurité** : **aucune IP externe nouvelle avec 200** — `?` 806/800 · site `90.65.170.144` 660/646 · web1 `37.187.180.135` 12/12 · **poste Paris `82.66.89.184` 4/4** (IP connue et réclamée, Q13).
+
+**Annexes** : nbaudit **ok 08:05:47Z**, `consecutive_failures 0`, **`subpath: ["19451:Image/"]` ⇒ vague 2 (Image/) armée et en production**. G: OK (705 Go libres, 82 %). Prouveur : aucune passe. Registre : **Q45 ouverte** (notre part du commit / tier 32→24 GiB).
