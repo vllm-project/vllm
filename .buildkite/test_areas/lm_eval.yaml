@@ -1012,6 +1012,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t4nc"
   key: lm-eval-turboquant-t4nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1025,6 +1026,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t4nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
@@ -1052,6 +1054,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k3v4nc"
   key: lm-eval-turboquant-k3v4nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1065,6 +1068,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant k3v4nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
@@ -1092,6 +1096,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t3nc"
   key: lm-eval-turboquant-t3nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1105,6 +1110,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t3nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
