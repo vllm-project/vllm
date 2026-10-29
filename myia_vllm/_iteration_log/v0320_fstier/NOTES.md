@@ -4229,3 +4229,15 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Annexes** : nbaudit **ok** 00:05Z (`Image/` vague 2). G: OK. Condensation propre (log roulé sur 20261029, aucun événement).
 
 **Registre** : aucune question ouverte. **Action du jour : repli po-2027 sous Minimax fenêtre 17-18Z** (GO user 28/10 ~23Z, signal claudish posté 23:1xZ) — vérifier l'ack aux cycles suivants et mesurer l'effet sur le pic du soir (barre de comparaison : le plateau 🟠 du 28/10, KV 92-95 % ~100 min, préemptions 19-23).
+
+## Cycle 02:1xZ (29/10) — 🟢 détente nocturne confirmée ; ⚠ rafale de 83× 400 window+1, dont ~80 depuis po-2024
+
+**Prod** : health 200 (3,6 ms), RC=0, StartedAt stable 28/10 18:20:28Z (8 h sans restart), OOM 0, 3/3 Up, `/dev/shm` 33G/63G = 51 %. KV GPU **26,4 %** (88,1 % au cycle précédent), running 1, waiting 0. Préemptions 23 → **28** (+5/2 h : jambe 1 du critère 🟠 franchie, mais jambes 2 et 3 non remplies). Batterie petits appelants : **14,46 s puis 0,15 / 0,14 s** — aucune lenteur récurrente, donc 🟢. Watchdog : un `fail 1/2` à 01:41:31Z, zéro 2/2, 3 901 OK. Prefix hits cumulés **84,8 %**.
+
+**★ 400 window+1 : 83/2 h (contre 2/2 h)** — signature exceptionnelle, non une panne moteur. **~80 refus en rafale depuis po-2024 entre 00:55:09 et 01:05:10Z**, cadence ~7-8 s, corps croissant ~940 K → 1,01 M, UA Bun, client `myia-po-2024:unknown` ; plus 1 po-2023 à 00:58:29Z et 3 po-2027 à 01:13Z. Une session déjà >262K retente au lieu d'être reroutée par le hub : coût moteur limité (rejets avant inférence), mais charge utile nulle et correction attendue côté claudish (#431). Signal transmis à claudish. **Conséquence sur l'attribution** : po-2024 113 requêtes/2 h, mais ~80 sont ces 400 — son trafic utile nocturne reste faible ; ne pas interpréter son brut comme une hausse de charge.
+
+**Attribution brute 2 h (00:11→02:11Z)** : po-2024 113 · po-2028 103 (93 corps >500 K) · ai-01 51 · po-2027 33 · po-2023 1 · sans en-têtes 257. 454×200, 83×400, 21×401 (poller Go uniquement). Census IP : aucune IP externe nouvelle avec 200 (site, web1 et poste user Paris connus).
+
+**VRAM** : GPU 0 **23 315 MiB** (+85, haut du boot), GPU 1 **21 786** stable ; mécanisme desktop+high-water inchangé, Q41 maintenue close sous « tenir en l'état ». **Marge commit : 88,5 % (44,1 Go libres)** — inversion nette après 90,7 % ; aucun travail lourd lancé. `vmmemWSL` working set 100,5 GiB.
+
+**Annexes** : nbaudit ok 02:05:45Z (`Image/`, 0 échec consécutif). G: écriture OK. Condensation nominale, aucun événement d'échec. Prouveur : aucune passe. Registre : aucune question ouverte. Repli po-2027 : fenêtre 17-18Z maintenue, ack/exécution à vérifier.
