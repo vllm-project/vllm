@@ -10,7 +10,7 @@ token log probability before returning.
 This path is intended for repeatedly activating the same model and engine
 configuration on the same machine. It is not a portable model artifact.
 
-A snapshot is in place by default: the artifact stays where it was created, the
+A snapshot is in-place by default: the artifact stays where it was created, the
 host keeps the generated caches the engine depends on, and restore refuses to
 run once one of them changes. `vllm snapshot create --portable` instead marks
 the artifact as one to restore in another container or on another host, and
@@ -18,26 +18,19 @@ the artifact as one to restore in another container or on another host, and
 recorded, so neither mode can be mistaken for the other.
 
 A portable create also keeps the run's control files and logs outside the
-artifact, in a work directory: one named by `--work-dir`, or otherwise a fresh
-random temporary directory. That path is recorded in the manifest and frozen
-into the captured process arguments, so every host restoring the artifact
-sees the same path while each one holds its own private copy. A work
-directory belongs to one running instance, not to the artifact: instances
-restoring the same artifact concurrently would collide in a directory on
-shared storage such as NFS, and the artifact may be mounted read-only by
-the containers that restore it, so create refuses a `--work-dir` inside
-the snapshot directory and the artifact itself is never written into; it
-can sit on shared, read-only storage. A directory named with `--work-dir`
-is kept after create and restore finish, so its logs and control files
-remain available for inspection, while a temporary one is removed when the
-run that owns it ends, on the create host and on every restore host alike
-— the restored tree keeps writing through its open log file, whose bytes
-then live on as unlinked inodes. Restore takes the path from the manifest
-alone, recreates the directory when it is missing, and clears the control
-files an earlier run left behind, so a named work directory is reusable
-once its previous restored tree stops. An in-place checkpoint instead
-keeps the same state laid out flat inside the artifact, and its restore
-reuses and resets those files.
+artifact, in a work directory: one named by `--work-dir`, or otherwise a
+fresh temporary one. The path is recorded in the manifest, so every host
+restoring the artifact sees the same path in its own private copy. The
+directory must stay outside the artifact — shared storage such as NFS
+cannot host concurrent instances, and the artifact may be mounted
+read-only — so create refuses a `--work-dir` inside the snapshot directory
+and never writes into the artifact itself.
+
+A named work directory is kept after the run ends, for inspecting its logs
+and control files; a temporary one is removed. Restore recreates the
+directory and clears whatever an earlier run left there, so a named one
+is reusable once its previous restored tree stops. An in-place checkpoint
+instead keeps the same state laid out flat inside the artifact.
 
 ## Requirements
 
@@ -89,10 +82,10 @@ Snapshots currently require:
   watermark), so CRIU reopens its path, but its content is machine state. A
   portable artifact carries it as warm state — written back only when
   missing, never fingerprinted — so a target host keeps its own watermark.
-- The child log is carried with the same semantics: CRIU reopens its path,
-  but the work directory holding it does not travel with the artifact, so a
-  portable artifact carries the log as warm state and restore writes it back
-  when the directory has no log to reset.
+- The child log is also carried, because CRIU reopens its path: the work
+  directory holding it does not travel with the artifact, so restore writes
+  the log back when the directory has none, and crops a log an earlier
+  restore left behind.
 
 The official CUDA 13 `vllm/vllm-openai` Linux x86-64 images include the
 snapshot runtime. CUDA 12.x and Arm64 images omit it. A compatible host
