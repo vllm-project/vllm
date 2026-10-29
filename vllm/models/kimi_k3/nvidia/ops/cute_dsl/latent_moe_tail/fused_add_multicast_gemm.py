@@ -52,10 +52,11 @@ from cutlass.cute.nvgpu.common import CacheEvictionPriority
 from cutlass.cute.runtime import from_dlpack
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 
+from vllm.models.common.ops.moe_tail_fusion.primitives import CUDAGraphCompatibleWrapper
+
 from .fused_add_multicast_skinny_gemm import (
     FusedAddMulticastSkinnyGemmKernel,
 )
-from .primitives import CUDAGraphCompatibleWrapper
 
 
 def _as_cute(tensor: torch.Tensor, *, dynamic_m: bool = False):
