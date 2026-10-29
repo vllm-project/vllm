@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +20,58 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
+def test_v2_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
+)
+def test_cpu_worker_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(
+        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
+    )
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(
+            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
+        ),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner
+
+
 def test_sleep_preservation_restores_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
@@ -27,7 +80,7 @@ def test_sleep_preservation_restores_private_draft_not_shared_target():
     expected = draft.private.weight.detach().clone()
     pointer = draft.private.weight.data_ptr()
     worker = object.__new__(gpu_worker.Worker)
-    worker.get_draft_model = lambda: draft
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     assert set(worker._get_sleep_parameters(target)) == {
         "weight",
         "draft.private.weight",
@@ -52,7 +105,7 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
     if draft is not None:
         draft.shared = target.weight
     worker = object.__new__(gpu_worker.Worker)
-    worker.get_draft_model = lambda: draft
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
     worker._save_sleep_parameters(target)
     assert worker._sleep_saved_parameters == {}
@@ -300,6 +353,23 @@ def test_startup_plan_apply_gate(plan_env):
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
 
 
+def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
+    """Ignore an old-schema budget even when the fingerprint matches."""
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 1024)
+    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    path = startup_plan._plan_path(fingerprint)
+    with open(path) as f:
+        plan = json.load(f)
+    plan["schema"] = 1
+    with open(path, "w") as f:
+        json.dump(plan, f)
+
+    maybe_apply_startup_plan(worker)
+
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch
@@ -424,8 +494,8 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )

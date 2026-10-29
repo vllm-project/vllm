@@ -13,12 +13,14 @@ from utils import (
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda,
+    skip_if_not_cuda_alike,
     skip_unsupported,
 )
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
 
 
 @skip_unsupported
@@ -180,6 +182,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=tp_size,
+        disable_custom_all_reduce=os.getenv("VLLM_TEST_DISABLE_CUSTOM_AR") == "1",
         max_num_seqs=128,
         max_model_len=8192,
         dtype="auto",  # not everything is supported
@@ -946,6 +949,67 @@ def test_decode_logprobs_match_prefill_logprobs(
     else:
         print("✓ SUCCESS: All decode logprobs match prefill logprobs bitwise!")
         print(f"{'=' * 80}\n")
+
+
+def _supports_online_fp8() -> bool:
+    if current_platform.is_rocm():
+        # Imported lazily: this module resolves the GPU arch at import time.
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
+    return current_platform.has_device_capability(89)
+
+
+@skip_if_not_cuda_alike
+@pytest.mark.skipif(
+    not _supports_online_fp8(),
+    reason="Online FP8 requires compute capability 8.9+ or MI300/MI355",
+)
+@pytest.mark.timeout(600)
+def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
+    """Online (per-tensor weight, dynamic activation) FP8 MoE experts must not
+    let a request's output depend on the other requests in its batch.
+
+    Guards against the expert inputs being quantized with a single dynamic
+    scale over the whole batch (issue #57016): the scale is then the max over
+    every token of every co-batched request, so greedy tokens and logprobs
+    change with batch composition even though each batch is deterministic.
+    """
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    prompts = [_random_prompt(10, 50) for _ in range(8)]
+    sp = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
+
+    llm = LLM(
+        model="ibm-granite/granite-3.1-1b-a400m-instruct",
+        quantization="fp8_per_tensor",
+        enforce_eager=True,
+        max_num_seqs=8,
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        bs1 = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in prompts
+        ]
+        bsN = [
+            _extract_step_logprobs(o) for o in llm.generate(prompts, sp, use_tqdm=False)
+        ]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(bs1, bsN)):
+        assert lp1 is not None and lpN is not None
+        assert tok1 == tokN, (
+            f"Prompt {i}: tokens differ between BS=1 and BS={len(prompts)}: "
+            f"{tok1} vs {tokN}"
+        )
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs are not bitwise equal between BS=1 and "
+            f"BS={len(prompts)}; max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
 
 
 def LLM_with_max_seqs(

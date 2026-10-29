@@ -11,6 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.utils import next_power_of_2
@@ -21,6 +22,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -70,6 +72,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     def capture(self) -> None:
         pass  # CUDA graph not yet supported for standalone AR speculator.
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        if self.speculative_config.kv_cache_dtype is not None:
+            return self._draft_vllm_config
+        return self.vllm_config
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -99,19 +107,31 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         spec = self.speculative_config
         assert spec is not None
+        cache_config = self.vllm_config.cache_config
+        if spec.kv_cache_dtype is not None:
+            cache_config = replace(cache_config, cache_dtype=spec.kv_cache_dtype)
+
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=self.draft_model_config,
             quant_config=None,
+            cache_config=cache_config,
             parallel_config=replace(
                 spec.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,
             ),
         )
+        draft_vllm_config.parallel_config.data_parallel_index = (
+            self.vllm_config.parallel_config.data_parallel_index
+        )
+        self._draft_vllm_config = draft_vllm_config
         with set_model_tag("draft_model"):
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
+                load_config=get_pp_safe_draft_load_config(
+                    get_draft_load_config(draft_vllm_config)
+                ),
             )
 
     @torch.inference_mode()
@@ -335,6 +355,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.current_draft_step,
                 self.draft_logits,
             )
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
 
     @torch.inference_mode()
     def propose(

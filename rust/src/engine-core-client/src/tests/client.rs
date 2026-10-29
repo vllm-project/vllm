@@ -21,9 +21,11 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
+use crate::metrics::SchedulerStatsRecorder;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
     PlaceholderRange, SliceSpec,
@@ -36,11 +38,12 @@ use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
-use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
+use crate::transport::ConnectedEngine;
 use crate::{
     CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
     Error, TransportMode,
@@ -257,7 +260,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.unwrap().into_vec()
 }
 
-async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
+async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     let frames = sub.recv().await.unwrap().into_vec();
     assert_eq!(frames.len(), 2);
     assert_eq!(
@@ -265,6 +268,19 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
         EngineCoreRequestType::StartDpWave.to_frame().as_ref()
     );
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
+}
+
+async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
+    send_outputs(
+        push,
+        DpControlOutput {
+            engine_index,
+            timestamp: 0.0,
+            control: DpControlMessage::StartWave(wave),
+        }
+        .into(),
+    )
+    .await;
 }
 
 async fn connect_client_with_ipc(
@@ -411,12 +427,6 @@ async fn recv_xpub_subscription(xpub: &mut XPubSocket) {
     let frames = recv_xpub_message(xpub).await;
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].as_ref(), b"\x01");
-}
-
-async fn recv_external_coordinator_wakeup(xpub: &mut XPubSocket) -> (u32, u32) {
-    let frames = recv_xpub_message(xpub).await;
-    assert_eq!(frames.len(), 1);
-    rmp_serde::from_slice(&frames[0]).expect("decode external coordinator wakeup")
 }
 
 async fn send_external_coordinator_publish<T: serde::Serialize>(
@@ -607,18 +617,35 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
         let handshake_address = handshake_address.clone();
         async move {
             let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
+            let coordinator_address = engine
+                .init
+                .addresses
+                .coordinator_input
+                .clone()
+                .expect("coordinator input address should be present");
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
-
+            // An idle engine handed a request starts the wave itself.
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-1");
             assert_eq!(request.current_wave, 0);
+            send_start_wave(&mut coordinator.output_push, 0, 0).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+
+            let mut late_subscriber = SubSocket::new();
+            late_subscriber.connect(&coordinator_address).await.unwrap();
+            late_subscriber.subscribe("").await.unwrap();
+
+            let replay = recv_start_dp_wave(&mut late_subscriber).await;
+            assert_eq!(replay, (0, None));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             assert!(
                 timeout(
@@ -655,14 +682,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             )
             .await;
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
-
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
+            send_start_wave(&mut coordinator.output_push, 0, 1).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             send_outputs(
                 &mut data_socket.push,
@@ -693,7 +721,9 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
@@ -727,7 +757,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             assert!(
                 timeout(
@@ -812,7 +842,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown0_rx.await;
         }
@@ -838,7 +868,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown1_rx.await;
         }
@@ -878,9 +908,6 @@ async fn coordinator_accepts_stats_only_outputs() {
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
         let data_socket = engine.data_sockets.first_mut().expect("data socket");
-
-        let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-        assert_eq!((wave, exclude_engine), (0, 0));
 
         send_outputs(
             &mut coordinator.output_push,
@@ -2389,6 +2416,149 @@ async fn wake_up_requires_every_engine_to_be_fully_awake() {
     client.shutdown().await.unwrap();
 }
 
+/// Render the `vllm:engine_sleep_state` series of one model as
+/// `awake,weights_offloaded,discard_all` for engines 0 and 1.
+fn engine_sleep_state_series(model_name: &str) -> [String; 2] {
+    let rendered = vllm_metrics::METRICS.render().unwrap();
+    [0, 1].map(|engine| {
+        ["awake", "weights_offloaded", "discard_all"]
+            .map(|state| {
+                let prefix = format!(
+                    "vllm:engine_sleep_state{{model_name=\"{model_name}\",engine=\"{engine}\",sleep_state=\"{state}\"}} "
+                );
+                rendered
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .unwrap_or("missing")
+                    .to_owned()
+            })
+            .join(",")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sleep_and_wake_calls_record_engine_sleep_state() {
+    init_tracing();
+    // A model name of its own keeps other tests' clients off these series.
+    const MODEL: &str = "engine-sleep-state-model";
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        // Each engine answers the calls in order; `None` stands for a `()`
+        // result. On the partial wake-up only engine 1 reports fully awake.
+        let answers = [
+            ("sleep", None),
+            ("wake_up", Some(engine_index == 1)),
+            ("wake_up", Some(true)),
+            ("release_kv_cache_memory", None),
+            ("wake_up", Some(true)),
+            ("sleep", None),
+        ];
+        engines.push(spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    for (method, fully_awake) in answers {
+                        let utility = recv_engine_message(dealer).await;
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from(method));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: fully_awake.map(utility_result_value),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(handshake_address, 2, MODEL, Duration::from_secs(2), 5, None),
+        &ipc,
+    )
+    .await;
+
+    let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
+    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
+    assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
+    series.push(("partial wake", engine_sleep_state_series(MODEL)));
+    assert!(client.wake_up(None).await.unwrap());
+    series.push(("full wake", engine_sleep_state_series(MODEL)));
+    client.release_kv_cache_memory().await.unwrap();
+    series.push(("release kv cache", engine_sleep_state_series(MODEL)));
+    assert!(client.wake_up(None).await.unwrap());
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
+
+    expect_test::expect![[r#"
+        [
+            (
+                "connected",
+                [
+                    "1,0,0",
+                    "1,0,0",
+                ],
+            ),
+            (
+                "sleep level 1",
+                [
+                    "0,1,0",
+                    "0,1,0",
+                ],
+            ),
+            (
+                "partial wake",
+                [
+                    "0,1,0",
+                    "0,1,0",
+                ],
+            ),
+            (
+                "full wake",
+                [
+                    "1,0,0",
+                    "1,0,0",
+                ],
+            ),
+            (
+                "release kv cache",
+                [
+                    "0,0,0",
+                    "0,0,0",
+                ],
+            ),
+            (
+                "sleep level 2",
+                [
+                    "0,0,1",
+                    "0,0,1",
+                ],
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&series);
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
@@ -2721,7 +2891,7 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 }
 
 #[test]
-fn python_msgpack_fixtures_match_rust_encoding() {
+fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
     let output = Command::new(&script)
@@ -2750,10 +2920,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let mooncake_transfer_stats_hex =
+        lines.next().expect("missing Mooncake transfer stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
     let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
+    let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
+    let inplace_lora_request_hex =
+        lines.next().expect("missing in-place LoRA request fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2861,7 +3036,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(
-                            Length,
+                            Error,
                         ),
                         stop_reason: None,
                         events: None,
@@ -2869,12 +3044,34 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        error: Some(
+                            RequestError {
+                                code: "engine_paused",
+                                message: "Generation is paused.",
+                                retryable: true,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,
@@ -2883,6 +3080,9 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                     {
                         "req-1",
                     },
+                ),
+                weight_version: Some(
+                    "v7",
                 ),
             },
         )
@@ -2942,14 +3142,66 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
     ));
 
+    let mooncake_transfer_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_transfer_stats,
+        KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
-        multi_connector_stats,
-        KvConnectorStats::Multi(stats)
-            if stats.nixl.is_some()
-                && stats.mooncake.is_some()
-                && stats.other.contains_key("UnsupportedConnector")
+    let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
+        panic!("Python MultiConnector stats should decode as Multi");
+    };
+    assert!(multi_connector_stats.nixl.is_some());
+    assert!(multi_connector_stats.mooncake_transfer.is_some());
+    assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
+    let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
+    assert_eq!(nixl_stats.num_failed_handshakes, [1]);
+    assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+
+    let metrics = vllm_metrics::Metrics::new();
+    let recorder = SchedulerStatsRecorder::new(
+        &metrics.scheduler,
+        "test-model",
+        &[ConnectedEngine {
+            engine_id: EngineId::from_engine_index(0),
+            ready_response: crate::mock_engine::default_ready_response(),
+        }],
+    );
+    recorder.record(
+        0,
+        &SchedulerStats {
+            kv_connector_stats: Some(KvConnectorStats::Multi(multi_connector_stats)),
+            ..Default::default()
+        },
+    );
+    let rendered_metrics = metrics.render().unwrap();
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_xfer_time_seconds_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_sum{model_name=\"test-model\",engine=\"0\"} 12288"
+        )
+    );
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_transfers_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_notifications_total{model_name=\"test-model\",engine=\"0\"} 1"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
@@ -2985,6 +3237,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(
+        ready_response.vllm_config,
+        Some(serde_json::json!({
+            "model_config": {"model": "test-model", "max_model_len": 32768},
+            "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+            "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+            "speculative_config": null,
+        }))
+    );
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");
@@ -2997,6 +3258,44 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+
+    let lora_request_bytes = hex::decode(lora_request_hex).unwrap();
+    let expected_lora_request = LoraRequest {
+        lora_name: "adapter-a".to_string(),
+        lora_int_id: 3,
+        lora_path: "/adapters/a".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        load_inplace: true,
+        is_3d_lora_weight: true,
+    };
+    let decoded_lora_request: EngineCoreRequest =
+        rmp_serde::from_slice(&lora_request_bytes).unwrap();
+    assert_eq!(
+        decoded_lora_request.lora_request,
+        Some(expected_lora_request.clone())
+    );
+    let python_lora_slot = match decode_value(&lora_request_bytes) {
+        Value::Array(items) => items.get(6).cloned().expect("request lora_request slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
+    assert_eq!(
+        decode_value(&rmp_serde::to_vec_named(&expected_lora_request).unwrap()),
+        python_lora_slot,
+    );
+
+    let decoded_inplace_lora_request: LoraRequest =
+        rmp_serde::from_slice(&hex::decode(inplace_lora_request_hex).unwrap()).unwrap();
+    assert_eq!(
+        decoded_inplace_lora_request,
+        LoraRequest {
+            lora_name: "adapter-b".to_string(),
+            lora_int_id: 4,
+            lora_path: "/adapters/b".to_string(),
+            base_model_name: None,
+            load_inplace: true,
+            is_3d_lora_weight: false,
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3228,7 +3527,7 @@ async fn bootstrapped_external_coordinator_connects_and_subscribes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
+async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_no_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let input_address = ipc.input_endpoint();
@@ -3269,18 +3568,11 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
 
     let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
 
-    let wakeup = timeout(
-        Duration::from_secs(1),
-        recv_external_coordinator_wakeup(&mut stats_socket),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wakeup, (0, 7));
-
+    // The engine that receives the request starts the wave, not the frontend.
     assert!(
         timeout(
             Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
+            recv_xpub_message(&mut stats_socket)
         )
         .await
         .is_err()
@@ -3292,81 +3584,6 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
     assert_eq!(request.request_id, "req-1");
     assert_eq!(request.current_wave, 7);
     assert!(client.is_healthy());
-
-    send_outputs(
-        &mut push,
-        RequestBatchOutputs {
-            outputs: vec![request_output(
-                "req-1",
-                vec![],
-                Some(EngineCoreFinishReason::Length),
-            )],
-            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-            ..Default::default()
-        }
-        .into(),
-    )
-    .await;
-
-    let final_output = timeout(Duration::from_secs(1), stream.next()).await.unwrap();
-    assert!(final_output.is_some());
-
-    client.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
-    init_tracing();
-    let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
-    let coordinator_address = ipc.endpoint("stats.sock");
-
-    let mut stats_socket = XPubSocket::new();
-    stats_socket.bind(&coordinator_address).await.unwrap();
-
-    let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
-        let coordinator_address = coordinator_address.clone();
-        async move {
-            EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
-                1,
-                Duration::from_secs(2),
-                0,
-                Some(CoordinatorMode::External {
-                    address: coordinator_address,
-                }),
-            ))
-            .await
-            .unwrap()
-        }
-    });
-
-    let (mut dealer, mut push) =
-        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
-    let client = client_task.await.unwrap();
-    recv_xpub_subscription(&mut stats_socket).await;
-
-    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
-
-    assert!(
-        timeout(
-            Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
-        )
-        .await
-        .is_err()
-    );
-
-    let add = recv_engine_message(&mut dealer).await;
-    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-    assert_eq!(request.current_wave, 5);
 
     send_outputs(
         &mut push,
