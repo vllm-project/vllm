@@ -33,6 +33,7 @@ from vllm.snapshot.attachments import (
     SnapshotAttachmentError,
     capture_attachments,
     collect_generated_files,
+    materialize_attachments,
 )
 from vllm.snapshot.controller import (
     LocalSnapshotTools,
@@ -1726,6 +1727,7 @@ def test_snapshot_inventory_records_open_generated_cache_files(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101, 102))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda pid: targets[pid])
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda pid: targets[pid])
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -1771,19 +1773,48 @@ def test_snapshot_carries_libuuid_clock_file_with_cache_semantics(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(clock),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(clock),))
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
 
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "child.log").write_bytes(b"x" * 5)
     inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
 
-    # libuuid keeps the clock file open for the process lifetime, so CRIU
-    # reopens its path on restore; the watermark is machine state, so it
-    # travels as warm state instead of a fingerprinted dependency.
     assert inventory.generated_files == (
-        GeneratedFile(str(clock)),
-        GeneratedFile(str(tmp_path / "work" / "child.log")),
+        GeneratedFile(str(clock), required=True),
+        GeneratedFile(str(tmp_path / "work" / "child.log"), required=True),
     )
+
+
+def test_snapshot_carries_a_referenced_lock_file_with_cache_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    lock = cache_root / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(lock),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(lock),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "child.log").write_bytes(b"x" * 5)
+    inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
+
+    assert GeneratedFile(str(lock), required=True) in inventory.generated_files
 
 
 def test_snapshot_attachment_target_check_allows_libuuid_state_root(
@@ -1902,6 +1933,7 @@ def test_snapshot_inventory_records_a_generated_file_the_tree_only_mapped(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: ())
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: ())
     monkeypatch.setattr(
         snapshot_attachments, "_mapping_targets", lambda _pid: (str(kernel),)
     )
@@ -1913,8 +1945,10 @@ def test_snapshot_inventory_records_a_generated_file_the_tree_only_mapped(
     # the host could replace with no early error.
     inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
     assert inventory.generated_files == (
-        GeneratedFile(str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
-        GeneratedFile(str(tmp_path / "work" / "child.log")),
+        GeneratedFile(
+            str(kernel), hashlib.sha256(b"compiled kernel").hexdigest(), required=True
+        ),
+        GeneratedFile(str(tmp_path / "work" / "child.log"), required=True),
     )
 
 
@@ -1933,6 +1967,7 @@ def test_snapshot_collect_refuses_an_oversized_file(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(kernel),))
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -1966,6 +2001,7 @@ def test_snapshot_collect_refuses_a_total_size_past_the_limit(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(kernel),))
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -2002,6 +2038,108 @@ def test_snapshot_capture_refuses_a_file_that_changed_since_inventory(
                 ),
             ),
         )
+
+
+def test_snapshot_capture_tolerates_a_lock_file_that_changed(
+    tmp_path: Path,
+):
+    cache = tmp_path / "triton_cache"
+    cache.mkdir()
+    lock = cache / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    # Volatile lock content must not fail the capture.
+    captured = capture_attachments(artifact, (GeneratedFile(str(lock)),))
+    assert captured[0].digest == "cache"
+    assert materialize_attachments(artifact, captured) == []
+
+
+def test_snapshot_materialize_refuses_to_follow_a_parked_symlink(tmp_path: Path):
+    from vllm.snapshot.attachments import _install
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir(mode=0o700)
+    target = target_dir / "kernel.so"
+    source = tmp_path / "payload.so"
+    source.write_bytes(b"PAYLOAD")
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"ORIGINAL")
+    (target_dir / ".kernel.so.partial").symlink_to(victim)
+
+    _install(source, target, fsync=False)
+
+    assert victim.read_bytes() == b"ORIGINAL"
+    assert target.read_bytes() == b"PAYLOAD"
+    # The parked symlink itself is the attacker's and stays.
+    assert {path.name for path in target_dir.iterdir()} == {
+        "kernel.so",
+        ".kernel.so.partial",
+    }
+
+
+@pytest.mark.parametrize("vanishes", [False, True])
+def test_snapshot_capture_refuses_a_dependency_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vanishes: bool
+):
+    kernel = tmp_path / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    def unreadable(_path: Path) -> object:
+        raise PermissionError("cache entry is root-owned")
+
+    if vanishes:
+        kernel.unlink()
+    else:
+        monkeypatch.setattr(snapshot_attachments, "_regular_stat", unreadable)
+
+    # Failing create beats an artifact the restore cannot bring back.
+    with pytest.raises(SnapshotAttachmentError, match="cannot capture attachment"):
+        capture_attachments(
+            artifact,
+            (GeneratedFile(str(kernel), required=True),),
+        )
+
+
+def test_snapshot_capture_fails_when_the_child_log_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    child_log = work_dir / "child.log"
+    child_log.write_bytes(b"startup log")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    def unreadable(_path: Path) -> object:
+        raise PermissionError("log is root-owned")
+
+    monkeypatch.setattr(snapshot_attachments, "_regular_stat", unreadable)
+
+    with pytest.raises(SnapshotAttachmentError, match="cannot capture attachment"):
+        capture_attachments(artifact, (GeneratedFile(str(child_log), required=True),))
+
+
+def test_snapshot_capture_skips_a_cache_file_it_cannot_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    kernel = tmp_path / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    def unreadable(_path: Path) -> object:
+        raise PermissionError("cache entry is root-owned")
+
+    monkeypatch.setattr(snapshot_attachments, "_regular_stat", unreadable)
+
+    assert capture_attachments(artifact, (GeneratedFile(str(kernel)),)) == []
+    assert "skipped" in capsys.readouterr().err
 
 
 def test_snapshot_dump_stages_attachments_after_the_image_is_written(
@@ -2089,13 +2227,47 @@ def test_snapshot_inventory_carries_unreferenced_cache_files_as_warm_state(
     # A file the image does not reference still travels as warm state, marked
     # differently from the bytes the restore itself depends on.
     assert inventory.generated_files == (
-        GeneratedFile(str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
-        GeneratedFile(str(lock), hashlib.sha256(b"held by pid 100").hexdigest()),
+        GeneratedFile(
+            str(kernel),
+            hashlib.sha256(b"compiled kernel").hexdigest(),
+            required=True,
+        ),
+        GeneratedFile(str(lock), required=True),
         GeneratedFile(str(stale)),
-        GeneratedFile(str(tmp_path / "work" / "child.log")),
+        GeneratedFile(str(tmp_path / "work" / "child.log"), required=True),
     )
     # The warm-state entries carry no fingerprint: a target machine's own
     # compiled state may differ without breaking anything.
+
+
+def test_snapshot_collect_refuses_a_referenced_cache_file_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    def unreadable(_path: Path) -> str:
+        return "unreadable"
+
+    monkeypatch.setattr(snapshot_attachments, "cache_fingerprint", unreadable)
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    # runtime binds fd_targets by name; patch its copy too.
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    with pytest.raises(SnapshotAttachmentError, match="referenced but unreadable"):
+        tools.inventory(100, artifact, tmp_path / "work", portable=True)
 
 
 def test_snapshot_in_place_checkpoint_walks_no_cache_and_carries_nothing(
@@ -2116,6 +2288,7 @@ def test_snapshot_in_place_checkpoint_walks_no_cache_and_carries_nothing(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_runtime, "fd_targets", lambda _pid: (str(kernel),))
     monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
@@ -2157,6 +2330,72 @@ def test_snapshot_materialize_leaves_a_targets_own_cache_state_alone(
     compiled.unlink()
     assert materialize_attachments(artifact, (manifest_entry,)) == [compiled]
     assert compiled.read_bytes() == b"target machine compiled this"
+
+
+def test_snapshot_materialize_keeps_a_larger_target_a_cache_attachment_owns(
+    tmp_path: Path,
+):
+    from vllm.snapshot.attachments import materialize_attachments
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    child_log = target / "child.log"
+    child_log.write_bytes(b"x" * 5)
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    captured = capture_attachments(artifact, (GeneratedFile(str(child_log)),))
+
+    # The earlier restore appended to the log; cache semantics leave it.
+    child_log.write_bytes(b"x" * 5 + b"appended by the earlier restore")
+    assert materialize_attachments(artifact, captured) == []
+    assert child_log.read_bytes() == b"x" * 5 + b"appended by the earlier restore"
+
+
+def test_snapshot_materialize_rejects_a_truncated_payload(tmp_path: Path):
+    from vllm.snapshot.attachments import materialize_attachments
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    kernel = target / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    captured = capture_attachments(artifact, (GeneratedFile(str(kernel)),))
+
+    # A copy truncated in transit fails the restore, not the engine.
+    blob = _blob_path_of(artifact, kernel)
+    blob.write_bytes(b"compiled")
+    kernel.unlink()
+    with pytest.raises(SnapshotAttachmentError, match="truncated"):
+        materialize_attachments(artifact, captured)
+
+
+def test_snapshot_materialize_rejects_a_corrupted_payload(tmp_path: Path):
+    from vllm.snapshot.attachments import materialize_attachments
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    kernel = target / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    captured = capture_attachments(
+        artifact,
+        (GeneratedFile(str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),),
+    )
+
+    # Same size, different bytes: only the digest catches it.
+    blob = _blob_path_of(artifact, kernel)
+    blob.write_bytes(b"corupted kernel")
+    kernel.unlink()
+    with pytest.raises(SnapshotAttachmentError, match="differs since capture"):
+        materialize_attachments(artifact, captured)
+
+
+def _blob_path_of(artifact: Path, target: Path) -> Path:
+    from vllm.snapshot.attachments import ATTACHMENT_DIR
+
+    return artifact / ATTACHMENT_DIR / Path(*target.parts[1:])
 
 
 def test_snapshot_restore_rematerializes_a_cache_file_the_host_rotated(
