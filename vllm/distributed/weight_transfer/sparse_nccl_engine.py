@@ -145,8 +145,16 @@ class SparseNCCLWeightTransferEngine(
         pass
 
     def finish_weight_update(self) -> None:
-        """No-op: sparse patches are applied in place, no layerwise reload."""
-        pass
+        """Run the model-level post-load hook once, after all patches.
+
+        Patches are applied in place, so there is no layerwise reload to
+        finalize, but weight-derived model state still has to be rebuilt.
+        """
+        from vllm.model_executor.model_loader.weight_utils import (
+            finalize_model_weights,
+        )
+
+        finalize_model_weights(self.model)
 
     def receive_weights(self, update_info: SparseNCCLWeightTransferUpdateInfo) -> None:
         """Receive sparse flat-index patches from the trainer and apply them."""
