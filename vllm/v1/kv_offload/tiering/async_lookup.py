@@ -239,6 +239,9 @@ class AsyncLookupManager(ABC):
             state = self._lookup_state.get(key)
             if state is None or state.result is True:
                 continue
+            if not state.request_ids:
+                del self._lookup_state[key]
+                continue
             state.generation = self._next_generation
             self._next_generation += 1
             state.result = True
