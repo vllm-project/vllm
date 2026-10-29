@@ -142,7 +142,7 @@ def test_triton_fp8_backend_requires_fp8(
 
 def test_fp8_heuristic_scales_occupancy_and_split_k():
     """Fewer processors can fill the GPU without the same split-K expansion."""
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
         get_heuristic_config,
     )
 
@@ -154,7 +154,7 @@ def test_fp8_heuristic_scales_occupancy_and_split_k():
 
 def test_fp8_heuristic_scales_persistent_grid_without_mutating_cached_choices():
     """Selecting a smaller GPU must preserve cached choices for a larger GPU."""
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
         get_heuristic_config,
     )
 
@@ -168,7 +168,7 @@ def test_fp8_heuristic_scales_persistent_grid_without_mutating_cached_choices():
 
 @pytest.mark.parametrize("num_processors", [0, -1])
 def test_fp8_heuristic_requires_positive_processor_count(num_processors):
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
         get_heuristic_config,
     )
 
@@ -177,7 +177,7 @@ def test_fp8_heuristic_requires_positive_processor_count(num_processors):
 
 
 def test_fp8_heuristic_scales_cache_boundaries():
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
         get_heuristic_config,
     )
 
