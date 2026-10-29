@@ -5800,9 +5800,7 @@ steps:
   - tests/v1/kv_connector/umbp_integration
   - vllm/platforms/rocm.py
   commands:
-  - uv venv --system-site-packages .venv
-  - .venv/bin/python -c "import mori.cpp as m; assert hasattr(m, 'UMBPClient'), 'MORI was built without UMBP'; import torch; assert torch.accelerator.device_count() >= 4, 'UMBP integration requires four GPUs'"
-  - .venv/bin/python -m pytest -v -s -rs tests/v1/kv_connector/umbp_integration
+  - pytest -v -s -rs tests/v1/kv_connector/umbp_integration
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125

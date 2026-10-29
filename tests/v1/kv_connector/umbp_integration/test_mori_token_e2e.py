@@ -11,8 +11,8 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from vllm.platforms import current_platform
 
-if not hasattr(pytest.importorskip("mori.cpp"), "UMBPClient"):
-    pytest.skip("MORI was built without UMBP", allow_module_level=True)
+mori_cpp = pytest.importorskip("mori.cpp")
+assert hasattr(mori_cpp, "UMBPClient"), "MORI was built without UMBP"
 
 if not current_platform.is_cuda_alike():
     pytest.skip("requires CUDA or ROCm", allow_module_level=True)

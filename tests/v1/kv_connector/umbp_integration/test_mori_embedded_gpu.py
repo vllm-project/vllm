@@ -24,8 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     UMBPRuntimeConfig,
 )
 
-if not hasattr(pytest.importorskip("mori.cpp"), "UMBPClient"):
-    pytest.skip("MORI was built without UMBP", allow_module_level=True)
+mori_cpp = pytest.importorskip("mori.cpp")
+assert hasattr(mori_cpp, "UMBPClient"), "MORI was built without UMBP"
 
 _SIZE = 1 << 20
 _NAMESPACE = "mori-embedded-tp2-pp2"
@@ -95,11 +95,8 @@ def _gpu_worker(
     worker.close()
 
 
-@pytest.mark.skipif(
-    not torch.accelerator.is_available() or torch.accelerator.device_count() < 4,
-    reason="requires four ROCm GPUs",
-)
 def test_mori_embedded_tp2_pp2_gpu_roundtrip(socket_dir):
+    assert torch.accelerator.device_count() >= 4, "requires four ROCm GPUs"
     context = mp.get_context("spawn")
     ready = context.Queue()
     release = context.Event()

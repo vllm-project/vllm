@@ -49,8 +49,8 @@ def test_finished_hybrid_tail_roundtrip_restores_full_state(socket_dir, device):
     if device != "cpu":
         if not torch.accelerator.is_available():
             pytest.skip("requires a ROCm GPU")
-        if not hasattr(pytest.importorskip("mori.cpp"), "UMBPClient"):
-            pytest.skip("MORI was built without UMBP")
+        mori_cpp = pytest.importorskip("mori.cpp")
+        assert hasattr(mori_cpp, "UMBPClient"), "MORI was built without UMBP"
         torch.accelerator.set_device_index(0)
         runtime = EmbeddedRuntime.from_config(
             UMBPRuntimeConfig(
