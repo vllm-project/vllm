@@ -128,6 +128,7 @@ def test_k1_chunks_rows_by_the_logits_workspace(fake_qsa, monkeypatch):
     )
     inputs = _selection_inputs(5, pages, page_size)
     out = qsa_flydsl.flydsl_select_paged_tokens(**inputs)
+    assert out is not None
     assert [rows for rows, _ in fake.k1_calls] == [2, 2, 1]
     assert [e[1].tolist() for e in expanded] == [[0, 1], [2, 3], [4]]
     assert out[:, 0].tolist() == [1, 1, 2, 2, 3]
