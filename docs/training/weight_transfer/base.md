@@ -23,8 +23,8 @@ vice versa, so the registries stay independent.
 `WeightSource` adapts your trainer's weights to the engines. vLLM ships
 [`ModuleSource`](#modulesource) for modules that every rank holds whole; for
 anything else (a pipeline stage, a rank's experts, a Megatron export) you
-typically write your own. Engines receive HF-format names, so any gathering,
-re-fusing or renaming happens in the source.
+typically write your own. Engines receive [Transformers names](README.md#parameter-names),
+so any gathering, re-fusing or renaming happens in the source.
 
 A source implements `metadata` and one or both iteration modes:
 
@@ -108,7 +108,7 @@ from vllm.distributed.weight_transfer.base import materialize_full_tensor
 class PipelineStageSource(WeightSource):
     """`layout` lists the whole model's (name, dtype, shape, stage) on every
     rank; `stage_ranks[s]` are stage s's trainer ranks; `module` holds this
-    rank's stage, with HF names."""
+    rank's stage, with Transformers names."""
 
     def __init__(self, module, layout, stage_ranks):
         self._module = module

@@ -121,6 +121,29 @@ on. This is the main rule to internalize:
     reads what it was told, a mismatched `packed` flag between the two sides is
     unrepresentable rather than merely discouraged.
 
+## Parameter Names
+
+Each tensor in an update is named as in the Transformers implementation of the
+model, i.e. the keys of `model.state_dict()` after `from_pretrained`. A trainer
+that holds a Transformers model can send `model.named_parameters()` as they are
+(for PEFT, merge and unload the adapters first). Models that Transformers does
+not implement use the names in their checkpoint.
+
+These can differ from the names in the checkpoint files, because Transformers
+renames some checkpoints when it loads them. vLLM applies the same renamings when
+it loads weights from disk, but not to updates. A trainer that holds the
+checkpoint names, such as a Megatron export, can convert them with:
+
+```python
+from vllm.model_executor.models.utils import get_checkpoint_renaming_mapper
+
+mapper = get_checkpoint_renaming_mapper(hf_config)
+name = mapper.map_name(checkpoint_name)
+```
+
+Only the names change. Tensors keep the layout of the checkpoint files, so MoE
+experts are sent one per expert, not in the fused layout that Transformers builds.
+
 ## Multi-Rank Trainers
 
 For sharded trainers (FSDP, TP/PP/EP), **every trainer rank builds an engine and

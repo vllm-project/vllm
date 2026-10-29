@@ -22,11 +22,11 @@ The backend imports the runtime lazily, so vLLM is unaffected unless you select 
 
 ### Destination resolution
 
-A parameter is resharded **directly into the live vLLM parameter** when its checkpoint name maps 1:1 onto a model parameter whose shape is either identical to the checkpoint shape (replicated) or differs on exactly one dim by the tensor-parallel factor. That rank then only ever receives its own shard.
+A parameter is resharded **directly into the live vLLM parameter** when its [name](README.md#parameter-names) maps 1:1 onto a model parameter whose shape is either identical to the checkpoint shape (replicated) or differs on exactly one dim by the tensor-parallel factor. That rank then only ever receives its own shard.
 
 Anything else falls back to receiving the full tensor and letting `load_weights` do the sharding, exactly as the NCCL engine does for every parameter. The fallback covers:
 
-- fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`), whose checkpoint names do not name a model parameter
+- fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`), whose names do not name a model parameter
 - quantized models, where the weight loader does more than a sharded copy
 - pipeline-parallel deployments
 

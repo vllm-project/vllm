@@ -97,6 +97,24 @@ def mock_create_engine(config, vllm_config, device, model):
     return MockWeightTransferEngine(config, vllm_config, device, model)
 
 
+class LoopbackWeightTransferEngine(MockWeightTransferEngine):
+    """Loads ``1, 2, ...`` filled tensors under the update's names, as the real
+    engines load the tensors they receive."""
+
+    def receive_weights(self, update_info: MockUpdateInfo) -> None:
+        super().receive_weights(update_info)
+        assert update_info.names and update_info.dtype_names and update_info.shapes
+        specs = zip(update_info.dtype_names, update_info.shapes)
+        self.model.load_weights(
+            (name, torch.full(shape, i + 1, dtype=getattr(torch, dtype)))
+            for i, (name, (dtype, shape)) in enumerate(zip(update_info.names, specs))
+        )
+
+
+def loopback_create_engine(config, vllm_config, device, model):
+    return LoopbackWeightTransferEngine(config, vllm_config, device, model)
+
+
 # --- Tests ---
 
 
@@ -339,3 +357,57 @@ def test_weight_transfer_config_backend(vllm_runner):
         config = runner.llm.llm_engine.vllm_config.weight_transfer_config
         assert config is not None
         assert config.backend == "nccl"
+
+
+@create_new_process_for_each_test()
+def test_update_weights_uses_transformers_names(vllm_runner):
+    """Updates are named as in Transformers, which renames Laguna's checkpoint
+    ``mlp.shared_expert.*`` and ``mlp.experts.e_score_correction_bias``."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    prefix = "model.layers.1.mlp"
+    update_info = {
+        "names": [
+            f"{prefix}.shared_experts.gate_proj.weight",
+            f"{prefix}.shared_experts.up_proj.weight",
+            f"{prefix}.gate.e_score_correction_bias",
+        ],
+        "dtype_names": ["bfloat16", "bfloat16", "float32"],
+        "shapes": [[512, 2048], [512, 2048], [256]],
+    }
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            loopback_create_engine,
+        ),
+        vllm_runner(
+            "poolside/Laguna-XS.2",
+            enforce_eager=True,
+            load_format="dummy",
+            max_model_len=256,
+            hf_overrides={
+                "num_hidden_layers": 2,
+                "layer_types": ["full_attention", "sliding_attention"],
+                "num_attention_heads_per_layer": [48, 64],
+                "mlp_layer_types": ["dense", "sparse"],
+            },
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
+        llm.init_weight_transfer_engine(WeightTransferInitRequest(init_info={}))
+        llm.start_weight_update()
+        llm.update_weights(WeightTransferUpdateRequest(update_info=update_info))
+        llm.finish_weight_update("step-1")
+
+        def read_moe(self):
+            moe = self.model_runner.get_model().model.layers[1].mlp
+            gate_up = moe.shared_experts.gate_up_proj.weight
+            bias = moe.gate.e_score_correction_bias
+            return [t.unique().tolist() for t in (gate_up[:512], gate_up[512:], bias)]
+
+        assert llm.collective_rpc(read_moe) == [[[1.0], [2.0], [3.0]]]
