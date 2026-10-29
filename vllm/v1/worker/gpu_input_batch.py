@@ -294,6 +294,7 @@ class InputBatch:
 
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
+        self.synthetic_acceptance_lengths: dict[str, float] = {}
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -393,6 +394,13 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
+            length = (sampling_params.extra_args or {}).get(
+                "synthetic_acceptance_length", -1.0
+            )
+            if length != -1.0:
+                self.synthetic_acceptance_lengths[req_id] = (
+                    0.0 if length is None else length
+                )
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
@@ -566,6 +574,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
+        self.synthetic_acceptance_lengths.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 
@@ -850,6 +859,11 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
+        lengths = self.synthetic_acceptance_lengths
+        synthetic_length = next(iter(lengths.values()), -1.0)
+        assert not lengths or (
+            len(lengths) == num_reqs and len(set(lengths.values())) == 1
+        ), "All requests in a batch must use the same synthetic_acceptance_length."
         if not self.all_greedy:
             temperature = copy_slice(
                 self.temperature_cpu_tensor, self.temperature, num_reqs
@@ -946,6 +960,7 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
             spec_token_ids=self.spec_token_ids,
+            synthetic_acceptance_length=synthetic_length,
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,

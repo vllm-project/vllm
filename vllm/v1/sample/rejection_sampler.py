@@ -33,7 +33,10 @@ from vllm.v1.spec_decode.fly import (
     compute_fly_entropy,
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+from vllm.v1.spec_decode.utils import (
+    request_synthetic_acceptance_rates,
+    unconditional_to_conditional_rates,
+)
 
 if TYPE_CHECKING:
     from vllm.config.speculative import SpeculativeConfig
@@ -112,11 +115,12 @@ class RejectionSampler(nn.Module):
                 dtype=torch.float32,
                 device=device,
             )
-        self.synthetic_mode = self.synthetic_conditional_rates is not None
-        _rejection_greedy_sample.register_warmup(synthetic_mode=self.synthetic_mode)
-        _rejection_random_sample.register_warmup(
-            synthetic_mode=self.synthetic_mode,
+        self.num_speculative_tokens = (
+            spec_config.num_speculative_tokens if spec_config is not None else 0
         )
+        for synthetic_mode in (False, True):
+            _rejection_greedy_sample.register_warmup(synthetic_mode=synthetic_mode)
+            _rejection_random_sample.register_warmup(synthetic_mode=synthetic_mode)
         _expand.register_warmup()
         _sample_recovered_tokens.register_warmup(
             use_fp64_gumbel=self.use_fp64_gumbel,
@@ -204,6 +208,13 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
+        synthetic_rates = self.synthetic_conditional_rates
+        if sampling_metadata.synthetic_acceptance_length >= 0:
+            synthetic_rates = request_synthetic_acceptance_rates(
+                sampling_metadata.synthetic_acceptance_length,
+                self.num_speculative_tokens,
+                logits.device,
+            )
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
@@ -213,8 +224,8 @@ class RejectionSampler(nn.Module):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
-            synthetic_mode=self.synthetic_mode,
-            synthetic_conditional_rates=self.synthetic_conditional_rates,
+            synthetic_mode=synthetic_rates is not None,
+            synthetic_conditional_rates=synthetic_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
