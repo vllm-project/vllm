@@ -100,9 +100,12 @@ def use_fused_mqa_topk(
     full_context: every rank ranks its rows over the whole context (no DCP, or
     PCP after the KV all-gather); pure DCP needs the per-shard top-k merge;
     candidate_selection: v4.1 two-level selection needs the logits.
+    VLLM_BATCH_INVARIANT keeps the dense path: the fused gate depends on the
+    chunk's total keys, and ties at the k-th score are taken in atomic order.
     """
     return (
         envs.VLLM_USE_FUSED_MQA_TOPK
+        and not envs.VLLM_BATCH_INVARIANT
         and not fp4_cache
         and full_context
         and not candidate_selection

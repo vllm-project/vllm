@@ -580,6 +580,9 @@ __launch_bounds__(kNumThreads, 1) void fused_mqa_topk_fp8_prefill_kernel(
   if (threadIdx.x == 0) {
     __threadfence();
     if (atomicAdd(counter + 1, 1u) == gridDim.x - 1) {
+      // Acquire: every other CTA's last claim on counter happens before the
+      // reset below.
+      __threadfence();
       atomicExch(counter, 0u);
       atomicExch(counter + 1, 0u);
     }

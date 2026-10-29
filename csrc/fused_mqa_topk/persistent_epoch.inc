@@ -681,6 +681,10 @@ if (warp_idx == 8) {
                       return sel_entry.ends[local] - sel_entry.starts[local] <=
                              topk;
                     });
+    // The selection scratch aliases kv[] and sf_kv[]. Order its generic
+    // accesses before the next block's TMA writes, which have no proxy fence
+    // of their own when that block has no sample tiles.
+    cutlass::arch::fence_view_async_shared();
     __syncwarp();
     if (lane == 0) sel_done.arrive();
     claim_empty[k & 1].arrive();
@@ -688,6 +692,8 @@ if (warp_idx == 8) {
 }
 
 // -------- exact rescan of the blocks queued by the selection --------
+// The rescan's first TMA loads overwrite the epoch's generic shared memory.
+cutlass::arch::fence_view_async_shared();
 __syncthreads();
 if (warp_idx == 0) cute::TMEM::Allocator1Sm().free(0, 512);
 if (defer_head != kTerm) {
@@ -721,6 +727,9 @@ if (defer_head != kTerm) {
     make_relative(out, topk, rows, row_base, starts_g, threadIdx.x, kNumThreads,
                   [](uint32_t) { return false; });
     cur = uint32_t(__ldcg(defer_next + vblock));
+    // Order the generic mbarrier.inval above before the TMA writes of the
+    // next rescan block or the next epoch.
+    cutlass::arch::fence_view_async_shared();
     __syncthreads();
   }
   // The loop ran at least once and ended with a barrier.
