@@ -229,6 +229,7 @@ steps:
       kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Kimi K3"
       dind: false
       device: mi355_1
@@ -517,6 +518,7 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
   key: dsv41-nvidia-specialized-decode-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
