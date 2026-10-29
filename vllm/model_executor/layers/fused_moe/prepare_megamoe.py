@@ -518,8 +518,9 @@ def prepare_megamoe_inputs(
                 f"{required_rows}, got {shared_x_sf.shape[0]}."
             )
 
-    # On GB200, eight-row tiles win from 64 tokens; keep smaller batches untiled.
-    block_m = 8 if num_tokens >= 64 else 1
+    # On GB200, 8-row tiles win from 64 tokens and 32-row tiles from 1024 (1.3-1.6x
+    # over 8 rows); smaller batches stay untiled.
+    block_m = 32 if num_tokens >= 1024 else 8 if num_tokens >= 64 else 1
     grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0

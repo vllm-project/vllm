@@ -688,7 +688,7 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
 
 
 @requires_sm100
-@pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
+@pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 1025, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
 def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
