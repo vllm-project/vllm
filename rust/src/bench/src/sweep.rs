@@ -373,12 +373,22 @@ impl SummaryColumn {
 }
 
 /// Parse a comma-separated list of concurrency values.
+///
+/// A zero value is rejected here, before any sweep point runs: it would
+/// otherwise build `Semaphore::new(0)` and hang that point forever (the
+/// same failure as `--max-concurrency 0`; Python rejects it since #54887).
 pub fn parse_concurrency_values(s: &str) -> Result<Vec<usize>> {
     s.split(',')
         .map(|v| {
-            v.trim().parse::<usize>().map_err(|_| {
+            let value = v.trim().parse::<usize>().map_err(|_| {
                 BenchError::Config(format!("Invalid concurrency value: '{}'", v.trim()))
-            })
+            })?;
+            if value == 0 {
+                return Err(BenchError::Config(
+                    "--sweep-max-concurrency values must be greater than 0, got 0".into(),
+                ));
+            }
+            Ok(value)
         })
         .collect()
 }
@@ -560,5 +570,28 @@ mod tests {
             dash_count >= 2,
             "expected at least 2 dashes, got {dash_count}: {row}"
         );
+    }
+
+    #[test]
+    fn parse_concurrency_values_rejects_zero() {
+        // Any zero point would hang its sweep run on Semaphore::new(0);
+        // reject the whole list before the first point starts.
+        for input in ["0", "0,1", "1,0", "1,0,16"] {
+            let err = parse_concurrency_values(input).expect_err("0 must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--sweep-max-concurrency") && msg.contains("greater than 0"),
+                "{input}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_concurrency_values_accepts_positive() {
+        assert_eq!(
+            parse_concurrency_values("1,10,50").unwrap(),
+            vec![1, 10, 50]
+        );
+        assert_eq!(parse_concurrency_values(" 8 , 16 ").unwrap(), vec![8, 16]);
     }
 }

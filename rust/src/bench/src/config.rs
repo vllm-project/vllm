@@ -246,6 +246,21 @@ impl BenchConfig {
             ));
         }
 
+        // A zero concurrency builds Semaphore::new(0) in benchmark.rs /
+        // multi_turn.rs, on which every request waits forever. Reject it
+        // here, matching Python `vllm bench serve` (since #54887), instead
+        // of hanging with no error.
+        if args.max_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--max-concurrency must be greater than 0".into(),
+            ));
+        }
+        if args.multi_turn_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--multi-turn-concurrency must be greater than 0".into(),
+            ));
+        }
+
         let base_url = args.resolve_base_url();
         let api_url = args.resolve_api_url();
 
@@ -1398,6 +1413,63 @@ mod tests {
 
         assert!(BenchConfig::from_args(&args).is_err());
     }
+
+    #[test]
+    fn test_zero_max_concurrency_fails() {
+        // Matches Python `vllm bench serve` (since #54887): 0 would build
+        // Semaphore::new(0) and hang forever, so fail fast with its message.
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--max-concurrency",
+            "0",
+        ]);
+        let err = BenchConfig::from_args(&args).expect_err("0 concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--max-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_positive_max_concurrency_passes() {
+        for value in ["1", "16"] {
+            let args = parse_args(vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--max-concurrency",
+                value,
+            ]);
+            assert!(
+                BenchConfig::from_args(&args).is_ok(),
+                "value {value} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_multi_turn_concurrency_fails() {
+        // Same Semaphore::new(0) hang via the multi-turn path.
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--multi-turn",
+            "--multi-turn-concurrency",
+            "0",
+        ]);
+        let err =
+            BenchConfig::from_args(&args).expect_err("0 multi-turn concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--multi-turn-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
     #[test]
     fn test_range_ratio_parse_float() {
         let rr = RangeRatio::parse("0.2").unwrap();
