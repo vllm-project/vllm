@@ -111,6 +111,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("qsa_index_scores_rdna3", torch::kCUDA,
                 &qsa_index_scores_rdna3);
 
+  // qwen4_exp QSA indexer Gemma RMSNorm + (M)RoPE of the index heads.
+  rocm_ops.def(
+      "qsa_norm_rope_rdna3(Tensor x, Tensor! out, Tensor weight, "
+      "Tensor positions, Tensor cos_sin_cache, float eps, int rotary_dim, "
+      "int section_t, int section_h, int section_w, bool interleaved) -> ()");
+  rocm_ops.impl("qsa_norm_rope_rdna3", torch::kCUDA, &qsa_norm_rope_rdna3);
+
+  // Gated shared expert: out *= sigmoid(x . w), one launch.
+  rocm_ops.def(
+      "shared_expert_gate_rdna3(Tensor! out, Tensor x, Tensor weight) -> ()");
+  rocm_ops.impl("shared_expert_gate_rdna3", torch::kCUDA,
+                &shared_expert_gate_rdna3);
+
   // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
   rocm_ops.def(
       "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "

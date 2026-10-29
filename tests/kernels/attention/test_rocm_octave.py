@@ -389,7 +389,14 @@ def _window_tables(entries, hkv, dev):
         ("on", sq.MAX_EXACT_WINDOW),
     ],
 )
-def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window, window_size):
+# Consecutive rows of one request share a row tile over the union of their
+# selections; rows of different requests keep their own.
+@pytest.mark.parametrize(
+    "rows", [[0, 1, 1, 2, 0, 1, 2], [0, 0, 1, 1, 1, 2, 2, 2, 0]], ids=["mixed", "pairs"]
+)
+def test_sparse_decode_matches_reference(
+    cache_dtype, hkv, group, window, window_size, rows
+):
     """Sparse (top-k) decode as qwen4_exp QSA runs it: each query reads the
     logical positions in its index row, -1 entries are holes. With the window
     on, the first 4 and the last `window_size` positions come from the fp16
@@ -424,7 +431,7 @@ def test_sparse_decode_matches_reference(cache_dtype, hkv, group, window, window
         wtags[::2] = -7
         stags[::2] = -7
 
-    q_to_req = torch.tensor([0, 1, 1, 2, 0, 1, 2], dtype=torch.int32, device=dev)
+    q_to_req = torch.tensor(rows, dtype=torch.int32, device=dev)
     num_q, topk = q_to_req.numel(), max(512, 2 * window_size)
     qpos = torch.tensor(
         [lens[r] - 1 - 37 * i for i, r in enumerate(q_to_req.tolist())],

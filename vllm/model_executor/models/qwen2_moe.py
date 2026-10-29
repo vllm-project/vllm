@@ -50,6 +50,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -58,6 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -111,6 +113,27 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        self._fused_gate: bool | None = None
+
+    def _use_fused_gate(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        """Gate GEMM, sigmoid and multiply in one ROCm launch (fp16)."""
+        if self._fused_gate is None:
+            gate = self.expert_gate
+            assert gate is not None
+            self._fused_gate = (
+                current_platform.is_rocm()
+                and hasattr(torch.ops._rocm_C, "shared_expert_gate_rdna3")
+                and isinstance(gate.quant_method, UnquantizedLinearMethod)
+                and getattr(gate, "bias", None) is None
+                and gate.weight.dtype == torch.float16
+                and gate.weight.shape[0] == 1
+            )
+        return (
+            self._fused_gate
+            and x.dtype == out.dtype == torch.float16
+            and x.is_contiguous()
+            and out.is_contiguous()
+        )
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -118,7 +141,12 @@ class Qwen2MoeMLP(nn.Module):
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
+            if self._use_fused_gate(x, out):
+                torch.ops._rocm_C.shared_expert_gate_rdna3(
+                    out, x, self.expert_gate.weight
+                )
+            else:
+                out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 

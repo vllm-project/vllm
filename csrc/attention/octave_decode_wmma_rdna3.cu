@@ -16,6 +16,10 @@
 //
 // The query is rotated like K while it is staged into LDS; the output stays
 // rotated and octave_reduce rotates it back.
+//
+// Register budget: the sparse variants sit at 249-253 of 256 VGPRs with no
+// scratch. Any change here must be checked with -Rpass-analysis for
+// ScratchSize 0: a spill in this kernel corrupts the output.
 
 #include <cstdint>
 #include <torch/all.h>
@@ -111,10 +115,120 @@ __device__ __forceinline__ float sign_of(const int* bits, int i) {
   return ((bits[i >> 5] >> (i & 31)) & 1) ? -1.0f : 1.0f;
 }
 
+// Pair mode (sparse): rows 2p and 2p+1 of the same request share one row
+// tile over the union of their selections. Row 2p's region of uidx holds its
+// own list followed, in row 2p+1's region, by the positions only row 2p+1
+// selected; umask bit b marks the entries row 2p+b attends and
+// ulen[2p] = union length, ulen[2p+1] = -1. Rows of different requests keep
+// their own lists (masks 1 and 2, ulen = topk each). One block per pair: row
+// 2p's positions go into an LDS hash, row 2p+1's are looked up and the misses
+// appended in index order, so the output is deterministic.
+constexpr int kUnionThreads = 256;
+constexpr int kUnionHashBits = 13;
+constexpr int kUnionMaxTopk = 1 << (kUnionHashBits - 1);
+
+__global__ __launch_bounds__(kUnionThreads) void pair_union(
+    const int* __restrict__ idx, int64_t sidx, int topk,
+    const int* __restrict__ q_to_req, int num_q, int num_reqs,
+    int* __restrict__ uidx, uint8_t* __restrict__ umask,
+    int* __restrict__ ulen) {
+  #ifndef OCTAVE_WMMA_STUB
+  constexpr int HS = 1 << kUnionHashBits;
+  __shared__ int key[HS];
+  __shared__ short at[HS];
+  __shared__ uint32_t mw[kUnionMaxTopk / 4];
+  __shared__ int wsum[kUnionThreads / 32];
+  const int ra = 2 * blockIdx.x, rb = ra + 1, t = threadIdx.x;
+  const int* ia = idx + (int64_t)ra * sidx;
+  const int* ib = idx + (int64_t)rb * sidx;
+  int* ua = uidx + (int64_t)ra * topk;
+  int* ub = ua + topk;
+  uint8_t* ma = umask + (int64_t)ra * topk;
+  uint8_t* mb = ma + topk;
+  const int qa = q_to_req[ra];
+  const bool merge =
+      rb < num_q && qa >= 0 && qa < num_reqs && q_to_req[rb] == qa;
+  if (!merge) {
+    for (int i = t; i < topk; i += kUnionThreads) {
+      ua[i] = ia[i];
+      ma[i] = 1;
+      if (rb < num_q) {
+        ub[i] = ib[i];
+        mb[i] = 2;
+      }
+    }
+    if (t == 0) {
+      ulen[ra] = topk;
+      if (rb < num_q) ulen[rb] = topk;
+    }
+    return;
+  }
+  auto slot = [](int v) {
+    return (int)(((uint32_t)v * 2654435761u) >> (32 - kUnionHashBits));
+  };
+  for (int i = t; i < HS; i += kUnionThreads) key[i] = -1;
+  for (int i = t; i < kUnionMaxTopk / 4; i += kUnionThreads) mw[i] = 0;
+  __syncthreads();
+  for (int i = t; i < topk; i += kUnionThreads) {
+    const int v = ia[i];
+    ua[i] = v;
+    if (v < 0) continue;
+    atomicOr(&mw[i >> 2], 1u << (8 * (i & 3)));
+    for (int hs = slot(v);; hs = (hs + 1) & (HS - 1)) {
+      const int prev = atomicCAS(&key[hs], -1, v);
+      if (prev == -1 || prev == v) {
+        if (prev == -1) at[hs] = (short)i;
+        break;
+      }
+    }
+  }
+  __syncthreads();
+  const int w = t >> 5, lane = t & 31;
+  int nb = 0;
+  for (int base = 0; base < topk; base += kUnionThreads) {
+    const int i = base + t;
+    const int v = i < topk ? ib[i] : -1;
+    bool add = false;
+    if (v >= 0) {
+      add = true;
+      for (int hs = slot(v); key[hs] != -1; hs = (hs + 1) & (HS - 1))
+        if (key[hs] == v) {
+          // A repeated position of row 2p+1 past the first is appended.
+          const int a = at[hs];
+          const uint32_t bit = 2u << (8 * (a & 3));
+          add = (atomicOr(&mw[a >> 2], bit) & bit) != 0;
+          break;
+        }
+    }
+    const uint32_t bal = __builtin_amdgcn_ballot_w32(add);
+    if (lane == 0) wsum[w] = __builtin_popcount(bal);
+    __syncthreads();
+    int off = nb, tot = 0;
+    for (int k = 0; k < kUnionThreads / 32; ++k) {
+      if (k < w) off += wsum[k];
+      tot += wsum[k];
+    }
+    off += __builtin_popcount(bal & ((1u << lane) - 1u));
+    if (add) {
+      ub[off] = v;
+      mb[off] = 2;
+    }
+    nb += tot;
+    __syncthreads();
+  }
+  for (int i = t; i < topk; i += kUnionThreads)
+    ma[i] = (uint8_t)(mw[i >> 2] >> (8 * (i & 3)));
+  if (t == 0) {
+    ulen[ra] = topk + nb;
+    ulen[rb] = -1;
+  }
+  #endif  // OCTAVE_WMMA_STUB
+}
+
 // SP: sparse mode. Row qi attends to the logical positions idx[qi, 0..topk)
 // (negative entries are skipped) instead of its first q_to_klen[qi] tokens,
 // and every row is its own segment since rows do not share positions.
-template <int VB, bool KC, int NSB, typename QT, bool SP>
+template <int VB, bool KC, int NSB, typename QT, bool SP, bool PAIR>
 __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     const QT* __restrict__ Q, const uint8_t* __restrict__ cache,
     const int* __restrict__ block_table, const int* __restrict__ q_to_req,
@@ -126,7 +240,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int64_t smo, int64_t smh, int64_t sms, const int* __restrict__ idx,
     int64_t sidx, int topk, const int* __restrict__ qpos,
     const int* __restrict__ wtags, int wmask, const int* __restrict__ stags,
-    int smask, int window) {
+    int smask, int window, const uint8_t* __restrict__ umask,
+    const int* __restrict__ ulen) {
   #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
@@ -147,14 +262,22 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
   const int max_kv = max_blocks * block_size;
   const float sm_log2 = sm_scale * 1.4426950408889634f / LUT_ONE;
 
+  // Query vector (column) v -> row of the group and head. Pair mode: row
+  // tile t holds rows 2t and 2t+1 in its first 2 * hpk columns.
+  auto vrow = [&](int v) {
+    return PAIR ? 2 * (v >> 4) + (v & 15) / hpk : v / hpk;
+  };
+  auto vhead = [&](int v) { return PAIR ? (v & 15) % hpk : v % hpk; };
+
   __shared__ __attribute__((aligned(16))) _Float16 sQ[32][QROW];
 
   // Stage the group's queries rotated like K: lane owns 8 dims.
   for (int v = w; v < 32; v += 2 * NSB) {
-    const int r = v / hpk, g = v % hpk;
+    const int r = vrow(v), g = vhead(v);
     const int qi = grp * QG + r;
     float x[8];
-    const bool live = v < QG * hpk && qi < num_q;
+    const bool live =
+        (PAIR ? (v & 15) < 2 * hpk : v < QG * hpk) && r < QG && qi < num_q;
     #pragma unroll
     for (int i = 0; i < 8; ++i)
       x[i] = live ? to_f<QT>(Q[(int64_t)qi * sq0 +
@@ -188,22 +311,25 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
   __syncthreads();
 
   int rreq[QG], rlen[QG];
+  int merged = 0;  // pair mode: bit r set when row r joined row r - 1
     #pragma unroll
   for (int r = 0; r < QG; ++r) {
     const int qi = grp * QG + r;
     int rq = -1, ln = 0;
     if (qi < num_q) {
       rq = q_to_req[qi];
-      ln = SP ? topk : q_to_klen[qi];
+      ln = SP ? (PAIR ? ulen[qi] : topk) : q_to_klen[qi];
+      if (PAIR && ln < 0) merged |= 1 << r;
       if (rq < 0 || rq >= num_reqs) {
         rq = 0;
         ln = 0;
       }
-      ln = min(max(ln, 0), SP ? topk : max_kv);
+      ln = min(max(ln, 0), SP ? 2 * topk : max_kv);
     }
     rreq[r] = __builtin_amdgcn_readfirstlane(rq);
     rlen[r] = __builtin_amdgcn_readfirstlane(ln);
   }
+  merged = __builtin_amdgcn_readfirstlane(merged);
 
   // Per-segment sums of this lane's query (debiasing): half h sums dims
   // [128 h, 128 h + 128) as two 64-dim segments; the halves swap.
@@ -235,10 +361,13 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int seg1 = seg0 + 1;
     if constexpr (!SP)
       while (seg1 < QG && rreq[seg1] == rreq[seg0]) ++seg1;
+    if constexpr (PAIR)
+      if (seg1 < QG && ((merged >> seg1) & 1)) ++seg1;
     const int req = rreq[seg0];
     int Lmax = 0;
     for (int r = seg0; r < seg1; ++r) Lmax = max(Lmax, rlen[r]);
-    const int qv_lo = seg0 * hpk, qv_hi = seg1 * hpk;
+    const int qv_lo = PAIR ? (seg0 >> 1) * 16 + (seg0 & 1) * hpk : seg0 * hpk;
+    const int qv_hi = qv_lo + (seg1 - seg0) * hpk;
     int tps = (Lmax + num_splits - 1) / num_splits;
     if (tps < min_tps) tps = min_tps;
     tps = (tps + 15) & ~15;
@@ -249,8 +378,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       if (tile_live && si < num_splits && h == 0 && qlive) {
         int qx = qv;
         asm volatile("" : "+v"(qx));
-        float* op = mid_o + (int64_t)(grp * QG + qx / hpk) * smo +
-                    (int64_t)(kvh * hpk + qx % hpk) * smh + (int64_t)si * sms;
+        float* op = mid_o + (int64_t)(grp * QG + vrow(qx)) * smo +
+                    (int64_t)(kvh * hpk + vhead(qx)) * smh + (int64_t)si * sms;
         op[D] = -INFINITY;
         op[D + 1] = 0.0f;
       }
@@ -260,9 +389,13 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
 
     if (tile_live && si < num_splits) {
       int qlen = 0;
+      if constexpr (SP) {
+        qlen = qlive ? Lmax : 0;
+      } else {
     #pragma unroll
-      for (int r = 0; r < QG; ++r)
-        if (qlive && qv / hpk == r) qlen = rlen[r];
+        for (int r = 0; r < QG; ++r)
+          if (qlive && qv / hpk == r) qlen = rlen[r];
+      }
 
       const int start = si * tps;
       const int end = min(start + tps, Lmax);
@@ -288,8 +421,14 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       // whether that position maps to a live cache slot. Dead entries read
       // slot 0 of block 0 and are masked out of the softmax.
       const int* irow = SP ? idx + (int64_t)(grp * QG + seg0) * sidx : nullptr;
+      const int ilast = Lmax - 1;
+      // Pair mode: entry pos of the list is attended by this column's row
+      // when bit (row & 1) of its mask is set.
+      const uint8_t* mrow =
+          PAIR ? umask + (int64_t)(grp * QG + seg0) * sidx : nullptr;
+      const int mbit = PAIR ? (qv & 15) / hpk : 0;
       auto sel_block = [&](int pos, int& off) {
-        const int t = irow[min(pos, topk - 1)];
+        const int t = irow[min(pos, ilast)];
         const int lb = max(t, 0) / block_size;
         off = max(t, 0) - lb * block_size;
         const int pb = (t >= 0 && lb < max_blocks)
@@ -299,9 +438,12 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       };
       // Exact-window tokens (attended by octave_window_attn instead): the
       // last `window` positions before the query, and the first kSinks.
-      const int rpos = SP && wtags ? qpos[grp * QG + seg0] : 0;
+      const int rpos = SP && wtags
+                           ? (PAIR ? (qlive ? qpos[grp * QG + vrow(qv)] : 0)
+                                   : qpos[grp * QG + seg0])
+                           : 0;
       auto in_window = [&](int pos, int pb, int off) {
-        const int t = irow[min(pos, topk - 1)];
+        const int t = irow[min(pos, ilast)];
         const int d = rpos - t;
         const int slot = pb * block_size + off;
         return (d >= 0 && d < window && wtags[slot & wmask] == slot) ||
@@ -463,6 +605,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
             int off;
             const int pb = sel_block(t, off);
             ok = ok && pb >= 0 && !(wtags && in_window(t, pb, off));
+            if constexpr (PAIR) ok = ok && ((mrow[min(t, ilast)] >> mbit) & 1);
           }
           const uint32_t a = pickw(sa_c, 2 * e);
           float v;
@@ -549,8 +692,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       if (qlive) {
         int qx = qv;
         asm volatile("" : "+v"(qx));
-        float* op = mid_o + (int64_t)(grp * QG + qx / hpk) * smo +
-                    (int64_t)(kvh * hpk + qx % hpk) * smh + (int64_t)si * sms;
+        float* op = mid_o + (int64_t)(grp * QG + vrow(qx)) * smo +
+                    (int64_t)(kvh * hpk + vhead(qx)) * smh + (int64_t)si * sms;
         const bool any = m != -INFINITY;
         const float corr = BIAS * cp;
         constexpr float kOut = 1.0f / (PSCALE * LUT_ONE);
@@ -637,13 +780,29 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const bool sp = indices.has_value();
   const int* idx = sp ? indices->data_ptr<int>() : nullptr;
-  const int64_t sidx = sp ? indices->stride(0) : 0;
+  int64_t sidx = sp ? indices->stride(0) : 0;
   const int topk = sp ? (int)indices->size(1) : 0;
-  const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
+  // Pair mode: two rows of a request share a row tile over the union of
+  // their selections (see pair_union).
+  const bool pair = sp && num_q > 1 && 2 * hpk <= 16 && topk <= kUnionMaxTopk;
+  torch::Tensor uidx, umask, ulen;
+  if (pair) {
+    const int rows = (num_q + 1) & ~1;
+    uidx = torch::empty({rows, topk}, query.options().dtype(at::kInt));
+    umask = torch::empty({rows, topk}, query.options().dtype(at::kByte));
+    ulen = torch::empty({rows}, query.options().dtype(at::kInt));
+    pair_union<<<rows / 2, kUnionThreads, 0, stream>>>(
+        idx, sidx, topk, q_to_req.data_ptr<int>(), num_q, block_table.size(0),
+        uidx.data_ptr<int>(), umask.data_ptr<uint8_t>(), ulen.data_ptr<int>());
+    idx = uidx.data_ptr<int>();
+    sidx = topk;
+  }
+  const int nrt = pair ? (std::min(num_q, QG) > 2 ? 2 : 1)
+                       : (std::min(num_q, QG) * hpk > 16 ? 2 : 1);
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW_SP(B, KC, T, SP)                                              \
-    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                   \
+  #define SQW_SP(B, KC, T, SP, PAIR)                                        \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP, PAIR>                             \
         <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                             \
             (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),   \
             block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),          \
@@ -654,13 +813,17 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
             query.stride(0), query.stride(1), cache.stride(0),              \
             cache.stride(1), cache.stride(2), mid_o.stride(0),              \
             mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
-            wmask, stags, smask, window)
-  #define SQW(B, KC, T)          \
-    do {                         \
-      if (sp)                    \
-        SQW_SP(B, KC, T, true);  \
-      else                       \
-        SQW_SP(B, KC, T, false); \
+            wmask, stags, smask, window,                                    \
+            pair ? umask.data_ptr<uint8_t>() : nullptr,                     \
+            pair ? ulen.data_ptr<int>() : nullptr)
+  #define SQW(B, KC, T)                 \
+    do {                                \
+      if (pair)                         \
+        SQW_SP(B, KC, T, true, true);   \
+      else if (sp)                      \
+        SQW_SP(B, KC, T, true, false);  \
+      else                              \
+        SQW_SP(B, KC, T, false, false); \
     } while (0)
   const bool bf = query.dtype() == at::kBFloat16;
   if (fmt == 4) {

@@ -95,7 +95,7 @@ __global__ void __launch_bounds__(T1)
                    const _Float16* __restrict__ bo,
                    const _Float16* __restrict__ inj,
                    const _Float16* __restrict__ nw, const int nw_shared,
-                   const _Float16* __restrict__ wd,
+                   const _Float16* __restrict__ wd, const int64_t ldw,
                    _Float16* __restrict__ out_h, _Float16* __restrict__ out_xn,
                    _Float16* __restrict__ s_out, _Float16* __restrict__ inj_out,
                    const float eps, const int Mr,
@@ -115,7 +115,7 @@ __global__ void __launch_bounds__(T1)
 #pragma unroll
     for (int u = 0; u < CPL; ++u)
       wr[p][u] = *reinterpret_cast<const half8*>(
-          &wd[(size_t)r * D + wv * KW + (lane + 32 * u) * 8]);
+          &wd[r * ldw + wv * KW + (lane + 32 * u) * 8]);
   }
 
   // Pass 1 (no xn_in): sum of squares of h' per token, nothing kept in
@@ -296,8 +296,8 @@ void launch(const at::Tensor& h, const at::Tensor& bo, const at::Tensor& inj,
     return reinterpret_cast<_Float16*>(x.data_ptr());
   };
   hc_down_kernel<M><<<NB, T1, 0, st>>>(
-      P(h), P(bo), P(inj), P(nw), nw.numel() == H, P(wd), W(out_h), W(xn), W(s),
-      W(inj_out), eps, (int)h.size(0), xn_in);
+      P(h), P(bo), P(inj), P(nw), nw.numel() == H, P(wd), wd.stride(0),
+      W(out_h), W(xn), W(s), W(inj_out), eps, (int)h.size(0), xn_in);
   hc_up_kernel<M><<<H / DPB, T2, 0, st>>>(P(s), P(wu), xn_in ? xn_in : P(xn),
                                           W(out), (int)h.size(0));
 }
@@ -319,9 +319,12 @@ void check_weights(const torch::Tensor& wd, const torch::Tensor& wu) {
               "qwen4_hc: bad down weight");
   TORCH_CHECK(wu.dim() == 2 && wu.size(0) == D && wu.size(1) == R,
               "qwen4_hc: bad up weight");
-  for (auto* x : {&wd, &wu})
-    TORCH_CHECK(x->is_contiguous() && x->scalar_type() == at::kHalf,
-                "qwen4_hc: fp16 contiguous");
+  TORCH_CHECK(wd.stride(1) == 1 && wd.stride(0) % 8 == 0 &&
+                  wd.scalar_type() == at::kHalf,
+              "qwen4_hc: down weight fp16, unit column stride, rows 16-byte "
+              "aligned");
+  TORCH_CHECK(wu.is_contiguous() && wu.scalar_type() == at::kHalf,
+              "qwen4_hc: up weight fp16 contiguous");
 }
 
 // ---------------------------------------------------------------------------
