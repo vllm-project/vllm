@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ROCm fused KDA decode kernel must match the Triton chain it replaces.
+"""The ROCm fused KDA decode kernels must match the Triton chain they replace.
 
-The fused kernel folds the packed causal conv1d update, the gated delta-rule
-recurrence and the gated output RMSNorm into one launch, and updates both the
-conv state and the recurrent state in place. Every one of those outputs is
-compared against the three-kernel path the AMD layer falls back to.
+Two fused paths fold the packed causal conv1d update, the gated delta-rule
+recurrence and the gated output RMSNorm into one launch, updating the conv
+state and the recurrent state in place:
+
+* the vLLM HIP kernel ``ops.fused_kda_decode`` (gfx942 / gfx950), and
+* AITER's Gluon kernels behind ``rocm_aiter_ops`` (CDNA4+): the packed
+  non-spec decode and the speculative-decode ``fused_recurrent_kda``.
+
+Every output of each is compared against the unfused path the AMD layer falls
+back to, with the argument layout the layer itself uses.
 """
+
+from functools import partial
 
 import pytest
 import torch
@@ -14,7 +22,7 @@ import torch
 from vllm.platforms import current_platform
 
 
-def _on_supported_arch() -> bool:
+def _hip_kernel_arch() -> bool:
     if not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -22,9 +30,25 @@ def _on_supported_arch() -> bool:
     return on_gfx950() or on_gfx942()
 
 
+def _aiter_gluon_kda_available() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() >= 4 and rocm_aiter_ops._kda_gluon_decode_importable()
+
+
 pytestmark = pytest.mark.skipif(
-    not _on_supported_arch(),
+    not current_platform.is_rocm(), reason="ROCm-only KDA decode kernels"
+)
+requires_hip_kernel_arch = pytest.mark.skipif(
+    not _hip_kernel_arch(),
     reason="The fused KDA decode kernel is only built for gfx942 / gfx950",
+)
+requires_aiter_gluon_kda = pytest.mark.skipif(
+    not _aiter_gluon_kda_available(),
+    reason="AITER Gluon KDA decode needs CDNA4+ and an AITER build that ships it",
 )
 
 # Kimi-K3 KDA: 96 heads x 128, conv width 4, gate_lower_bound -5.0.
@@ -41,7 +65,11 @@ def _requires_kernel() -> None:
 
 
 class KdaDecodeInputs:
-    """One decode step of a Kimi-K3 KDA layer, in the layer's own layout."""
+    """One decode step of a Kimi-K3 KDA layer, in the layer's own layout.
+
+    ``num_spec`` > 0 sizes the conv state for speculative decoding
+    (``conv_width - 1 + num_spec`` taps, as ``kda_state_shape`` does).
+    """
 
     def __init__(
         self,
@@ -49,6 +77,7 @@ class KdaDecodeInputs:
         num_heads: int,
         num_slots: int,
         seed: int = 0,
+        num_spec: int = 0,
     ) -> None:
         torch.manual_seed(seed)
         device = "cuda"
@@ -70,9 +99,15 @@ class KdaDecodeInputs:
                 for i in range(3)
             ]
         )
-        # SD cache layout: [slots, width - 1, 3 * dim]; the layer transposes it.
+        # SD cache layout: [slots, taps, 3 * dim]; the layer transposes it.
         self.conv_state = (
-            torch.randn(num_slots, CONV_WIDTH - 1, 3 * dim, device=device, dtype=DTYPE)
+            torch.randn(
+                num_slots,
+                CONV_WIDTH - 1 + num_spec,
+                3 * dim,
+                device=device,
+                dtype=DTYPE,
+            )
             * 0.5
         )
         self.recurrent_state = (
@@ -111,6 +146,12 @@ class KdaDecodeInputs:
 
     def conv_state_view(self, state: torch.Tensor) -> torch.Tensor:
         return state.transpose(-1, -2)
+
+    def empty_out(self) -> torch.Tensor:
+        num_tokens = self.mixed_qkv.shape[0]
+        return torch.empty(
+            1, num_tokens, self.num_heads, HEAD_DIM, device="cuda", dtype=DTYPE
+        )
 
 
 def _gated_rmsnorm(
@@ -196,6 +237,7 @@ def _run_fused(
     return out, conv_state, recurrent_state
 
 
+@requires_hip_kernel_arch
 @pytest.mark.parametrize("num_heads", [12, 24, 96])
 @pytest.mark.parametrize("num_tokens", [1, 7, 128])
 @torch.inference_mode()
@@ -214,6 +256,7 @@ def test_fused_kda_decode_matches_triton_chain(num_heads: int, num_tokens: int) 
     torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
 
 
+@requires_hip_kernel_arch
 @torch.inference_mode()
 def test_fused_kda_decode_leaves_untouched_slots_alone() -> None:
     """Only the slots named by state_indices may be written."""
@@ -234,6 +277,7 @@ def test_fused_kda_decode_leaves_untouched_slots_alone() -> None:
     )
 
 
+@requires_hip_kernel_arch
 @torch.inference_mode()
 def test_fused_kda_decode_without_output_norm() -> None:
     """Omitting the gate/norm pair returns the raw recurrent output."""
@@ -265,6 +309,7 @@ def test_fused_kda_decode_without_output_norm() -> None:
     assert torch.isfinite(out).all()
 
 
+@requires_hip_kernel_arch
 @torch.inference_mode()
 def test_fused_kda_decode_skips_null_block_padding() -> None:
     """A CUDA-graph decode batch is padded with NULL_BLOCK_ID (0).
@@ -291,7 +336,12 @@ def test_fused_kda_decode_skips_null_block_padding() -> None:
     torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
 
 
-def test_decode_weights_staged_after_loading(dist_init) -> None:
+@requires_hip_kernel_arch
+@pytest.mark.parametrize("state_dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("aiter_available", [False, True])
+def test_decode_weights_staged_after_loading(
+    dist_init, monkeypatch, state_dtype: str, aiter_available: bool
+) -> None:
     """The fused-decode weight copies must not depend on the weight loaders.
 
     Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
@@ -300,11 +350,20 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
     """
     _requires_kernel()
     from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.models.kimi_k3.amd.ops.kda_chunk import is_fused_kda_chunk_supported
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_kda_gluon_decode_available", lambda: aiter_available
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_kda_gluon_prefill_available", lambda: aiter_available
+    )
     config = KimiLinearConfig(
         hidden_size=256,
         linear_attn_config={
@@ -318,16 +377,36 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
         },
     )
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", dtype=DTYPE)
+    vllm_config.cache_config.mamba_ssm_cache_dtype = state_dtype
     with set_current_vllm_config(vllm_config), torch.device("cuda"):
         layer = KimiK3DeltaAttention(
             config, vllm_config, prefix="model.layers.0.self_attn"
         )
+    use_aiter = aiter_available and state_dtype == "float32"
+    assert layer.use_aiter_decode == use_aiter
+    expected_prefill = (
+        "gluon"
+        if use_aiter
+        else "fused"
+        if is_fused_kda_chunk_supported()
+        else "triton"
+    )
+    assert layer.kda_prefill_backend == expected_prefill
+    if state_dtype == "bfloat16":
+        # Neither FP32-only decode backend may stage weights or take its fast path.
+        assert layer.decode_conv1d_weight is None
+        assert layer.decode_norm_weight is None
+        return
     assert layer.decode_conv1d_weight is not None
+    # The AITER Gluon decode path takes o_norm.weight directly, so only the HIP
+    # kernel gets an fp32 norm copy.
+    assert (layer.decode_norm_weight is None) == layer.use_aiter_decode
     with torch.no_grad():
         for param in layer.parameters():
             param.normal_()
         layer.decode_conv1d_weight.fill_(float("nan"))
-        layer.decode_norm_weight.fill_(float("nan"))
+        if layer.decode_norm_weight is not None:
+            layer.decode_norm_weight.fill_(float("nan"))
 
     process_weights_after_loading(
         torch.nn.ModuleList([layer]), vllm_config.model_config, torch.device("cuda")
@@ -341,7 +420,297 @@ def test_decode_weights_staged_after_loading(dist_init) -> None:
     torch.testing.assert_close(
         layer.decode_conv1d_weight, expected_conv, atol=0, rtol=0
     )
-    torch.testing.assert_close(
-        layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
+    if layer.decode_norm_weight is not None:
+        torch.testing.assert_close(
+            layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
+        )
+        assert not layer.decode_norm_weight.requires_grad
+    assert not layer.decode_conv1d_weight.requires_grad
+
+
+# --------------------------------------------------------------------------
+# non-spec decode: fused_recurrent_kda_packed_decode
+# --------------------------------------------------------------------------
+
+
+def _run_aiter_packed_decode(
+    inp: KdaDecodeInputs,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Exactly the call KimiK3DeltaAttention._forward makes for decode batches."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    conv_state = inp.conv_state.clone()
+    recurrent_state = inp.recurrent_state.clone()
+    num_tokens = inp.mixed_qkv.shape[0]
+    core_attn_out = inp.empty_out()
+    rocm_aiter_ops.kda_fused_recurrent_packed_decode(
+        mixed_qkv=inp.mixed_qkv,
+        g=inp.g1[0],
+        beta=inp.beta[0],
+        A_log=inp.A_log,
+        dt_bias=inp.dt_bias,
+        lower_bound=GATE_LOWER_BOUND,
+        initial_state=recurrent_state,
+        ssm_state_indices=inp.state_indices[:num_tokens],
+        conv_state=inp.conv_state_view(conv_state),
+        conv_weight=inp.decode_conv1d_weight,
+        out_gate=inp.g2[:num_tokens],
+        norm_weight=inp.norm_weight_bf16,
+        norm_eps=NORM_EPS,
+        out=core_attn_out[0, :num_tokens],
     )
-    assert not layer.decode_norm_weight.requires_grad
+    return core_attn_out, conv_state, recurrent_state
+
+
+@requires_aiter_gluon_kda
+@pytest.mark.parametrize("num_heads", [12, 24])
+@pytest.mark.parametrize("num_tokens", [1, 7, 128])
+@torch.inference_mode()
+def test_aiter_packed_decode_matches_triton_chain(
+    num_heads: int, num_tokens: int
+) -> None:
+    inp = KdaDecodeInputs(num_tokens, num_heads, num_slots=max(num_tokens, 4) + 3)
+
+    expected_out, expected_conv, expected_state = _run_triton_chain(inp)
+    actual_out, actual_conv, actual_state = _run_aiter_packed_decode(inp)
+
+    # The fused kernel keeps the recurrent output in fp32 through the norm,
+    # while the Triton chain rounds it to BF16 in between.
+    torch.testing.assert_close(actual_out, expected_out, atol=3e-2, rtol=3e-2)
+    # The conv state is a pure shift-and-append: it must be bit-exact.
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
+
+
+@requires_aiter_gluon_kda
+@torch.inference_mode()
+def test_aiter_packed_decode_leaves_untouched_slots_alone() -> None:
+    """Only the slots named by the state indices may be written."""
+    num_tokens, num_heads, num_slots = 4, 12, 9
+    inp = KdaDecodeInputs(num_tokens, num_heads, num_slots, seed=3)
+
+    _, actual_conv, actual_state = _run_aiter_packed_decode(inp)
+
+    touched = set(inp.state_indices.tolist())
+    untouched = [slot for slot in range(num_slots) if slot not in touched]
+    assert untouched, "test needs at least one unused slot"
+    torch.testing.assert_close(
+        actual_conv[untouched], inp.conv_state[untouched], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        actual_state[untouched], inp.recurrent_state[untouched], atol=0, rtol=0
+    )
+
+
+@requires_aiter_gluon_kda
+@torch.inference_mode()
+def test_aiter_packed_decode_skips_null_block_padding() -> None:
+    """A CUDA-graph decode batch is padded with NULL_BLOCK_ID (0).
+
+    gdn_attn.py fills the tail of ``non_spec_state_indices_tensor`` with 0 and
+    the Triton chain leaves slot 0 alone; the fused kernel's pad_slot_guard
+    must do the same rather than read-modify-write slot 0 once per padded row.
+    """
+    num_real, num_padded, num_heads = 3, 5, 12
+    inp = KdaDecodeInputs(num_real + num_padded, num_heads, num_slots=12, seed=11)
+    inp.state_indices[num_real:] = 0
+
+    expected_out, expected_conv, expected_state = _run_triton_chain(inp)
+    actual_out, actual_conv, actual_state = _run_aiter_packed_decode(inp)
+
+    torch.testing.assert_close(
+        actual_out[0, :num_real], expected_out[0, :num_real], atol=3e-2, rtol=3e-2
+    )
+    assert torch.isfinite(actual_out).all()
+    # Slot 0 must be untouched by both paths.
+    torch.testing.assert_close(actual_conv[0], inp.conv_state[0], atol=0, rtol=0)
+    torch.testing.assert_close(actual_state[0], inp.recurrent_state[0], atol=0, rtol=0)
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
+
+
+# --------------------------------------------------------------------------
+# spec-only decode: fused_recurrent_kda with conv / gate / norm fused in
+# --------------------------------------------------------------------------
+
+
+class SpecBatch:
+    """A spec-only KDA batch: ``num_spec + 1`` query tokens per request at most.
+
+    ``seq_lens`` are the per-request query lengths, ``num_accepted`` the tokens
+    verified in the previous step; ``state_indices`` is the [N, num_spec + 1]
+    per-token slot table the GDN metadata hands the layer.
+    """
+
+    def __init__(
+        self,
+        seq_lens: list[int],
+        num_accepted: list[int],
+        num_heads: int,
+        num_spec: int,
+        seed: int = 0,
+    ) -> None:
+        assert len(seq_lens) == len(num_accepted)
+        assert max(seq_lens) <= num_spec + 1
+        n_seqs = len(seq_lens)
+        slots_per_seq = num_spec + 1
+        num_slots = n_seqs * slots_per_seq + 2
+        self.inp = KdaDecodeInputs(
+            sum(seq_lens), num_heads, num_slots, seed=seed, num_spec=num_spec
+        )
+        # Distinct slots per (request, token), shuffled, none at slot 0.
+        perm = torch.randperm(num_slots - 1, device="cuda")[: n_seqs * slots_per_seq]
+        self.state_indices = (perm + 1).to(torch.int32).view(n_seqs, slots_per_seq)
+        self.query_start_loc = torch.tensor(
+            [0] + torch.tensor(seq_lens).cumsum(0).tolist(),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.num_accepted_tokens = torch.tensor(
+            num_accepted, dtype=torch.int32, device="cuda"
+        )
+        self.max_query_len = slots_per_seq
+
+
+def _run_spec_triton_chain(
+    sb: SpecBatch,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The layer's unfused spec path: conv update -> recurrent KDA -> norm."""
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+        causal_conv1d_update,
+    )
+    from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
+
+    inp = sb.inp
+    conv_state = inp.conv_state.clone()
+    recurrent_state = inp.recurrent_state.clone()
+    conv_out = causal_conv1d_update(
+        inp.mixed_qkv,
+        inp.conv_state_view(conv_state),
+        inp.conv_weights,
+        None,
+        activation="silu",
+        conv_state_indices=sb.state_indices[:, 0],
+        num_accepted_tokens=sb.num_accepted_tokens,
+        query_start_loc=sb.query_start_loc,
+        max_query_len=sb.max_query_len,
+        validate_data=False,
+        out=torch.empty_like(inp.mixed_qkv),
+    )
+    q, k, v = (
+        x.view(1, -1, inp.num_heads, HEAD_DIM) for x in conv_out.split(inp.dim, dim=-1)
+    )
+    core_attn_out, _ = fused_recurrent_kda(
+        q=q,
+        k=k,
+        v=v,
+        raw_g=inp.g1,
+        raw_beta=inp.beta,
+        A_log=inp.A_log,
+        dt_bias=inp.dt_bias,
+        lower_bound=GATE_LOWER_BOUND,
+        initial_state=recurrent_state,
+        cu_seqlens=sb.query_start_loc,
+        ssm_state_indices=sb.state_indices,
+        num_accepted_tokens=sb.num_accepted_tokens,
+    )
+    out = _gated_rmsnorm(core_attn_out, inp.g2, inp.norm_weight_bf16, NORM_EPS)
+    return out, conv_state, recurrent_state
+
+
+def _run_aiter_spec(
+    sb: SpecBatch,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Exactly the call KimiK3DeltaAttention._forward makes for spec-only batches."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    inp = sb.inp
+    conv_state = inp.conv_state.clone()
+    recurrent_state = inp.recurrent_state.clone()
+    q, k, v = (
+        x.view(1, -1, inp.num_heads, HEAD_DIM)
+        for x in inp.mixed_qkv.split(inp.dim, dim=-1)
+    )
+    n_spec = q.shape[1]
+    core_attn_out = inp.empty_out()
+    rocm_aiter_ops.kda_fused_recurrent_spec_decode(
+        q=q,
+        k=k,
+        v=v,
+        g=inp.g1,
+        beta=inp.beta,
+        A_log=inp.A_log,
+        dt_bias=inp.dt_bias,
+        lower_bound=GATE_LOWER_BOUND,
+        initial_state=recurrent_state,
+        cu_seqlens=sb.query_start_loc,
+        ssm_state_indices=sb.state_indices,
+        num_accepted_tokens=sb.num_accepted_tokens,
+        conv_state=inp.conv_state_view(conv_state),
+        conv_weight=inp.decode_conv1d_weight,
+        out_gate=inp.g2[:n_spec].unsqueeze(0),
+        norm_weight=inp.norm_weight_bf16,
+        norm_eps=NORM_EPS,
+        out=core_attn_out[:, :n_spec],
+    )
+    return core_attn_out, conv_state, recurrent_state
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@torch.inference_mode()
+def test_triton_decode_with_bf16_recurrent_state(num_spec: int) -> None:
+    """BF16 fallback reads rounded states and preserves paged writeback semantics."""
+    if num_spec:
+        batch = SpecBatch([4, 2, 1], [1, 2, 4], 12, num_spec, seed=5)
+        inp = batch.inp
+        run = partial(_run_spec_triton_chain, batch)
+    else:
+        inp = KdaDecodeInputs(3, 12, num_slots=8, seed=5)
+        run = partial(_run_triton_chain, inp)
+
+    initial_state = inp.recurrent_state.bfloat16()
+    inp.recurrent_state = initial_state.float()
+    expected_out, expected_conv, expected_state = run()
+    inp.recurrent_state = initial_state
+    actual_out, actual_conv, actual_state = run()
+
+    assert actual_state.dtype == torch.bfloat16
+    torch.testing.assert_close(actual_out, expected_out, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(
+        actual_state, expected_state.bfloat16(), atol=2e-3, rtol=3e-2
+    )
+
+
+@requires_aiter_gluon_kda
+@pytest.mark.parametrize("num_heads", [12, 24])
+@pytest.mark.parametrize(
+    "num_spec, seq_lens, num_accepted",
+    [
+        (3, [4, 4, 4], [1, 2, 4]),  # Kimi-K3 recipe: 3 draft tokens, uniform
+        (3, [4, 2, 1, 4], [4, 1, 1, 3]),  # ragged after partial acceptance
+        (6, [7, 3], [1, 4]),  # longer window, two requests
+    ],
+)
+@torch.inference_mode()
+def test_aiter_spec_decode_matches_triton_chain(
+    num_heads: int, num_spec: int, seq_lens: list[int], num_accepted: list[int]
+) -> None:
+    sb = SpecBatch(seq_lens, num_accepted, num_heads, num_spec, seed=5)
+
+    expected_out, expected_conv, expected_state = _run_spec_triton_chain(sb)
+    actual_out, actual_conv, actual_state = _run_aiter_spec(sb)
+
+    torch.testing.assert_close(actual_out, expected_out, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=3e-2)
+    # Nothing outside the slot table may change.
+    touched = set(sb.state_indices.flatten().tolist())
+    untouched = [s for s in range(sb.inp.conv_state.shape[0]) if s not in touched]
+    assert untouched
+    torch.testing.assert_close(
+        actual_conv[untouched], sb.inp.conv_state[untouched], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        actual_state[untouched], sb.inp.recurrent_state[untouched], atol=0, rtol=0
+    )

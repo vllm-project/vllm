@@ -36,6 +36,7 @@ pub mod names {
     pub const SEED_OSS: &str = "seed_oss";
     pub const STEP3: &str = "step3";
     pub const STEP3P5: &str = "step3p5";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
@@ -77,7 +78,8 @@ impl ReasoningParserFactory {
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
             .register_parser::<Step3ReasoningParser>(names::STEP3)
-            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5);
+            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5)
+            .register_parser::<DeepSeekV3ReasoningParser>(names::STEP5);
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
@@ -100,6 +102,8 @@ impl ReasoningParserFactory {
             .register_pattern("step3p5", names::STEP3P5)
             .register_pattern("step-3.5", names::STEP3P5)
             .register_pattern("step3", names::STEP3)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
