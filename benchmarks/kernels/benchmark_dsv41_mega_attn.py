@@ -118,7 +118,6 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
     n_wv_group = padded_heads // 8
     cos_sin = make_cos_sin_cache(65536, device)
     positions = torch.randint(0, 65536, (s_q,), device=device, dtype=torch.int64)
-    pos32 = positions.to(torch.int32)
 
     # Per-step inputs: the wq_b output (local heads) and this step's KV row.
     q_local = torch.randn(
@@ -177,7 +176,7 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
             ex_len,
             False,
             0.0,
-            pos32,
+            positions,
             False,
             64,
             cos_sin,
