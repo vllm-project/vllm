@@ -1696,27 +1696,26 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         return prepared_data, prepared_kwargs
 
     @staticmethod
-    def _write_back_sampled_frame_indices(mm_items, video_metadata) -> None:
-        """Copy the HF processor's sampled frame indices onto the item metadata.
+    def _sampled_frame_metadata_overrides(mm_items, video_metadata):
+        """Build timestamp-helper metadata from HF-sampled frame indices.
 
         Input ``frames_indices`` can be the pre-sample range. The processor
-        replaces them on the ``VideoMetadata`` it was given. GLM-5.3 uses this
-        direct path, so the timestamp helper must see that replacement. Also
-        clear ``do_sample_frames`` so the helper keeps these indices instead of
-        sampling again.
+        returns a ``VideoMetadata`` with the sample it kept. GLM-5.3's direct
+        path must feed those indices into the timestamp helper and clear
+        ``do_sample_frames`` so the helper keeps them instead of sampling again.
 
-        Metadata is copied before mutation so the caller's ``mm_data`` (which
-        shares the original dict) stays unchanged. A later re-parse of the same
-        ``mm_data`` (e.g. the cache path in ``test_processing_correctness``)
-        would otherwise see ``do_sample_frames=False`` against the original
-        unsampled frame tensor and produce ``grid_t != len(timestamps)`` for
+        Overrides are returned and never written back onto ``mm_items``. The
+        same items are reused by ``test_processing_correctness`` (baseline then
+        cache); persisting ``do_sample_frames=False`` while the video tensor
+        stays full-length made pass-2 HF emit ``grid_t != len(timestamps)`` for
         odd-length videos.
         """
         if not video_metadata:
-            return
+            return None
         video_items = mm_items.get("video")
         if video_items is None:
-            return
+            return None
+        overrides: list[dict[str, Any] | None] = [None] * video_items.get_count()
         for index, meta_obj in enumerate(video_metadata):
             indices = getattr(meta_obj, "frames_indices", None)
             if indices is None or index >= video_items.get_count():
@@ -1731,10 +1730,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             new_meta = dict(raw[1])
             new_meta["frames_indices"] = [int(idx) for idx in indices]
             new_meta["do_sample_frames"] = False
-            video_items.data[index] = (raw[0], new_meta)
-            metadata_lst = getattr(video_items, "metadata", None)
-            if isinstance(metadata_lst, list) and index < len(metadata_lst):
-                metadata_lst[index] = new_meta
+            overrides[index] = new_meta
+        if not any(override is not None for override in overrides):
+            return None
+        return overrides
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -1776,12 +1775,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 if hasattr(processed_data, "get")
                 else None
             )
-            self._write_back_sampled_frame_indices(mm_items, sampled_metadata)
+            metadata_overrides = self._sampled_frame_metadata_overrides(
+                mm_items, sampled_metadata
+            )
             return self._with_video_timestamps(
                 self._finalize_hf_mm_data(
                     hf_data, hf_kwargs, passthrough_data, processed_data
                 ),
                 mm_items,
+                metadata_overrides=metadata_overrides,
             )
 
         if (
@@ -1871,7 +1873,12 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             mm_items,
         )
 
-    def _with_video_timestamps(self, processed, mm_items: MultiModalDataItems):
+    def _with_video_timestamps(
+        self,
+        processed,
+        mm_items: MultiModalDataItems,
+        metadata_overrides: list[dict[str, Any] | None] | None = None,
+    ):
         video_items = mm_items.get("video")
         if (
             video_items is not None
@@ -1879,10 +1886,17 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             and not isinstance(video_items, DictEmbeddingItems)
             and "timestamps" not in processed
         ):
-            processed["timestamps"] = [
-                self.info._video_timestamps(*video_items.get(i))
-                for i in range(video_items.get_count())
-            ]
+            timestamps = []
+            for i in range(video_items.get_count()):
+                video_array, metadata = video_items.get(i)
+                if (
+                    metadata_overrides is not None
+                    and i < len(metadata_overrides)
+                    and metadata_overrides[i] is not None
+                ):
+                    metadata = metadata_overrides[i]
+                timestamps.append(self.info._video_timestamps(video_array, metadata))
+            processed["timestamps"] = timestamps
         return processed
 
     def _get_mm_fields_config(
