@@ -1221,6 +1221,7 @@ def test_online_gate_up_proj_target_disables_fse(
     assert "at <shared_expert> do not match the routed expert keys" in warning
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("num_shared", [0, 1, 2])
 @pytest.mark.parametrize("experts_per_chunk", [1, 3, 4])
 def test_online_moe_quantize_weights_places_routed_then_shared_experts(

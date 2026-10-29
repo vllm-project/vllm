@@ -1860,6 +1860,7 @@ def _modelopt_mxfp8_config(exclude_modules=(), moe_quant_algo="NVFP4"):
     )
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("moe_quant_algo", "expected"),
     [
@@ -2014,6 +2015,7 @@ def test_online_targets_off_shared_expert_defer_to_checkpoint(
     )
 
 
+@pytest.mark.skip_global_cleanup
 def test_online_only_one_shared_projection_matching_keys() -> None:
     """An online target on part of the shared expert is fine as long as every
     projection runs with the routed experts' keys (MXFP4 here)."""
