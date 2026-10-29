@@ -107,6 +107,23 @@ To build the `vllm-rs` in isolation:
 ./tools/build_rust.sh
 ```
 
+### Hybrid and External DP Load Balancing
+
+Like `vllm serve` (see [Data Parallel Deployment](../docs/serving/data_parallel_deployment.md)), `vllm-rs serve` can run one Rust frontend per node that serves only the node's data parallel ranks, with an upstream load balancer spreading requests across nodes. Every node passes the global `--data-parallel-size`, the address of the node that owns rank 0 as `--data-parallel-address`, and the same explicit `--data-parallel-rpc-port`, because all engines join the handshake of the rank-0 frontend. For MoE models, the rank-0 frontend also runs the DP coordinator.
+
+```bash
+# Node 0: ranks 0-1
+vllm-rs serve <moe-model> \
+  --data-parallel-size 4 --data-parallel-size-local 2 --data-parallel-hybrid-lb \
+  --data-parallel-address 10.0.0.1 --data-parallel-rpc-port 13345
+# Node 1: ranks 2-3
+vllm-rs serve <moe-model> \
+  --data-parallel-size 4 --data-parallel-size-local 2 --data-parallel-start-rank 2 \
+  --data-parallel-address 10.0.0.1 --data-parallel-rpc-port 13345
+```
+
+For external load balancing, start one `vllm-rs serve` per rank with `--data-parallel-rank <rank>`. A request can be pinned to one of a frontend's ranks with the `X-data-parallel-rank` header, which takes the global rank. Unlike `vllm serve`, `--data-parallel-rpc-port` has no default here and ranks are not inferred from `--nnodes`/`--node-rank`.
+
 ### Engine-free renderer
 
 `vllm-rs render` serves text-only request preprocessing without starting or

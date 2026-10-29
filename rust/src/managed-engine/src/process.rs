@@ -44,6 +44,11 @@ pub struct ManagedEngineConfig {
     /// The per-node replica count is forwarded separately in `python_args` as
     /// `--data-parallel-size-local`.
     pub data_parallel_size: usize,
+    /// Handshake endpoint of the colocated frontend when it serves only this
+    /// node's engines (hybrid or external DP LB). The engines then also
+    /// handshake there for their input/output addresses, after fetching the
+    /// coordinator and DP rendezvous from the frontend owning rank 0.
+    pub client_handshake_address: Option<String>,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
 }
@@ -76,8 +81,11 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
-            .arg(self.data_parallel_size.to_string())
-            .args(&self.python_args);
+            .arg(self.data_parallel_size.to_string());
+        if let Some(client_handshake_address) = &self.client_handshake_address {
+            command.arg("--headless-client-handshake-address").arg(client_handshake_address);
+        }
+        command.args(&self.python_args);
         command.envs(Self::rust_frontend_envs());
         command
     }
@@ -227,6 +235,7 @@ mod tests {
             handshake_host: "127.0.0.1".to_string(),
             handshake_port: 62100,
             data_parallel_size: 4,
+            client_handshake_address: None,
             python_args: vec![
                 "--data-parallel-size-local".to_string(),
                 "2".to_string(),

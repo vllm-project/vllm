@@ -243,16 +243,21 @@ def run_headless(args: argparse.Namespace):
         handshake_address,
     )
 
+    # A colocated frontend that serves only these engines (the Rust frontend in
+    # hybrid or external DP LB) also handshakes with them for their I/O.
+    client_handshake_address = args.headless_client_handshake_address
+
     # Create the engines.
     engine_manager = CoreEngineProcManager(
         local_engine_count=local_engine_count,
         start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
         vllm_config=vllm_config,
-        local_client=False,
+        local_client=client_handshake_address is not None,
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
         log_stats=not engine_args.disable_log_stats,
+        client_handshake_address=client_handshake_address,
     )
 
     try:

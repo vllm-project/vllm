@@ -33,6 +33,7 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
@@ -790,7 +791,7 @@ impl SharedRuntimeArgs {
         grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
-        engine_count: usize,
+        topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
@@ -814,9 +815,9 @@ impl SharedRuntimeArgs {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
-                engine_start_index: 0,
-                engine_count,
-                data_parallel_size: engine_count,
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
                 ready_timeout,
                 local_input_address,
                 local_output_address,
@@ -1098,15 +1099,23 @@ pub struct ServeArgs {
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     pub managed_engine: ManagedEngineArgs,
+
+    /// Data parallel load-balancing arguments.
+    #[command(flatten)]
+    pub data_parallel_lb: DataParallelLbArgs,
 }
 
 impl ServeArgs {
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
-    pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+    pub fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> Config {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
-            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1130,7 +1139,7 @@ impl ServeArgs {
             grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
-            self.managed_engine.data_parallel_size,
+            topology,
             local_input_address,
             local_output_address,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
@@ -1140,7 +1149,12 @@ impl ServeArgs {
 
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
-    pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+    pub fn to_managed_engine_config(
+        &self,
+        handshake_port: u16,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
+    ) -> ManagedEngineConfig {
         let reasoning_parser = effective_engine_reasoning_parser(
             &self.runtime.reasoning_parser,
             &self.runtime.model.id,
@@ -1164,12 +1178,24 @@ impl ServeArgs {
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
             self.runtime.structured_outputs_config_json(),
+            topology,
+            client_handshake_address,
         )
     }
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
     selection.resolve_reasoning_name(model).map(str::to_owned)
+}
+
+/// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
+/// node's engines (hybrid or external DP LB).
+pub fn frontend_ipc_handshake_address() -> String {
+    let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let handshake = preferred_base_path.join(format!("vllm-rs-h-{}", Uuid::new_v4().simple()));
+    format!("ipc://{}", handshake.to_string_lossy())
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

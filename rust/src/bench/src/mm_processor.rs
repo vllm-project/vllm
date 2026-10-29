@@ -157,6 +157,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         handshake_host: args.engine.handshake_host.clone(),
         handshake_port,
         data_parallel_size: args.engine.data_parallel_size,
+        client_handshake_address: None,
         python_args,
     };
     eprintln!(
