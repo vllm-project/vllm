@@ -11,6 +11,7 @@ import pytest
 import regex as re
 from pydantic import BaseModel
 
+import vllm.envs as envs
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
@@ -205,10 +206,19 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-def test_structured_output_compile_worker_limit(vllm_runner, monkeypatch):
-    monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "1")
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+@pytest.fixture
+def single_compile_worker_env():
+    envs.disable_envs_cache()
+    try:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "1")
+            monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            yield
+    finally:
+        envs.disable_envs_cache()
 
+
+def test_structured_output_compile_worker_limit(vllm_runner, single_compile_worker_env):
     with vllm_runner(
         "Qwen/Qwen2.5-1.5B-Instruct",
         enforce_eager=True,
