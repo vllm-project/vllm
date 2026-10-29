@@ -496,10 +496,14 @@ def _engine(vllm_runner, model_dir, mono, graphs=False, in_process=None, **extra
 
 @pytest.fixture(scope="module", autouse=True)
 def _env():
+    from vllm._aiter_ops import rocm_aiter_ops
+
     with pytest.MonkeyPatch.context() as mp:
         for name, value in ENV.items():
             mp.setenv(name, value)
+        rocm_aiter_ops.refresh_env_variables()
         yield
+    rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.fixture(scope="module")
