@@ -858,6 +858,9 @@ class EngineArgs:
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
+    draft_kv_pool: bool = CacheConfig.draft_kv_pool
+    draft_kv_pool_max_seqs: int | None = CacheConfig.draft_kv_pool_max_seqs
+    draft_kv_pool_cache_fraction: float = CacheConfig.draft_kv_pool_cache_fraction
     tokens_only: bool = False
 
     shutdown_timeout: int = 0
@@ -1459,6 +1462,14 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        cache_group.add_argument("--draft-kv-pool", **cache_kwargs["draft_kv_pool"])
+        cache_group.add_argument(
+            "--draft-kv-pool-max-seqs", **cache_kwargs["draft_kv_pool_max_seqs"]
+        )
+        cache_group.add_argument(
+            "--draft-kv-pool-cache-fraction",
+            **cache_kwargs["draft_kv_pool_cache_fraction"],
         )
 
         # Model weight offload related configs
@@ -2335,6 +2346,9 @@ class EngineArgs:
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            draft_kv_pool=self.draft_kv_pool,
+            draft_kv_pool_max_seqs=self.draft_kv_pool_max_seqs,
+            draft_kv_pool_cache_fraction=self.draft_kv_pool_cache_fraction,
         )
 
         # TurboQuant and UltraQuant both keep boundary attention layers at the

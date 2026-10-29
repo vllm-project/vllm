@@ -521,6 +521,21 @@ def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
     assert (mla[3] == 7).all() and (indexer[3] == 7).all()
 
 
+def test_copy_kv_cache_blocks_applies_only_its_pools_copies():
+    """Block IDs are per pool: a copy applies only to the pool it names."""
+    backing = torch.zeros((6, 2))
+    shared, pool1 = backing[:4], backing[4:]
+    shared[1] = 7
+    pool1[1] = 11
+    copies = [KVCacheBlockCopy(1, 2), KVCacheBlockCopy(1, 0, pool_id=1)]
+
+    copy_kv_cache_blocks_inplace([shared], 4, copies)
+    copy_kv_cache_blocks_inplace([pool1], 2, copies, pool_id=1)
+
+    assert shared[:, 0].tolist() == [0, 7, 7, 0]
+    assert pool1[:, 0].tolist() == [11, 11]
+
+
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(

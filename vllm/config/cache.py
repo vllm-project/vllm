@@ -391,6 +391,20 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    draft_kv_pool: bool = False
+    """Give a DFlash or DSpark drafter's sliding-window KV its own block pool,
+    sized for the window each request keeps, instead of blocks of the shared
+    pool, which are as large as its widest group's. Needs the hybrid KV cache
+    manager and Model Runner V2."""
+
+    draft_kv_pool_max_seqs: int | None = Field(default=None, ge=1)
+    """Requests the drafter pool holds at their admission cap. Defaults to
+    max_num_seqs."""
+
+    draft_kv_pool_cache_fraction: float = Field(default=0.5, ge=0)
+    """Extra drafter pool blocks for prefix-cached drafter KV, as a fraction of
+    the blocks its requests hold at their cap."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -408,6 +422,8 @@ class CacheConfig:
             "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
+            "draft_kv_pool_max_seqs",
+            "draft_kv_pool_cache_fraction",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",

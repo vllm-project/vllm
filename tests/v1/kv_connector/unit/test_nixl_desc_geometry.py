@@ -33,6 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.v1.kv_cache_interface import (
+    DFlashSlidingWindowSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -201,7 +203,7 @@ def test_packed_mla_pp1_transfers_whole_rows(num_layers, worker_cls):
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     # One packed region -> one run of 4 whole rows.
     assert worker.src_blocks_data.tolist() == [[raw.data_ptr(), stride, 0, stride, 4]]
-    assert worker._transfer_layer_group_ids == ()
+    assert worker.region_members == [list(layouts)]
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
@@ -216,12 +218,12 @@ def test_per_layer_peer_addresses_pages_inside_packed_rows():
         remote.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     assert metadata.block_lens == [192]
-    local = SimpleNamespace(region_names=["L0"])
-    bw.NixlBaseConnectorWorker._split_remote_packed_rows(local, metadata)
+    bw.NixlBaseConnectorWorker._expand_remote_packed_rows(metadata)
     assert metadata.kv_caches_base_addr == [raw.data_ptr() + 64]
     assert metadata.block_lens == [128]
     assert metadata.block_strides == [192]
     assert metadata.region_names == ["L0"]
+    assert metadata.region_members == [["L0"]]
     assert metadata.packed_member_layouts == {}
 
 
@@ -280,21 +282,8 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
         num_blocks=d_num_blocks,
     )
     assert producer.block_len_per_layer == [128, 64, 64]
-    assert producer._transfer_layer_group_ids == (0, 1, 2)
+    assert producer.region_members == [["L2"], ["L2.swa"], ["L3"]]
     assert producer.num_descs == 3 * p_num_blocks
-    local_ids = producer._compute_desc_ids(
-        [[1], [2], [3]],
-        producer.num_blocks,
-        None,
-        1,
-        region_num_blocks=producer.dst_region_num_blocks[producer.engine_id],
-    )
-    local_descs = expand_strided_descs(producer.src_blocks_data)
-    assert local_descs[local_ids].tolist() == [
-        [p_raw.data_ptr() + 192, 128, 0],
-        [p_raw.data_ptr() + 2 * 192, 64, 0],
-        [p_raw.data_ptr() + 128 + 3 * 192, 64, 0],
-    ]
     # Each decoder TP rank receives the complete MLA page, without head slicing.
     for rank in (0, 1):
         metadata = msgspec.msgpack.decode(
@@ -304,12 +293,28 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
         assert metadata.region_num_blocks == [d_num_blocks] * 3
         assert metadata.region_names == ["L2", "L2.swa", "L3"]
+        pairs = producer._dst_pairs[consumer.engine_id]
+        local_ids = producer._compute_desc_ids(
+            [[1], [2], [3]],
+            producer.num_blocks,
+            None,
+            1,
+            region_num_blocks=producer.dst_region_num_blocks[producer.engine_id],
+            pairs=(pairs.local, pairs.group),
+        )
+        local_descs = expand_strided_descs(producer.src_blocks_data)
+        assert local_descs[local_ids].tolist() == [
+            [p_raw.data_ptr() + 192, 128, 0],
+            [p_raw.data_ptr() + 2 * 192, 64, 0],
+            [p_raw.data_ptr() + 128 + 3 * 192, 64, 0],
+        ]
         remote_ids = producer._compute_desc_ids(
             [[3], [1], [2]],
             metadata.num_blocks,
             None,
             1,
             region_num_blocks=producer.dst_region_num_blocks[consumer.engine_id],
+            pairs=(pairs.remote, pairs.group),
         )
         handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
         remote_descs = producer.nixl_wrapper.dlists[handle]
@@ -319,9 +324,6 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             [d_raw.data_ptr() + 256, 64, 0],
             [d_raw.data_ptr() + 64 + 2 * 256, 64, 0],
         ]
-        aligned = msgspec.msgpack.encode(metadata)
-        producer._align_remote_regions_by_layer(metadata)
-        assert msgspec.msgpack.encode(metadata) == aligned
 
 
 @pytest.mark.cpu_test
@@ -356,12 +358,103 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     worker.block_len_per_layer = [16, 16]
     worker.block_stride_per_layer = [16, 16]
     worker.region_num_blocks = [2, 3]
-    worker._transfer_layer_region_indices = ()
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 
     # One (addr, len, dev, stride, count) run per region, sized to its pool.
     assert descriptors.tolist() == [[100, 16, 0, 16, 2], [1000, 16, 0, 16, 3]]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.LBHNC])
+def test_private_pool_regions_hold_their_pools_blocks(layout):
+    """A drafter group in its own pool (--draft-kv-pool) registers regions over
+    the pool's part of the backing, each with the pool's block count, so its
+    block IDs address its own blocks."""
+    block_size, num_blocks, num_pool_blocks = 16, 6, 3
+    target = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.uint8
+    )
+    draft = DFlashSlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+        sliding_window=32,
+    )
+    page = target.page_size_bytes
+    shared_bytes = 2 * page * num_blocks
+    raw = torch.zeros(shared_bytes + 2 * page * num_pool_blocks, dtype=torch.int8)
+    block_outer = layout.is_block_outermost
+    tensors = [
+        KVCacheTensor(
+            size=raw.nbytes,
+            layers=["target.0", "target.1"],
+            layer_stride=page if block_outer else page * num_blocks,
+            block_stride=2 * page if block_outer else page,
+        ),
+        KVCacheTensor(
+            size=raw.nbytes,
+            layers=["draft.0", "draft.1"],
+            layer_stride=page if block_outer else page * num_pool_blocks,
+            block_stride=2 * page if block_outer else page,
+            offset=shared_bytes,
+            pool_id=1,
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks,
+        tensors,
+        [
+            KVCacheGroupSpec(["target.0", "target.1"], target),
+            KVCacheGroupSpec(["draft.0", "draft.1"], draft, pool_id=1),
+        ],
+        pool_num_blocks={1: num_pool_blocks},
+    )
+    caches = {}
+    for tensor, spec in zip(tensors, (target, draft)):
+        views = create_kv_cache_views(
+            raw, spec, kv_cache_config.num_blocks_of(tensor), layout, tensor
+        )
+        caches.update(zip(tensor.layers, views))
+
+    config = create_vllm_config(block_size=block_size)
+    config.cache_config.kv_cache_layout = layout.name
+    backend = MagicMock()
+    backend.get_supported_kernel_block_sizes.return_value = [block_size]
+    backend.get_name.return_value = "FLASH_ATTN"
+    backend.full_cls_name.return_value = "fake.FLASH_ATTN"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch("threading.Thread"),
+    ):
+        worker = NixlPullConnectorWorker(config, "consumer", kv_cache_config)
+        worker.register_kv_caches(caches)
+
+    base = raw.data_ptr()
+    regions = {
+        name: (addr - base, count)
+        for name, addr, count in zip(
+            worker.region_names,
+            worker.kv_caches_base_addr[worker.engine_id][0],
+            worker.region_num_blocks,
+        )
+    }
+    assert regions == {
+        "target.0": (0, num_blocks),
+        "target.1": (page if block_outer else page * num_blocks, num_blocks),
+        "draft.0": (shared_bytes, num_pool_blocks),
+        "draft.1": (
+            shared_bytes + (page if block_outer else page * num_pool_blocks),
+            num_pool_blocks,
+        ),
+    }
+    # Every descriptor stays inside the backing.
+    descs = expand_strided_descs(worker.src_blocks_data)
+    assert (descs[:, 0] + descs[:, 1] <= base + raw.nbytes).all()
 
 
 def _register_overlaid_mla_worker(
@@ -435,7 +528,7 @@ def _register_overlaid_mla_worker(
     worker.dst_num_blocks = {}
     worker.dst_region_num_blocks = {}
     worker.dst_region_group_ids = {}
-    worker.dst_uses_region_group_mapping = {}
+    worker._dst_pairs = {}
     worker.dst_region_mem_types = {}
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
@@ -452,9 +545,6 @@ def _register_overlaid_mla_worker(
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []
-    worker._transfer_layer_names = ()
-    worker._transfer_layer_region_indices = ()
-    worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
     worker._head_sharded_draft_kv_heads = None
     worker.block_len_per_layer = []
@@ -522,14 +612,11 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     expected_addrs = [
         allocation.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    num_desc_regions = 2 if push_pp else 1
+    # One descriptor list per region, whichever layers share it.
     local_descs = expand_strided_descs(worker.src_blocks_data)
-    assert local_descs[:, 0].tolist() == expected_addrs * num_desc_regions
-    assert worker.num_descs == num_blocks * num_desc_regions
-    assert (
-        worker.dst_region_num_blocks[worker.engine_id]
-        == [num_blocks] * num_desc_regions
-    )
+    assert local_descs[:, 0].tolist() == expected_addrs
+    assert worker.num_descs == num_blocks
+    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks]
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -537,7 +624,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     )
     assert metadata.region_group_ids == [-1]
     assert metadata.region_num_blocks == [num_blocks]
-    assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
+    assert metadata.region_members == [["layer.0", "layer.1"]]
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 
@@ -581,12 +668,15 @@ def _make_mla_hybrid_worker(
     num_logical_blocks,
     worker_cls=None,
     kda_only_tensor=False,
+    num_draft_pool_blocks=0,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
     layout.
 
     ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
-    no other group uses, as when a model has more SSM than MLA layers."""
+    no other group uses, as when a model has more SSM than MLA layers.
+    ``num_draft_pool_blocks`` adds a sliding-window drafter layer in a private
+    pool of that many blocks (--draft-kv-pool)."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -595,6 +685,7 @@ def _make_mla_hybrid_worker(
     )
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
+        DFlashSlidingWindowSpec,
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheTensor,
@@ -641,6 +732,27 @@ def _make_mla_hybrid_worker(
             KVCacheGroupSpec(layer_names["kda_b"], kda_spec),
         ],
     )
+    if num_draft_pool_blocks:
+        draft_spec = DFlashSlidingWindowSpec(
+            block_size=local_block_size,
+            num_kv_heads=1,
+            head_size=unified_page // (2 * local_block_size * 2),
+            dtype=torch.float16,
+            sliding_window=2 * local_block_size,
+        )
+        kv_cache_config.kv_cache_tensors.append(
+            KVCacheTensor(
+                size=num_draft_pool_blocks * draft_spec.page_size_bytes,
+                layers=["draft.0"],
+                layer_stride=num_draft_pool_blocks * draft_spec.page_size_bytes,
+                block_stride=draft_spec.page_size_bytes,
+                pool_id=1,
+            )
+        )
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(["draft.0"], draft_spec, pool_id=1)
+        )
+        kv_cache_config.pool_num_blocks = {1: num_draft_pool_blocks}
 
     vllm_config = create_vllm_config(block_size=local_block_size)
     vllm_config.cache_config.enable_prefix_caching = False
@@ -688,20 +800,55 @@ def _make_mla_hybrid_worker(
         ]
         # MLA caches are [B, 1, N, C] on device, tokens on dim 2.
         mla_views = [t.view(t.shape[0], 1, kernel_block_size, -1) for t in tensors]
-        worker.register_kv_caches(
-            {
-                name: (mla_views if prefix == "mla" else tensors)[
-                    int(name.rsplit(".", 1)[1])
-                ]
-                for prefix, names in layer_names.items()
-                for name in names
-            }
-        )
+        caches = {
+            name: (mla_views if prefix == "mla" else tensors)[
+                int(name.rsplit(".", 1)[1])
+            ]
+            for prefix, names in layer_names.items()
+            for name in names
+        }
+        if num_draft_pool_blocks:
+            # [B, H, N, C] kernel blocks of the drafter's own pool.
+            caches["draft.0"] = torch.zeros(
+                num_draft_pool_blocks * ppl,
+                1,
+                kernel_block_size,
+                unified_page // ppl // kernel_block_size,
+                dtype=torch.uint8,
+            )
+        worker.register_kv_caches(caches)
     # Keep tensors alive alongside the worker; flat views for byte checks.
     worker._test_tensors = [t.view(-1) for t in tensors]
     worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
+
+
+@pytest.mark.cpu_test
+def test_mamba_hybrid_keeps_the_private_pools_block_count():
+    """With Mamba layers every shared-pool region counts the shared pool's
+    kernel blocks, while a drafter region in a private pool (--draft-kv-pool)
+    keeps its pool's count, locally and in what the peer is told."""
+    num_logical_blocks, num_pool_blocks, ppl = 8, 3, 2
+    worker = _make_mla_hybrid_worker(
+        local_block_size=32,
+        kernel_block_size=16,
+        num_logical_blocks=num_logical_blocks,
+        num_draft_pool_blocks=num_pool_blocks,
+    )
+
+    counts = dict(zip(worker.region_names, worker.region_num_blocks))
+    assert counts.pop("draft.0") == num_pool_blocks * ppl
+    assert set(counts.values()) == {num_logical_blocks * ppl}
+    draft_region = worker.region_names.index("draft.0")
+    descs = expand_strided_descs(worker.src_blocks_data)
+    offset = sum(worker.region_num_blocks[:draft_region])
+    draft_descs = descs[offset : offset + num_pool_blocks * ppl]
+    base = worker.kv_caches_base_addr[worker.engine_id][0][draft_region]
+    assert draft_descs[:, 0].tolist() == [
+        base + i * worker.block_stride_per_layer[draft_region]
+        for i in range(num_pool_blocks * ppl)
+    ]
 
 
 @pytest.mark.cpu_test
@@ -788,6 +935,8 @@ def _make_remote_meta(
     remote_kernel_block_size,
     remote_num_logical,
     remote_ssm_sizes,
+    region_group_ids=None,
+    layer_group_ids=None,
 ):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
@@ -799,20 +948,30 @@ def _make_remote_meta(
     kernel_page = (
         worker.block_len_per_layer[0] * remote_kernel_block_size // worker.block_size
     )
+    region_members = worker.region_members
+    num_regions = len(region_members)
+    if layer_group_ids is None:
+        group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
+        layer_group_ids = {
+            name: group_by_layer[name] for names in region_members for name in names
+        }
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
         device_id=0,
-        kv_caches_base_addr=[0x10_000_000, 0x20_000_000],
+        kv_caches_base_addr=[0x10_000_000 * (i + 1) for i in range(num_regions)],
         num_blocks=remote_num_logical * remote_ppl,
-        block_lens=[kernel_page, kernel_page],
+        block_lens=[kernel_page] * num_regions,
         # Non-interleaved remote: consecutive blocks abut, so stride == page length.
-        block_strides=[kernel_page, kernel_page],
+        block_strides=[kernel_page] * num_regions,
         kv_cache_layout=worker.kv_cache_layout,
         block_size=remote_kernel_block_size,
         ssm_sizes=remote_ssm_sizes,
         attn_backend_name=worker.backend_name,
         physical_blocks_per_logical_kv_block=remote_ppl,
+        region_members=region_members,
+        region_group_ids=region_group_ids,
+        layer_group_ids=layer_group_ids,
     )
 
 
@@ -918,6 +1077,36 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     # rank 1 carries only its SSM shard.
     assert len(worker.nixl_wrapper.xfers) == 2
     assert total > 0
+
+
+@pytest.mark.cpu_test
+def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
+    """A hybrid layer in another cache group on P would be read at the wrong
+    group's blocks, and region-mapped reads cannot serve SSM state, so the
+    handshake refuses the peer before any transfer."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=16,
+        kernel_block_size=16,
+        num_logical_blocks=4,
+        kda_only_tensor=True,
+    )
+    layer_groups = dict(worker.kv_cache_config.transfer_group_index_by_layer)
+    remote_groups = list(worker.region_group_ids)
+    # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in 2.
+    remote_groups[remote_groups.index(1)] = 2
+    layer_groups["kda_a.2"] = 2
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=16,
+        remote_kernel_block_size=16,
+        remote_num_logical=4,
+        remote_ssm_sizes=worker._mamba_ssm_size,
+        region_group_ids=remote_groups,
+        layer_group_ids=layer_groups,
+    )
+
+    with pytest.raises(NotImplementedError, match="cache groups"):
+        _register_remote_agents(worker, meta_r, 1)
 
 
 def _resolve(
@@ -1712,11 +1901,20 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     assert worker._ple_group_index is None
     assert worker._group_region_indices[1] == [2]
 
+    group_by_layer = worker.kv_cache_config.transfer_group_index_by_layer
+    regions, groups = zip(
+        *dict.fromkeys(
+            (region, group_by_layer[name])
+            for region, names in enumerate(worker.region_members)
+            for name in names
+        )
+    )
     desc_ids = worker._compute_desc_ids(
         block_ids=([1], [0]),
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=(regions, groups),
     )
     # Paged block 1 in both paged regions; ring block 0 only in its own
     # scratch region, which no longer folds into the overlaid paged region.

@@ -830,6 +830,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        pool_of_layer = {
+            layer_name: group.pool_id
+            for group in kv_cache_config.kv_cache_groups
+            for layer_name in group.layer_names
+        }
+        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
+        for layer_name, cache in kv_caches_dict.items():
+            if cache.device == self.device:
+                pool_id = pool_of_layer.get(layer_name, 0)
+                self.kv_caches_by_pool.setdefault(pool_id, []).append(cache)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -1325,11 +1335,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            copy_kv_cache_blocks_inplace(
-                self.kv_caches,
-                self.kv_cache_config.num_blocks,
-                scheduler_output.kv_cache_block_copies,
-            )
+            for pool_id, kv_caches in self.kv_caches_by_pool.items():
+                copy_kv_cache_blocks_inplace(
+                    kv_caches,
+                    self.kv_cache_config.num_blocks_of_pool(pool_id),
+                    scheduler_output.kv_cache_block_copies,
+                    pool_id,
+                )
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -1945,7 +1957,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         input_batch,
                         self.block_tables,
                         context_len,
-                        self.kv_cache_config.num_blocks,
+                        [
+                            self.kv_cache_config.num_blocks_of_group(group_id)
+                            for group_id in range(
+                                len(self.kv_cache_config.kv_cache_groups)
+                            )
+                        ],
                         self.max_model_len,
                         input_block_tables=block_tables,
                     )
@@ -2448,6 +2465,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
+        if hasattr(self, "kv_caches_by_pool"):
+            self.kv_caches_by_pool.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):

@@ -965,6 +965,63 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class DFlashSlidingWindowSpec(SlidingWindowSpec):
+    """Sliding-window drafter KV that is only read near the sequence end.
+
+    DFlash/DSpark context KV is a per-position projection of the target's
+    hidden states, and draft attention runs only past the last target token.
+    An allocation whose target tokens end at ``T`` therefore backs only blocks
+    from ``T - tail_tokens`` on (earlier ones stay null), and a prefix hit only
+    needs cached drafter blocks in the window before the request end.
+    """
+
+    num_speculative_tokens: int = 0
+    """Drafts each step verifies; ``T`` counts them before acceptance."""
+    max_in_flight_steps: int = 1
+    num_lookahead_tokens: int = 0
+    """Slots each allocation backs past its target tokens for the drafts."""
+
+    @property
+    def tail_tokens(self) -> int:
+        """Tokens below ``T`` a draft step can still read: the window, plus
+        the drafts each in-flight step counts in ``T`` and may reject."""
+        return (
+            self.sliding_window + self.num_speculative_tokens * self.max_in_flight_steps
+        )
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        # The processed prefix's window plus one tail per in-flight step: steps
+        # back only their own trailing tail, however long their chunk. Both
+        # bounds cover the lookahead slots past the last allocation's tokens.
+        tail_blocks = (
+            cdiv(
+                self.tail_tokens
+                + self.extra_retained_tokens
+                + self.num_lookahead_tokens,
+                self.block_size,
+            )
+            + 1
+        )
+        return min(
+            super().max_admission_blocks_per_request(
+                max_in_flight_tokens + self.num_lookahead_tokens, max_model_len
+            ),
+            (self.max_in_flight_steps + 1) * tail_blocks,
+        )
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, DFlashSlidingWindowSpec)
+            and spec.sliding_window == self.sliding_window
+            for spec in kv_cache_specs.values()
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class CircularBufferSpec(AttentionSpec):
     """One block per request holding the raw keys of the token group that
     is still being compressed.
@@ -1493,6 +1550,7 @@ class KVCacheTensor:
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
     host_resident: bool = False
+    pool_id: int = 0  # the device block pool whose block IDs index this tensor
 
 
 class KVCacheGroupRole(str, Enum):
@@ -1520,6 +1578,10 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # Device block pool of this group: 0 is the shared pool, whose blocks are
+    # as large as its widest group's; others are private pools of their own
+    # groups' blocks, sized by ``KVCacheConfig.pool_num_blocks``.
+    pool_id: int = 0
 
 
 @dataclass
@@ -1557,6 +1619,9 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
+
+    pool_num_blocks: dict[int, int] = field(default_factory=dict)
+    """Block counts of the device pools other than pool 0 (``num_blocks``)."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
@@ -1622,9 +1687,21 @@ class KVCacheConfig:
     def num_blocks_of(self, tensor: KVCacheTensor) -> int:
         """Number of blocks addressable by the pool backing ``tensor``."""
         if not tensor.host_resident:
-            return self.num_blocks
+            return self.num_blocks_of_pool(tensor.pool_id)
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
+
+    def num_blocks_of_pool(self, pool_id: int) -> int:
+        """Number of blocks of device pool ``pool_id``."""
+        return self.pool_num_blocks[pool_id] if pool_id else self.num_blocks
+
+    def num_blocks_of_group(self, group_id: int) -> int:
+        """Number of blocks of the pool backing cache group ``group_id``."""
+        group = self.kv_cache_groups[group_id]
+        if group.host_resident:
+            assert self.hisparse_host_num_blocks is not None
+            return self.hisparse_host_num_blocks
+        return self.num_blocks_of_pool(group.pool_id)
 
     @property
     def has_mamba_layers(self) -> bool:
