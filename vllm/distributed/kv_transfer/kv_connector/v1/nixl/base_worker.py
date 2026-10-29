@@ -1159,10 +1159,9 @@ class NixlBaseConnectorWorker:
         # Private block pools (--draft-kv-pool) have their own block counts,
         # which each region carries.
         self._has_private_pools = bool(kv_cache_config.pool_num_blocks)
-        if self._has_private_pools and (self._has_mamba or self.use_host_buffer):
+        if self._has_private_pools and self.use_host_buffer:
             raise NotImplementedError(
-                "NIXL with --draft-kv-pool supports neither Mamba layers nor a "
-                "host transfer buffer."
+                "NIXL with --draft-kv-pool does not support a host transfer buffer."
             )
 
     def _validate_remote_parallel_config(
@@ -1965,7 +1964,15 @@ class NixlBaseConnectorWorker:
         self.region_mem_types = region_mem_types
         self._mixed_mem_types = len(set(region_mem_types)) > 1
         if self._has_mamba:
-            self.region_num_blocks = [self.num_blocks] * self.num_regions
+            # SSM regions count logical blocks; descriptors count the shared
+            # pool's kernel blocks in every region but a private pool's.
+            transfer_groups = self.kv_cache_config.transfer_groups
+            self.region_num_blocks = [
+                count
+                if all(transfer_groups[group].pool_id for group in groups)
+                else self.num_blocks
+                for count, groups in zip(self.region_num_blocks, region_groups)
+            ]
 
         self._set_region_layers(region_layers)
         self._packed_member_layouts = packed_member_layouts

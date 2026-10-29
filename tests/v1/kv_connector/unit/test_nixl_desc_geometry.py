@@ -668,12 +668,15 @@ def _make_mla_hybrid_worker(
     num_logical_blocks,
     worker_cls=None,
     kda_only_tensor=False,
+    num_draft_pool_blocks=0,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
     layout.
 
     ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
-    no other group uses, as when a model has more SSM than MLA layers."""
+    no other group uses, as when a model has more SSM than MLA layers.
+    ``num_draft_pool_blocks`` adds a sliding-window drafter layer in a private
+    pool of that many blocks (--draft-kv-pool)."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -682,6 +685,7 @@ def _make_mla_hybrid_worker(
     )
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
+        DFlashSlidingWindowSpec,
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheTensor,
@@ -728,6 +732,27 @@ def _make_mla_hybrid_worker(
             KVCacheGroupSpec(layer_names["kda_b"], kda_spec),
         ],
     )
+    if num_draft_pool_blocks:
+        draft_spec = DFlashSlidingWindowSpec(
+            block_size=local_block_size,
+            num_kv_heads=1,
+            head_size=unified_page // (2 * local_block_size * 2),
+            dtype=torch.float16,
+            sliding_window=2 * local_block_size,
+        )
+        kv_cache_config.kv_cache_tensors.append(
+            KVCacheTensor(
+                size=num_draft_pool_blocks * draft_spec.page_size_bytes,
+                layers=["draft.0"],
+                layer_stride=num_draft_pool_blocks * draft_spec.page_size_bytes,
+                block_stride=draft_spec.page_size_bytes,
+                pool_id=1,
+            )
+        )
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(["draft.0"], draft_spec, pool_id=1)
+        )
+        kv_cache_config.pool_num_blocks = {1: num_draft_pool_blocks}
 
     vllm_config = create_vllm_config(block_size=local_block_size)
     vllm_config.cache_config.enable_prefix_caching = False
@@ -775,20 +800,55 @@ def _make_mla_hybrid_worker(
         ]
         # MLA caches are [B, 1, N, C] on device, tokens on dim 2.
         mla_views = [t.view(t.shape[0], 1, kernel_block_size, -1) for t in tensors]
-        worker.register_kv_caches(
-            {
-                name: (mla_views if prefix == "mla" else tensors)[
-                    int(name.rsplit(".", 1)[1])
-                ]
-                for prefix, names in layer_names.items()
-                for name in names
-            }
-        )
+        caches = {
+            name: (mla_views if prefix == "mla" else tensors)[
+                int(name.rsplit(".", 1)[1])
+            ]
+            for prefix, names in layer_names.items()
+            for name in names
+        }
+        if num_draft_pool_blocks:
+            # [B, H, N, C] kernel blocks of the drafter's own pool.
+            caches["draft.0"] = torch.zeros(
+                num_draft_pool_blocks * ppl,
+                1,
+                kernel_block_size,
+                unified_page // ppl // kernel_block_size,
+                dtype=torch.uint8,
+            )
+        worker.register_kv_caches(caches)
     # Keep tensors alive alongside the worker; flat views for byte checks.
     worker._test_tensors = [t.view(-1) for t in tensors]
     worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
+
+
+@pytest.mark.cpu_test
+def test_mamba_hybrid_keeps_the_private_pools_block_count():
+    """With Mamba layers every shared-pool region counts the shared pool's
+    kernel blocks, while a drafter region in a private pool (--draft-kv-pool)
+    keeps its pool's count, locally and in what the peer is told."""
+    num_logical_blocks, num_pool_blocks, ppl = 8, 3, 2
+    worker = _make_mla_hybrid_worker(
+        local_block_size=32,
+        kernel_block_size=16,
+        num_logical_blocks=num_logical_blocks,
+        num_draft_pool_blocks=num_pool_blocks,
+    )
+
+    counts = dict(zip(worker.region_names, worker.region_num_blocks))
+    assert counts.pop("draft.0") == num_pool_blocks * ppl
+    assert set(counts.values()) == {num_logical_blocks * ppl}
+    draft_region = worker.region_names.index("draft.0")
+    descs = expand_strided_descs(worker.src_blocks_data)
+    offset = sum(worker.region_num_blocks[:draft_region])
+    draft_descs = descs[offset : offset + num_pool_blocks * ppl]
+    base = worker.kv_caches_base_addr[worker.engine_id][0][draft_region]
+    assert draft_descs[:, 0].tolist() == [
+        base + i * worker.block_stride_per_layer[draft_region]
+        for i in range(num_pool_blocks * ppl)
+    ]
 
 
 @pytest.mark.cpu_test
