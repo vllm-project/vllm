@@ -10,7 +10,11 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -85,7 +89,11 @@ def test_chunked_scores_match_full_batch(
     idx_mapping_np = np.array([7, 2, 9, 1], dtype=np.int32)
     input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
     rejection_sampler = _make_rejection_sampler(
-        SimpleNamespace(logprobs_mode=logprobs_mode, return_sampling_mask=False),
+        SimpleNamespace(
+            logprobs_mode=logprobs_mode,
+            return_sampling_mask=False,
+            logprob_token_ids_state=None,
+        ),
         num_speculative_steps=3,
     )
 
@@ -118,7 +126,7 @@ def test_chunked_scores_match_full_batch(
             draft_sampled=torch.arange(10, device=device),
             pos=torch.arange(10, device=device),
             max_chunk_logits=5,
-            max_num_logprobs=2,
+            logprobs_dims=(2, 0),
         )
     )
     score_logits = logits + 1 if logprobs_mode in PROCESSED_LOGPROBS_MODES else logits
@@ -128,7 +136,8 @@ def test_chunked_scores_match_full_batch(
         score_logits,
         input_batch.cu_num_logits,
         input_batch.cu_num_logits_np,
-        max_num_logprobs=2,
+        input_batch.expanded_idx_mapping,
+        logprobs_dims=(2, 0),
     )
 
     assert sampled[:, 0].tolist() == idx_mapping_np.tolist()
@@ -149,6 +158,235 @@ def test_chunked_scores_match_full_batch(
         == full_logprobs.cu_num_generated_tokens
     )
     assert sampling_mask_tensors is None
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
+    """Requests that only set `logprob_token_ids` (no `logprobs`) still get the
+    scores of those tokens when their batch is verified with speculative drafts."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    wanted = {3: [5, 11], 0: [2], 2: [], 1: [16, 0, 7]}  # request state index -> ids
+    token_ids_state = LogprobTokenIdsState(4, device)
+    for req_idx, ids in wanted.items():
+        token_ids_state.add_request(req_idx, SamplingParams(logprob_token_ids=ids))
+    token_ids_state.apply_staged_writes()
+    max_token_ids = token_ids_state.max_num_token_ids(idx_mapping_np)
+    assert max_token_ids == 3
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(
+            logprobs_mode=logprobs_mode,
+            return_sampling_mask=False,
+            logprob_token_ids_state=token_ids_state,
+        ),
+        num_speculative_steps=3,
+    )
+
+    def fake_verify(
+        self, logits, _draft_logits, _draft_sampled, _pos, cu_num_logits, *_
+    ):
+        num_sampled = torch.diff(cu_num_logits).to(torch.int32)
+        sampled = (
+            torch.arange(4, device=device).repeat(len(num_sampled), 1) % vocab_size
+        )
+        return logits, sampled, num_sampled
+
+    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)  # type: ignore[method-assign]
+    torch.manual_seed(0)
+    logits = torch.randn(10, vocab_size, device=device)
+
+    _, _, chunked, _ = rejection_sampler._verify_in_chunks(
+        logits,
+        input_batch,
+        draft_logits=None,
+        draft_sampled=torch.arange(10, device=device),
+        pos=torch.arange(10, device=device),
+        max_chunk_logits=5,
+        logprobs_dims=(0, max_token_ids),
+    )
+    assert chunked is not None
+    assert chunked.logprobs.shape == (10, 1 + max_token_ids)
+
+    expected = logits if logprobs_mode == "raw_logits" else logits.log_softmax(-1)
+    for req, req_idx in enumerate(idx_mapping_np):
+        ids = wanted[int(req_idx)]
+        for row in range(cu_num_logits_np[req], cu_num_logits_np[req + 1]):
+            assert chunked.logprob_token_ids[row, 1 : 1 + len(ids)].tolist() == ids
+            torch.testing.assert_close(
+                chunked.logprobs[row, 1 : 1 + len(ids)], expected[row, ids]
+            )
+            assert torch.isinf(chunked.logprobs[row, 1 + len(ids) :]).all()
+
+    # Without any requested token ids nothing is computed.
+    assert (
+        rejection_sampler._get_logprobs_tensors(
+            torch.zeros(4, 4, dtype=torch.int64, device=device),
+            torch.ones(4, dtype=torch.int32, device=device),
+            logits[:4],
+            input_batch.cu_num_logits[:5],
+            input_batch.cu_num_logits_np[:5],
+            input_batch.expanded_idx_mapping[:4],
+            None,
+        )
+        is None
+    )
+
+
+def _make_sampler_with_token_ids(
+    logprobs_mode: str,
+    wanted: dict[int, list[int]],
+    num_logprobs: int,
+    device: torch.device,
+) -> SimpleNamespace:
+    """Sampler stand-in with the real `Sampler.get_logprobs_dims`: every request
+    state index in `wanted` asks for `logprob_token_ids`, and the batch-wide top-k
+    `logprobs` is `num_logprobs` (NO_LOGPROBS when unset)."""
+    token_ids_state = LogprobTokenIdsState(4, device)
+    for req_idx, ids in wanted.items():
+        token_ids_state.add_request(req_idx, SamplingParams(logprob_token_ids=ids))
+    token_ids_state.apply_staged_writes()
+    sampler = SimpleNamespace(
+        logprobs_mode=logprobs_mode,
+        return_sampling_mask=False,
+        logprob_token_ids_state=token_ids_state,
+        sampling_states=SimpleNamespace(max_num_logprobs=lambda _idx: num_logprobs),
+    )
+    sampler.get_logprobs_dims = MethodType(Sampler.get_logprobs_dims, sampler)
+    return sampler
+
+
+def _fake_verify(device: torch.device, vocab_size: int):
+    def fake_verify(
+        self, logits, _draft_logits, _draft_sampled, _pos, cu_num_logits, *_
+    ):
+        num_sampled = torch.diff(cu_num_logits).to(torch.int32)
+        sampled = (
+            torch.arange(4, device=device).repeat(len(num_sampled), 1) % vocab_size
+        )
+        return logits, sampled, num_sampled
+
+    return fake_verify
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_get_logprobs_dims_with_only_token_ids():
+    """`logprob_token_ids` alone is enough to ask for logprobs, whatever the
+    batch's draft tokens (the sharded gather sizes its buffers from these dims)."""
+    device = torch.device("cuda")
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    wanted = {3: [5, 11], 0: [2], 2: [], 1: [16, 0, 7]}
+    sampler = _make_sampler_with_token_ids("raw_logprobs", wanted, NO_LOGPROBS, device)
+    assert sampler.get_logprobs_dims(idx_mapping_np) == (0, 3)
+    sampler = _make_sampler_with_token_ids("raw_logprobs", wanted, 1, device)
+    assert sampler.get_logprobs_dims(idx_mapping_np) == (1, 3)
+    sampler = _make_sampler_with_token_ids("raw_logprobs", {}, NO_LOGPROBS, device)
+    assert sampler.get_logprobs_dims(idx_mapping_np) is None
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_logprob_token_ids_with_topk_logprobs(logprobs_mode: str):
+    """Top-k `logprobs` narrower than the widest `logprob_token_ids`: the rows are
+    as wide as the token ids, requests with token ids get exactly those tokens and
+    the others get the top-k."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    wanted = {3: [5, 11], 0: [], 2: [], 1: [16, 0, 7, 9]}
+    sampler = _make_sampler_with_token_ids(logprobs_mode, wanted, 1, device)
+    dims = sampler.get_logprobs_dims(idx_mapping_np)
+    assert dims == (1, 4)
+    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+        _fake_verify(device, vocab_size), rejection_sampler
+    )
+    torch.manual_seed(0)
+    logits = torch.randn(10, vocab_size, device=device)
+
+    _, _, lp, _ = rejection_sampler._verify_in_chunks(
+        logits,
+        input_batch,
+        draft_logits=None,
+        draft_sampled=torch.arange(10, device=device),
+        pos=torch.arange(10, device=device),
+        max_chunk_logits=5,
+        logprobs_dims=dims,
+    )
+    assert lp is not None
+    assert lp.logprobs.shape == (10, 1 + 4)
+
+    expected = logits if logprobs_mode == "raw_logits" else logits.log_softmax(-1)
+    top1 = logits.argmax(-1)
+    for req, req_idx in enumerate(idx_mapping_np):
+        ids = wanted[int(req_idx)] or None
+        for row in range(cu_num_logits_np[req], cu_num_logits_np[req + 1]):
+            if ids is None:
+                assert lp.logprob_token_ids[row, 1] == top1[row]
+                torch.testing.assert_close(
+                    lp.logprobs[row, 1], expected[row, top1[row]]
+                )
+                assert torch.isinf(lp.logprobs[row, 2:]).all()
+            else:
+                assert lp.logprob_token_ids[row, 1 : 1 + len(ids)].tolist() == ids
+                torch.testing.assert_close(
+                    lp.logprobs[row, 1 : 1 + len(ids)], expected[row, ids]
+                )
+                assert torch.isinf(lp.logprobs[row, 1 + len(ids) :]).all()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_logprob_token_ids_with_adaptive_verification():
+    """Adaptive verification verifies one chunk over compacted logits, with
+    `cu_num_logits` on device and `cu_num_logits_np` an upper bound: the scores of
+    `logprob_token_ids` must match the fixed-boundary layout."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    true_cu = np.array([0, 3, 4, 8, 10], dtype=np.int32)
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    wanted = {3: [5, 11], 0: [2], 2: [], 1: [16, 0, 7]}
+    sampler = _make_sampler_with_token_ids("raw_logprobs", wanted, -1, device)
+    dims = sampler.get_logprobs_dims(idx_mapping_np)
+    torch.manual_seed(0)
+    logits = torch.randn(10, vocab_size, device=device)
+
+    def run(adaptive: bool):
+        input_batch = _make_input_batch(true_cu, idx_mapping_np, device)
+        if adaptive:
+            # Pre-compaction layout on the host (4 rows per request); the device
+            # tensors hold the compacted one.
+            input_batch.cu_num_logits_np = np.arange(0, 17, 4, dtype=np.int32)
+            input_batch.expanded_idx_mapping = torch.cat(
+                [
+                    input_batch.expanded_idx_mapping,
+                    torch.zeros(6, dtype=torch.int64, device=device),
+                ]
+            )
+        rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+        rejection_sampler.enable_adaptive_verification = adaptive
+        rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+            _fake_verify(device, vocab_size), rejection_sampler
+        )
+        return rejection_sampler._verify_in_chunks(
+            logits,
+            input_batch,
+            draft_logits=None,
+            draft_sampled=torch.arange(10, device=device),
+            pos=torch.arange(10, device=device),
+            max_chunk_logits=16,
+            logprobs_dims=dims,
+        )[2]
+
+    fixed, adaptive = run(False), run(True)
+    assert fixed is not None and adaptive is not None
+    assert torch.equal(fixed.logprob_token_ids, adaptive.logprob_token_ids)
+    assert torch.equal(fixed.logprobs, adaptive.logprobs)
+    assert fixed.logprobs.shape == (10, 1 + 3)
 
 
 @pytest.mark.skipif(
@@ -178,6 +416,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     sampler = SimpleNamespace(
         logprobs_mode="processed_logprobs",
         return_sampling_mask=False,
+        logprob_token_ids_state=None,
         sampling_states=SimpleNamespace(
             top_k=SimpleNamespace(np=np.full(num_reqs, vocab_size)),
             temperature=SimpleNamespace(gpu=torch.ones(num_reqs, device=device)),
@@ -234,7 +473,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
             draft_sampled,
             pos,
             max_chunk_logits=8,
-            max_num_logprobs=0,
+            logprobs_dims=(0, 0),
         )
     )
     rng_after_off = torch.get_device_module(device).get_rng_state()
@@ -248,7 +487,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         draft_sampled,
         pos,
         max_chunk_logits=8,
-        max_num_logprobs=0,
+        logprobs_dims=(0, 0),
     )
     rng_after_on = torch.get_device_module(device).get_rng_state()
 

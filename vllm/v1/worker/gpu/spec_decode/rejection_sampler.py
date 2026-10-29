@@ -20,7 +20,6 @@ from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -191,10 +190,12 @@ class RejectionSampler:
         logits: torch.Tensor,
         cu_num_logits: torch.Tensor,
         cu_num_logits_np: np.ndarray,
-        max_num_logprobs: int,
+        expanded_idx_mapping: torch.Tensor,
+        logprobs_dims: tuple[int, int] | None,
     ) -> LogprobsTensors | None:
-        if max_num_logprobs == NO_LOGPROBS:
+        if logprobs_dims is None:
             return None
+        num_logprobs, max_token_ids = logprobs_dims
 
         num_reqs = cu_num_logits.shape[0] - 1
         num_logits = logits.shape[0]
@@ -220,9 +221,12 @@ class RejectionSampler:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
         return compute_topk_scores(
             logits,
-            max_num_logprobs,
+            num_logprobs,
             flat_sampled,
             cu_num_generated_tokens,
+            logprob_token_ids_state=self.sampler.logprob_token_ids_state,
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_token_ids,
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
         )
@@ -312,7 +316,7 @@ class RejectionSampler:
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
         max_chunk_logits: int,
-        max_num_logprobs: int,
+        logprobs_dims: tuple[int, int] | None,
         verify_draft_sampled: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
@@ -373,7 +377,8 @@ class RejectionSampler:
                 processed_logits if use_processed_logits else logits[lo:hi],
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
-                max_num_logprobs,
+                input_batch.expanded_idx_mapping[lo:hi],
+                logprobs_dims,
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)
@@ -450,9 +455,7 @@ class RejectionSampler:
         if invalid_drafts is not None:
             verify_draft_sampled = draft_sampled.masked_fill(invalid_drafts, -1)
 
-        max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
-            input_batch.idx_mapping_np
-        )
+        logprobs_dims = self.sampler.get_logprobs_dims(input_batch.idx_mapping_np)
         chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
         (
             sampled,
@@ -466,7 +469,7 @@ class RejectionSampler:
             draft_sampled,
             pos,
             chunk_logit_limit,
-            max_num_logprobs,
+            logprobs_dims,
             verify_draft_sampled,
         )
 

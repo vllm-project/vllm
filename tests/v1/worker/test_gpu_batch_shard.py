@@ -522,7 +522,10 @@ def test_gather_sampler_output_kernels(tp_size: int):
 
 
 @requires_gpu
-def test_gather_sampler_output_logprobs_and_nans():
+# (num_logprobs, max_token_ids): top-k only, `logprob_token_ids` only (what a
+# request gets from a speculative-decoding batch), and token ids wider than top-k.
+@pytest.mark.parametrize("logprobs_dims", [(2, 0), (0, 2), (1, 2)])
+def test_gather_sampler_output_logprobs_and_nans(logprobs_dims: tuple[int, int]):
     """num_nans is reduced per request and gathered; LogprobsTensors are
     packed into fixed per-request blocks, width-aligned across ranks (pad
     and truncate paths), and restored to global row order."""
@@ -631,7 +634,7 @@ def test_gather_sampler_output_logprobs_and_nans():
                 global_batch=global_cuda,
                 local_batch=local_batches[rank],
                 gather_num_nans=True,
-                logprobs_dims=(num_cols - 1, 0),
+                logprobs_dims=logprobs_dims,
             )
 
     for rank in range(tp_size):
