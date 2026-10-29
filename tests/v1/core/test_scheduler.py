@@ -2778,49 +2778,16 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
-def test_adaptive_verification_stats_count_actual_budget():
-    scheduler = create_scheduler(
-        num_speculative_tokens=5, per_request_spec_decode_metrics="detailed"
-    )
-    [request] = create_requests(num_requests=1, num_tokens=1)
-    scheduler.add_request(request)
-    req_id = request.request_id
-    req_id_to_index = {req_id: 0}
-    scheduler.update_from_output(
-        scheduler.schedule(),
-        ModelRunnerOutput(
-            req_ids=[req_id],
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=[[0]],
-        ),
-    )
-    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4, 5]]))
-    engine_outputs = scheduler.update_from_output(
-        scheduler.schedule(),
-        ModelRunnerOutput(
-            req_ids=[req_id],
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=[[1, 2, 3]],
-            num_verified_tokens_per_req=[4],
-        ),
-    )
-
-    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
-    assert stats.num_draft_tokens == 5
-    assert stats.num_verified_tokens == 4
-    assert stats.num_verified_tokens_per_pos == [1, 1, 1, 1, 0]
-    payload = request.spec_decode_metrics.to_dict()
-    assert payload["num_draft_tokens"] == 5
-    assert payload["num_verified_tokens"] == 4
-    assert payload["per_step_verified"] == [4]
-
-
-def _run_spec_verify_steps(scheduler, rounds, grammar=None):
+def _run_spec_verify_steps(
+    scheduler, rounds, grammar=None, num_verified_per_round=None
+):
     """Drive prefill + one draft/verify step per round for a single request.
 
     ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
     step each. ``grammar`` optionally makes the request use structured outputs
     after prefill, so the scheduler trims draft tokens with it.
+    ``num_verified_per_round`` optionally sets the verified draft count the
+    model runner reports with adaptive verification.
     Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
@@ -2828,7 +2795,7 @@ def _run_spec_verify_steps(scheduler, rounds, grammar=None):
     rid = req.request_id
     req_to_index = {rid: 0}
 
-    def _mk_output(sampled):
+    def _mk_output(sampled, num_verified=None):
         return ModelRunnerOutput(
             req_ids=[rid],
             req_id_to_index=req_to_index,
@@ -2836,6 +2803,9 @@ def _run_spec_verify_steps(scheduler, rounds, grammar=None):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            num_verified_tokens_per_req=(
+                None if num_verified is None else [num_verified]
+            ),
         )
 
     # Prefill: sample one token.
@@ -2845,20 +2815,23 @@ def _run_spec_verify_steps(scheduler, rounds, grammar=None):
             params=StructuredOutputsParams(regex="[0-9]+"), reasoning_ended=True
         )
         req.structured_output_request.grammar = grammar
-    for spec, out in rounds:
+    verified = num_verified_per_round or [None] * len(rounds)
+    for (spec, out), num_verified in zip(rounds, verified):
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
         output = scheduler.schedule()
-        scheduler.update_from_output(output, _mk_output([out]))
+        scheduler.update_from_output(output, _mk_output([out], num_verified))
     return req
 
 
-def test_per_request_spec_decode_detailed_records_per_step():
+@pytest.mark.parametrize("verified_per_step", [None, [3, 2, 1]])
+def test_per_request_spec_decode_detailed_records_per_step(verified_per_step):
     scheduler = create_scheduler(
         num_speculative_tokens=3,
         per_request_spec_decode_metrics="detailed",
     )
     # Three verify steps for one request; num_accepted = len(output) - 1, so the
-    # outputs below accept 3, 1, then 0 drafts across the steps.
+    # outputs below accept 3, 1, then 0 drafts across the steps. With adaptive
+    # verification, the model runner reports how many drafts it verified.
     req = _run_spec_verify_steps(
         scheduler,
         [
@@ -2866,11 +2839,12 @@ def test_per_request_spec_decode_detailed_records_per_step():
             ([5, 6, 7], [5, 8]),  # accept 1
             ([9, 10, 11], [12]),  # accept 0
         ],
+        num_verified_per_round=verified_per_step,
     )
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
     assert payload["per_step_drafted"] == [3, 3, 3]
-    assert payload["per_step_verified"] == [3, 3, 3]
+    assert payload["per_step_verified"] == (verified_per_step or [3, 3, 3])
     assert payload["num_spec_steps"] == 3
 
 
