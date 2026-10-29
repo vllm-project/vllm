@@ -31,6 +31,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.utils import all_reduce_int
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -267,7 +268,7 @@ class EngineCore:
         )
         # DP engines step in lockstep, warmup included, so they decide together.
         dp_group = getattr(self, "dp_group", None)
-        if not ParallelConfig.min_across_dp(dp_group, int(reason is None)):
+        if not all_reduce_int(dp_group, int(reason is None)):
             self.model_executor.disable_extensible_kv_cache(
                 reason or "another data-parallel engine cannot use it"
             )
@@ -413,7 +414,7 @@ class EngineCore:
         )
         if committable_blocks is not None:
             # DP engines must warm up the same steps.
-            committable_blocks = ParallelConfig.min_across_dp(
+            committable_blocks = all_reduce_int(
                 getattr(self, "dp_group", None), committable_blocks
             )
         compilation_times = []

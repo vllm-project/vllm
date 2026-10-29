@@ -6,10 +6,10 @@ from concurrent.futures import Future
 from multiprocessing import Lock
 from typing import Any
 
-import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.utils import all_reduce_int
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
@@ -159,6 +159,13 @@ class UniProcExecutor(Executor):
         return True
 
 
+def _all_reduce_world(value: int, op: dist.ReduceOp = dist.ReduceOp.MIN) -> int:
+    """All-reduce value over every rank of the external launcher."""
+    from vllm.distributed.parallel_state import get_world_group
+
+    return all_reduce_int(get_world_group().cpu_group, value, op)
+
+
 class ExecutorWithExternalLauncher(UniProcExecutor):
     """An executor that uses external launchers to launch engines,
     specially designed for torchrun-compatible launchers, for
@@ -200,7 +207,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def determine_available_memory(self) -> list[int]:  # in bytes
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
-        return [self._all_reduce_min(memory[0])]
+        return [_all_reduce_world(memory[0])]
 
     def extensible_kv_cache_unsupported_reason(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
@@ -208,7 +215,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduce for one that dropped it.
         reason = super().extensible_kv_cache_unsupported_reason(kv_cache_specs)
-        if self._all_reduce(int(reason is not None), dist.ReduceOp.MAX):
+        if _all_reduce_world(int(reason is not None), dist.ReduceOp.MAX):
             return reason or "another rank cannot use it"
         return None
 
@@ -217,7 +224,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     ) -> int | None:
         # Every rank's engine must warm up the same shapes.
         committable = super().initialize_from_config(kv_cache_configs)
-        return None if committable is None else self._all_reduce_min(committable)
+        return None if committable is None else _all_reduce_world(committable)
 
     def compile_or_warm_up_model(
         self, num_committable_kv_blocks: int | None = None
@@ -226,22 +233,9 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         return [
             times
             if times.num_kv_blocks is None
-            else times._replace(num_kv_blocks=self._all_reduce_min(times.num_kv_blocks))
+            else times._replace(num_kv_blocks=_all_reduce_world(times.num_kv_blocks))
             for times in super().compile_or_warm_up_model(num_committable_kv_blocks)
         ]
-
-    @classmethod
-    def _all_reduce_min(cls, value: int) -> int:
-        return cls._all_reduce(value, dist.ReduceOp.MIN)
-
-    @staticmethod
-    def _all_reduce(value: int, op: "dist.ReduceOp") -> int:
-        from vllm.distributed.parallel_state import get_world_group
-
-        cpu_group = get_world_group().cpu_group
-        tensor = torch.tensor([value], device="cpu", dtype=torch.int64)
-        dist.all_reduce(tensor, group=cpu_group, op=op)
-        return int(tensor.item())
 
     def shutdown(self) -> None:
         super().shutdown()

@@ -194,9 +194,7 @@ def test_engine_queries_offload_blocks_only_when_enabled(
     engine.model_executor = executor
     # Data-parallel peers report fewer committable blocks.
     monkeypatch.setattr(
-        engine_core_module.ParallelConfig,
-        "min_across_dp",
-        staticmethod(lambda group, value: value - 1),
+        engine_core_module, "all_reduce_int", lambda group, value: value - 1
     )
     monkeypatch.setattr(
         engine_core_module, "get_kv_cache_configs", lambda *args: [kv_config]
