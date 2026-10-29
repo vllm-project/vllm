@@ -49,3 +49,25 @@ def test_flashinfer_bf16_cutedsl_correctness(
     expected = F.linear(x, weight, bias)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-1)
+
+
+@pytest.mark.parametrize(
+    "m,n,k", [(1, 1024, 1024), (64, 2048, 3072), (512, 1024, 1000)]
+)
+@pytest.mark.parametrize("tune", [False, True])
+def test_flashinfer_bf16_auto_correctness(m: int, n: int, k: int, tune: bool) -> None:
+    """--linear-backend=flashinfer: mm_bf16(backend="auto"), with and without
+    autotuning across FlashInfer's BF16 backends."""
+    from flashinfer import autotune
+
+    torch.manual_seed(0)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.1
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    with autotune(tune):
+        actual = layer_utils.cuda_flashinfer_bf16_gemm_impl(
+            x, weight, None, None, "flashinfer"
+        )
+    expected = F.linear(x, weight)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-1)

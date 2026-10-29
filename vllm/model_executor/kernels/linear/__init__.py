@@ -119,6 +119,7 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferAutoMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     FlashInferTrtllmMxfp8LinearKernel,
@@ -156,6 +157,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
     FbgemmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferAutoNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
@@ -298,6 +300,12 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         CutlassFp8BlockScaledMMKernel,
         CutlassW4A8LinearKernel,
         CutlassNvFp4LinearKernel,
+    },
+    # Kernels that let FlashInfer pick the backend (backend="auto").
+    "flashinfer": {
+        FlashInferFP8ScaledMMLinearKernel,
+        FlashInferAutoMxfp8LinearKernel,
+        FlashInferAutoNvFp4LinearKernel,
     },
     "flashinfer_cutlass": {
         FlashInferFP8ScaledMMLinearKernel,
@@ -575,6 +583,8 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
         TorchMxFp8LinearKernel,
+        # Only with --linear-backend=flashinfer.
+        FlashInferAutoMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -606,6 +616,8 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+        # Only with --linear-backend=flashinfer.
+        FlashInferAutoNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
@@ -1429,6 +1441,7 @@ __all__ = [
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
     "Rdna3W4A8MxFp4LinearKernel",
+    "FlashInferAutoMxfp8LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",
@@ -1439,6 +1452,7 @@ __all__ = [
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
+    "FlashInferAutoNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4W4A16LinearKernel",
     "FlashInferB12xNvFp4LinearKernel",

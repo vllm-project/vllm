@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.model_executor.kernels.linear import (
+    FlashInferAutoMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
@@ -133,3 +134,27 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "expected_kernel_cls"),
+    [
+        ("flashinfer", FlashInferAutoMxfp8LinearKernel),
+        ("auto", FlashInferCutedslMxfp8LinearKernel),
+    ],
+)
+def test_flashinfer_linear_backend_selects_auto_mxfp8_kernel(
+    linear_backend, expected_kernel_cls
+):
+    """--linear-backend=flashinfer runs mm_mxfp8(backend="auto"); the default
+    selection never picks that kernel."""
+    with (
+        _patch_cuda_platform(100),
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=(128, 128))
+
+    assert type(kernel) is expected_kernel_cls

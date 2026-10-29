@@ -40,18 +40,20 @@ def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
-    pdl: bool,
+    pdl: bool | None,
     backend: str,
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
+    # pdl=None keeps FlashInfer's default.
+    kwargs = {} if pdl is None else {"pdl": pdl}
     return mm_bf16(
         a,
         b,
         bias=bias,
-        pdl=pdl,
         out_dtype=torch.bfloat16,
         backend=backend,
+        **kwargs,
     )
 
 
@@ -1166,7 +1168,7 @@ def flashinfer_scaled_fp4_mm(
     if alpha is None:
         alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
-    if backend in ("cutlass", "cudnn"):
+    if backend in ("cutlass", "cudnn", "auto"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
