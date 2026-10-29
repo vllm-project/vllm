@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from itertools import chain, islice
+from itertools import chain
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -417,14 +417,9 @@ class RequestOffloadState:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            for req_block_hash in islice(
-                self.req.block_hashes,
-                group_config.hashes_per_chunk * len(group_state.offload_keys)
-                + group_config.hashes_per_chunk
-                - 1,
-                None,
-                group_config.hashes_per_chunk,
-            ):
+            stride = group_config.hashes_per_chunk
+            start = stride * (len(group_state.offload_keys) + 1) - 1
+            for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
                 self.req_context.set_offload_key_position(
@@ -1881,7 +1876,12 @@ class OffloadingConnectorScheduler:
                 # Clamp to the GPU prefix cache's commit point. The final sampled
                 # token's slot is never committed (under spec decode it holds a
                 # rejected draft's KV), so a block ending there must not be stored.
-                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
+                # A request that finished before its prefill completed (e.g. an
+                # error) has computed only num_computed_tokens of its prompt.
+                num_tokens_after_batch = min(
+                    req.num_computed_tokens,
+                    max(req.num_prompt_tokens, req.num_tokens - 1),
+                )
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens

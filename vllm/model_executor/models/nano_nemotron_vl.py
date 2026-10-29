@@ -1008,7 +1008,9 @@ class NemotronH_Nano_VL_V2(
             )
 
             # Construct the vision projection.
-            vit_hidden_size = config.vit_hidden_size
+            vit_hidden_size = getattr(config, "vision_hidden_size", None)
+            if vit_hidden_size is None:
+                vit_hidden_size = config.vit_hidden_size
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
 
