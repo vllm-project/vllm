@@ -14,6 +14,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -123,11 +124,14 @@ def make_request(
     )
 
 
-def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheManager:
+def make_kv_cache_manager(
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
+) -> KVCacheManager:
     """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
-    these tests, so callers don't have to pass it at every site."""
+    these tests, so callers don't have to pass it at every site. With
+    ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -138,7 +142,13 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
             prefix_cache_retention_interval=kwargs.pop("retention_interval"),
         )
     manager = KVCacheManager(kv_cache_config, **kwargs)
-    if kv_cache_config.hisparse_host_num_blocks is not None:
+    if kv_cache_config.hisparse_host_num_blocks is None:
+        pass
+    elif vllm_config is not None:
+        HiSparseConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        ).bind_kv_cache_manager(manager)
+    else:
         get_hisparse_coordinator(manager)
     return manager
 
@@ -235,11 +245,13 @@ def make_hisparse_kv_cache_manager(
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     num_prefill_lookahead: int = 0,
+    vllm_config: VllmConfig | None = None,
     **config_kwargs,
 ) -> KVCacheManager:
     config = make_hisparse_kv_cache_config(num_blocks, host_num_blocks, **config_kwargs)
     return make_kv_cache_manager(
         config,
+        vllm_config,
         max_model_len=max_model_len,
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
@@ -918,8 +930,7 @@ def _make_hisparse_scheduler(
     tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
 ) -> tuple[Scheduler, KVCacheManager]:
     """A scheduler over a HiSparse manager whose async mock connector matches
-    ``matched_tokens``, forwarding allocations to a HiSparseConnector beside it
-    as MultiConnector does."""
+    ``matched_tokens``."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -932,21 +943,12 @@ def _make_hisparse_scheduler(
         use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         **kwargs,
     )
-    manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
+    manager = make_hisparse_kv_cache_manager(
+        32, host_num_blocks, vllm_config=scheduler.vllm_config
+    )
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     assert scheduler.scheduler_reserve_full_isl
-    hisparse = HiSparseConnector(
-        scheduler.vllm_config, KVConnectorRole.SCHEDULER, manager.kv_cache_config
-    )
-    hisparse.bind_kv_cache_manager(manager)
-    mock_update = scheduler.connector.update_state_after_alloc
-
-    def update_state_after_alloc(request, blocks, num_external_tokens):
-        mock_update(request, blocks, num_external_tokens)
-        hisparse.update_state_after_alloc(request, blocks, 0)
-
-    scheduler.connector.update_state_after_alloc = update_state_after_alloc
     return scheduler, manager
 
 

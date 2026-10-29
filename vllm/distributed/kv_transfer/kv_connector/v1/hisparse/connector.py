@@ -109,7 +109,6 @@ class HiSparseConnectorScheduler:
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
-        coordinator.import_step_tokens = self.import_step_tokens
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
         if self.coordinator is None:
@@ -275,7 +274,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_coordinator(
-            get_hisparse_coordinator(kv_cache_manager)
+            get_hisparse_coordinator(
+                kv_cache_manager,
+                import_step_tokens=self.connector_scheduler.import_step_tokens,
+            )
         )
 
     @property
@@ -397,8 +399,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests[request.request_id] = request
-        assert self.connector_scheduler.coordinator is not None
-        self.connector_scheduler.coordinator.reserve_import(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

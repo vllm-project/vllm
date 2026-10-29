@@ -104,11 +104,12 @@ class HiSparseCoordinator:
         max_model_len: int,
         *,
         num_reprefillable_tokens: int,
+        import_step_tokens: int = 0,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
         # Spec decode step tokens an import needs beyond its sequence.
-        self.import_step_tokens = 0
+        self.import_step_tokens = import_step_tokens
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
@@ -176,9 +177,13 @@ class HiSparseCoordinator:
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
         # request -> full-sequence host pages of an admitted import. A waiting
-        # import holds host pages and is never preempted, so the rest stays
-        # reserved against later admissions.
+        # import holds host pages and is never preempted, so the pages it has
+        # yet to allocate stay reserved against later admissions.
         self._import_pages: dict[str, int] = {}
+        self._import_reservations: dict[str, int] = {}
+        self._num_reserved_import_pages = 0
+        # The import the admission gate last sized, kept for its allocation.
+        self._sized_import: tuple[str, int] | None = None
         # Requests whose resident pages were all non-null when last scanned.
         # Pages only become null at admission or import (before the first
         # scan) and when the pool reuses an unpinned page (_lose_page).
@@ -546,25 +551,34 @@ class HiSparseCoordinator:
         """Note a prefix an external load is populating in host pages."""
         self._resident_requests.discard(request_id)
         self._pending_imports[request_id] = num_tokens
+        if self._sized_import is not None and self._sized_import[0] == request_id:
+            self._import_pages[request_id] = self._sized_import[1]
+        self._sized_import = None
 
-    def reserve_import(self, request: Request) -> None:
-        """Reserve the full sequence's host pages of a just-admitted import."""
-        if request.request_id in self._pending_imports:
-            assert self.host_manager is not None
-            self._import_pages[request.request_id] = cdiv(
-                min(request.num_tokens, self.max_model_len) + self.import_step_tokens,
-                self.host_manager.block_size,
-            )
+    def size_import(self, request_id: str, num_pages: int) -> None:
+        """Note the full-sequence host pages of an import being admitted."""
+        self._sized_import = (request_id, num_pages)
 
     def reserved_import_pages(self, request_id: str) -> int:
         """Host pages other admitted imports still need for their sequence."""
-        assert self.host_manager is not None
-        req_to_blocks = self.host_manager.req_to_blocks
-        return sum(
-            max(pages - len(req_to_blocks.get(other_id, ())), 0)
-            for other_id, pages in self._import_pages.items()
-            if other_id != request_id
+        return self._num_reserved_import_pages - self._import_reservations.get(
+            request_id, 0
         )
+
+    def update_import_reservation(self, request_id: str, num_held_pages: int) -> None:
+        pages = self._import_pages.get(request_id)
+        if pages is None:
+            return
+        self._set_import_reservation(request_id, max(pages - num_held_pages, 0))
+        if num_held_pages >= pages:
+            del self._import_pages[request_id]
+
+    def _set_import_reservation(self, request_id: str, num_pages: int) -> None:
+        self._num_reserved_import_pages += num_pages - self._import_reservations.pop(
+            request_id, 0
+        )
+        if num_pages > 0:
+            self._import_reservations[request_id] = num_pages
 
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
@@ -879,6 +893,7 @@ class HiSparseCoordinator:
         self._resident_requests.discard(request_id)
         self._pending_imports.pop(request_id, None)
         self._import_pages.pop(request_id, None)
+        self._set_import_reservation(request_id, 0)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
@@ -925,6 +940,8 @@ class HiSparseCoordinator:
 
 def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
+    *,
+    import_step_tokens: int = 0,
 ) -> HiSparseCoordinator:
     """Return the coordinator shared by a KV cache manager's HiSparse groups.
 
@@ -942,6 +959,7 @@ def get_hisparse_coordinator(
         managers,
         kv_cache_manager.max_model_len,
         num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
+        import_step_tokens=import_step_tokens,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")

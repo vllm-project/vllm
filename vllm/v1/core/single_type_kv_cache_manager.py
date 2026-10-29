@@ -2272,6 +2272,7 @@ class HiSparseSourceManager(FullAttentionManager):
         if apply_admission_cap and total_computed_tokens > num_local_computed_tokens:
             num_tokens += self.coordinator.import_step_tokens
             available -= self.coordinator.reserved_import_pages(request_id)
+            self.coordinator.size_import(request_id, cdiv(num_tokens, self.block_size))
         required = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -2308,6 +2309,22 @@ class HiSparseSourceManager(FullAttentionManager):
             num_external_computed_tokens,
             record_for_zeroing,
         )
+        self.coordinator.update_import_reservation(
+            request_id, len(self.req_to_blocks[request_id])
+        )
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        new_blocks = super().allocate_new_blocks(
+            request_id, num_tokens, num_tokens_main_model
+        )
+        if new_blocks:
+            assert self.coordinator is not None
+            self.coordinator.update_import_reservation(
+                request_id, len(self.req_to_blocks[request_id])
+            )
+        return new_blocks
 
     def cache_blocks(
         self,
