@@ -763,7 +763,7 @@ def _make_read_request(remote_block_ids):
 def test_update_state_drops_decode_recompute_tail_block(
     external_tokens, has_mamba, zero_ids
 ):
-    """Only full hybrid READ destinations skip zeroing; local tails still zero."""
+    """Full READ destinations skip zeroing; local tails still zero."""
     sched = _make_read_scheduler()
     sched._has_mamba = has_mamba
     remote_blocks = [[10, 11], [91]] if has_mamba else [[10, 11]]
@@ -787,7 +787,7 @@ def test_update_state_drops_decode_recompute_tail_block(
     before = asdict(output)
     meta = sched.build_connector_meta(output)
     assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
-    if zero_ids and has_mamba and external_tokens:
+    if zero_ids and external_tokens:
         before["new_block_ids_to_zero"] = zero_ids[1:]
     assert asdict(output) == before
 
@@ -796,6 +796,19 @@ def test_update_state_drops_decode_recompute_tail_block(
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
     assert output.new_block_ids_to_zero == [100, 101, 102]
+
+
+def test_attention_only_read_skips_zeroing_in_every_group():
+    """Mixed-precision attention-only hybrids zero pages in every READ group."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    request = _make_read_request([[10, 11], [12]])
+    sched._reqs_need_recv["req"] = (request, [[100, 101], [300]])
+
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = [100, 101, 102, 300, 301]
+    sched.build_connector_meta(output)
+    assert output.new_block_ids_to_zero == [102, 301]
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
