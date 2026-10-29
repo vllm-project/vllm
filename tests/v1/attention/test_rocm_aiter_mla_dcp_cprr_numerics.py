@@ -37,6 +37,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
 from vllm._aiter_ops import is_aiter_found  # noqa: E402
+from vllm.distributed.parallel_state import GroupCoordinator  # noqa: E402
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 
 KV_LORA_RANK = 512
@@ -75,11 +76,6 @@ requires_cprr = pytest.mark.skipif(
     not (_gpu_available() and _on_gfx950()),
     reason="cprr DCP verify needs ROCm + AITER on gfx950",
 )
-
-
-@pytest.fixture(autouse=True)
-def select_asm_route(monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", "asm")
 
 
 # --------------------------------------------------------------------------
@@ -130,7 +126,9 @@ def _merge_partials(os_, lses):
 # --------------------------------------------------------------------------
 
 
-class _FakeGroup:
+class _FakeGroup(GroupCoordinator):
+    """Rank-simulating stub; ``GroupCoordinator.__init__`` is never run."""
+
     def __init__(self, world_size: int, rank: int):
         self.world_size = world_size
         self.rank_in_group = rank
@@ -198,7 +196,7 @@ class _PrefillBackendStub:
         return self
 
 
-def _make_ctx_layer(vllm_config):
+def _make_ctx_layer(vllm_config, monkeypatch: pytest.MonkeyPatch):
     """Stand-in for the registered attention layer in static_forward_context.
 
     ``MLACommonMetadataBuilder.__init__`` reads the MLA dims, ``dcp_manager``
@@ -210,7 +208,7 @@ def _make_ctx_layer(vllm_config):
     from vllm.v1.attention.ops.dcp import MLADCPManager
 
     mgr = object.__new__(MLADCPManager)
-    mgr.init_kv_gather = lambda *a, **k: None
+    monkeypatch.setattr(mgr, "init_kv_gather", lambda *a, **k: None)
 
     return SimpleNamespace(
         non_causal_multi_token_decode=False,
@@ -375,7 +373,9 @@ def _run_shard(
     return md, o, lse, local_len
 
 
-def _numerics(heads_per_rank: int, sabotage: bool = False):
+def _numerics(
+    monkeypatch: pytest.MonkeyPatch, heads_per_rank: int, sabotage: bool = False
+):
     """Run every DCP shard and return (per-shard max rel err, merged rel err)."""
     import aiter
 
@@ -394,7 +394,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
 
         layer_name = "model.layers.0.self_attn.attn"
         vllm_config.compilation_config.static_forward_context[layer_name] = (
-            _make_ctx_layer(vllm_config)
+            _make_ctx_layer(vllm_config, monkeypatch)
         )
         # block_size 1: one page per token, so page ids are positions and the
         # residue-class page table is expressible directly.
@@ -489,7 +489,9 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
     ids=["native-128", "padded-96-to-128"],
 )
 @torch.inference_mode()
-def test_cprr_shards_match_reference_and_merge_to_full_context(heads_per_rank):
+def test_cprr_shards_match_reference_and_merge_to_full_context(
+    monkeypatch, heads_per_rank
+):
     """Every DCP shard must be right, and their LSE merge must reproduce
     full-context attention.
 
@@ -498,14 +500,14 @@ def test_cprr_shards_match_reference_and_merge_to_full_context(heads_per_rank):
     reference on the tokens whose causal window is truncated. Checking the merge
     alone would hide that, so both are asserted.
     """
-    shard_rel, merge_rel = _numerics(heads_per_rank)
+    shard_rel, merge_rel = _numerics(monkeypatch, heads_per_rank)
     assert shard_rel < SHARD_RTOL, f"per-shard rel err {shard_rel:.3e}"
     assert merge_rel < MERGE_RTOL, f"merged rel err {merge_rel:.3e}"
 
 
 @requires_cprr
 @torch.inference_mode()
-def test_wrong_cp_rank_breaks_the_result():
+def test_wrong_cp_rank_breaks_the_result(monkeypatch):
     """Positive control: without it, a passing run above proves nothing.
 
     Feeding shard r's pages to the kernel while telling it that it is rank r+1
@@ -513,7 +515,7 @@ def test_wrong_cp_rank_breaks_the_result():
     and the round-robin reconstruction are wrong. If the error does NOT blow up,
     the kernel is not using cp_rank and the test above has no power.
     """
-    shard_rel, merge_rel = _numerics(16, sabotage=True)
+    shard_rel, merge_rel = _numerics(monkeypatch, 16, sabotage=True)
     assert shard_rel > SHARD_RTOL or merge_rel > MERGE_RTOL, (
         f"sabotaged run still passed (shard {shard_rel:.3e}, merge "
         f"{merge_rel:.3e}) -- cp_rank is not reaching the kernel"
@@ -545,3 +547,174 @@ def test_cprr_kernel_is_selected_for_the_k3_shape():
     )
     assert route is m._DCPDecodeRoute.CPRR
     assert m._asm_dcp_verify_heads(96) in m._NATIVE_CPRR_HEADS
+
+
+VARLEN_QO = (1, 5, 3, 2, 4, 1, 5, 2, 0, 0)
+VARLEN_CTX = (256, 3, 100, 0, 37, 1, 251, 2, 0, 0)
+PAD_TOKENS = 6
+
+
+def _varlen_reference(q_f32, kv_f32, seq_lens, qo_lens, positions_per_req):
+    heads = q_f32.shape[1]
+    o = torch.zeros(sum(qo_lens), heads, KV_LORA_RANK, device=q_f32.device)
+    lse = torch.full((sum(qo_lens), heads), float("-inf"), device=q_f32.device)
+    token = 0
+    for req, (seq_len, qo_len) in enumerate(zip(seq_lens, qo_lens)):
+        positions = positions_per_req[req]
+        kv_sel = kv_f32[req].index_select(0, positions)
+        for t in range(qo_len):
+            valid = positions <= seq_len - qo_len + t
+            if bool(valid.any()):
+                k = kv_sel[valid]
+                s = (q_f32[token] @ k.T) * SCALE
+                lse[token] = torch.logsumexp(s, dim=-1)
+                o[token] = torch.softmax(s, dim=-1) @ k[:, :KV_LORA_RANK]
+            token += 1
+    return o, lse
+
+
+@requires_cprr
+@pytest.mark.parametrize(
+    ("asm", "expected"),
+    [
+        (True, rocm_aiter_mla._DCPDecodeRoute.CPRR),
+        (False, rocm_aiter_mla._DCPDecodeRoute.SEGMENTED),
+    ],
+)
+@torch.inference_mode()
+def test_adaptive_varlen_shards_match_reference(monkeypatch, asm, expected):
+    import aiter
+
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
+    from vllm.v1.attention.ops.dcp import (
+        CPTritonContext,
+        correct_attn_out,
+        mask_dcp_empty_shards_,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    if not asm:
+        monkeypatch.setattr(
+            rocm_aiter_mla, "_asm_dcp_verify_configured", lambda *a, **k: False
+        )
+    heads_per_rank = 12
+    device = torch.device("cuda", 0)
+    torch.accelerator.set_device_index(device.index)
+    torch.manual_seed(0)
+    _ensure_workspace_manager(device)
+    _install_fake_groups(DCP, 0)
+    vllm_config = _make_vllm_config(heads_per_rank)
+    vllm_config.speculative_config.enable_adaptive_verification = True
+
+    nr = len(VARLEN_QO)
+    qo_lens = list(VARLEN_QO)
+    seq_lens = [c + q for c, q in zip(VARLEN_CTX, VARLEN_QO)]
+    num_tokens = sum(qo_lens)
+    max_len = max(seq_lens)
+    gathered_heads = heads_per_rank * DCP
+    real_reqs = sum(q > 0 for q in qo_lens)
+    base, extra = divmod(num_tokens, real_reqs)
+    host_qo = [base + (i < extra) for i in range(real_reqs)] + [0] * (nr - real_reqs)
+
+    def qsl(lens):
+        return torch.tensor([0] + lens, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+
+    with set_current_vllm_config(vllm_config):
+        layer_name = "model.layers.0.self_attn.attn"
+        vllm_config.compilation_config.static_forward_context[layer_name] = (
+            _make_ctx_layer(vllm_config, monkeypatch)
+        )
+        spec = MLAAttentionSpec(
+            block_size=1,
+            num_kv_heads=1,
+            head_size=HEAD_SIZE,
+            dtype=vllm_config.model_config.dtype,
+            non_causal_multi_token_decode=False,
+        )
+        kv_flat = torch.randn(
+            nr * max_len, 1, HEAD_SIZE, dtype=torch.float32, device=device
+        ).to(aiter.dtypes.fp8)
+        q_flat = (
+            torch.randn(
+                num_tokens + PAD_TOKENS,
+                gathered_heads,
+                HEAD_SIZE,
+                dtype=torch.float32,
+                device=device,
+            )
+            .mul_(0.5)
+            .to(aiter.dtypes.fp8)
+        )
+        kv_f32 = kv_flat.float().view(nr, max_len, HEAD_SIZE)
+        q_f32 = q_flat.float()
+        ref_o, _ = _varlen_reference(
+            q_f32,
+            kv_f32,
+            seq_lens,
+            qo_lens,
+            [torch.arange(s, device=device) for s in seq_lens],
+        )
+
+        raw_o, raw_lse = [], []
+        for r in range(DCP):
+            positions = [
+                torch.arange(r, max(r, s), DCP, device=device) for s in seq_lens
+            ]
+            local = torch.tensor([p.numel() for p in positions], dtype=torch.int32)
+            block_table = torch.zeros(
+                nr,
+                vllm_config.model_config.max_model_len // DCP,
+                dtype=torch.int32,
+                device=device,
+            )
+            for req, p in enumerate(positions):
+                block_table[req, : p.numel()] = (req * max_len + p).to(torch.int32)
+            common = CommonAttentionMetadata(
+                query_start_loc=qsl(qo_lens).to(device),
+                query_start_loc_cpu=qsl(host_qo),
+                seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+                num_reqs=nr,
+                num_actual_tokens=num_tokens,
+                max_query_len=QLEN,
+                max_seq_len=max_len,
+                block_table_tensor=block_table,
+                slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device=device),
+                causal=True,
+                dcp_local_seq_lens=local.to(device),
+                dcp_local_seq_lens_cpu_upper_bound=local,
+            )
+            _install_fake_groups(DCP, r)
+            builder = AiterMLAMetadataBuilder(spec, [layer_name], vllm_config, device)
+            md = builder.build(0, common)
+            assert md.decode is not None
+            assert md.decode.dcp_route is expected
+            impl = _build_impl(builder.num_heads, DCP, r)
+            o, lse = impl.forward_mqa(q_flat, kv_flat, md, _Layer(device))
+            torch.accelerator.synchronize()
+
+            lse = lse.float().view(-1, gathered_heads).contiguous()
+            mask_dcp_empty_shards_(lse, md.decode.seq_lens, common.query_start_loc)
+            raw_o.append(o.view(-1, gathered_heads, KV_LORA_RANK))
+            raw_lse.append(lse)
+
+            po, plse = _varlen_reference(q_f32, kv_f32, seq_lens, qo_lens, positions)
+            seen = torch.isfinite(plse)
+            assert not bool((~seen & (lse[:num_tokens] > -1e30)).any())
+            shard_o = raw_o[-1][:num_tokens].float()[seen]
+            rel = (shard_o - po[seen]).abs().max() / po.abs().max()
+            assert rel < SHARD_RTOL, f"rank {r} rel err {rel:.3e}"
+            lse_err = (lse[:num_tokens][seen] - plse[seen]).abs().max()
+            assert lse_err < SHARD_RTOL, f"rank {r} lse err {lse_err:.3e}"
+
+        lses = torch.stack(raw_lse)
+        merged = sum(
+            correct_attn_out(raw_o[r].contiguous(), lses, r, CPTritonContext())[
+                0
+            ].float()
+            for r in range(DCP)
+        )
+        assert bool(torch.isfinite(merged).all())
+        merge_rel = (merged[:num_tokens] - ref_o).abs().max() / ref_o.abs().max()
+        assert merge_rel < MERGE_RTOL, f"merged rel err {merge_rel:.3e}"
