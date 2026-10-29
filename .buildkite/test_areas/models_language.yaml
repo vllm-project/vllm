@@ -61,9 +61,10 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid)"
   device: h200_35gb
   key: language-models-tests-hybrid
+  automatic_shard: true
   timeout_in_minutes: 65
   env:
     # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
@@ -82,11 +83,11 @@ steps:
     - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
     - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
-    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview'
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Language Models (Hybrid) Shard %N"
+      automatic_shard: true
+      label: ":amd: (MI355 DPX) Language Models (Hybrid)"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
@@ -95,13 +96,14 @@ steps:
       commands:
       - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-      - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+      - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview'
 
 # Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
 # autotuning (https://github.com/vllm-project/vllm/issues/25194). Keep this one
 # correctness test on L4 until its H200 output matches the Transformers reference.
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 65
@@ -117,6 +119,7 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
       dind: false
       device: mi355_dpx
@@ -140,6 +143,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
+  automatic_shard: true
   timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
@@ -155,6 +159,7 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Language Models (Extended Generation)"
       dind: false
       device: mi355_dpx
