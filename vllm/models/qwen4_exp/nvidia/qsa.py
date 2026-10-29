@@ -14,7 +14,7 @@ from transformers import Qwen4ExpTextConfig
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
-from vllm.config.cache import CacheConfig, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -34,7 +34,6 @@ from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    extract_layer_index,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -61,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
 from . import model
 from .indexer_qsa import QSAIndexer
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
@@ -131,13 +130,6 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
                 yield name, weight
 
         return super().load_weights(remap_shards())
-
-
-def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
-    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
-    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
-        return "auto"
-    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -508,13 +500,21 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 or current_platform.has_device_capability(89)
             )
         )
-        self.fuse_indexer_projection = vllm_config.lora_config is None
+        # Without a quant config here (BF16, or ModelOpt FP4, which keeps
+        # attention in BF16) the fused layer is unquantized. Otherwise the
+        # indexer shares the q/k/v GEMM only if it uses the same quant method.
+        fused_quant_config = model.without_modelopt_fp4(quant_config)
+        projection_method = type(self.qkv_proj.quant_method)
+        self.fuse_indexer_projection = vllm_config.lora_config is None and (
+            fused_quant_config is None
+            or projection_method is type(self.indexer.index_qk_proj.quant_method)
+        )
         if self.fuse_indexer_projection:
             self.index_qk_size = self.indexer.index_qk_proj.output_size
             self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
                 self.qkv_proj,
                 self.index_qk_size,
-                model.without_modelopt_fp4(quant_config),
+                fused_quant_config,
             )
             del self.indexer.index_qk_proj
 
