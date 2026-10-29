@@ -31,6 +31,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
@@ -53,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -1137,6 +1139,36 @@ def test_lazy_duplicate_store_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2d: Lazy walk covers bounded-replay SWA allocations
+# ---------------------------------------------------------------------------
+def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
+    """Lazy: the walk covers what every group, offloaded or not, takes per step."""
+    config = _make_kv_cache_config(num_blocks=32, num_groups=3)
+    for group in config.kv_cache_groups[1:]:
+        group.kv_cache_spec = SlidingWindowMLASpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+            sliding_window=BLOCK_SIZE * 4,
+            bounded_replay=True,
+        )
+    fix = make_scheduler(
+        num_cpu_blocks=32, num_gpu_blocks=32, lazy=True, kv_cache_config=config
+    )
+    gpu_pool = fix.gpu_block_pool
+
+    # One step takes cdiv(64, 16) blocks per group.
+    num_blocks = 3 * 4
+    blocks = _allocate_gpu_blocks(gpu_pool, make_request(num_blocks), num_blocks)
+    _flush_old_blocks_to_lru_head(gpu_pool, gpu_pool.get_num_free_blocks())
+    gpu_pool.free_blocks(blocks)
+
+    meta = fix.scheduler.build_connector_meta(make_scheduler_output({}))
+    assert sorted(meta.store_gpu_blocks) == [b.block_id for b in blocks]
+
+
+# ---------------------------------------------------------------------------
 # Test 3: LRU eviction order
 # ---------------------------------------------------------------------------
 def test_lru_eviction_order() -> None:
@@ -1296,6 +1328,68 @@ def test_touched_blocks_survive_eviction() -> None:
         bhash_with_group = make_block_hash_with_group_id(bhash, 0)
         cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
         assert cached is not None, f"req_a block {i} should survive (was touched/MRU)"
+
+
+def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
+    """Eager mode: a prefix that hits on GPU keeps its CPU copy at the MRU end."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # Fill all 4 usable CPU blocks: req_a is LRU, req_b is MRU.
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+            new_reqs={
+                req_a.request_id: kv_a.get_block_ids(),
+                req_b.request_id: kv_b.get_block_ids(),
+            },
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+
+    # req_a's prefix is reused and hits entirely on GPU.
+    req_a2 = Request(
+        request_id="req-a2",
+        prompt_token_ids=req_a.prompt_token_ids,
+        sampling_params=req_a.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
+    )
+    assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
+    sched.update_state_after_alloc(
+        req_a2, KVCacheBlocks(blocks=([],)), num_external_tokens=0
+    )
+
+    # Storing 2 new blocks evicts the 2 LRU blocks, which are now req_b's.
+    req_c = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    meta2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_c.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req_c.request_id: kv_c.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, meta2.store_event)
+
+    cache_map = sched.cpu_block_pool.cached_block_hash_to_block
+
+    def cpu_cached(req: Request) -> list[bool]:
+        return [
+            cache_map.get_one_block(make_block_hash_with_group_id(h, 0)) is not None
+            for h in req.block_hashes[:2]
+        ]
+
+    assert cpu_cached(req_a) == [True, True]
+    assert cpu_cached(req_b) == [False, False]
+    assert cpu_cached(req_c) == [True, True]
 
 
 # ---------------------------------------------------------------------------
@@ -2933,6 +3027,45 @@ def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> Non
     assert attention_blocks[0].block_id in stored
     assert len(stored) == len(set(stored))
     assert len(finish_meta.store_cpu_blocks) == len(stored)
+
+
+def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
+    """A hybrid GPU prefix hit refreshes the CPU attention blocks and the Mamba
+    state at the hit boundary, not older Mamba states, once admitted."""
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(block_size=block_size)
+    sched = fix.scheduler
+    cpu_pool = sched.cpu_block_pool
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    other = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+
+    def cache_on_cpu(request: Request, group_id: int) -> list[KVCacheBlock]:
+        blocks = cpu_pool.get_new_blocks(2)
+        cpu_pool.cache_full_blocks(
+            request=request,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=2,
+            block_size=sched.group_block_sizes[group_id],
+            kv_cache_group_id=group_id,
+        )
+        return blocks
+
+    attention, mamba = cache_on_cpu(req, 0), cache_on_cpu(req, 1)
+    newer = cache_on_cpu(other, 0)
+    cpu_pool.free_blocks([*attention, *mamba])
+    cpu_pool.free_blocks(newer)
+
+    lru_before = cpu_pool.free_block_queue.get_all_free_blocks()
+    assert sched.get_num_new_matched_tokens(req, 2 * block_size) == (0, False)
+    assert cpu_pool.free_block_queue.get_all_free_blocks() == lru_before
+    sched.update_state_after_alloc(
+        req, KVCacheBlocks(blocks=([], [])), num_external_tokens=0
+    )
+
+    lru_order = cpu_pool.free_block_queue.get_all_free_blocks()
+    assert lru_order[-3:] == [mamba[1], attention[1], attention[0]]
+    assert lru_order.index(mamba[0]) < lru_order.index(newer[0])
 
 
 def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
