@@ -606,28 +606,42 @@ requires_td = pytest.mark.skipif(
 )
 
 
+def _tile(m, n, k):
+    return {"BLOCK_SIZE_M": m, "BLOCK_SIZE_N": n, "BLOCK_SIZE_K": k}
+
+
+def _find_config(kernel, kwargs, stages_warps):
+    """The config of ``kernel`` with these kwargs and (num_stages, num_warps), or
+    None if this platform drops it (``_drop_racy_wgmma_configs`` on sm90)."""
+    matches = [
+        c
+        for c in kernel.configs
+        if c.kwargs == kwargs and stages_warps in (None, (c.num_stages, c.num_warps))
+    ]
+    assert len(matches) <= 1, matches
+    return matches[0] if matches else None
+
+
 def _pin_ssd_configs(
-    monkeypatch, scan_cfg=(64, 64, 32, 2, 4), state_cfg=(64, 64, 32, 4, 2)
+    monkeypatch, scan_cfg=(64, 64, 32, 4, 2), state_cfg=(64, 64, 32, 4, 2)
 ):
-    """Pin each autotuned SSD kernel to one config: (M, N, K, num_stages, num_warps)."""
+    """Pin each autotuned SSD kernel to one config: (M, N, K, num_stages, num_warps).
 
-    def tile(m, n, k):
-        return {"BLOCK_SIZE_M": m, "BLOCK_SIZE_N": n, "BLOCK_SIZE_K": k}
-
+    The default scan config has num_warps=2, so sm90 keeps it."""
     pins = [
-        (ssd_chunk_scan._chunk_scan_fwd_kernel, tile(*scan_cfg[:3]), scan_cfg[3:]),
-        (ssd_chunk_state._chunk_state_fwd_kernel, tile(*state_cfg[:3]), state_cfg[3:]),
-        (ssd_bmm._bmm_chunk_fwd_kernel, tile(64, 64, 32), (4, 2)),
+        (ssd_chunk_scan._chunk_scan_fwd_kernel, _tile(*scan_cfg[:3]), scan_cfg[3:]),
+        (
+            ssd_chunk_state._chunk_state_fwd_kernel,
+            _tile(*state_cfg[:3]),
+            state_cfg[3:],
+        ),
+        (ssd_bmm._bmm_chunk_fwd_kernel, _tile(64, 64, 32), (4, 2)),
         (ssd_chunk_state._chunk_cumsum_fwd_kernel, {"BLOCK_SIZE_H": 8}, None),
         (ssd_state_passing._state_passing_fwd_kernel, {"BLOCK_SIZE": 256}, None),
     ]
     for kernel, kwargs, stages_warps in pins:
-        (config,) = [
-            c
-            for c in kernel.configs
-            if c.kwargs == kwargs
-            and stages_warps in (None, (c.num_stages, c.num_warps))
-        ]
+        config = _find_config(kernel, kwargs, stages_warps)
+        assert config is not None, (kernel.fn.__name__, kwargs, stages_warps)
         monkeypatch.setattr(kernel, "configs", [config])
 
 
@@ -819,15 +833,18 @@ def test_ssd_td_matches_pointer(
         # (M, N, K, num_stages, num_warps); first case: tiles picked in E2E runs
         (128, (32, 64, 32, 1, 4), (32, 64, 32, 5, 2)),
         # M=128: taller than the ragged chunks and headdim
-        (128, (128, 32, 32, 4, 4), (128, 32, 32, 4, 4)),
-        # N=256: wider than headdim
+        (128, (128, 64, 32, 1, 4), (128, 32, 32, 4, 4)),
+        # N=256: wider than headdim; sm90 has no such scan config
         (256, (64, 256, 32, 4, 4), (64, 256, 32, 4, 4)),
         # K=64: K-looped prev_states step
-        (256, (128, 64, 64, 4, 4), (64, 128, 64, 2, 4)),
+        (256, (64, 64, 64, 1, 4), (64, 128, 64, 2, 4)),
     ],
 )
 def test_ssd_td_matches_pointer_across_tiles(dstate, scan_cfg, state_cfg, monkeypatch):
     """Same check at other tile shapes."""
+    scan_kernel = ssd_chunk_scan._chunk_scan_fwd_kernel
+    if _find_config(scan_kernel, _tile(*scan_cfg[:3]), scan_cfg[3:]) is None:
+        pytest.skip(f"no chunk-scan config {scan_cfg} on this platform")
     _pin_ssd_configs(monkeypatch, scan_cfg, state_cfg)
     nheads, headdim, chunk_size = 4, 80, 128
     inputs = _make_td_inputs(
