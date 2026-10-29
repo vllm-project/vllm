@@ -1464,7 +1464,7 @@ async def benchmark(
             value = diffusion_stats[key]
             if value_fmt.endswith("d}"):
                 value = int(value)
-            print("{:<40} ".format(label) + value_fmt.format(value))
+            print(f"{label:<40} " + value_fmt.format(value))
 
     if spec_decode_stats is not None and diffusion_stats is None:
         print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))

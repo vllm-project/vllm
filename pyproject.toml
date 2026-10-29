@@ -100,8 +100,6 @@ ignore = [
     "B905",
     # Loop control variable not used within loop body
     "B007",
-    # f-string format
-    "UP032",
     # `StrEnum` changes `str()` and `format()` output of members
     "UP042",
 ]

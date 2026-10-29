@@ -64,7 +64,7 @@ def register_layer_for_moe_forward_op(
     prefix = layer.layer_name
     compilation_config = vllm_config.compilation_config
     if prefix in compilation_config.static_forward_context:
-        raise ValueError("Duplicate layer name: {}".format(prefix))
+        raise ValueError(f"Duplicate layer name: {prefix}")
     compilation_config.static_forward_context[prefix] = layer
     compilation_config.static_all_moe_layers.append(prefix)
 

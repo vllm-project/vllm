@@ -338,25 +338,14 @@ class EplbState:
             or model.num_expert_groups != new_model.num_expert_groups
         ):
             raise RuntimeError(
-                "Model: {} "
-                "with config {} "
-                "{} {} {} {} "
-                "mismatch with new model {} "
-                "with config {} "
-                "{} {} {} {}".format(
-                    type(model),
-                    model.num_routed_experts,
-                    model.num_redundant_experts,
-                    model.num_physical_experts,
-                    model.num_logical_experts,
-                    model.num_expert_groups,
-                    type(new_model),
-                    new_model.num_routed_experts,
-                    new_model.num_redundant_experts,
-                    new_model.num_physical_experts,
-                    new_model.num_logical_experts,
-                    new_model.num_expert_groups,
-                )
+                f"Model: {type(model)} "
+                f"with config {model.num_routed_experts} "
+                f"{model.num_redundant_experts} {model.num_physical_experts} "
+                f"{model.num_logical_experts} {model.num_expert_groups} "
+                f"mismatch with new model {type(new_model)} "
+                f"with config {new_model.num_routed_experts} "
+                f"{new_model.num_redundant_experts} {new_model.num_physical_experts} "
+                f"{new_model.num_logical_experts} {new_model.num_expert_groups}"
             )
 
     def add_model(

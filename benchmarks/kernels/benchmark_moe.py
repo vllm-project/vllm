@@ -95,8 +95,8 @@ def clear_triton_cache():
 
 def ensure_divisibility(numerator, denominator, text):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} {} is not divisible by tp {}.".format(
-        text, numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{text} {numerator} is not divisible by tp {denominator}."
     )
 
 

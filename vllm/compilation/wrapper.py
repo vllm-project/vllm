@@ -76,7 +76,7 @@ class TorchCompileWithNoGuardsWrapper:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
             with layerwise_nvtx_marker_context(
-                "Torch Compiled Module (input):{}".format(self.__class__.__name__),
+                f"Torch Compiled Module (input):{self.__class__.__name__}",
                 self,
                 in_tensor=args_list,
                 kwargs=kwargs_dict,

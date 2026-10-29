@@ -2329,7 +2329,7 @@ def apply_image_repeat(
                 new_val = (i // 256 // 256, i // 256, i % 256)
                 cur_image.putpixel((0, 0), new_val)
 
-        uuid = "uuid_{}".format(i)
+        uuid = f"uuid_{i}"
 
         inputs.append(
             {
@@ -2382,7 +2382,7 @@ def time_counter(enable: bool):
         yield
         elapsed_time = time.time() - start_time
         print("-" * 50)
-        print("-- generate time = {}".format(elapsed_time))
+        print(f"-- generate time = {elapsed_time}")
         print("-" * 50)
     else:
         yield
@@ -2567,7 +2567,7 @@ def main(args):
             inputs = []
             inputs_with_empty_media = []
             for i in range(args.num_prompts):
-                uuid = "uuid_{}".format(i)
+                uuid = f"uuid_{i}"
                 inputs.append(
                     {
                         "prompt": prompts[i % len(prompts)],
