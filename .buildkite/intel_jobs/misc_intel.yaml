@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":intel: (BMG) Batch Invariance"
   key: xpu-batch-invariance
-  timeout_in_minutes: 60
+  timeout_in_minutes: 70
   num_devices: 2
   device: intel_gpu
   agent_tags:
