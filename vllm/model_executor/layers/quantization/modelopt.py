@@ -99,6 +99,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -114,8 +115,10 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
     replace_parameter,
+    retire_parameter,
     set_weight_attrs,
 )
+from vllm.platforms import current_platform
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
@@ -353,8 +356,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             else:
                 kv_cache_quant_method = None
 
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore", [])
+            # ModelOpt checkpoints use either key across export versions.
+            exclude_modules = config.get("ignore", config.get("exclude_modules", []))
             group_size_raw = config.get("group_size")
 
         if not quant_method:
@@ -853,6 +856,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        # Whether the selected backend reads the activation input scales.
+        self.uses_input_scales = True
         activation_key = None if self.use_a16 else kNvfp4Dynamic
 
         if quant_config.moe_activation_override is not None:
@@ -1023,6 +1028,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
+        # Keep dummy scales positive and gate/up global scales identical.
+        for param, value in (
+            (w13_weight_scale, 1.0),
+            (w2_weight_scale, 1.0),
+            (w13_weight_scale_2, 1e-3),
+            (w2_weight_scale_2, 1e-3),
+            (w13_input_scale, 1e-2),
+            (w2_input_scale, 1e-2),
+        ):
+            set_weight_attrs(param, {"dummy_weight_value": value})
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
@@ -1080,11 +1096,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-        replace_parameter(layer, "w13_input_scale", a13_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        replace_parameter(layer, "w2_input_scale", a2_scale)
+        # Weight-only backends (Marlin, Humming) return no input scales: the
+        # loaded ones keep their data, retired, and the kernel config gets None.
+        self.uses_input_scales = a13_scale is not None
+        if self.uses_input_scales:
+            replace_parameter(layer, "w13_input_scale", a13_scale)
+            replace_parameter(layer, "w2_input_scale", a2_scale)
+        else:
+            retire_parameter(layer, "w13_input_scale")
+            retire_parameter(layer, "w2_input_scale")
 
         self._build_moe_kernel(layer)
 
@@ -1119,8 +1142,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a13_scale=layer.w13_input_scale if self.uses_input_scales else None,
+            a2_scale=layer.w2_input_scale if self.uses_input_scales else None,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
@@ -2079,7 +2102,8 @@ class KNvfp4Static(QuantKeyScheme):
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         replace_parameter(layer, "weight_global_scale", weight_global_scale)
-        del layer.weight_scale_2
+        # Kernels read weight_global_scale; the loaded param keeps its data.
+        retire_parameter(layer, "weight_scale_2")
 
 
 class KNvfp4Dynamic(QuantKeyScheme):
@@ -2117,7 +2141,8 @@ class KNvfp4Dynamic(QuantKeyScheme):
             "input_global_scale_inv",
             (1.0 / layer.input_global_scale).to(torch.float32),
         )
-        del layer.input_scale
+        # Kernels read input_global_scale; the loaded param keeps its data.
+        retire_parameter(layer, "input_scale")
 
 
 class KFp8StaticTensor(QuantKeyScheme):
@@ -2164,10 +2189,17 @@ class KFp8StaticTensor(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is WEIGHT:
             weight = layer.weight
-            max_w_scale = layer.weight_scale.max()
-            if not (layer.weight_scale == layer.weight_scale[0]).all():
+            weight_scale = layer.weight_scale
+            if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
+                weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight, weight_scale, getattr(layer, "input_scale", None)
+                )
+                if input_scale is not None:
+                    replace_parameter(layer, "input_scale", input_scale)
+            max_w_scale = weight_scale.max()
+            if not (weight_scale == weight_scale[0]).all():
                 max_w_scale, weight = requantize_with_max_scale(
-                    layer.weight, layer.weight_scale, layer.logical_widths
+                    weight, weight_scale, layer.logical_widths
                 )
             # Transposed here rather than in the kernel: ModelOpt maps each
             # fp8 key to exactly one kernel, so the layout is key-determined.
@@ -2530,7 +2562,8 @@ class _DropInputScale(FormatScheme):
                 "Dropping input_scale from a weight-only W4A16 NVFP4 "
                 "checkpoint (deprecated)."
             )
-        del layer.input_scale
+        # Weight-only: no kernel reads it; the loaded param keeps its data.
+        retire_parameter(layer, "input_scale")
 
 
 _DROP_INPUT_SCALE = _DropInputScale()
