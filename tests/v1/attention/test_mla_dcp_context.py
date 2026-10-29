@@ -74,11 +74,21 @@ def test_gather_dcp_context_rows_copies_rows(num_rows, dims, dtype, index_dtype)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="requires GPU")
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype):
+@pytest.mark.parametrize(
+    "dtype, out_dtype",
+    [
+        (torch.bfloat16, None),
+        (torch.float16, None),
+        # fp8 rows dequantized into the model dtype.
+        (current_platform.fp8_dtype(), torch.bfloat16),
+        (current_platform.fp8_dtype(), torch.float16),
+    ],
+)
+def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, out_dtype):
     """The JIT warmup compiles the variant that the context loop launches: rows
     of the all-gather part of the workspace, int64 row indices taken at any
-    offset into the batch's indices, and any number of rows."""
+    offset into the batch's indices, any number of rows and, for fp8 rows, the
+    layer's 0-dim k_scale."""
     kernel = _gather_context_rows.kernel
 
     def compiled_variants() -> set:
@@ -86,7 +96,7 @@ def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype):
 
     kernel.device_caches.clear()
     _gather_context_rows.warmup(
-        dtype=dtype, kv_lora_rank=_KV_LORA_RANK, rope_dim=_QK_ROPE
+        dtype=dtype, kv_lora_rank=_KV_LORA_RANK, rope_dim=_QK_ROPE, out_dtype=out_dtype
     )
     torch.accelerator.synchronize()
     warmed = compiled_variants()
@@ -100,9 +110,17 @@ def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype):
     )
     gathered = workspace[workspace_rows // dcp_world_size :]
     row_indices = torch.arange(workspace_rows, device="cuda")
+    dequant = (
+        {}
+        if out_dtype is None
+        else dict(
+            k_scale=torch.ones((), dtype=torch.float32, device="cuda"),
+            out_dtype=out_dtype,
+        )
+    )
     for start, num_rows in ((0, 1), (1, 33), (3, 1000)):
         gather_dcp_context_rows(
-            gathered, row_indices[start : start + num_rows], _KV_LORA_RANK
+            gathered, row_indices[start : start + num_rows], _KV_LORA_RANK, **dequant
         )
     torch.accelerator.synchronize()
 
