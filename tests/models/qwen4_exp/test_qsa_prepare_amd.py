@@ -185,9 +185,8 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         # C++ reference: both the fused Triton kernel and the C++
         # reshape_and_cache_flash write the platform-native fp8 flavor
         # (OCP on gfx950, FNUZ on gfx942), so the C++ op is the unfused
-        # reference on both arches. Use separate contiguous uint8 buffers
-        # (NOT zeros_like on split views — the C++ op requires contiguous
-        # caches and split views of a shared buffer are strided).
+        # reference on both arches. The reference buffers are separate
+        # allocations so the reference cannot alias the fused cache.
         slot = main["main_slot_mapping"]
         valid = slot >= 0
         blocks = (slot[valid] // MAIN_PAGE).long()
@@ -204,7 +203,6 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
             dtype=torch.uint8,
             device=kv_cache.device,
         )
-        assert key_ref.is_contiguous() and value_ref.is_contiguous()
         k_scale_t = torch.tensor(float(main["main_k_scale"]), device="cuda")
         v_scale_t = torch.tensor(float(main["main_v_scale"]), device="cuda")
         reshape_and_cache_flash(
@@ -244,14 +242,22 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         _assert_codes_match(stored[..., :MAIN_D], ref_k_stored)
         _assert_codes_match(stored[..., MAIN_D:], ref_v_stored)
         return
-    cache = torch.zeros_like(kv_cache)
-    key_cache, value_cache = cache.split(MAIN_D, dim=-1)
+    key_ref = torch.zeros(
+        kv_cache.shape[:-1] + (MAIN_D,),
+        dtype=kv_cache.dtype,
+        device=kv_cache.device,
+    )
+    value_ref = torch.zeros(
+        kv_cache.shape[:-1] + (MAIN_D,),
+        dtype=kv_cache.dtype,
+        device=kv_cache.device,
+    )
     scale = torch.tensor(1.0, device="cuda")
     reshape_and_cache_flash(
         k.view(-1, MAIN_HK, MAIN_D),
         v.view(-1, MAIN_HK, MAIN_D),
-        key_cache,
-        value_cache,
+        key_ref,
+        value_ref,
         main["main_slot_mapping"],
         "auto",
         scale,
@@ -259,13 +265,16 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     )
     torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
     assert torch.equal(gate_out, gate)
-    torch.testing.assert_close(kv_cache, cache, rtol=RTOL, atol=ATOL)
+    torch.testing.assert_close(kv_cache[..., :MAIN_D], key_ref, rtol=RTOL, atol=ATOL)
+    torch.testing.assert_close(kv_cache[..., MAIN_D:], value_ref, rtol=RTOL, atol=ATOL)
 
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("main_kv", ["auto", "fp8", "mxfp4_qsa"])
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, None])
+@pytest.mark.parametrize(
+    "indexer_dtype", [torch.bfloat16, pytest.param(None, id="fp8_platform")]
+)
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [

@@ -433,6 +433,7 @@ def test_clearing_qsa_key_cache_releases_its_storage() -> None:
     references_before_bind = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
     raw_cache.bind_kv_cache(kv)
     assert raw_cache.key_cache.shape[-1] == 64
+    assert raw_cache.rope_position_cache is not None
     assert raw_cache.rope_position_cache.dtype == torch.int64
 
     clear_layer_kv_caches([raw_cache])
