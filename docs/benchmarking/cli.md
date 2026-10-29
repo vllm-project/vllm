@@ -671,6 +671,10 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
+If filtering leaves fewer samples than `--num-prompts`, the benchmark oversamples
+the retained requests with unique request IDs. Use `--no-oversample` to send only
+the retained samples.
+
 `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
 
 ```bash
