@@ -1973,7 +1973,7 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
     [(torch.float8_e4m3fn, 448.0), (torch.int8, 127.0)],
     ids=["fp8", "int8"],
 )
-@pytest.mark.parametrize("mode", ["mask", "bound"])
+@pytest.mark.parametrize("mode", ["mask", "bound", "expert_bound"])
 def test_masked_amax_scale_ignores_unrouted_rows(quant_dtype, scale_max, mode):
     """Padding rows must never contribute to a per-tensor activation scale."""
     num_rows, num_valid, k = 64, 48, 256
@@ -1982,10 +1982,23 @@ def test_masked_amax_scale_ignores_unrouted_rows(quant_dtype, scale_max, mode):
         # Non-prefix valid rows: only a mask can express this.
         included = rows % 2 == 1
         kwargs = {"row_valid": included}
-    else:
+    elif mode == "bound":
         included = rows < num_valid
         kwargs = {
             "num_valid": torch.tensor([num_valid], device="cuda", dtype=torch.int32)
+        }
+    else:
+        # Batched dispatch layout: [expert, rows_per_expert, K] with worst-case
+        # per-expert capacity, so each expert has its own valid prefix.
+        rows_per_expert = 16
+        expert_num_tokens = torch.tensor(
+            [16, 9, 0, 16], device="cuda", dtype=torch.int32
+        )
+        expert = rows // rows_per_expert
+        included = (rows % rows_per_expert) < expert_num_tokens[expert]
+        kwargs = {
+            "expert_num_tokens": expert_num_tokens,
+            "rows_per_expert": rows_per_expert,
         }
 
     x = torch.randn((num_rows, k), device="cuda", dtype=torch.bfloat16)

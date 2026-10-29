@@ -465,9 +465,11 @@ def _masked_amax_scale_kernel(
     num_cols,
     stride_row,
     stride_col,
+    rows_per_expert,
     scale_max,
     eps,
     HAS_MASK: tl.constexpr,
+    HAS_EXPERT_BOUND: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -478,6 +480,12 @@ def _masked_amax_scale_kernel(
         rows_valid = rows_valid & tl.load(
             valid_ptr + rows, mask=rows_valid, other=0
         ).to(tl.int1)
+    elif HAS_EXPERT_BOUND:
+        # Batched dispatch buffers are [expert, max_tokens, K]; only the
+        # leading `expert_num_tokens[e]` rows of each expert hold tokens.
+        expert = rows // rows_per_expert
+        bound = tl.load(bound_ptr + expert, mask=rows_valid, other=0)
+        rows_valid = rows_valid & ((rows % rows_per_expert) < bound)
     else:
         # Padding always trails the valid rows, so a device-side row count is
         # enough and saves materializing a mask.
@@ -501,14 +509,21 @@ def masked_amax_scale(
     *,
     row_valid: torch.Tensor | None = None,
     num_valid: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    rows_per_expert: int | None = None,
     eps: float = 1e-10,
 ) -> torch.Tensor:
     """Per-tensor activation quant scale that skips rows without a route.
 
     ``PaddedStandard`` buffers carry rows that hold no route (``topk_ids == -1``)
     and whose contents are uninitialized, so a tensor-wide absmax would be
-    poisoned by them. Those rows are dropped from the reduction instead; their
-    quantized values are never consumed by an expert GEMM.
+    poisoned by them. Batched dispatch buffers have the same problem per
+    expert: rows past ``expert_num_tokens[e]`` hold stale tokens. Those rows
+    are dropped from the reduction instead; their quantized values are never
+    consumed by an expert GEMM.
+
+    Exactly one of ``row_valid``, ``num_valid`` and ``expert_num_tokens``
+    selects the valid rows.
 
     Args:
         x: 2D activations to reduce.
@@ -517,39 +532,61 @@ def masked_amax_scale(
             are not a prefix.
         num_valid: 1-element device tensor holding the number of leading valid
             rows. Cheaper than ``row_valid`` when padding trails the rows.
+        expert_num_tokens: Device tensor of received token counts, one per
+            expert, for a buffer laid out as ``[expert, rows_per_expert, K]``.
+        rows_per_expert: Row stride between experts, i.e. the worst-case
+            per-expert capacity of the buffer.
         eps: Lower bound on the returned scale, matching the dynamic kernels.
 
     """
     assert x.dim() == 2, f"expected 2D activations, got {x.shape}"
-    assert (row_valid is None) != (num_valid is None), (
-        "pass exactly one of row_valid / num_valid"
+    assert sum(m is not None for m in (row_valid, num_valid, expert_num_tokens)) == 1, (
+        "pass exactly one of row_valid / num_valid / expert_num_tokens"
     )
+    assert (expert_num_tokens is None) == (rows_per_expert is None), (
+        "rows_per_expert is only valid together with expert_num_tokens"
+    )
+    out = torch.zeros((1,), dtype=torch.float32, device=x.device)
     if row_valid is not None:
         assert row_valid.shape == (x.size(0),), (
             f"expected {x.size(0)} row flags, got {tuple(row_valid.shape)}"
         )
         row_valid = row_valid.contiguous()
-    else:
-        assert num_valid is not None
+        bound = out
+    elif num_valid is not None:
         assert num_valid.numel() == 1, f"expected 1 row count, got {num_valid}"
+        bound = num_valid
+    else:
+        assert expert_num_tokens is not None and rows_per_expert is not None
+        assert rows_per_expert > 0, "expected a positive rows_per_expert"
+        assert x.size(0) % rows_per_expert == 0, (
+            f"{x.size(0)} rows is not a multiple of {rows_per_expert}"
+        )
+        assert expert_num_tokens.numel() == x.size(0) // rows_per_expert, (
+            f"expected {x.size(0) // rows_per_expert} expert counts, "
+            f"got {expert_num_tokens.numel()}"
+        )
+        bound = expert_num_tokens
     scale_max = (
         127.0 if quant_dtype == torch.int8 else float(torch.finfo(quant_dtype).max)
     )
-    out = torch.zeros((1,), dtype=torch.float32, device=x.device)
     block_m, block_k = 32, 128
     _masked_amax_scale_kernel[(triton.cdiv(x.size(0), block_m),)](
         x,
-        # The selector that HAS_MASK discards is never dereferenced.
+        # The pointers of the inactive constexpr branches are never
+        # dereferenced, so `out` doubles as a dummy.
         out if row_valid is None else row_valid,
-        out if num_valid is None else num_valid,
+        bound,
         out,
         x.size(0),
         x.size(1),
         x.stride(0),
         x.stride(1),
+        rows_per_expert or 0,
         scale_max,
         eps,
         HAS_MASK=row_valid is not None,
+        HAS_EXPERT_BOUND=expert_num_tokens is not None,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
     )
