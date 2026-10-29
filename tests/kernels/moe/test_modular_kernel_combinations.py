@@ -792,27 +792,24 @@ _PADDING_HIDDEN_PAD_EXPECTED = 128
 #   // 64 * 64 * (2 if tp_size == 1 else 1) (rocm_aiter_moe.py); tp_size==1 here.
 _PADDING_INTERMEDIATE_PAD_EXPECTED = 256
 
-# AITER's W4A16 CK-Tile MXFP4 stage2 kernel misindexes scales and raises
-# NotImplementedError unless the physical intermediate width is a multiple
-# of 256 -- the 128-aligned _PADDING_N_UNPADDED/_PADDING_N_PADDED above
-# aren't enough, so MXFP4 needs its own 256-aligned N pair.
+# AITER's W4A16 stage2 kernel raises NotImplementedError below a 256-wide
+# physical intermediate (128 isn't enough), so MXFP4 needs its own N pair.
 _PADDING_N_UNPADDED_MXFP4 = 512  # 2 * 256
 _PADDING_N_PADDED_MXFP4 = 768  # +256
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 512
 
-# Separately, AITER's W4A4 MXFP4 stage1 (gate/up) GEMM silently produces
-# NaN/Inf -- not a raise -- unless the physical hidden width is a multiple
-# of 256 (confirmed on gfx950: K=896/1152 -> NaN, K=768/1024 -> finite).
-# W4A16's stage1 path is unrestricted (unquantized activations), but reuses
-# the same 256-aligned K pair rather than branching the test on scheme.
+# Both MXFP4 schemes also need a 256-wide physical hidden dim: W4A4's stage1
+# GEMM silently produces NaN/Inf below it (confirmed: K=896/1152 -> NaN,
+# K=768/1024 -> finite); W4A16 silently produces wrong output instead (K=896
+# fails the cos_sim check below). Production enforces the same 256 floor via
+# mxfp4_round_up_hidden_size_and_intermediate_size() before building weights,
+# so this isn't just a test-only requirement.
 _PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
 _PADDING_K_PADDED_MXFP4 = 1280  # +256
 # hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
 _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 = 256
-# Same formula as _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16, undoubled:
-# W4A4's SiLU path already doubles the intermediate pad inside AITER, so
-# aiter_moe_pads() must pass it through undoubled to avoid double-masking
-# live rows.
+# W4A4's SiLU path doubles intermediate_pad inside AITER, so this constant
+# (undoubled) differs from the W4A16 one above despite the same N pair.
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 # {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)
@@ -949,15 +946,13 @@ def _check_mxfp4_accuracy(
     ref_out: torch.Tensor, mk_out: torch.Tensor, fe_name: str
 ) -> None:
     """Shared mxfp4 accuracy check for _aiter_padding_matrix_worker and
-    _aiter_token_padding_worker; callers pre-slice both tensors to the real
-    (unpadded / non-garbage-row) region.
+    _aiter_token_padding_worker (callers pre-slice to the real region).
 
-    Cosine similarity catches a sign-flipped mk_out that a magnitude guard
-    can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted), but it's
-    scale-invariant and check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference
-    signal -- so the magnitude guard below still runs too, to catch a
-    uniform-scale error like rank_worker's documented ~5x-small
-    AITER_MXFP4_BF16 bug.
+    Cosine similarity catches a sign-flipped mk_out that the magnitude
+    guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted); being
+    scale-invariant, it in turn misses a uniform-scale error like
+    rank_worker's ~5x-small AITER_MXFP4_BF16 bug, which the magnitude
+    guard catches instead.
     """
     cos_sim = torch.nn.functional.cosine_similarity(
         mk_out.flatten().float(), ref_out.flatten().float(), dim=0
@@ -1056,12 +1051,9 @@ def _aiter_padding_matrix_worker(
         padded_config.is_w4a16_mxfp4
         and padded_config.activation == MoEActivation.SWIGLUOAI
     ):
-        # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
-        # sign agreement, ~5x-small magnitude) instead of raising -- smoke
-        # test only until https://github.com/vllm-project/vllm/pull/59766.
-        # SWIGLUOAI_UNINTERLEAVE isn't exempted: rocm_aiter_moe.py forces the
-        # same kernel path for it as SWIGLUOAI here (see rank_worker), so it
-        # gets the full check below instead.
+        # AITER_MXFP4_BF16 silently miscomputes SWIGLUOAI; smoke test only
+        # until #59766 (see rank_worker). SWIGLUOAI_UNINTERLEAVE isn't
+        # exempted -- same kernel path, gets the full check below instead.
         assert mk_out.shape == ref_out.shape, (
             f"{fe_name} output shape {mk_out.shape} != reference shape {ref_out.shape}."
         )
@@ -1198,14 +1190,13 @@ def _slice_unpadded_mxfp4_weights(
     weights: WeightTensors, k_unpadded: int, n_unpadded: int
 ) -> WeightTensors:
     """MXFP4 counterpart to _slice_unpadded_weights: slices the packed
-    uint8/block-scale WeightTensors directly, so the result can feed
-    reference_moe_impl the same way the fp8 path does.
+    uint8/block-scale tensors directly so the result can feed
+    reference_moe_impl like the fp8 path does.
 
-    downcast_to_mxfp() packs 2 elements/byte along the quantized axis (K for
-    w1, N for w2) with 32-wide scale blocks (MXFP_BLOCK_SIZE); this file's
-    MXFP4 padding constants are multiples of both (lcm=64), so each slice
-    lands on a byte/scale-block boundary. The unpacked axis slices like
-    _slice_unpadded_weights. Gate/up interleave is left to
+    downcast_to_mxfp() packs 2 elements/byte along the quantized axis with
+    32-wide scale blocks (MXFP_BLOCK_SIZE); this file's MXFP4 padding
+    constants are multiples of both (lcm=64), so every slice lands on a
+    byte/scale-block boundary. Gate/up interleave is left to
     reference_moe_impl, which expects pre-interleave row order.
     """
     assert weights.w1_scale is not None and weights.w2_scale is not None, (
@@ -1233,14 +1224,10 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
 
     MXFP4 counterpart to test_aiter_moe_padding_matrix: W4A16 (mxfp4 weight,
     unquantized activation) and W4A4 (both mxfp4). W4A16 uses
-    SWIGLUOAI_UNINTERLEAVE -- AITER's heuristic-dispatch kernel only has a
-    SWIGLUOAI-family specialization (ROCm/aiter#2419), and
-    SWIGLUOAI_UNINTERLEAVE hits that same kernel path here (see
-    rank_worker), so unlike literal SWIGLUOAI it isn't affected by the
-    AITER_MXFP4_BF16 bug (#59766) and gets the full reference comparison,
-    same as W4A4 (SILU). (This wasn't possible when this test was first
-    written -- the shared reference/NYI infra only learned to treat
-    SWIGLUOAI_UNINTERLEAVE this way in #62907.)
+    SWIGLUOAI_UNINTERLEAVE to dodge the AITER_MXFP4_BF16 SWIGLUOAI bug
+    (#59766, see rank_worker) and get the full reference comparison like
+    W4A4 (SILU) -- only possible since #62907 taught the shared
+    reference/NYI infra to treat SWIGLUOAI_UNINTERLEAVE this way.
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
@@ -1370,12 +1357,10 @@ def _aiter_token_padding_worker(
     )
 
     if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
-        # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
-        # sign agreement, ~5x-small magnitude) instead of raising -- smoke
-        # test only (finite real rows, already checked) until #59766 lands.
-        # SWIGLUOAI_UNINTERLEAVE isn't exempted: it hits the same kernel
-        # path as SWIGLUOAI here (see rank_worker), so it gets the full
-        # check below instead.
+        # AITER_MXFP4_BF16 silently miscomputes SWIGLUOAI; smoke test only
+        # (finite real rows, already checked) until #59766 (see rank_worker).
+        # SWIGLUOAI_UNINTERLEAVE isn't exempted -- same kernel path, gets
+        # the full check below instead.
         return
 
     if config.weight_dtype == "mxfp4":
@@ -1485,13 +1470,9 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
 ):
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
-    MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. W4A16
-    uses SWIGLUOAI_UNINTERLEAVE -- AITER's heuristic-dispatch kernel only
-    has a SWIGLUOAI-family specialization (ROCm/aiter#2419), and
-    SWIGLUOAI_UNINTERLEAVE hits that same kernel path here (see
-    rank_worker), so unlike literal SWIGLUOAI it isn't affected by the
-    AITER_MXFP4_BF16 bug (#59766) and gets the full comparison, same as
-    W4A4 (SILU).
+    MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. Uses
+    SWIGLUOAI_UNINTERLEAVE for W4A16 for the same reason as
+    test_aiter_moe_padding_matrix_mxfp4.
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
