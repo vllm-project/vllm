@@ -420,7 +420,7 @@ A decoder normally learns that a NIXL pull finished from the output of a later s
 
 - **Supported**: the `uni` executor or single-node `mp`, sync or async scheduling, TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
 - **Unchanged**: a request still waits for every rank and for free KV blocks, and transfer failures follow `kv_load_failure_policy`. Unexpected polling errors stop the engine, even while it is paused.
-- **Overhead**: with `mp`, workers sleep up to 0.2 ms between polls, which can delay a new RPC by that much plus OS scheduling jitter. Measure latency and CPU usage before enabling.
+- **Overhead**: with `mp`, workers poll every 0.2 ms between RPCs while pulls are pending. An RPC that arrives during a poll waits for it to finish.
 - **Streams and metrics**: KV post-processing runs on the worker's current stream before the next forward pass. Transfer metrics are still reported with regular step outputs.
 
 ## Metrics Reference

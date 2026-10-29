@@ -11,6 +11,7 @@ import zmq
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.utils import sched_yield
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm.v1.outputs import KVConnectorOutput
@@ -83,23 +84,22 @@ class EarlyKVRecvSender:
         self._last_step_rpc = time.perf_counter()
 
     def wait_for_poll(self, rpc_mq: MessageQueue) -> bool:
-        """Sleep until the next poll is due and return whether to poll.
+        """Spin until the next poll is due, yielding as dequeue() does.
 
-        Returns False, without sleeping, when an RPC is queued, no step RPC
-        arrived recently, or no receive is pending.
+        Returns False once an RPC is queued, or at once when no step RPC
+        arrived recently or no receive is pending.
         """
         if (
-            rpc_mq.shutting_down
-            or rpc_mq.readable()
-            or time.perf_counter() - self._last_step_rpc > _ACTIVE_WINDOW_S
+            time.perf_counter() - self._last_step_rpc > _ACTIVE_WINDOW_S
             or not has_kv_transfer_group()
             or not get_kv_transfer_group().has_pending_recving()
         ):
             return False
-        if (delay := self._next_poll - time.perf_counter()) > 0:
-            time.sleep(delay)
-        # An RPC may have arrived during the sleep. Leave it for dequeue.
-        return not rpc_mq.shutting_down and not rpc_mq.readable()
+        while not (rpc_mq.shutting_down or rpc_mq.readable()):
+            if time.perf_counter() >= self._next_poll:
+                return True
+            sched_yield()
+        return False
 
     def poll(self) -> None:
         """Send completed receives; let the worker monitor handle fatal errors."""
