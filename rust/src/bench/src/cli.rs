@@ -406,6 +406,7 @@ pub struct BenchServeArgs {
     /// Minimum total running requests across engines reported by /metrics
     /// before starting the profiler. When set, profiling is deferred until
     /// this threshold is reached, then captures for --profile-duration seconds.
+    /// Only engines exposed by the /metrics endpoint at --base-url are counted.
     /// Requires --profile.
     #[arg(long)]
     pub profile_batch_threshold: Option<usize>,

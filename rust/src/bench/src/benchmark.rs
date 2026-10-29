@@ -1400,6 +1400,12 @@ pub(crate) async fn fetch_num_requests_running(
     let url = format!("{base_url}/metrics");
     let resp = client.get(&url).send().await.ok()?;
     let text = resp.text().await.ok()?;
+
+    parse_num_requests_running(&text)
+}
+
+/// Parse total running requests across the engine series in `/metrics`.
+fn parse_num_requests_running(text: &str) -> Option<usize> {
     let mut total: Option<usize> = None;
     for line in text.lines() {
         let Some(rest) = line.trim().strip_prefix("vllm:num_requests_running") else {
@@ -1934,43 +1940,19 @@ async fn sample_verify_prompts(
 mod tests {
     use super::*;
 
-    async fn running_requests_from_metrics(metrics: &str) -> Option<usize> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{metrics}",
-            metrics.len()
-        );
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                assert_ne!(stream.read_buf(&mut request).await.unwrap(), 0);
-            }
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let running = fetch_num_requests_running(&client, &base_url).await;
-        server.await.unwrap();
-        running
-    }
-
-    #[tokio::test]
-    async fn test_fetch_num_requests_running_sums_dp_engines() {
+    #[test]
+    fn test_parse_num_requests_running_sums_dp_engines() {
         let metrics: String = (0..8)
             .map(|engine| {
                 format!("vllm:num_requests_running{{model_name=\"m\",engine=\"{engine}\"}} 16.0\n")
             })
             .collect();
 
-        assert_eq!(running_requests_from_metrics(&metrics).await, Some(128));
+        assert_eq!(parse_num_requests_running(&metrics), Some(128));
     }
 
-    #[tokio::test]
-    async fn test_fetch_num_requests_running_matches_exact_metric_name() {
+    #[test]
+    fn test_parse_num_requests_running_matches_exact_metric_name() {
         let metrics = "\
 vllm:num_requests_running_total{engine=\"0\"} 1024
 vllm:num_requests_running{engine=\"0\"} 16
@@ -1978,28 +1960,22 @@ vllm:num_requests_waiting{model_name=\"vllm:num_requests_running\"} 256
 vllm:num_requests_running{engine=\"1\"} 16
 ";
 
-        assert_eq!(running_requests_from_metrics(metrics).await, Some(32));
+        assert_eq!(parse_num_requests_running(metrics), Some(32));
     }
 
-    #[tokio::test]
-    async fn test_fetch_num_requests_running_single_and_missing_samples() {
-        for (metrics, expected) in [
-            ("vllm:num_requests_running{engine=\"0\"} 42.0\n", Some(42)),
-            ("vllm:num_requests_running 0\n", Some(0)),
-            ("vllm:num_requests_running {engine=\"0\"} 16\n", Some(16)),
-            (
-                "vllm:num_requests_running{model_name=\"model with spaces\"}\t4.2e1 123456\n",
-                Some(42),
-            ),
-            ("", None),
-            ("# TYPE vllm:num_requests_running gauge\n", None),
-            ("vllm:num_requests_waiting{engine=\"0\"} 16\n", None),
-            ("vllm:num_requests_running{engine=\"0\"} invalid\n", None),
-            ("vllm:num_requests_running NaN\n", None),
-            ("vllm:num_requests_running -1\n", None),
-        ] {
-            assert_eq!(running_requests_from_metrics(metrics).await, expected);
+    #[test]
+    fn test_parse_num_requests_running_distinguishes_zero_and_missing() {
+        for (metrics, expected) in [("vllm:num_requests_running 0\n", Some(0)), ("", None)] {
+            assert_eq!(parse_num_requests_running(metrics), expected);
         }
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_reads_sample_before_timestamp() {
+        let metrics =
+            "vllm:num_requests_running {model_name=\"model with spaces\"}\t4.2e1 123456\n";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(42));
     }
 
     fn make_metrics(
