@@ -96,9 +96,9 @@ def test_custom_speculator(register, lazy: bool):
     )
     spec_config = _custom_spec_config()
 
-    # The configured name is kept.
-    assert spec_config.method == "dummy"
-    assert spec_config.base_method is None
+    # Not based on a built-in method.
+    assert spec_config.custom_method == "dummy"
+    assert spec_config.method is None
     assert type(spec_config.speculator_config) is DummySpeculatorConfig
 
     config = VllmConfig()
@@ -118,8 +118,8 @@ def test_custom_speculator_inherits_builtin_config(register):
     spec_config = _custom_spec_config("my_ngram")
 
     # Set up and behaves as the built-in speculator, but builds the custom one.
-    assert spec_config.method == "my_ngram"
-    assert spec_config.base_method == "ngram_gpu"
+    assert spec_config.custom_method == "my_ngram"
+    assert spec_config.method == "ngram_gpu"
     assert spec_config.use_ngram_gpu()
     assert spec_config.prompt_lookup_min == spec_config.prompt_lookup_max == 5
     assert spec_config.speculator_config.prefer_dense_token_history
@@ -264,6 +264,7 @@ def _checkpoint_spec(
 ) -> Any:
     return SimpleNamespace(
         method=method,
+        custom_method=None,
         draft_model_config=SimpleNamespace(
             model=model,
             # The speculator config class declared by the draft model.

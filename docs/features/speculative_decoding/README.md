@@ -105,7 +105,10 @@ vllm serve <target-model> \
 ```
 
 The speculator reads its options from
-`vllm_config.speculative_config.speculator_options`.
+`vllm_config.speculative_config.speculator_options`. Once set up,
+`speculative_config.custom_method` is the registered name (`"my_spec"`), and
+`speculative_config.method` is the built-in method its config is based on
+(`"eagle3"`), so vLLM treats it like that built-in speculator.
 
 ### V1 Custom Proposer Backend
 

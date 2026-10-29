@@ -27,9 +27,6 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
-from vllm.v1.worker.gpu.spec_decode.speculator_config import (
-    get_custom_speculator_config_class,
-)
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
@@ -737,8 +734,8 @@ class VllmConfig:
             return True
 
         speculative_config = getattr(self, "speculative_config", None)
-        custom_method = getattr(speculative_config, "method", None)
-        if get_custom_speculator_config_class(custom_method) is not None:
+        custom_method = getattr(speculative_config, "custom_method", None)
+        if custom_method is not None:
             requires_v2 = f"Custom speculative method '{custom_method}' requires"
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
@@ -1387,7 +1384,7 @@ class VllmConfig:
                 )
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.base_method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
@@ -3082,7 +3079,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.base_method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 

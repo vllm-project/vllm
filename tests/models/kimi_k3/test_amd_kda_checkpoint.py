@@ -53,7 +53,7 @@ BLOCK_SIZE = 64
 
 
 class _StubSpeculativeConfig:
-    method = base_method = "dspark"
+    method = "dspark"
     parallel_drafting = False
     speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
 

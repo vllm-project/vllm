@@ -179,7 +179,6 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
     )
     speculative_config = SimpleNamespace(
         method="mtp",
-        base_method="mtp",
         num_speculative_tokens=3,
         draft_model_config=draft_model_config,
         use_local_argmax_reduction=False,

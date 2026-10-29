@@ -5,6 +5,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -468,7 +469,11 @@ class SpeculativeConfig:
 
     Besides the built-in methods, this can be a custom method registered with
     `vllm.v1.worker.gpu.spec_decode.speculator_config.register_speculative_method`
-    (e.g. by a vLLM plugin), which requires the V2 model runner."""
+    (e.g. by a vLLM plugin), which requires the V2 model runner. It is then
+    moved to `custom_method`, and this is set to the built-in method that its
+    config is based on (None if it isn't based on one)."""
+    custom_method: str | None = field(default=None, init=False)
+    """The configured custom speculative method, if any (see `method`)."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -742,7 +747,7 @@ class SpeculativeConfig:
                 factors.append(tuple(layer_ids))
 
         # A custom speculator may compile a different draft model graph.
-        factors.append(self.method)
+        factors.append(self.custom_method)
         if self.speculator_options:
             factors.append(sorted(self.speculator_options.items()))
         factors.extend(self.speculator_config.hash_factors())
@@ -1328,13 +1333,15 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if get_custom_speculator_config_class(self.method) is not None:
+        if (custom_cls := get_custom_speculator_config_class(self.method)) is not None:
             logger.warning_once(
                 "Using custom speculative method '%s'. This is an experimental "
                 "feature and the speculator interface is subject to breaking "
                 "changes in future vLLM releases.",
                 self.method,
             )
+            self.custom_method = self.method
+            self.method = custom_cls.base_method  # type: ignore[assignment]
         elif self.method is None and SpeculativeConfig._is_custom_proposer_path(
             self.model
         ):
@@ -1369,7 +1376,7 @@ class SpeculativeConfig:
             ):
                 raise ValueError(
                     f"{option} is not supported with speculative method "
-                    f"{self.method!r}."
+                    f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
 
@@ -1391,15 +1398,6 @@ class SpeculativeConfig:
         """The configured speculator's config. Derived on each access
         so that it follows changes to the fields it depends."""
         return get_speculator_config_class(self)(self)
-
-    @property
-    def base_method(self) -> str | None:
-        """`method`, or for a custom method, the built-in method its config is
-        based on. Use this (or the `use_*` methods) to check for a method, so
-        that custom speculators based on built-in ones are treated like them.
-        """
-        custom_cls = get_custom_speculator_config_class(self.method)
-        return self.method if custom_cls is None else custom_cls.base_method
 
     # Shortcuts for commonly used speculator config properties.
 
@@ -1778,7 +1776,7 @@ class SpeculativeConfig:
 
     def use_gemma4_mtp(self) -> bool:
         return (
-            self.base_method == "mtp"
+            self.method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
@@ -1786,7 +1784,7 @@ class SpeculativeConfig:
 
     def use_step3p5_mtp(self) -> bool:
         return (
-            self.base_method == "mtp"
+            self.method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "step3p5_mtp"
@@ -1796,7 +1794,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.base_method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token.
@@ -1812,16 +1810,16 @@ class SpeculativeConfig:
         return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
-        return self.base_method == "dflash"
+        return self.method == "dflash"
 
     def use_dspark(self) -> bool:
-        return self.base_method == "dspark"
+        return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
-        return self.base_method == "draft_model"
+        return self.method == "draft_model"
 
     def uses_draft_kv_cache(self) -> bool:
         return (
@@ -1831,16 +1829,16 @@ class SpeculativeConfig:
         )
 
     def uses_extract_hidden_states(self) -> bool:
-        return self.base_method == "extract_hidden_states"
+        return self.method == "extract_hidden_states"
 
     def use_ngram_gpu(self) -> bool:
-        return self.base_method == "ngram_gpu"
+        return self.method == "ngram_gpu"
 
     def use_ngram(self) -> bool:
-        return self.base_method in ("ngram", "ngram_gpu")
+        return self.method in ("ngram", "ngram_gpu")
 
     def use_multi_module_mtp(self) -> bool:
-        if self.base_method != "mtp" or self.draft_model_config is None:
+        if self.method != "mtp" or self.draft_model_config is None:
             return False
         num_mtp_layers = getattr(
             self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
@@ -1848,10 +1846,10 @@ class SpeculativeConfig:
         return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
-        method = self.method
+        method = self.custom_method or self.method
         model = (
             None
-            if method
+            if self.method
             in (
                 "ngram",
                 "suffix",

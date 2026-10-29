@@ -28,19 +28,17 @@ def fake_speculative_config(
     that aren't fields are taken from the speculator config, like
     SpeculativeConfig's shortcuts to its properties.
     """
-    spec = _FakeSpeculativeConfig(**fields)
+    spec = _FakeSpeculativeConfig(**{"custom_method": None, **fields})
     if speculator_config_cls is None:
         probe = SimpleNamespace(
             method=fields["method"],
+            custom_method=None,
             draft_model_config=SimpleNamespace(architectures=[]),
             use_gemma4_mtp=lambda: False,
             use_multi_module_mtp=lambda: False,
         )
         speculator_config_cls = get_speculator_config_class(probe)  # type: ignore[arg-type]
     spec.speculator_config = speculator_config_cls(spec)
-    if "base_method" not in fields:
-        base_method = speculator_config_cls.base_method
-        spec.base_method = base_method or fields.get("method")
     return spec
 
 
@@ -59,7 +57,8 @@ def attach_speculator_config(
     `speculator_config` of `speculator_config_cls` (and the shortcuts to its
     properties), which reads the mock's attributes lazily."""
     spec.speculator_config = speculator_config_cls(spec)
-    spec.base_method = speculator_config_cls.base_method
+    spec.method = speculator_config_cls.base_method
+    spec.custom_method = None
     for name in _SPECULATOR_CONFIG_SHORTCUTS:
         setattr(spec, name, getattr(spec.speculator_config, name))
     return spec

@@ -323,10 +323,10 @@ def registered_speculative_methods() -> list[str]:
 
 
 def get_custom_speculator_config_class(
-    method: object,
+    method: str | None,
 ) -> type[SpeculatorConfig] | None:
     """The config of a registered custom speculative method, or None."""
-    if not isinstance(method, str) or method not in _CUSTOM_CONFIGS:
+    if method not in _CUSTOM_CONFIGS:
         return None
     config_cls = _CUSTOM_CONFIGS[method]
     if isinstance(config_cls, str):
@@ -346,9 +346,9 @@ def get_custom_speculator_config_class(
 def get_method_config_class(spec_config: "SpeculativeConfig") -> type[SpeculatorConfig]:
     """The config class for `spec_config.method`, regardless of the draft
     checkpoint (for setting up `spec_config`)."""
-    if (
-        custom_cls := get_custom_speculator_config_class(spec_config.method)
-    ) is not None:
+    if spec_config.custom_method is not None:
+        custom_cls = get_custom_speculator_config_class(spec_config.custom_method)
+        assert custom_cls is not None
         return custom_cls
     method = spec_config.method
     if method is None:
@@ -372,11 +372,9 @@ def get_speculator_config_class(
     spec_config: "SpeculativeConfig",
 ) -> type[SpeculatorConfig]:
     """The config class for a set-up spec config."""
-    if (
-        custom_cls := get_custom_speculator_config_class(spec_config.method)
-    ) is not None:
-        return custom_cls
     config_cls = get_method_config_class(spec_config)
+    if spec_config.custom_method is not None:
+        return config_cls
     declared_cls = _get_draft_declared_config_class(spec_config)
     if declared_cls is not None and issubclass(declared_cls, config_cls):
         return declared_cls
@@ -406,22 +404,21 @@ def _resolve_checkpoint_config_class(
     """
     declared_cls = _get_draft_declared_config_class(spec_config)
     if spec_config.method is not None:
-        # Not checked for a custom speculator that isn't based on a built-in one.
-        if (
-            configured_cls.base_method is not None
-            and declared_cls is not None
-            and declared_cls.base_method != configured_cls.base_method
-        ):
+        if declared_cls is not None and declared_cls.base_method != spec_config.method:
             draft = spec_config.draft_model_config
             declared = declared_cls.base_method
+            requested = spec_config.custom_method or spec_config.method
             raise ValueError(
-                f"speculative_config requested method={spec_config.method!r}, but "
+                f"speculative_config requested method={requested!r}, but "
                 f"the draft model {draft.model!r} is a {declared!r} checkpoint "
                 f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
                 f"architectures={getattr(draft, 'architectures', None)}). Pass a "
                 f"matching method or a matching draft checkpoint. Use "
                 f"method={declared!r} if that is what you intended."
             )
+        return configured_cls
+    if spec_config.custom_method is not None:
+        # Not based on a built-in speculator, so there's nothing to check.
         return configured_cls
 
     if declared_cls is not None:
