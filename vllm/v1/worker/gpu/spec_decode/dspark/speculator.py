@@ -90,7 +90,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
-        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
+        if self.use_draft_logits and model.draft_id_to_target_id is not None:
             d2t = model.draft_id_to_target_id
             self._d2t_scatter_index = (
                 torch.arange(d2t.shape[0], device=d2t.device) + d2t
@@ -100,7 +100,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self._draft_scatter_buf = torch.full(
                 (self.max_num_reqs, self.vocab_size),
                 float("-inf"),
-                dtype=self.draft_logits.dtype,
+                dtype=self.draft_logits_spec(self.vllm_config)[0],
                 device=self.device,
             )
         self.use_confidence_head = (
@@ -112,6 +112,10 @@ class DSparkSpeculator(DFlashSpeculator):
             # is available.
             self.use_acceptance_estimator = False
         return model
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # A model's own sample_sequential kernels write the full-size cache.
+        return not hasattr(self.model, "sample_sequential")
 
     def _sample_logits(
         self,
@@ -135,12 +139,20 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
-        sampler = (
-            gumbel_sample
-            if self.draft_watermarker is None
-            else self.draft_watermarker.sample
-        )
-        return sampler(
+        if self.draft_watermarker is not None:
+            return self.draft_watermarker.sample(
+                logits,
+                idx_map,
+                self.temperature,
+                self.seeds,
+                sample_pos - 1,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=self.draft_logits.values,
+                logits_cache_col=self._step_cols[step],
+                use_fp64=self.use_fp64_gumbel,
+            )
+        return gumbel_sample(
             logits,
             idx_map,
             self.temperature,
@@ -148,9 +160,10 @@ class DSparkSpeculator(DFlashSpeculator):
             sample_pos - 1,
             apply_temperature=True,
             is_drafting=True,
-            logits_cache=self.draft_logits,
+            logits_cache=self.draft_logits.values,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
+            logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
@@ -191,6 +204,8 @@ class DSparkSpeculator(DFlashSpeculator):
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
+            if hasattr(self.model, "apply_output_logit_transform"):
+                logits_i = self.model.apply_output_logit_transform(logits_i)
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
