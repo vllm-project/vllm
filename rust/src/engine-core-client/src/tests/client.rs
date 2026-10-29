@@ -36,7 +36,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
+use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -2922,6 +2922,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
     let mooncake_transfer_stats_hex =
         lines.next().expect("missing Mooncake transfer stats fixture line");
+    let umbp_stats_hex = lines.next().expect("missing UMBP stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
@@ -3149,6 +3150,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
     ));
 
+    let umbp_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(umbp_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        umbp_stats,
+        KvConnectorStats::Umbp(stats) if stats.0[&UmbpOperation::Store].num_bytes == 4096
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
     let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
@@ -3157,6 +3165,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.nixl.is_some());
     assert!(multi_connector_stats.mooncake_transfer.is_some());
     assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.umbp.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -3202,6 +3211,10 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     ));
     assert!(rendered_metrics.contains(
         "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
+         operation=\"load\"} 8192"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
