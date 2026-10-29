@@ -20,14 +20,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 HEAD_DIM = 256
-
-
-def _on_gfx950() -> bool:
-    from vllm.platforms.rocm import on_gfx950
-
-    return on_gfx950()
-
-
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 _MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
 
@@ -197,20 +189,6 @@ def _reference_attention(q, keys, values, logical_indices, block_table, token_to
 
 
 @pytest.mark.parametrize(
-    "hw_cvt",
-    [
-        False,
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(
-                not current_platform.is_rocm() or not _on_gfx950(),
-                reason="v_cvt_scalef32_pk_bf16_fp4 is gfx950-only",
-            ),
-        ),
-    ],
-)
-@pytest.mark.parametrize("dot_scaled", [False, True])
-@pytest.mark.parametrize(
     ("num_rows", "num_query_heads", "num_kv_heads", "head_major"),
     [
         pytest.param(1, 12, 1, True, id="tp2-decode"),
@@ -225,8 +203,6 @@ def test_sparse_attention_matches_dequantized_reference(
     num_query_heads: int,
     num_kv_heads: int,
     head_major: bool,
-    dot_scaled: bool,
-    hw_cvt: bool,
 ) -> None:
     torch.manual_seed(1)
     page_size, num_requests, pages_per_request = 256, 2, 12
@@ -266,8 +242,6 @@ def test_sparse_attention_matches_dequantized_reference(
         block_table,
         token_to_req,
         is_mxfp4=True,
-        mxfp4_dot_scaled=dot_scaled,
-        mxfp4_hw_cvt=hw_cvt,
     )
     keys, values = dequantize_cache(cache)
     expected = _reference_attention(

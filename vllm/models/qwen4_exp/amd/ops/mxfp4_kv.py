@@ -152,35 +152,14 @@ def _e2m1_to_bf16(code, scale):
 
 
 @triton.jit
-def mxfp4_dequant_rows(
-    packed, scales, HEAD_DIM: tl.constexpr, HW_CVT: tl.constexpr = False
-):
-    """``[rows, HEAD_DIM // 2]`` bytes and ``[rows, groups]`` scales -> BF16.
-
-    ``HW_CVT`` uses gfx950's ``v_cvt_scalef32_pk_bf16_fp4``, which decodes
-    a byte into two scaled BF16 values bit-identically to the portable path.
-    """
+def mxfp4_dequant_rows(packed, scales, HEAD_DIM: tl.constexpr):
+    """``[rows, HEAD_DIM // 2]`` bytes and ``[rows, groups]`` scales -> BF16."""
     ROWS: tl.constexpr = packed.shape[0]
     GROUPS: tl.constexpr = HEAD_DIM // 32
-    if HW_CVT:
-        packed = tl.reshape(packed.to(tl.uint32), (ROWS, GROUPS, 16))
-        scale = (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
-        scale = tl.broadcast_to(scale[:, :, None], (ROWS, GROUPS, 16))
-        pair = tl.inline_asm_elementwise(
-            "v_cvt_scalef32_pk_bf16_fp4 $0, $1, $2",
-            "=v,v,v",
-            [packed, scale],
-            dtype=tl.uint32,
-            is_pure=True,
-            pack=1,
-        )
-        low = (pair & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True)
-        high = (pair >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
-    else:
-        packed = tl.reshape(packed.to(tl.int32), (ROWS, GROUPS, 16))
-        exponent = scales.to(tl.int32)[:, :, None]
-        low = _e2m1_to_bf16(packed & 0x0F, exponent)
-        high = _e2m1_to_bf16(packed >> 4, exponent)
+    packed = tl.reshape(packed.to(tl.int32), (ROWS, GROUPS, 16))
+    exponent = scales.to(tl.int32)[:, :, None]
+    low = _e2m1_to_bf16(packed & 0x0F, exponent)
+    high = _e2m1_to_bf16(packed >> 4, exponent)
     return tl.reshape(tl.join(low, high), (ROWS, HEAD_DIM))
 
 
