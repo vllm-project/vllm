@@ -344,6 +344,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Spec Decode Draft Model"
   key: spec-decode-draft-model-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   optional: true
@@ -418,9 +419,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
+      label: ":amd: (MI355) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -449,12 +450,15 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
     # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+    - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
@@ -464,6 +468,7 @@ steps:
       timeout_in_minutes: 120
       commands:
       - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+      - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -491,7 +496,9 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
@@ -516,7 +523,9 @@ steps:
       - vllm/v1/attention/
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dflash2.py
+      - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/quantization/
       - vllm/model_executor/kernels/linear/
@@ -627,7 +636,13 @@ steps:
     # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
     # separate shards and put the remaining tests in shard 0, where new tests
     # land by default.
-    - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+    - >-
+      if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+      pytest -v -s
+      v1/e2e/spec_decode/acceptance_rates/mtp_other/
+      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
+      fi
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   mirror:
