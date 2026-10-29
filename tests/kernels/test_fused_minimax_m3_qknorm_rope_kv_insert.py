@@ -828,6 +828,131 @@ def test_sparse_full_nvfp4(num_tokens, num_kv_heads, block_size, kv_scales):
 
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="NVFP4 KV caches need SM100",
+)
+@pytest.mark.parametrize("num_tokens", [7, 513])
+@pytest.mark.parametrize("block_size", [16, 128])
+@pytest.mark.parametrize("heads_per_rank", [1, 2])
+@pytest.mark.parametrize("kv_scales", [(0.5, 2.0), (1.0, 1.0)])
+def test_nvfp4_kv_head_major_slots_match_insert(
+    num_tokens, block_size, heads_per_rank, kv_scales
+):
+    """The MSA NVFP4 spec's ``kv_head_major_slots`` claim holds for the bytes
+    the fused insert writes: slicing a TP1 page by KV head at the spec's byte
+    offsets, as NIXL does for a hetero-TP transfer, gives exactly the page a
+    decode rank holding those heads writes itself."""
+    from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
+        MiniMaxM3SparseMSANvfp4Backend,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+
+    torch.manual_seed(7)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_kv_heads, q_per_kv, num_idx_heads = 4, 4, 1
+    row_bytes = HEAD_DIM // 2 + HEAD_DIM // 16
+
+    spec = MiniMaxM3SparseMSANvfp4Backend.customize_spec(
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=HEAD_DIM,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.NVFP4,
+        )
+    )
+    assert spec.kv_head_major_slots
+    assert spec.page_size_bytes == 2 * num_kv_heads * block_size * row_bytes
+    head_bytes = spec.page_size_bytes // num_kv_heads
+
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    k_scale, v_scale = (
+        torch.tensor(s, dtype=torch.float32, device=device) for s in kv_scales
+    )
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+
+    # Per-head q / k / v columns, then the replicated index q / k columns.
+    q, k, v = (
+        torch.randn(num_tokens, n, HEAD_DIM, dtype=dtype, device=device)
+        for n in (num_kv_heads * q_per_kv, num_kv_heads, num_kv_heads)
+    )
+    v.copy_(nvfp4_edge_values(num_tokens * num_kv_heads, v_scale.item()).view_as(v))
+    index_qk = torch.randn(
+        num_tokens, (num_idx_heads + 1) * HEAD_DIM, dtype=dtype, device=device
+    )
+
+    def insert(first_head, nkv):
+        heads = slice(first_head, first_head + nkv)
+        q_heads = slice(first_head * q_per_kv, (first_head + nkv) * q_per_kv)
+        qkv = torch.cat(
+            [q[:, q_heads].flatten(1), k[:, heads].flatten(1)]
+            + [v[:, heads].flatten(1), index_qk],
+            dim=-1,
+        )
+        kv_cache = torch.zeros(
+            num_blocks * spec.page_size_bytes // num_kv_heads * nkv,
+            dtype=torch.uint8,
+            device=device,
+        ).view(num_blocks, 2 * nkv, block_size, row_bytes)
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            weights[0],
+            weights[1],
+            cos_sin,
+            positions,
+            nkv * q_per_kv,
+            nkv,
+            ROTARY_DIM,
+            eps,
+            weights[2],
+            weights[3],
+            num_idx_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            torch.zeros(num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device),
+            block_size,
+            torch.empty(
+                num_tokens, nkv * q_per_kv * HEAD_DIM, dtype=dtype, device=device
+            ),
+            torch.empty(
+                num_tokens, num_idx_heads * HEAD_DIM, dtype=dtype, device=device
+            ),
+            "nvfp4",
+            kv_k_scale=k_scale,
+            kv_v_scale=v_scale,
+        )
+        return kv_cache.view(num_blocks, -1)
+
+    full_pages = insert(0, num_kv_heads)
+    rank_bytes = heads_per_rank * head_bytes
+    for first_head in range(0, num_kv_heads, heads_per_rank):
+        offset = first_head * head_bytes
+        sliced = full_pages[:, offset : offset + rank_bytes]
+        rank_pages = insert(first_head, heads_per_rank)
+        assert torch.equal(sliced, rank_pages), (
+            f"heads {first_head}..{first_head + heads_per_rank - 1}: "
+            f"{int((sliced != rank_pages).sum())} bytes differ"
+        )
+
+
+# ── Test 6: sparse mode with an NVFP4 index-K cache ──────────────────────────
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
     reason="The NVFP4 reshape_and_cache_flash reference needs SM100",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 513])

@@ -119,6 +119,7 @@ class MiniMaxM3SparseMSANvfp4Backend(MiniMaxM3SparseMSABackend):
             num_head_slots=2 * spec.num_kv_heads,
             state_content_bytes=nvfp4_kv_cache_full_dim(spec.head_size)
             * get_dtype_size(spec.dtype),
+            kv_head_major_slots=True,
         )
 
     @classmethod
