@@ -45,6 +45,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
@@ -674,6 +675,8 @@ def sparse_attn_indexer(
             if candidate_blocks is not None
             else PrefillRowShard.from_metadata(prefill_metadata, num_decode_tokens)
         )
+        # Once per layer rather than per chunk: bf16 weights / unit Q scales.
+        mx_q_scale, mx_weights = mqa_logits_mx_inputs(q_quant, q_scale, weights)
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -716,7 +719,9 @@ def sparse_attn_indexer(
                 )
 
             q_slice = q_quant[row_start:row_end]
-            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
+            q_scale_slice = (
+                mx_q_scale[row_start:row_end] if mx_q_scale is not None else None
+            )
             topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
             # DeepGEMM returns compressed logits: row i starts at K position
@@ -753,17 +758,28 @@ def sparse_attn_indexer(
                     row_starts = cu_seqlen_ks
                     row_ends = cu_seqlen_ke
                 else:
-                    q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                        q_slice_cast, q_scale_slice, weights[row_start:row_end]
+                    # Layers scoring the same chunk share DeepGEMM's per-SM
+                    # schedule; a row-sharded (narrowed) chunk builds its own.
+                    schedules = (
+                        chunk.logits_schedules
+                        if cu_seqlen_ks is chunk.cu_seqlen_ks
+                        else {}
                     )
+                    num_kv, num_heads = k_quant_cast.shape[0], q_slice_cast.shape[1]
+                    key = (torch.cuda.is_current_stream_capturing(), num_kv, num_heads)
+                    if key not in schedules:
+                        schedules[key] = get_mqa_logits_metadata(
+                            cu_seqlen_ks, cu_seqlen_ke, num_kv, num_heads
+                        )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
                         (k_quant_cast, k_scale_cast),
-                        chunk_weights,
+                        mx_weights[row_start:row_end],
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         chunk.max_seqlen_k,
+                        schedules[key],
                     )
                     # DeepSelect ranks the bf16 logits in place of their exact fp32
                     # copy; fp32 logits keep the per-row top-k.
