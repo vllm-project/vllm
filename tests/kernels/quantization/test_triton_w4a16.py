@@ -319,12 +319,14 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
         ),
     )
 
-    kernel.process_weights_after_loading(layer)
-
-    # Expected transformed layouts.
+    # Expected transformed layouts, taken before processing: `replace_parameter`
+    # writes a same-size result into the loaded parameter's own storage, which
+    # the checkpoint tensors above still alias.
     expected_w_kn8 = _pack_int4_along_n(w_int4_kn)  # [K, N//8]
     expected_scales_gn = scales_ckpt_nkg.t().contiguous()  # [K//G, N]
     expected_zeros_gn8 = zeros_ckpt_n8kg.t().contiguous()  # [K//G, N//8]
+
+    kernel.process_weights_after_loading(layer)
 
     assert tuple(layer.weight_packed.shape) == (K, N // 8)
     assert tuple(layer.weight_scale.shape) == (K // G, N)

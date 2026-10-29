@@ -6,12 +6,10 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -24,7 +22,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layers,
+    maybe_prefix,
+)
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -212,8 +214,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm5NextMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
     def set_moe_parameters(self):
@@ -296,14 +300,17 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fused_shared_expert_layers = self.fused_shared_expert_layers
         num_fused_shared = _num_fused_shared_experts(
-            self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+            self.config.n_shared_experts,
+            bool(fused_shared_expert_layers),
         )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
         )
@@ -329,7 +336,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            if self.is_fused_shared_expert_enabled:
+            # Only parse the layer index when FSE is enabled.
+            if (
+                "mlp.shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in fused_shared_expert_layers
+            ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             if _try_load_fp8_indexer_wk(

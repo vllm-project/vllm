@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -169,7 +170,10 @@ class MarlinLinearKernel(MPLinearKernel):
                 ),
             )
         else:
-            setattr(layer, self.w_zp_name, marlin_make_empty(device))
+            # Marlin takes an empty zp; a loaded unused one keeps its data.
+            self._retire_unused_zp(layer)
+            self.w_zp_name = "w_zp"
+            replace_parameter(layer, self.w_zp_name, marlin_make_empty(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 

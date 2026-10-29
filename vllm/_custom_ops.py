@@ -2782,6 +2782,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     q_fp8_scale: float = 1.0,
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
+    write_qkv: bool = True,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2792,11 +2793,13 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
       index_k]`` — the index branch is read straight out of ``qkv``.
 
-    When ``kv_cache`` is given (sparse serving), also scatter-inserts the
-    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
-    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
-    selects the cache storage/conversion path. If
-    ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
+    When ``kv_cache`` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by ``slot_mapping`` and, on sparse layers, the
+    index key into ``index_cache`` by ``index_slot_mapping``.
+    ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what ``reshape_and_cache_flash`` would with
+    unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
+    used for both caches.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
     niq*128]``) are given, the normed/roped q / index_q are written there
@@ -2818,6 +2821,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
+
+    ``write_qkv=False`` needs ``q_fp8_out`` without ``q_out``, for callers that
+    read only the FP8 q, ``index_q_out`` and the caches: k and index_k need not
+    be rewritten in ``qkv``. The persistent kernel (SM80+, ``rotary_dim`` 64)
+    skips those stores; the fallback kernel may still make them.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
@@ -2845,6 +2853,47 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         q_fp8_scale,
         kv_k_scale,
         kv_v_scale,
+        write_qkv,
+    )
+
+
+def fused_minimax_m3_dspark_context_kv(
+    all_kv: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    cache_offsets: torch.Tensor,
+    k_scale: torch.Tensor,
+    scale_offsets: torch.Tensor,
+    rotary_dim: int,
+    eps: float,
+    kv_cache_dtype: str,
+) -> None:
+    """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
+
+    ``all_kv`` ``[N, L, 2, nkv, 128]`` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (``k_norm_weight[L, 128]``) and partial NeoX RoPE;
+    both are stored like ``reshape_and_cache_flash`` into the layers' caches.
+    Layer ``l``'s cache is ``kv_cache`` (layer 0, ``[nb, nkv, bs, 2 * 128]``)
+    shifted by ``cache_offsets[l]`` elements; its fp8 k/v scales are
+    ``k_scale`` (layer 0's) shifted by ``scale_offsets[0, l]`` /
+    ``scale_offsets[1, l]`` floats. Slots < 0 are skipped.
+    """
+    torch.ops._C.fused_minimax_m3_dspark_context_kv(
+        all_kv,
+        k_norm_weight,
+        cos_sin_cache,
+        positions,
+        slot_mapping,
+        kv_cache,
+        cache_offsets,
+        k_scale,
+        scale_offsets,
+        rotary_dim,
+        eps,
+        kv_cache_dtype,
     )
 
 

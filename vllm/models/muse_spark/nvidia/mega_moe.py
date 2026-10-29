@@ -138,6 +138,16 @@ class MuseSparkMegaMoEExperts(nn.Module):
             self.w2_input_scale = param(num_local_experts, dtype=torch.float32)
             self.w13_input_scale = param(num_local_experts, 2, dtype=torch.float32)
 
+            for scale, value in (
+                (self.w13_weight_scale, 1.0),
+                (self.w2_weight_scale, 1.0),
+                (self.w13_weight_scale_2, 1e-3),
+                (self.w2_weight_scale_2, 1e-3),
+                (self.w13_input_scale, 1e-2),
+                (self.w2_input_scale, 1e-2),
+            ):
+                set_weight_attrs(scale, {"dummy_weight_value": value})
+
         else:
             self.w13_weight = param(
                 num_local_experts,

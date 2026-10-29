@@ -1926,6 +1926,23 @@ def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size
         VllmConfig._resolve_and_verify_engram_config(config)
 
 
+@pytest.mark.parametrize("threshold,expected", [(7, 8), (8, 8), (16, 16)])
+def test_dbo_thresholds_cover_a_request_per_microbatch(threshold, expected):
+    # Verifying 3 drafts: 4 tokens per request, so 2 microbatches need 8.
+    parallel_config = ParallelConfig(
+        enable_dbo=True,
+        dbo_decode_token_threshold=threshold,
+        dbo_prefill_token_threshold=threshold,
+    )
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(uniform_decode_query_len=4, parallel_config=parallel_config),
+    )
+    VllmConfig._raise_dbo_thresholds_for_spec_decode(config)
+    assert parallel_config.dbo_decode_token_threshold == expected
+    assert parallel_config.dbo_prefill_token_threshold == expected
+
+
 def test_engram_explicit_config_requires_supported_model():
     """Explicit all-false settings still opt into model validation."""
     with pytest.raises(ValueError, match="requires a model with supported Engram"):
@@ -4064,6 +4081,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     target_config.hf_text_config.model_type = "deepseek_v3"
     target_config.quantization = None
     target_config.max_model_len = 4096
+    target_config.using_transformers_backend.return_value = False
 
     SpeculativeConfig(
         method="mtp",

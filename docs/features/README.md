@@ -1,5 +1,9 @@
 # Features
 
+## KV Cache Offloading
+
+- [UMBPStoreConnector](umbp_store_connector_usage.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -152,7 +153,6 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
-        draft_logits_num_shards: int = 1,
     ):
         self.sampler = sampler
         self.watermark_key = watermark_key
@@ -165,9 +165,6 @@ class RejectionSampler:
         self.fly_window_size = 0
         self.fly_entropy_threshold = spec_config.fly_entropy_threshold
         self.fly_entropy_top_k = spec_config.fly_entropy_top_k
-        # Above 1 when each TP rank caches only the draft logits of the
-        # requests it owns (see DraftModelSpeculator).
-        self.draft_logits_num_shards = draft_logits_num_shards
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
@@ -254,7 +251,7 @@ class RejectionSampler:
     def _verify(
         self,
         logits: torch.Tensor,
-        draft_logits: torch.Tensor | None,
+        draft_logits: DraftLogitsCache | None,
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
         cu_num_logits: torch.Tensor,
@@ -293,18 +290,21 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
-            draft_logits_num_shards=self.draft_logits_num_shards,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
         )
+        if self.sampler.trace_replay_state is not None:
+            self.sampler.trace_replay_state.apply_trace_to_verified(
+                sampled, num_sampled, verify_draft_sampled, cu_num_logits, idx_mapping
+            )
         return processed_logits, sampled, num_sampled
 
     def _verify_in_chunks(
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
-        draft_logits: torch.Tensor | None,
+        draft_logits: DraftLogitsCache | None,
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
         max_chunk_logits: int,
@@ -422,7 +422,7 @@ class RejectionSampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
-        draft_logits: torch.Tensor | None = None,
+        draft_logits: DraftLogitsCache | None = None,
         invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
@@ -442,6 +442,17 @@ class RejectionSampler:
         # accepted length before it reaches a permissive bitmask row. Only
         # verification sees the copy: `apply_sampling_params` and watermarking
         # keep the real draft ids.
+        # A request skipped since its draft step may find its draft logits row
+        # reused by another request. Reject those drafts.
+        stale_drafts = (
+            draft_logits.stale_drafts(input_batch) if draft_logits is not None else None
+        )
+        if stale_drafts is not None:
+            invalid_drafts = (
+                stale_drafts
+                if invalid_drafts is None
+                else invalid_drafts | stale_drafts
+            )
         verify_draft_sampled = draft_sampled
         if invalid_drafts is not None:
             verify_draft_sampled = draft_sampled.masked_fill(invalid_drafts, -1)

@@ -1624,6 +1624,12 @@ package_data = {
         "py.typed",
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
+        # Tuned kernel configs must be explicit: the setuptools-scm git
+        # file-finder is inactive when building from a .git-less tree
+        # (e.g. tarball/sdist builds), which silently drops them from
+        # the wheel and forces fallback to default launch configs.
+        "model_executor/layers/mamba/ops/configs/selective_state_update/*.json",
+        "kernels/helion/configs/*/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
