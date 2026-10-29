@@ -531,7 +531,9 @@ class ShardedMarkovSampler:
         # sizes, and eager drafts (decode graphs not FULL) run the unpadded
         # one. A rank compiling mid-serving would leave its peers polling for
         # its records until they give up.
-        for rows in range(1, MAX_ROWS_PERSISTENT + 1):
+        # (the speculator's buffers bound the batch: max_num_seqs requests)
+        max_reqs = spec.sample_idx_mapping.numel() // spec.num_speculative_steps
+        for rows in range(1, min(MAX_ROWS_PERSISTENT, max_reqs) + 1):
             self._launch(spec, rows, None, warmup=True)
         torch.distributed.barrier(group=cpu_group)
         self.failstop = FailStop(
