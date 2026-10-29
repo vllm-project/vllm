@@ -827,8 +827,15 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
+        # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
+        params = self.kv_transfer_config.get_from_extra_config("ucx_backend_params", {})
+        ucx_backend_params = {k: str(v) for k, v in params.items()}
         sleep_mode = vllm_config.model_config.enable_sleep_mode and config is not None
-        if sleep_mode:
+        # With UCX params, create every backend here, in the configured order.
+        explicit_backends = (config is not None and not sleep_mode) and (
+            bool(ucx_backend_params) and "UCX" in self.nixl_backends
+        )
+        if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
@@ -838,8 +845,17 @@ class NixlBaseConnectorWorker:
                 {
                     "num_threads": str(num_threads),
                     "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
+                    **ucx_backend_params,
                 },
             )
+        elif explicit_backends:
+            for backend in self.nixl_backends:
+                nixl_params: dict[str, str] = {}
+                if backend == "UCX":
+                    if not non_ucx_backends:
+                        nixl_params["num_threads"] = str(num_threads)
+                    nixl_params.update(ucx_backend_params)
+                self.nixl_wrapper.create_backend(backend, nixl_params)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
@@ -1644,6 +1660,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
@@ -1844,10 +1861,14 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
+                # Overlaid groups can page the same bytes with different page
+                # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
+                # one address share a region only if their block_len matches.
                 # A packed PP producer keeps one region per layer, so aliases at
                 # one address (a layer and its SWA view) stay distinct.
-                if base_addr in seen_base_addresses and not split_packed_rows:
-                    region_index = seen_base_addresses.index(base_addr)
+                region_key = (base_addr, block_len)
+                if region_key in seen_region_keys and not split_packed_rows:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1860,6 +1881,7 @@ class NixlBaseConnectorWorker:
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)

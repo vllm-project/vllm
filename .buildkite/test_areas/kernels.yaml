@@ -38,6 +38,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
@@ -60,6 +61,7 @@ steps:
       source_file_dependencies:
       - csrc/
       - tests/kernels/core
+      - vllm/kernels/triton/
       - tests/kernels/test_top_k_per_row.py
       - tests/kernels/test_concat_mla_q.py
       - tests/kernels/test_rocm_fp32_router_gemm.py
@@ -260,6 +262,30 @@ steps:
       - tests/kernels/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (B200) MiniMax M3 MegaMoE"
+  key: minimax-m3-mega-moe-test-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
+  - vllm/models/minimax_m3/nvidia/
+  - vllm/utils/deep_gemm.py
+  - tests/models/test_minimax_m3_mega_moe.py
+  commands:
+    - pytest -v -s models/test_minimax_m3_mega_moe.py
+
+- label: ":nvidia: (B200) MiniMax-M3 Model Tests"
+  key: minimax-m3-model-tests-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/cute_utils/
+  - vllm/utils/flashinfer.py
+  - tests/models/minimax_m3/
+  commands:
+    - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
+
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
@@ -345,8 +371,9 @@ steps:
           --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
       - pytest -v -s kernels/test_fused_muse_spark_qknorm_rope_kv_insert.py -k rocm
 
-- label: ":nvidia: (L4) Attention Kernels Shard %N"
+- label: ":nvidia: (L4) Attention Kernels"
   key: kernels-attention-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -359,15 +386,14 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 7
+    - pytest -v -s kernels/attention
   mirror:
     amd:
-      label: ":amd: (MI300) Attention Kernels Shard %N"
+      label: ":amd: (MI300) Attention Kernels"
+      automatic_shard: true
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
-      parallelism: 6
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -380,15 +406,7 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - >-
-        pytest -v -s
-        kernels/attention
-        --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
-        --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
-        --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
-        --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
-        --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
-        --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -512,8 +530,9 @@ steps:
       commands:
       - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":nvidia: (L4) MoE Kernels Shard %N"
+- label: ":nvidia: (L4) MoE Kernels"
   key: kernels-moe-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 50
@@ -526,16 +545,12 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - >-
-      pytest -v -s
-      kernels/moe
-      --ignore=kernels/moe/test_modular_oai_triton_moe.py
-      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 5
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
   mirror:
     amd:
-      label: ":amd: (MI300) MoE Kernels Shard %N"
+      label: ":amd: (MI300) MoE Kernels"
+      automatic_shard: true
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
@@ -566,6 +581,7 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/checkpoint.py
   - vllm/model_executor/layers/mamba/gdn
+  - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
   - vllm/v1/attention/backends/gdn_attn.py
   commands:
