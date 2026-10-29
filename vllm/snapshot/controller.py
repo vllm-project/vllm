@@ -50,8 +50,9 @@ def _child_engine_argv(
         ):
             if not separator:
                 next(iterator, None)
-        elif len(option) > 2 and "--portable".startswith(option):
-            # A store_true flag: nothing to consume after it.
+        elif option == "--portable":
+            # The create parser rejects abbreviations, so only the full
+            # spelling reaches the child argv.
             continue
         else:
             child_argv.append(item)

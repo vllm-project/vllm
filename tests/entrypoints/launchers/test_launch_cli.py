@@ -335,7 +335,7 @@ def parse_snapshot(*argv: str):
     return parser.parse_args(["snapshot", *argv])
 
 
-@pytest.mark.parametrize("option", ["--snapshot-dir", "--snapshot_dir", "--snapshot-d"])
+@pytest.mark.parametrize("option", ["--snapshot-dir", "--snapshot_dir"])
 @pytest.mark.parametrize("joined", [False, True])
 def test_snapshot_create_forwards_only_engine_options(option, joined, monkeypatch):
     directory = [f"{option}=/tmp/snapshot"] if joined else [option, "/tmp/snapshot"]
@@ -370,6 +370,44 @@ def test_snapshot_create_strips_the_portable_option(monkeypatch):
     # The flag carries no value, so the option after it survives.
     assert "--portable" not in child_argv
     assert "--dtype" in child_argv
+
+
+@pytest.mark.parametrize("port_argv", ["--port 9001", "--port=9001"])
+def test_snapshot_create_keeps_the_port_option(port_argv, monkeypatch):
+    argv = [
+        "create",
+        "Qwen/Qwen3-0.6B",
+        "--revision",
+        _MODEL_REVISION,
+        "--snapshot-dir",
+        "/tmp/snapshot",
+        *port_argv.split(),
+    ]
+    args = parse_snapshot(*argv)
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", *argv])
+
+    child_argv = list(_child_engine_argv(args, None))
+
+    # Compare above the appended --enable-sleep-mode.
+    expected = port_argv.split()
+    assert child_argv[-len(expected) - 1 : -1] == expected
+
+
+@pytest.mark.parametrize("abbrev", ["--porta", "--portab", "--portabl"])
+def test_snapshot_create_rejects_portable_abbreviations(abbrev, capsys):
+    # The create parser disables abbreviations, so a prefix of --portable
+    # fails parsing instead of reaching the argv stripping as a valid flag.
+    with pytest.raises(SystemExit):
+        parse_snapshot(
+            "create",
+            "Qwen/Qwen3-0.6B",
+            "--revision",
+            _MODEL_REVISION,
+            "--snapshot-dir",
+            "/tmp/snapshot",
+            abbrev,
+        )
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_snapshot_create_strips_the_work_dir_option(monkeypatch):
