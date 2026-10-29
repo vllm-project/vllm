@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dispatch DSV4.1 mHC operations and overlap coefficient generation."""
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -33,8 +33,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or regress.
-MHC_OVERLAP_MAX_TOKENS = 16
+
+@cache
+def mhc_overlap_max_tokens() -> int:
+    """Largest batch of the overlap path and its fused all-reduce + mHC."""
+    # GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or
+    # regress. H200 TP4 improves through 144 tokens; at 192 the one-shot fused
+    # all-reduce falls behind FlashInfer's two-shot one.
+    return 144 if current_platform.is_device_capability(90) else 16
+
 
 # The fused all-reduce + mHC kernel of the overlap path, built once by
 # init_mhc_all_reduce.
@@ -47,12 +54,19 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
     mix_size = config.hc_mult * (config.hc_mult + 2)
     return (
-        current_platform.is_device_capability_family(100)
-        and is_deep_gemm_supported()
+        is_deep_gemm_supported()
         and config.hidden_size % 64 == 0
         and 0 < mix_size <= 32
         and mix_size % 8 == 0
         and not vllm_config.parallel_config.use_ubatching
+        and (
+            current_platform.is_device_capability_family(100)
+            # Hopper overlaps only behind the fused all-reduce + mHC.
+            or (
+                current_platform.is_device_capability(90)
+                and supports_mhc_all_reduce(vllm_config)
+            )
+        )
     )
 
 
@@ -85,13 +99,13 @@ def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
     _all_reduce_mhc = AllReduceMHC(
         hidden_size=config.hidden_size,
         hc_mult=config.hc_mult,
-        max_num_tokens=MHC_OVERLAP_MAX_TOKENS,
+        max_num_tokens=mhc_overlap_max_tokens(),
         top_k=config.num_experts_per_tok,
         device=current_platform.current_device(),
     )
     logger.info_once(
         "DSV4.1 mHC: CuTe DSL Lamport all-reduce fused with mHC for up to %d tokens.",
-        MHC_OVERLAP_MAX_TOKENS,
+        mhc_overlap_max_tokens(),
     )
 
 
@@ -239,7 +253,7 @@ def mhc_shifted_post_pre(
             # Outside FULL graphs, compute the next mixes inline.
             stream = torch.cuda.current_stream()
     elif reduce_results:
-        if stream is not None and 0 < x.shape[0] <= MHC_OVERLAP_MAX_TOKENS:
+        if stream is not None and 0 < x.shape[0] <= mhc_overlap_max_tokens():
             assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
             assert pre_mix is not None and norm_weight is not None
             residual, layer_input = _all_reduce_mhc(
