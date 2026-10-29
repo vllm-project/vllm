@@ -278,6 +278,7 @@ pub(crate) async fn unified_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
+                        spec_decode_metrics: finished.spec_decode_metrics,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
@@ -420,6 +421,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                spec_decode_metrics: None,
                 timestamps: Default::default(),
             })),
         }
@@ -509,7 +511,7 @@ mod tests {
     async fn unified_stream_parses_formatted_tool_call_without_latch() {
         use vllm_parser::tool::{HermesToolParser, ToolParser as _};
 
-        let hermes = HermesToolParser::create(&[]).unwrap();
+        let hermes = HermesToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
         let parser = vllm_parser::unified::CombinedParser::new(None, Some(hermes));
 
         // Regression guard: a formatted call (space before the outer `}`) must not
@@ -745,6 +747,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(0),
                     timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -786,6 +789,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(5),
                     timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -819,6 +823,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(2),
                     timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -872,6 +877,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(5),
                     timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -919,6 +925,7 @@ mod tests {
                 AssistantEvent::Done {
                     usage: done_usage(0),
                     timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,

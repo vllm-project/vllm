@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV4IndexerBackend,
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV32IndexerPrefillChunkMetadata,
@@ -299,6 +300,19 @@ class DeepseekV41RocmMxfp4IndexerBackend(DeepseekV41IndexerBackend):
     @staticmethod
     def get_builder_cls() -> type["DeepseekV41RocmMxfp4IndexerMetadataBuilder"]:
         return DeepseekV41RocmMxfp4IndexerMetadataBuilder
+
+
+class DeepseekV4RocmMxfp4IndexerBackend(DeepseekV4IndexerBackend):
+    """DeepSeek-V4's single-level indexer: the dense path only. Its 256-token
+    blocks give 64-entry pages at compress ratio 4, aiter's preferred size."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V4_ROCM_MXFP4_INDEXER"
+
+    @staticmethod
+    def get_builder_cls() -> type["RocmMxfp4IndexerMetadataBuilder"]:
+        return RocmMxfp4IndexerMetadataBuilder
 
 
 class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):

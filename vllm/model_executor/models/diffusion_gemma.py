@@ -286,6 +286,7 @@ class DiffusionGemmaForConditionalGeneration(
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
+    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
@@ -347,7 +348,7 @@ class DiffusionGemmaForConditionalGeneration(
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality == "image":
-            return "<image_soft_token>"
+            return "<|image|>"
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")

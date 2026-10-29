@@ -188,6 +188,7 @@ def test_cpu_mla_prefill_new_tokens() -> None:
     k = torch.randn(6, 4, 16, dtype=torch.bfloat16)
     v = torch.randn(6, 4, 16, dtype=torch.bfloat16)
     out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+    assert not isinstance(out, tuple)
     ref, _ = _reference_ragged_attention(
         q,
         k,
@@ -286,6 +287,7 @@ def test_zen_cpu_mla_prefill_new_tokens() -> None:
     v = torch.randn(6, 4, v_head_dim, dtype=torch.bfloat16)
 
     out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+    assert not isinstance(out, tuple)
     ref, _ = _reference_ragged_attention(
         q,
         k,
