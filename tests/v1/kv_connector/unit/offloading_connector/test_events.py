@@ -786,6 +786,81 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
     assert key in tracker._pending_event_metadata
 
 
+@pytest.mark.parametrize(
+    ("record_method", "position"),
+    [("record_store", 0), ("record_partial_store", 4)],
+)
+def test_reused_key_store_survives_queued_eviction(record_method, position):
+    """An eviction queued before a key is stored again must not release the
+    payload of the newer store, whose BlockStored is translated later."""
+    tracker = _tracker()
+    group = _group_config()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key, other_key = make_offload_key(_hash(0), 0), make_offload_key(_hash(1), 0)
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="reuse")
+    record = getattr(tracker, record_method)
+
+    primary.prepare_store([key], ctx)
+    record(req, group, position, key)
+    primary.complete_store([key], ctx)
+    list(tracker.take_events(primary.take_events()))
+
+    # Evict the key, then store it again before the eviction is translated.
+    primary.prepare_store([other_key], ctx)
+    primary.complete_store([other_key], ctx)
+    primary.prepare_store([key], ctx)
+    record(req, group, position, key)
+    [old_removal, *_] = tracker.take_events(primary.take_events())
+    assert isinstance(old_removal, BlockRemoved)
+    assert old_removal.block_hashes == [_wire_hash(_hash(0))]
+
+    primary.complete_store([key], ctx)
+    [stored] = tracker.take_events(primary.take_events())
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(_hash(0))]
+    assert stored.token_ids == [1, 2, 3, 4]
+    assert stored.block_size == 4
+
+    primary.prepare_store([other_key], ctx)
+    [final_removal] = tracker.take_events(primary.take_events())
+    assert final_removal.block_hashes == [_wire_hash(_hash(0))]
+    assert key not in tracker._pending_event_metadata
+
+
+def test_dropped_promotion_cleanup_does_not_hold_restored_key():
+    """The manager drops a failed promotion's cleanup once the key is stored
+    again; the store's payload must still be released at its eviction."""
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    group = _group_config()
+    key, other_key = make_offload_key(_hash(0), 0), make_offload_key(_hash(1), 0)
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="restore")
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+
+    primary.prepare_store([key], ctx)
+    assert (
+        OffloadingConnectorScheduler._maximal_prefix_lookup(
+            scheduler, [key], ctx, req, group, 0
+        )
+        is None
+    )
+    primary.complete_store([key], ctx, success=False)
+    primary.prepare_store([key], ctx)
+    tracker.record_store(req, group, 0, key)
+    assert list(tracker.take_events(primary.take_events())) == []
+
+    primary.complete_store([key], ctx)
+    [stored] = tracker.take_events(primary.take_events())
+    assert stored.token_ids == [1, 2, 3, 4]
+
+    primary.prepare_store([other_key], ctx)
+    [removed] = tracker.take_events(primary.take_events())
+    assert removed.block_hashes == [_wire_hash(_hash(0))]
+    assert key not in tracker._pending_event_metadata
+
+
 def test_take_events_groups_removed_hashes_by_kv_group():
     tracker = _tracker()
     group0_config = _group_config(group_idx=0, blocks_per_chunk=2)

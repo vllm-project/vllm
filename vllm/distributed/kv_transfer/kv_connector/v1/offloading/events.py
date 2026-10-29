@@ -122,6 +122,11 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # OffloadKey -> primary removals of earlier allocations that a later
+        # recorded store replaced (prepare_store() only allocates absent keys).
+        # The manager queued them before that store, so they arrive in the next
+        # take_events() batch, or never if the manager dropped them.
+        self._superseded_primary_removals: dict[OffloadKey, int] = {}
 
     def record_store(
         self,
@@ -140,8 +145,17 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
+        self._replace_event_metadata(offload_key, meta)
+
+    def _replace_event_metadata(
+        self, offload_key: OffloadKey, meta: _OffloadEventMetadata
+    ) -> None:
         if existing := self._pending_event_metadata.get(offload_key):
             meta.active_residencies.update(existing.active_residencies)
+            if _PRIMARY_RESIDENCY in existing.active_residencies:
+                self._superseded_primary_removals[offload_key] = (
+                    self._superseded_primary_removals.get(offload_key, 0) + 1
+                )
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -247,9 +261,7 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={_PRIMARY_RESIDENCY},
         )
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
+        self._replace_event_metadata(offload_key, meta)
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -278,11 +290,13 @@ class OffloadingEventsTracker:
             meta = self._pending_event_metadata.get(key)
             if meta is not None and not meta.active_residencies:
                 self._pending_event_metadata.pop(key)
+        self._superseded_primary_removals.clear()
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+        self._superseded_primary_removals.clear()
 
     def _build_event_metadata(
         self,
@@ -429,6 +443,16 @@ class OffloadingEventsTracker:
                 ownership=event.ownership,
             )
 
+    def _release_residency(
+        self, key: OffloadKey, meta: _OffloadEventMetadata, event: OffloadingEvent
+    ) -> None:
+        residency = (event.medium, event.ownership)
+        superseded = self._superseded_primary_removals.get(key, 0)
+        if residency == _PRIMARY_RESIDENCY and superseded:
+            self._superseded_primary_removals[key] = superseded - 1
+        else:
+            meta.active_residencies.discard(residency)
+
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
@@ -437,14 +461,14 @@ class OffloadingEventsTracker:
             meta = self._pending_event_metadata.get(key)
             if event.metadata_only:
                 if meta is not None:
-                    meta.active_residencies.discard((event.medium, event.ownership))
+                    self._release_residency(key, meta, event)
                 continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies.discard((event.medium, event.ownership))
+                self._release_residency(key, meta, event)
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
