@@ -20,7 +20,6 @@ from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import
 from vllm.model_executor.layers.quantization.online.rdna_lm_head import (
     RdnaLMHeadMethod,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.utils.platform_utils import num_compute_units
 
 GROUP_SIZE = 32
@@ -107,7 +106,7 @@ class Int4LMHeadMethod(RdnaLMHeadMethod):
 
     def quantize_weight(self, layer: Module, weight: torch.Tensor) -> None:
         w_q, w_s, w_zp = quantize_lm_head_int4(weight)
-        replace_parameter(layer, "weight", w_q)
+        self.set_weight(layer, w_q)
         layer.weight_scale = Parameter(w_s, requires_grad=False)
         layer.weight_zero_point = Parameter(w_zp, requires_grad=False)
 

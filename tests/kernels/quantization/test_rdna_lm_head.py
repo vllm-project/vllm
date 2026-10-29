@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.kernels.linear.mixed_precision import rdna_hybrid_w4a16
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online import rdna_lm_head
 from vllm.model_executor.layers.quantization.online.int4_lm_head import (
@@ -163,7 +164,9 @@ def test_lm_head_quantization_rejects_bad_weights(scheme, monkeypatch):
         head.quant_method.process_weights_after_loading(head)
 
 
-def _loaded_head(scheme: Scheme, dtype: torch.dtype, tie: bool = False):
+def _loaded_head(
+    scheme: Scheme, dtype: torch.dtype, tie: bool = False, device: str = "cuda"
+):
     with set_current_vllm_config(_config(scheme)):
         head = ParallelLMHead(VOCAB, HIDDEN, disable_tp=True)
         embed = VocabParallelEmbedding(VOCAB, HIDDEN, disable_tp=True)
@@ -172,7 +175,7 @@ def _loaded_head(scheme: Scheme, dtype: torch.dtype, tie: bool = False):
         layer.weight.data.copy_(torch.randn(layer.weight.shape, generator=gen) * 0.02)
     if tie:
         head = head.tie_weights(embed)
-    return head.to("cuda", dtype), embed.to("cuda", dtype)
+    return head.to(device, dtype), embed.to(device, dtype)
 
 
 @requires_gfx1x
@@ -200,14 +203,24 @@ def test_lm_head_matches_reference(scheme, dtype, num_tokens):
     assert ((out - full).norm() / full.norm()).item() < scheme.full_precision_tol
 
 
-@requires_gfx1x
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_tied_lm_head_keeps_embedding(scheme):
-    head, embed = _loaded_head(scheme, torch.bfloat16, tie=True)
+@pytest.mark.parametrize("tie", [False, True], ids=["untied", "tied"])
+def test_quantized_head_does_not_reuse_loaded_weight(scheme, tie, monkeypatch):
+    monkeypatch.setattr(rdna_lm_head, "_on_gfx1x", lambda: True)
+    # Without the gfx1151 row padding the quantized weight is contiguous, the
+    # case where reusing the loaded storage would overwrite it.
+    monkeypatch.setattr(rdna_hybrid_w4a16, "_on_gfx1151", lambda: False)
+    head, embed = _loaded_head(scheme, torch.bfloat16, tie=tie, device="cpu")
+    loaded = head.weight
     embed_weight = embed.weight.detach().clone()
     head.quant_method.process_weights_after_loading(head)
 
+    assert head.weight is not loaded
     assert head.weight.dtype == scheme.weight_dtype
+    assert (
+        head.weight.untyped_storage().data_ptr() != loaded.untyped_storage().data_ptr()
+    )
+    # A tied head shares the embedding's weight until it is quantized.
     assert embed.weight.dtype == torch.bfloat16
     assert torch.equal(embed.weight, embed_weight)
 

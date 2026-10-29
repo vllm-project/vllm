@@ -13,7 +13,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
-from torch.nn import Module
+from torch.nn import Module, Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -107,10 +107,20 @@ class RdnaLMHeadMethod(QuantizeMethodBase):
             "Quantized the lm_head to %s (%d x %d per rank).", self.scheme, n, k
         )
 
+    @staticmethod
+    def set_weight(layer: Module, weight: torch.Tensor) -> None:
+        """Register ``weight`` as a new ``layer.weight`` parameter.
+
+        Not `replace_parameter`, which keeps the loaded parameter and may copy
+        into its storage: a tied head shares both with the input embeddings, and
+        an untied head would keep its fp16 storage allocated.
+        """
+        layer.weight = Parameter(weight, requires_grad=False)
+
     @abstractmethod
     def quantize_weight(self, layer: Module, weight: torch.Tensor) -> None:
-        """Replace ``layer.weight`` with the quantized copy of ``weight`` and
-        register any scale tensors the op needs."""
+        """Replace ``layer.weight`` with the quantized copy of ``weight`` (via
+        `set_weight`) and register any scale tensors the op needs."""
         raise NotImplementedError
 
     @abstractmethod
