@@ -75,19 +75,12 @@ _TIER_POLL_LOCK_TIMEOUT_S = 1.0
 # Warn after this much continuous failure to acquire the lock. Above the 5 s
 # warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
 _TIER_POLL_STALL_WARN_S = 30.0
-# Back off once rounds have failed continuously for this long. Counted in time,
-# not rounds: at the default 1 ms interval a round budget is spent in a blink,
-# so a transient fault (a peer reconnecting) would otherwise trip it. The
-# thread never stops -- an idle engine parks, and on_schedule_end() only serves
-# the tiers when a step runs, so exiting here would leave peers unserved with
-# nothing to wake the engine.
+# Back off after this much continuous failure (time, not rounds, so a brief
+# fault doesn't trip it). Never exit: an idle engine would leave peers unserved.
 _TIER_POLL_BACK_OFF_AFTER_S = 30.0
-# Floor for the wait between backing-off rounds. The wait is the larger of this
-# and the configured tier_poll_interval_s, so backing off never polls faster
-# than the configured interval.
+# Minimum wait between rounds while backing off.
 _TIER_POLL_BACKOFF_S = 1.0
-# Minimum spacing between the reports logged for failing rounds, so neither a
-# permanent fault nor one that alternates with successes can flood the log.
+# Minimum spacing between failure logs.
 _TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 # How long shutdown() waits for the thread to finish its round.
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
@@ -412,8 +405,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _tier_poll_loop(self) -> None:
         stalled_since: float | None = None
-        # Start of the current run of failed rounds, how many have failed in
-        # it, and when one was last reported.
+        # Current failure run: start, count, and last log time.
         failing_since: float | None = None
         failures = 0
         last_error_log = 0.0
@@ -439,13 +431,8 @@ class TieringOffloadingManager(OffloadingManager):
                 failing_since = None
                 failures = 0
             except Exception:
-                # Never let a round kill the thread silently: it keeps
-                # retrying (backing off after sustained failure) so a peer is
-                # still served while the engine is idle, when no step runs.
-                # At most one report per error-log interval, so a fault that
-                # alternates with successes cannot log a traceback every round.
-                # The first failure of a run gets the traceback, later ones a
-                # one-line summary; a failure inside the interval logs nothing.
+                # Keep retrying so peers are served while idle. Rate-limit
+                # logs: traceback on the first failure, a summary after.
                 now = time.monotonic()
                 if failing_since is None:
                     failing_since = now
@@ -1240,26 +1227,22 @@ class TieringOffloadingManager(OffloadingManager):
     def has_pending_work(self) -> bool:
         """Report whether outstanding work needs an engine step to finish.
 
-        Work a live tier-poll thread can complete on its own -- a polled
-        tier's own work and its jobs and deferred releases, which
-        poll_tiers() collects -- is left out, so an engine that only serves
-        peers can still go idle and finish a pause or graceful shutdown.
+        Work a live tier-poll thread finishes on its own is excluded, so an
+        engine that only serves peers can go idle.
         """
-    if self._polled_tiers:
-        # A step is the only driver without a live tier-poll thread, and the
-        # only way to submit a promotion a peer lookup takes from another tier.
-        thread = self._tier_poll_thread
-        if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
-            return True
-        # A lone polled tier: the thread collects its jobs and deferred
-        # releases, so only primary-tier cascades need a step.
-        return any(state.pending_cascade_keys for state in self._req_state.values())
-    return (
-        bool(self._jobs)
-        or bool(self._deferred_releases)
-        or any(state.pending_cascade_keys for state in self._req_state.values())
-        or any(tier.has_pending_work() for tier in self.secondary_tiers)
-    )
+        if self._polled_tiers:
+            # Without a live thread, or with another tier a peer lookup can
+            # promote from, only a step makes progress.
+            thread = self._tier_poll_thread
+            if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
+                return True
+            return any(state.pending_cascade_keys for state in self._req_state.values())
+        return (
+            bool(self._jobs)
+            or bool(self._deferred_releases)
+            or any(state.pending_cascade_keys for state in self._req_state.values())
+            or any(tier.has_pending_work() for tier in self.secondary_tiers)
+        )
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
