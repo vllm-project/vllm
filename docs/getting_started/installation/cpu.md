@@ -22,6 +22,22 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
+## Expert parallelism
+
+CPU DP-attention and EP-MoE use PyTorch Gloo over TCP/IP with
+`--all2all-backend allgather_reducescatter` on both the same host and across
+hosts. Existing model, dtype, quantization and expert capability checks still
+apply; BF16 vector experts are a reference test configuration, not a precision
+allowlist. Optimized AMX paths require the matching CPU and OS capabilities.
+
+See [CPU Expert Parallelism](../../serving/expert_parallel_deployment.md#cpu-expert-parallelism)
+for the tested/unsupported/unvalidated matrix, same-host and primary/headless
+layouts, private-network requirements and current validation limits. Install
+matching CPU extensions and model revisions on all workers. Budget memory for
+replicated attention, local experts, per-engine KV caches, communication
+scratch and compiler/loading temporaries, and reserve CPU cores for serving
+and Gloo threads.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).

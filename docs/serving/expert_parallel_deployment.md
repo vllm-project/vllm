@@ -1,12 +1,12 @@
 # Expert Parallel Deployment
 
-vLLM supports Expert Parallelism (EP), which allows experts in Mixture-of-Experts (MoE) models to be deployed on separate GPUs, increasing locality, efficiency, and throughput overall.
+vLLM supports Expert Parallelism (EP), which shards routed expert weights across Mixture-of-Experts (MoE) workers. For CPU workers, see [CPU Expert Parallelism](#cpu-expert-parallelism); the accelerator examples use the GPU backends described below.
 
 EP is typically coupled with Data Parallelism (DP). While DP can be used independently of EP, EP is more efficient when used in conjunction with DP. You can read more about data parallelism [here](data_parallel_deployment.md).
 
-## Prerequisites
+## GPU Prerequisites {#prerequisites}
 
-Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
+Before using the GPU EP backends below, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
 1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
@@ -29,6 +29,163 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+
+## CPU Expert Parallelism
+
+CPU EP combines data-parallel attention with sharded routed experts using
+`--enable-expert-parallel --all2all-backend allgather_reducescatter`.
+DP/EP communication uses **PyTorch Gloo over TCP/IP on both the same host and
+across hosts**. Existing TP/PP communication selection is preserved. NCCL,
+DeepEP, RDMA and InfiniBand are not required for this CPU path.
+
+With `TP=PP=PCP=1` and `DP=EP=2`, attention weights and each engine's KV cache
+remain local to its DP rank, while each rank loads its own routed expert
+weights. The existing model, attention and expert selectors determine dtype,
+activation, quantization and supported layouts. BF16 unquantized experts are
+the reference example below, not a runtime restriction on other configurations.
+
+### Compatibility and validation
+
+Install a matching [CPU build](../getting_started/installation/cpu.md) on every
+worker. Record the selected attention backend, expert implementation and local
+expert count; CPU ISA alone does not prove a particular expert path was used.
+
+| Configuration | Validation status | Capability or evidence boundary |
+| --- | --- | --- |
+| FP32/BF16 variable-size Gloo collectives, integer routing metadata, subgroup sizes 2 and 3 | Tested on native macOS arm64 and Linux amd64 emulation | Includes empty ranks, changed sizes, subgroup ordering and independent output storage. Exact collectives also pass between two containers with private IPC namespaces. |
+| BF16 mapped and modular experts with DP2/EP2 or DP3/EP3, including input weighting and separate shared experts | Tested on native macOS arm64 and Linux amd64 emulation | Full-weight references check routing weights, local ownership, remote zeros and once-only shared output. |
+| `axolotl-ai-co/tiny-mixtral-30m`, revision `99512191d2561cb631b0d3176e59ade2d76b287b`, BF16 vector experts, DP2/EP2 | Eager and real Inductor tested on native macOS arm64 | Public-server tests compare fixed-prefix logprobs, uneven requests, idle ranks, later waves and warm-cache restart. MRV1 was automatically selected because Triton is unavailable on macOS. This tiny checkpoint tests mechanics rather than trained-model quality. |
+| The pinned tiny Mixtral checkpoint on Linux, including primary/headless containers | Not yet validated | Model-server startup is blocked before worker creation in the tested amd64 emulation environment. Actual default Linux runner and model comparisons remain required. |
+| `ibm-research/PowerMoE-3b`, revision `13fcb5a98001438bed01cf1ac4b423751dc4c2ea`, one rank, eager, macOS BF16 vector experts | Loads and generates; numerical reference validation failed | The existing top-token helper passes, but a teacher-forced HF prompt-logprob check fails identically on the rebuilt borrowed baseline and integrated build. This is not trained-model EP correctness evidence. |
+| AVX2 vector SWIGLUOAI experts with bias | Numerical regression check failed in Linux amd64 emulation | A small existing non-EP case exceeds the existing tolerance on the borrowed baseline and integrated build. This is distinct from a missing capability or an EP transport failure. |
+| ZenTorch fused MoE kernel with EP | Known incompatible kernel | It lacks rank-local expert-map handling; existing CPU selection bypasses it for EP. |
+| Inherited FP8/MXFP4 CPU expert paths | Target-specific regression validation pending | Existing capability checks require the appropriate native operator and CPU/OS ISA support; vector-only emulation does not validate AMX. |
+| Default Linux compiled full-model execution and deployment on two independent Linux hosts | Not yet validated | macOS Inductor and two local containers do not establish these deployment claims. |
+
+Configurations outside the reference tests are not automatically unsupported.
+Use existing capability checks and their specific errors. Dynamic CPU EPLB is
+separate work.
+
+The refreshed macOS eager/compiled tests completed shutdown and restart with
+no remaining server processes or forced kills. This does not establish
+recovery from a failed collective or physical two-host behavior.
+
+On the tested Docker setup, amd64-emulated model startup blocks while spawning
+a subprocess after PyZMQ starts its networking threads. A minimal Python/PyZMQ
+reproducer also blocks without vLLM; its native Linux arm64 control passes.
+Collective and layer results from that emulation remain useful, while native
+Linux x86-64 validation is still needed for MRV2 and target ISA claims.
+
+### Same-host reference layout
+
+Activate the CPU build's environment and first verify the pinned checkpoint on
+one rank. Then run two local DP engines with EP:
+
+```bash
+export VLLM_CPU_KVCACHE_SPACE=1
+
+.venv/bin/vllm serve axolotl-ai-co/tiny-mixtral-30m \
+  --revision 99512191d2561cb631b0d3176e59ade2d76b287b \
+  --dtype bfloat16 --enforce-eager \
+  --max-model-len 512 --max-num-batched-tokens 512 --max-num-seqs 4 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --data-parallel-size 2 --data-parallel-size-local 2 \
+  --data-parallel-backend mp --distributed-executor-backend mp \
+  --enable-expert-parallel --all2all-backend allgather_reducescatter \
+  --host 127.0.0.1 --port 8000
+```
+
+Size KV caches and CPU core bindings per engine. Leave capacity for the API,
+scheduler and communication threads. Measure peak memory during loading and
+compilation as well as inference: unequal gathers pad to the largest rank's
+batch, and combine temporarily holds the global contribution tensor.
+
+### Primary/headless layout across hosts
+
+The following is a cross-host validation recipe; physical two-host acceptance
+remains pending. Use the same vLLM revision, rebuilt CPU extension, PyTorch
+dependencies and checkpoint revision on both workers. Substitute each host's
+reachable private IP and private interface for these examples.
+
+```bash
+# Node A: primary API and DP rank 0.
+export VLLM_HOST_IP=10.0.0.10
+export GLOO_SOCKET_IFNAME=eth0
+export VLLM_CPU_KVCACHE_SPACE=1
+
+.venv/bin/vllm serve axolotl-ai-co/tiny-mixtral-30m \
+  --revision 99512191d2561cb631b0d3176e59ade2d76b287b \
+  --dtype bfloat16 --enforce-eager \
+  --max-model-len 512 --max-num-batched-tokens 512 --max-num-seqs 4 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --data-parallel-size 2 --data-parallel-size-local 1 \
+  --data-parallel-backend mp --distributed-executor-backend mp \
+  --enable-expert-parallel --all2all-backend allgather_reducescatter \
+  --data-parallel-address 10.0.0.10 --data-parallel-rpc-port 13345 \
+  --cpu-distributed-timeout-seconds 300 --distributed-timeout-seconds 300 \
+  --host 10.0.0.10 --port 8000
+```
+
+```bash
+# Node B: headless DP rank 1.
+export VLLM_HOST_IP=10.0.0.11
+export GLOO_SOCKET_IFNAME=eth0
+export VLLM_CPU_KVCACHE_SPACE=1
+
+.venv/bin/vllm serve axolotl-ai-co/tiny-mixtral-30m \
+  --revision 99512191d2561cb631b0d3176e59ade2d76b287b \
+  --dtype bfloat16 --enforce-eager \
+  --max-model-len 512 --max-num-batched-tokens 512 --max-num-seqs 4 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --data-parallel-size 2 --data-parallel-size-local 1 \
+  --data-parallel-backend mp --distributed-executor-backend mp \
+  --enable-expert-parallel --all2all-backend allgather_reducescatter \
+  --data-parallel-address 10.0.0.10 --data-parallel-rpc-port 13345 \
+  --cpu-distributed-timeout-seconds 300 --distributed-timeout-seconds 300 \
+  --data-parallel-start-rank 1 --headless
+```
+
+This is internal load balancing: only Node A exposes the API. Do not add
+`--data-parallel-rank`, which selects external load balancing, or the offline
+example's `--dp-num-nodes`, which is not a `vllm serve` flag. These DP-only
+launches do not use `--nnodes` to establish physical locality.
+
+For compiled validation, remove `--enforce-eager` on both workers and unset
+`VLLM_CPU_CI_ENV`; record the runner actually selected and verify real Inductor
+execution. A forced MRV1 run or the CI-eager shortcut is not default compiled
+validation.
+
+### CPU network requirements
+
+Follow the [inter-node security guidance](../usage/security.md#inter-node-communication):
+worker traffic belongs on an isolated private network with direct peer TCP
+reachability.
+
+| Connection | Required access |
+| --- | --- |
+| API | Authorized clients reach Node A's API port; scope this separately from worker traffic. |
+| DP startup | Node B reaches Node A's configured `--data-parallel-rpc-port`. |
+| Gloo peers, stores and engine/coordinator endpoints | Allow dynamic internal TCP listeners and return traffic between the specific worker private IPs or allowlisted worker-group members. Opening only the DP startup port is insufficient. |
+| Interface selection | `VLLM_HOST_IP` is that worker's reachable private address; `GLOO_SOCKET_IFNAME` selects its private NIC, not a port range. |
+
+There is no supported `GLOO_PORT_RANGE` setting or fixed two-port firewall
+recipe for this path. A small fixed internal port allowlist requires separate
+port-allocation work. Pre-download matching model artifacts; a shared filesystem
+is not required.
+
+For container simulation, use two workers with distinct reachable container
+addresses and private IPC namespaces on a bridge network. Containers on the
+same Docker network can reach the dynamic peer ports without publishing them
+to the host. A two-container run is useful functional evidence; it does not
+validate independent host kernels, physical NICs or host firewalls. For actual
+Linux multi-host containers, host networking is the initial deployment layout
+to validate; publishing one or two ports is insufficient.
+
+If startup stalls, first check advertised IPs, interfaces and peer TCP access.
+If connections succeed, check corresponding collective sizes, tensor shapes,
+dtypes and ordering. An idle engine must still participate in coordinated
+dummy forwards. API readiness alone is not a numerical correctness check. Use
+bounded group deadlines and restart the deployment after a collective failure.
 
 ## Single Node Deployment
 
@@ -82,7 +239,7 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
 
 ## Multi-Node Deployment
 
-For multi-node deployment, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
+For the GPU multi-node examples below, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
 
 ### Deployment Steps
 
@@ -135,6 +292,8 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     This ensures torch distributed group discovery uses Ethernet instead of InfiniBand for initial setup.
 
 ## Expert Parallel Load Balancer (EPLB)
+
+Dynamic CPU EPLB is separate from the CPU DP/EP path above. The following configuration applies to backends with EPLB support.
 
 While MoE models are typically trained so that each expert receives a similar number of tokens, in practice the distribution of tokens across experts can be highly skewed. vLLM provides an Expert Parallel Load Balancer (EPLB) to redistribute expert mappings across EP ranks, evening the load across experts.
 

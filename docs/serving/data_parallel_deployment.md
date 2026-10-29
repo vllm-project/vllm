@@ -1,6 +1,6 @@
 # Data Parallel Deployment
 
-vLLM supports Data Parallel deployment, where model weights are replicated across separate instances/GPUs to process independent batches of requests.
+vLLM supports Data Parallel deployment, where model weights are replicated across separate worker instances to process independent batches of requests.
 
 This will work with both dense and MoE models.
 
@@ -19,6 +19,27 @@ In all cases, it is beneficial to load-balance requests between DP ranks. For on
 This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see [examples/features/data_parallel/data_parallel_offline.py](../../examples/features/data_parallel/data_parallel_offline.py).
 
 There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
+
+## CPU DP and Expert Parallelism
+
+CPU MoE workers can combine DP attention with EP routed experts using
+`--enable-expert-parallel --all2all-backend allgather_reducescatter`.
+DP/EP communication uses Gloo over TCP/IP on both the same host and across
+hosts; existing TP/PP communication selection is preserved. With TP1,
+attention weights are replicated, routed expert weights are sharded, and
+KV caches belong to individual DP engines.
+
+See [CPU Expert Parallelism](expert_parallel_deployment.md#cpu-expert-parallelism)
+for the validation matrix, CPU build requirements, launch commands and private
+network requirements. The reference primary/headless layout has global DP2
+and local DP1 on each worker: the primary owns rank 0 and the API, and the
+secondary uses `--headless --data-parallel-start-rank 1`. Keep this separate
+from external load balancing, which uses `--data-parallel-rank`.
+
+The existing DP Coordinator keeps idle engines participating in dummy forwards.
+An engine with no user requests has not left the distributed group. CPU
+resource and KV-cache budgets apply per engine; GPU counts in the following
+examples describe the GPU deployment layouts.
 
 ## Internal Load Balancing
 
