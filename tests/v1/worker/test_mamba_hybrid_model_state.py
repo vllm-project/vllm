@@ -351,7 +351,7 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
 
 @pytest.mark.skipif(not HAS_GPU, reason="Requires CUDA or XPU")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
-def test_postprocess_state_scalar_with_int64_mapping(
+def test_postprocess_state_scalar_with_int32_mapping(
     num_sampled: int, expected_value: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
@@ -361,7 +361,7 @@ def test_postprocess_state_scalar_with_int64_mapping(
     state._align_mode = False
     state.recoverssm = None
     state._mamba_ctx = None
-    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int64, device=GPU_DEVICE)
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=GPU_DEVICE)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
@@ -376,7 +376,7 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
-    idx_mapping = torch.tensor([0, 1], dtype=torch.int64)
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
     num_accepted_tokens = torch.ones(2, dtype=torch.int32)
     attn_groups = _recoverssm_attn_groups("layer")
 
@@ -426,7 +426,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
         block_table=torch.zeros((2, 4), dtype=torch.int32, device=GPU_DEVICE),
     )
     num_sampled = torch.tensor([2, sampled], dtype=torch.int32, device=GPU_DEVICE)
-    idx_mapping = torch.tensor([3, 1], dtype=torch.int64, device=GPU_DEVICE)
+    idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device=GPU_DEVICE)
     attn_groups = _recoverssm_attn_groups("layer")
 
     state.recoverssm.record_step({"layer": metadata}, attn_groups, for_capture=False)
