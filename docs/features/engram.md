@@ -136,6 +136,11 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+Independent prefill and decode instances can opt into a persistent external
+table generation on supported CUDA Fabric systems; see
+[shared host-backed Engram tables](engram_shared_host.md) for setup, lifetime,
+and validation limits.
+
 ## Limitations
 
 - CUDA-alike platforms only.

@@ -510,12 +510,14 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
+  - tests/models/test_deepseek_v41_shared_engram.py
   commands:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 numerics; the model test skips.
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - pytest -v -s models/test_deepseek_v41_shared_engram.py
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd

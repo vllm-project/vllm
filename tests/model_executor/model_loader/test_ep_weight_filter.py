@@ -8,6 +8,7 @@ import tempfile
 import huggingface_hub.constants
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
@@ -17,6 +18,49 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
+
+
+def test_lazy_mixed_shard_skips_external_table_before_get_tensor(tmp_path, monkeypatch):
+    """A mixed shard must still load its projections without reading the table."""
+    import vllm.model_executor.model_loader.weight_utils as weight_utils
+
+    table = "layers.1.engram.embed.weight"
+    projection = "layers.1.engram.q_weight"
+    filename = tmp_path / "mixed.safetensors"
+    save_file({table: torch.ones(2, 256), projection: torch.ones(2)}, filename)
+    original = weight_utils.safe_open
+    reads = []
+
+    class ObservedOpen:
+        def __init__(self, *args, **kwargs):
+            self.source = original(*args, **kwargs)
+
+        def __enter__(self):
+            self.source.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.source.__exit__(*args)
+
+        def keys(self):
+            return self.source.keys()
+
+        def get_tensor(self, name):
+            reads.append(name)
+            return self.source.get_tensor(name)
+
+    monkeypatch.setattr(weight_utils, "safe_open", ObservedOpen)
+    loaded = dict(
+        safetensors_weights_iterator(
+            [str(filename)],
+            False,
+            "lazy",
+            is_unused_weight=lambda name: name == table,
+        )
+    )
+    assert set(loaded) == {projection}
+    assert reads == [projection]
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id

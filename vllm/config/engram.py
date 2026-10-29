@@ -8,6 +8,7 @@ from pydantic import model_validator
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
 if TYPE_CHECKING:
+    from vllm.config.load import LoadConfig
     from vllm.config.model import ModelConfig
     from vllm.config.parallel import ParallelConfig
 
@@ -55,8 +56,36 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    shared_host_endpoint: str | None = None
+    """Opt-in owner host:port for an immutable external Engram generation."""
+
+    shared_host_token_file: str | None = None
+    """Private token file used to attach to the shared Engram owner."""
+
+    shared_host_generation: str | None = None
+    """Expected generation printed by the owner after checkpoint publication."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        shared_values = (
+            self.shared_host_endpoint,
+            self.shared_host_token_file,
+            self.shared_host_generation,
+        )
+        if any(shared_values) and not all(shared_values):
+            raise ValueError(
+                "shared Engram requires endpoint, token file and generation"
+            )
+        if self.shared_host_endpoint and (
+            not self.cpu_offload
+            or self.dp_shared_memory
+            or self.use_thp
+            or self.embedding_across_dp
+        ):
+            raise ValueError(
+                "shared Engram requires CPU offload without DP sharing, "
+                "huge-page storage or embedding_across_dp"
+            )
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -81,12 +110,21 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if self.shared_host_endpoint:
+            from vllm.platforms import current_platform
+
+            if (
+                model_config.architecture != "DeepseekV41ForCausalLM"
+                or not current_platform.is_cuda()
+            ):
+                raise ValueError("shared Engram requires CUDA DeepSeek V4.1")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
+                and not self.shared_host_endpoint
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
@@ -94,6 +132,8 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.shared_host_endpoint and parallel_config.data_parallel_size != 1:
+            raise ValueError("shared Engram initially requires DP size 1")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
@@ -106,6 +146,20 @@ class EngramConfig:
         ):
             raise ValueError(
                 "Engram embedding_across_dp is not supported with elastic EP yet."
+            )
+
+    def verify_load_config(self, load_config: "LoadConfig") -> None:
+        """External tables require skipping mixed-shard tensors before reading."""
+        if not self.shared_host_endpoint:
+            return
+        if (
+            load_config.load_format not in ("auto", "safetensors")
+            or load_config.safetensors_load_strategy != "lazy"
+            or load_config.model_loader_extra_config.get("enable_multithread_load")
+        ):
+            raise ValueError(
+                "shared Engram requires safetensors lazy loading without "
+                "multi-thread loading"
             )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
