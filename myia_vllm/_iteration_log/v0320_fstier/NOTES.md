@@ -4241,3 +4241,21 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **VRAM** : GPU 0 **23 315 MiB** (+85, haut du boot), GPU 1 **21 786** stable ; mécanisme desktop+high-water inchangé, Q41 maintenue close sous « tenir en l'état ». **Marge commit : 88,5 % (44,1 Go libres)** — inversion nette après 90,7 % ; aucun travail lourd lancé. `vmmemWSL` working set 100,5 GiB.
 
 **Annexes** : nbaudit ok 02:05:45Z (`Image/`, 0 échec consécutif). G: écriture OK. Condensation nominale, aucun événement d'échec. Prouveur : aucune passe. Registre : aucune question ouverte. Repli po-2027 : fenêtre 17-18Z maintenue, ack/exécution à vérifier.
+
+## Cycle 04:1xZ (29/10) — 🟢 nuit calme confirmée ; la rafale 400 window+1 a CESSÉ ; ★ fork dashboard workspace-vllm réparé par merge
+
+**Prod** : health 200 (5,6 ms), RC=0, StartedAt stable 28/10 18:20:28Z (**10 h sans restart**), OOM 0, 3/3 Up, `/dev/shm` 33G/63G = 51 %. KV GPU **21,8 %** (26,4 % au cycle précédent — décroissance nocturne continue), running 1, waiting 0. Préemptions **28 inchangées (Δ+0/2 h)**. Batterie petits appelants : **0,59 / 7,99 / 0,64 s** — une sonde à 8 s en milieu de batterie (pattern « la file frappe aussi en milieu de batterie », déjà vu 18:11Z), aucune lenteur récurrente → **🟢**. Watchdog : un `fail 1/2` à 02:38:03Z, zéro 2/2, 3 899 OK. Prefix externe **84,0 %** de hits (88,9M/105,9M).
+
+**★ 400 window+1 : 1/2 h — la rafale de 83 a CESSÉ.** Fenêtre quasi propre (1 seul 400, po-2027). La session >262K de po-2024 s'est arrêtée d'elle-même vers 01:05Z ou a été corrigée ; pas de réponse claudish encore au signal de 02:17Z (normal, nuit — ack attendu dans la journée). 401 : 24× bruit d'auth connu.
+
+**Attribution 2 h (02:11→04:11Z)** : 411 lignes ~3,4 req/min (creux nocturne). **po-2028 127 req, 127 corps >100K, tous 200** — le secrétaire continue toute la nuit à contexte long, sans erreur ni préemption : le tiers absorbe. po-2027 14 req. Sans en-têtes 270 (moteur local + hub non résolu).
+
+**VRAM** : GPU 0 **23 152 MiB** (−163 vs 02:1xZ, redescend), GPU 1 **21 786** stable. Q41 close (« tenir en l'état »). **Marge commit 87,4 % (48,4 Go libres)** — la détente se poursuit (90,7 → 88,5 → 87,4).
+
+**★ Fork dashboard réparé** : WARN `[DASHBOARD-FORK]` #3482 récurrent dès 02:09:34Z (96 occurrences/2 h) — clé `workspace-vllm (1)` forkée à côté du canonique (apparu autour du cross-post 02:1xZ). **Merge exécuté 04:14:06Z** (seule opération de réparation fork) : 22 msg source ∪ 14 cible → 14 (40 doublons par id, 9 tombstones exclus), statut arbitré lastModified, **source archivée par renommage atomique, retirée des deux artefacts** (GDrive + PG).
+
+**Sécurité** : aucune IP externe nouvelle avec 200. Poste user Paris `82.66.89.184` réapparu (6 req/7 h, 200 — IP connue et réclamée Q13, pas une alerte). Site hairpin 931×200, web1 14×200, interne `?` 690×200.
+
+**Coordination** : inbox 183 non lus (cumul multi-jours) — 5 traités/marqués lus (ACK claudish attribution, rapports worker github-4131 + fleet-manifest, lot CoursIA P0, mention #4395). HIGH re-review ms#1543 (roo-extensions, corrigé 035ad0a1) **laissé non lu délibérément** : review hors périmètre du cycle de surveillance, reste visible pour la prochaine session de travail.
+
+**Annexes** : nbaudit ok 04:05:45Z (`Image/`, 0 échec consécutif). G: OK (710 Go libres). Condensation nominale — disjoncteur half-open retry **réussi 03:11:56Z** (condensation complétée, aucun échec). Prouveur : aucune passe. Registre : **zéro question ouverte**. **Repli po-2027 sous Minimax : fenêtre 17-18Z aujourd'hui** — vérifier l'ack claudish et mesurer l'effet sur le pic du soir (barre : plateau 🟠 du 28/10).
