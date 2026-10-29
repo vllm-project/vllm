@@ -1492,6 +1492,10 @@ class MooncakeStoreWorker:
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
+        # Device KV regions (addr -> len) registered with the store.
+        self._device_regions: dict[int, int] = {}
+        # Device regions unregistered for sleep and not yet registered again.
+        self._released_regions: set[int] = set()
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
@@ -1737,13 +1741,11 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        # A layer's cache is one tensor, or a list of state tensors that share
+        # one raw storage (Mamba).
+        def _layer_views(v: torch.Tensor | list[torch.Tensor]) -> list[torch.Tensor]:
             assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
+            return [v] if isinstance(v, torch.Tensor) else v
 
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
@@ -1757,7 +1759,7 @@ class MooncakeStoreWorker:
             }
             seen_storage_ptrs: set[int] = set()
             cache_tensors = [
-                group_kernel_blocks(_repr_tensor(cache), self.num_blocks)
+                group_kernel_blocks(_layer_views(cache)[0], self.num_blocks)
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
             ]
@@ -1776,8 +1778,20 @@ class MooncakeStoreWorker:
                         region_len,
                         ret,
                     )
-            for db in self.token_dbs:
-                db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
+                else:
+                    self._device_regions[base_addr] = region_len
+            for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
+                # In a hybrid model each KV cache group registers only its own
+                # layers. A group with no layers on this PP rank registers all.
+                group_caches = [
+                    group_kernel_blocks(view, self.num_blocks)
+                    for layer_name in group.layer_names
+                    if layer_name in kv_caches
+                    for view in _layer_views(kv_caches[layer_name])
+                ]
+                db.store_layout.register_kv_caches(
+                    group_caches or cache_tensors, self.num_blocks
+                )
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -1803,7 +1817,7 @@ class MooncakeStoreWorker:
             addrs: list[int] = []
             block_lens: list[int] = []
             for layer_name, value in group_caches:
-                cache = _repr_tensor(value)
+                cache = _layer_views(value)[0]
                 is_host_resident = group.host_resident
                 if is_host_resident:
                     num_blocks = self._kv_cache_config.hisparse_host_num_blocks
@@ -1834,6 +1848,8 @@ class MooncakeStoreWorker:
                             f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
                         )
                     registered_buffers[base_addr] = region_len
+                    if not is_host_resident:
+                        self._device_regions[base_addr] = region_len
                 elif registered_len != region_len:
                     raise ValueError(
                         f"KV cache views at {base_addr:#x} expose inconsistent "
@@ -1933,6 +1949,20 @@ class MooncakeStoreWorker:
         logger.info(
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
+
+    def unregister_kv_caches(self) -> None:
+        """Unregister device KV buffers after the engine has drained transfers."""
+        for addr in self._device_regions.keys() - self._released_regions:
+            if self.store.unregister_buffer(addr) != 0:
+                raise RuntimeError(f"Mooncake unregister_buffer failed for {addr:#x}")
+            self._released_regions.add(addr)
+
+    def restore_kv_caches(self) -> None:
+        """Register the released regions again: same addresses, new pages."""
+        for addr in list(self._released_regions):
+            if self.store.register_buffer(addr, self._device_regions[addr]) != 0:
+                raise RuntimeError(f"Mooncake register_buffer failed for {addr:#x}")
+            self._released_regions.discard(addr)
 
     def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async loads.
