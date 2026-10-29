@@ -17,7 +17,7 @@ import torch
 from vllm.distributed import get_tp_group
 from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import PEER_HEAD
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
-from vllm.models.kimi_k3.amd.specialized_decode.runtime import MAX_TOKENS
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import MAX_QLEN, MAX_TOKENS
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.peer import PeerBuffer
 
 
@@ -28,18 +28,30 @@ class MonoRunner:
         from vllm.models.kimi_k3.amd.specialized_decode.mono import layer
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
 
+        # the widest K1 of every request length (its token tiles), the widest
+        # K2 with every scratch region
         self.scratch = torch.zeros(
             max(
-                kda.scratch_bytes(
-                    kda.KdaPreBuild(
+                *(
+                    kda.scratch_bytes(
+                        kda.KdaPreBuild(
+                            tokens=MAX_TOKENS // q * q,
+                            qlen=q,
+                            nblocks=8,
+                            delta=True,
+                            state_len=3 + q,
+                        )
+                    )
+                    for q in range(1, MAX_QLEN + 1)
+                ),
+                layer.scratch_bytes(
+                    layer.K2Build(
                         tokens=MAX_TOKENS,
-                        qlen=MAX_TOKENS,
                         nblocks=8,
-                        delta=True,
-                        state_len=3 + MAX_TOKENS,
+                        producer_latent_quant=True,
+                        stream_x=True,
                     )
                 ),
-                layer.scratch_bytes(layer.K2Build(tokens=MAX_TOKENS, nblocks=8)),
             ),
             dtype=torch.uint8,
             device=device,

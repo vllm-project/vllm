@@ -5,7 +5,8 @@ does with AttnRes, ``(prefix_sum, block_residual, prefix_delta)``.
 
 - ``WholeLayer`` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
-  all-reduce, the MLP AttnRes and the latent MoE.
+  all-reduce, the MLP AttnRes and the latent MoE. From KDA_POST_TOKENS rows
+  vLLM's AttnRes and in_proj replace K1's front (``kda_post``).
 - ``FfnLayer`` (MLA layers): vLLM's AttnRes and MLA up to o_proj's input, then
   K2.
 
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import KDA_POST_TOKENS
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 if TYPE_CHECKING:
@@ -27,13 +29,15 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m = layer.mlp
+    nblocks = layer.prev_valid_blocks + (1 if reset else 0)
     return k2.K2Build(
         tokens=tokens,
-        nblocks=layer.prev_valid_blocks + (1 if reset else 0),
+        nblocks=nblocks,
         reset=reset,
         eps=layer.mlp_res_norm.variance_epsilon,
         out_eps=layer.post_attention_layernorm.variance_epsilon,
         ln_eps=m.routed_expert_norm.variance_epsilon,
+        **k2.tuned(tokens, nblocks),
         **runner.fault,
     )
 
@@ -79,15 +83,35 @@ def _k2(layer, runner: MonoRunner, core, prefix, blocks, reset=False):
     return out
 
 
-def compile_build(key) -> None:
-    """Compiles one launch's kernel (a ``K2Build`` or ``KdaPreBuild``) without
-    running it: FlyDSL's compile-only mode returns before the launch."""
-    import os
-
+def scratch_bytes(key) -> int:
+    """The shared scratch a launch's build uses (``kda_post`` none)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
 
-    mod = kda if isinstance(key, kda.KdaPreBuild) else k2
+    if isinstance(key, kda.KdaPreBuild):
+        return kda.scratch_bytes(key)
+    if isinstance(key, k2.K2Build):
+        return k2.scratch_bytes(key)
+    return 0
+
+
+def compile_build(key) -> None:
+    """Compiles one launch's kernel (a ``K2Build``, ``KdaPreBuild`` or
+    ``KdaPostBuild``) without running it: FlyDSL's compile-only mode returns
+    before the launch."""
+    import os
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        kda,
+        local_post,
+    )
+
+    mod: Any = k2
+    if isinstance(key, kda.KdaPreBuild):
+        mod = kda
+    elif isinstance(key, local_post.KdaPostBuild):
+        mod = local_post
     launch = mod.build(key)
     # FlyDSL's compile-only switch has no FLYDSL_ prefix
     old = os.environ.get("COMPILE_ONLY")
@@ -116,11 +140,27 @@ class _Layer:
 
 
 class WholeLayer(_Layer):
+    def __init__(self, layer, runner: MonoRunner, width: int):
+        super().__init__(layer, runner, width)
+        # vLLM's AttnRes and in_proj, then K1's KDA
+        self.post = width >= KDA_POST_TOKENS
+
     def _k1_key(self, qlen: int, state_len: int, delta: bool):
-        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+            kda,
+            local_post,
+        )
 
         layer = self.layer
         attn = layer.self_attn
+        if self.post:
+            return local_post.KdaPostBuild(
+                tokens=self.width,
+                qlen=qlen,
+                state_len=state_len,
+                onorm_eps=attn.o_norm.eps,
+                lower_bound=attn.gate_lower_bound,
+            )
         return kda.KdaPreBuild(
             tokens=self.width,
             qlen=qlen,
@@ -132,6 +172,7 @@ class WholeLayer(_Layer):
             onorm_eps=attn.o_norm.eps,
             lower_bound=attn.gate_lower_bound,
             write_idx=layer.block_write_idx if layer.is_block_write_layer else -1,
+            **kda.tuned(self.width, qlen),
         )
 
     def builds(self) -> list:
@@ -159,15 +200,33 @@ class WholeLayer(_Layer):
         m: Any = step.attn_metadata[attn.prefix]
         if self.first:
             runner.step_begin()
+        core = prefix_sum.new_empty(prefix_sum.size(0), kda.PROJ)
+        key = self._k1_key(
+            m.spec_state_indices_tensor.size(-1),
+            self.caches()[0].size(-1),
+            prefix_delta is not None,
+        )
+        if self.post:
+            self._post(key, m, prefix_sum, block_residual, prefix_delta, core)
+        else:
+            self._pre(key, m, prefix_sum, block_residual, prefix_delta, core)
+        if layer.is_block_write_layer:
+            # the prefix restarts at the attention's output
+            prefix_sum = torch.empty_like(prefix_sum)
+            out = _k2(layer, runner, core, prefix_sum, block_residual, reset=True)
+        else:
+            out = _k2(layer, runner, core, prefix_sum, block_residual)
+        return prefix_sum, block_residual, out
+
+    def _pre(self, key, m, prefix_sum, block_residual, prefix_delta, core):
+        """K1: AttnRes through the gated norm -> ``core``."""
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
+
+        layer = self.layer
+        attn = layer.self_attn
         conv_state, rstate = self.caches()
-        s = prefix_sum.size(0)
-        core = prefix_sum.new_empty(s, kda.PROJ)
         kda.kda_pre(
-            self._k1_key(
-                m.spec_state_indices_tensor.size(-1),
-                conv_state.size(-1),
-                prefix_delta is not None,
-            ),
+            key,
             prefix=prefix_sum,
             delta=prefix_delta,
             blocks=block_residual,
@@ -186,15 +245,48 @@ class WholeLayer(_Layer):
             num_acc=m.num_accepted_tokens,
             core_out=core,
             layer=layer.layer_idx,
-            **runner.launch_args(),
+            **self.runner.launch_args(),
         )
-        if layer.is_block_write_layer:
-            # the prefix restarts at the attention's output
-            prefix_sum = torch.empty_like(prefix_sum)
-            out = _k2(layer, runner, core, prefix_sum, block_residual, reset=True)
-        else:
-            out = _k2(layer, runner, core, prefix_sum, block_residual)
-        return prefix_sum, block_residual, out
+
+    def _post(self, key, m, prefix_sum, block_residual, prefix_delta, core):
+        """The stock AttnRes (the pending delta added into ``prefix_sum`` and the
+        block write, as K1 does) and in_proj, then K1's KDA (``kda_post``) ->
+        ``core``."""
+        from vllm.models.kimi_k3.amd.linear import _apply_attn_res
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+            kda,
+            local_post,
+        )
+
+        layer = self.layer
+        attn = layer.self_attn
+        x = _apply_attn_res(
+            prefix_sum,
+            block_residual,
+            layer.self_attention_res_proj,
+            layer.self_attention_res_norm,
+            layer.prev_valid_blocks,
+            delta=prefix_delta,
+            output_norm=layer.input_layernorm,
+            block_write_idx=(
+                layer.block_write_idx if layer.is_block_write_layer else -1
+            ),
+        )
+        conv_state, rstate = self.caches()
+        local_post.kda_post(
+            key,
+            projected=attn.in_proj_qkvgfab(x)[0],
+            w_fb=attn.f_b_proj.weight,
+            conv_w=attn.conv1d.weight.view(kda.QKV, 4),
+            conv_state=conv_state,
+            a_log=attn.A_log,
+            dt_bias=attn.dt_bias,
+            on_w=attn.o_norm.weight,
+            rstate=rstate,
+            st_idx=m.spec_state_indices_tensor,
+            num_acc=m.num_accepted_tokens,
+            core_out=core,
+        )
 
 
 class FfnLayer(_Layer):

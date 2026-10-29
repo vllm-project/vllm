@@ -60,7 +60,9 @@ def _randn(g, *shape, scale=1.0, dtype=bf):
 # ---------------------------------------------------------------- K1
 
 
-def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
+def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, L: int):
+    """S rows of S / L requests of L tokens; past one request each request
+    accepted a different number of tokens."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HD,
         HIDDEN,
@@ -71,7 +73,8 @@ def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
     )
 
     g = torch.Generator(device="cuda").manual_seed(0)
-    sl = 3 + (S - 1)
+    sl = 3 + (L - 1)
+    slots = S + 8
     w = {
         "prefix": _randn(g, S, HIDDEN, scale=2.0),
         "delta": _randn(g, S, HIDDEN, scale=0.5),
@@ -95,8 +98,11 @@ def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
         w["conv_state"] = conv.view(slots, QKV, sl)
     else:
         w["conv_state"] = conv.view(slots, sl, QKV).transpose(-1, -2)
-    w["st_idx"] = torch.arange(3, 3 + S, dtype=torch.int32, device="cuda").view(1, S)
-    w["num_acc"] = torch.full((1,), nacc, dtype=torch.int32, device="cuda")
+    R = S // L
+    w["st_idx"] = torch.arange(3, 3 + S, dtype=torch.int32, device="cuda").view(R, L)
+    w["num_acc"] = torch.full((R,), nacc, dtype=torch.int32, device="cuda")
+    if R > 1:
+        w["num_acc"] = 1 + torch.arange(R, dtype=torch.int32, device="cuda") % L
     return w
 
 
@@ -132,7 +138,8 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     mixed_qkv, g2, f_a, beta = proj.split([QKV, PROJ, HD, NH + 4], dim=-1)[:4]
     g1 = F.linear(f_a, w["w_fb"])
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    qsl = torch.tensor([0, S], dtype=torch.int32, device="cuda")
+    L = w["st_idx"].size(1)
+    qsl = torch.arange(0, S + 1, L, dtype=torch.int32, device="cuda")
     conv = causal_conv1d_update(
         mixed_qkv.contiguous(),
         conv_state,
@@ -142,7 +149,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
         conv_state_indices=w["st_idx"][:, 0].contiguous(),
         num_accepted_tokens=w["num_acc"],
         query_start_loc=qsl,
-        max_query_len=S,
+        max_query_len=L,
         validate_data=False,
         out=torch.empty_like(mixed_qkv),
     )
@@ -163,7 +170,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
         cu_seqlens=qsl,
         ssm_state_indices=w["st_idx"],
         num_accepted_tokens=w["num_acc"],
-        uniform_sequence_length=S,
+        uniform_sequence_length=L,
         out=core,
     )
     with set_current_vllm_config(VllmConfig()):
@@ -171,6 +178,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     norm.weight.data = w["on_w"].clone()
     out = norm.forward_cuda(core, rearrange(g2, "n (h d) -> 1 n h d", d=HD))
     return {
+        "x": x,
         "prefix": prefix,
         "blocks": blocks,
         "conv_state": conv_state,
@@ -179,35 +187,74 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     }
 
 
+def _assert_kda_matches(w, ref, conv_state, rstate, core):
+    # the conv output feeds the recurrence in fp32 here, bf16 in the reference
+    errs = {
+        "conv_state": _rel_l2(conv_state, ref["conv_state"]),
+        "rstate": _rel_l2(rstate, ref["rstate"]),
+        "core": _rel_l2(core, ref["core"]),
+    }
+    assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
+    assert _cos(core, ref["core"]) > COS_MIN, errs
+    rows = F.cosine_similarity(core.float(), ref["core"].float(), dim=1)
+    assert torch.all(rows > COS_MIN), rows.min()
+    # no other request's state moves
+    untouched = torch.ones(rstate.size(0), dtype=torch.bool, device="cuda")
+    untouched[w["st_idx"].flatten()] = False
+    torch.testing.assert_close(
+        rstate[untouched], w["rstate"][untouched], atol=0, rtol=0
+    )
+
+
 @needs_gfx950
-@pytest.mark.parametrize("dim_first", [True, False])
-@pytest.mark.parametrize("nacc", [1, 3])
-@pytest.mark.parametrize("write", [False, True])
-def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
+@pytest.mark.parametrize(
+    "S, L, dim_first, nacc, write",
+    [
+        (8, 8, dim_first, nacc, write)
+        for dim_first in (True, False)
+        for nacc in (1, 3)
+        for write in (False, True)
+    ]
+    # the served widths' tunings: weights cached in LDS (16 / 20 words), 32
+    # state rows a task, two 16-row token tiles
+    + [
+        (12, 6, True, 3, False),
+        (16, 8, False, 1, False),
+        (18, 6, False, 1, True),
+        (24, 6, True, 1, True),
+        (24, 8, True, 3, True),
+        (28, 7, False, 1, True),
+    ],
+)
+def test_k1_matches_vllm_ops(
+    S: int, L: int, dim_first: bool, nacc: int, write: bool
+) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
-    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
-    request, 8 tokens), including the state each step leaves behind."""
+    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step of S / L
+    requests, including the state each step leaves behind."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
         kda_pre,
         scratch_bytes,
+        tuned,
     )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
 
-    S, nb = 8, 4
+    nb = 4
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
     write_idx = nb if write else -1
-    w = _kda_inputs(nb, nacc, dim_first, S)
+    w = _kda_inputs(nb, nacc, dim_first, S, L)
     ref = _kda_reference(w, nb, S, write_idx)
 
     key = KdaPreBuild(
         tokens=S,
-        qlen=S,
+        qlen=L,
         nblocks=nb,
         delta=True,
         state_len=w["conv_state"].size(-1),
         write_idx=write_idx,
+        **tuned(S, L),
     )
     prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
@@ -244,14 +291,41 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
 
     torch.testing.assert_close(prefix, ref["prefix"], atol=0, rtol=0)
     torch.testing.assert_close(blocks, ref["blocks"], atol=0, rtol=0)
-    # the conv output feeds the recurrence in fp32 here, bf16 in the reference
-    errs = {
-        "conv_state": _rel_l2(conv_state, ref["conv_state"]),
-        "rstate": _rel_l2(rstate, ref["rstate"]),
-        "core": _rel_l2(core, ref["core"]),
-    }
-    assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
-    assert _cos(core, ref["core"]) > COS_MIN, errs
+    _assert_kda_matches(w, ref, conv_state, rstate, core)
+
+
+@needs_gfx950
+@pytest.mark.parametrize("S, L", [(30, 6), (32, 8)])
+def test_kda_post_matches_vllm_ops(S: int, L: int) -> None:
+    """The widest steps' KDA after vLLM's in_proj (``kda_post``) against
+    causal_conv1d_update -> fused_recurrent_kda -> FusedRMSNormGated on the
+    same projected rows."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import PROJ
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.local_post import (
+        KdaPostBuild,
+        kda_post,
+    )
+
+    w = _kda_inputs(4, 1, False, S, L)
+    ref = _kda_reference(w, 4, S, -1)
+    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
+    core = torch.zeros(S, PROJ, dtype=bf, device="cuda")
+    kda_post(
+        KdaPostBuild(tokens=S, qlen=L, state_len=w["conv_state"].size(-1)),
+        projected=F.linear(ref["x"], w["w_in"]),
+        w_fb=w["w_fb"],
+        conv_w=w["conv_w"],
+        conv_state=conv_state,
+        a_log=w["a_log"],
+        dt_bias=w["dt_bias"],
+        on_w=w["on_w"],
+        rstate=rstate,
+        st_idx=w["st_idx"],
+        num_acc=w["num_acc"],
+        core_out=core,
+    )
+    torch.accelerator.synchronize()
+    _assert_kda_matches(w, ref, conv_state, rstate, core)
 
 
 # ---------------------------------------------------------------- K2 / MoE
@@ -378,7 +452,7 @@ def _moe_args(mw):
     }
 
 
-def _k2_inputs(rank: int, device):
+def _k2_inputs(rank: int, device, S: int = 8):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN,
         PROJ,
@@ -387,10 +461,10 @@ def _k2_inputs(rank: int, device):
     gc = torch.Generator(device=device).manual_seed(11)
     gr = torch.Generator(device=device).manual_seed(200 + rank)
     return {
-        "core": _randn(gr, 8, PROJ),
+        "core": _randn(gr, S, PROJ),
         "w_o": _randn(gr, HIDDEN, PROJ, scale=0.02),
-        "prefix": _randn(gc, 8, HIDDEN, scale=2.0),
-        "blocks": _randn(gc, 8, 8, HIDDEN, scale=2.0),
+        "prefix": _randn(gc, S, HIDDEN, scale=2.0),
+        "blocks": _randn(gc, S, 8, HIDDEN, scale=2.0),
         "ares_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
         "ares_qk": _randn(gc, HIDDEN, scale=0.05),
         "in_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
@@ -400,7 +474,14 @@ def _k2_inputs(rank: int, device):
 def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
-    key = k2.K2Build(tokens=8, nblocks=nb + int(reset), reset=reset, **runner.fault)
+    S, nblocks = w["core"].size(0), nb + int(reset)
+    key = k2.K2Build(
+        tokens=S,
+        nblocks=nblocks,
+        reset=reset,
+        **k2.tuned(S, nblocks),
+        **runner.fault,
+    )
     k2.k2_launch(
         key,
         core=w["core"],
@@ -427,13 +508,14 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     return device
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _k2_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
     rank: int,
     distributed_init_port: str,
+    S: int,
+    nb: int,
 ) -> None:
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
@@ -442,16 +524,15 @@ def _k2_worker(
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
-    S, nb = 8, 4
     runner = MonoRunner(device)
     mw = _moe_weights(rank, device)
-    w = _k2_inputs(rank, device)
+    w = _k2_inputs(rank, device, S)
 
     for reset in (False, True):
         runner.step_begin()
         prefix = w["prefix"].clone()
         out = torch.empty(S, HIDDEN, dtype=bf, device=device)
-        key = _k2_launch(runner, w, mw, prefix, out, reset)
+        key = _k2_launch(runner, w, mw, prefix, out, reset, nb)
         torch.accelerator.synchronize()
 
         attn = _all_reduce_fp32(F.linear(w["core"], w["w_o"]))
@@ -487,7 +568,7 @@ def _k2_worker(
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         runner.step_begin()
-        _k2_launch(runner, w, mw, prefix, out, reset=True)
+        _k2_launch(runner, w, mw, prefix, out, reset=True, nb=nb)
     graph.replay()
     torch.accelerator.synchronize()
     want_prefix, want_out = prefix.clone(), out.clone()
@@ -500,8 +581,25 @@ def _k2_worker(
 
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
-def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
-    multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
+@pytest.mark.parametrize(
+    "S, nb",
+    [
+        (8, 4),
+        # past 16 rows: sparse routes; 7 + 1 blocks stream AttnRes; from 28 rows
+        # the front runs in 16-row panels
+        (24, 4),
+        (24, 7),
+        (32, 7),
+    ],
+)
+def test_k2_tp8_matches_vllm_ops_and_replays(
+    monkeypatch: pytest.MonkeyPatch, S: int, nb: int
+) -> None:
+    @ray.remote(num_gpus=1, max_calls=1)
+    def worker(monkeypatch, tp_size, pp_size, rank, port):
+        _k2_worker(monkeypatch, tp_size, pp_size, rank, port, S, nb)
+
+    multi_process_parallel(monkeypatch, 8, 1, worker)
 
 
 STALLED = 3
@@ -562,14 +660,19 @@ def test_stalled_rank_fails_the_step_without_a_hang(
 
 @needs_gfx950
 def test_warmup_compiles_without_launching() -> None:
-    """The JIT warm-up compiles K1 and K2 before capture without running them:
-    a launch on its null arguments would fault."""
+    """The JIT warm-up compiles K1 (or ``kda_post``) and K2 before capture
+    without running them: a launch on its null arguments would fault."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         KdaPreBuild,
     )
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.layer import K2Build
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.local_post import (
+        KdaPostBuild,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.layer import K2Build, tuned
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import compile_build
 
     compile_build(KdaPreBuild(tokens=8, qlen=8, nblocks=4, delta=True, state_len=10))
+    compile_build(KdaPostBuild(tokens=32, qlen=8, state_len=10))
     compile_build(K2Build(tokens=8, nblocks=4))
+    compile_build(K2Build(tokens=32, nblocks=8, **tuned(32, 8)))
     torch.accelerator.synchronize()

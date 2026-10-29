@@ -16,13 +16,17 @@ behind every earlier load):
     gemv CTAs 56 ..     in_proj, two 16-row groups each: the first group's
                         weights issued at kernel start, the second's as x lands
                         -> q|k|v|g|f_a|beta (PROJ)
-    kda tasks           (R x 12 heads x 8 v-chunks) on CTAs 0 ..: inputs that
-                        need no hand-off loaded first (metadata, conv window,
-                        state rows, f_b rows), then conv update of the owned
-                        channels (q / k out through QK), f_b MFMA + lower-bound
-                        gate, l2norm, the recurrence on 16 state rows (a state a
-                        token written), partial norms (ONRM), gated RMSNorm ->
-                        core_out
+    kda tasks           (R x 12 heads x 128 / state_rows v-chunks) on CTAs 0 ..:
+                        inputs that need no hand-off loaded first (metadata,
+                        conv window, state rows, f_b rows), then conv update of
+                        the owned channels (q / k out through QK), f_b MFMA +
+                        lower-bound gate, l2norm, the recurrence on 16 or 32
+                        state rows (a state a token written), partial norms
+                        (ONRM), gated RMSNorm -> core_out
+
+Past 16 rows the launch runs 16-row tiles of whole requests, each with its own
+mailboxes: every tile's AttnRes, then in_proj with a weight chunk loaded once for
+every tile, then every tile's KDA tasks.
 
 Rounding follows the original path where it is elementwise (the AttnRes prefix
 add, every bf16 hand-off between the original kernels); split-K reductions
@@ -30,13 +34,13 @@ differ only in their order.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.debug import (
@@ -73,6 +77,11 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
     publish,
     sreg,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.tiles import (
+    TILE_TOKENS,
+    tile_layout,
+    token_tiles,
+)
 
 HIDDEN = 7168
 NA = 56  # attn CTAs
@@ -98,6 +107,7 @@ NVCH = HD // VCH  # 8
 CONV_W = 4
 LOG2E = 1.0 / math.log(2.0)
 LDS_PAD = 8  # bf16 a padded x row
+TILE_ROWS = 16  # a launch's rows past 16: token tiles of whole requests
 
 assert NA + GEMV_CTAS <= BLOCKS and NA == 8 * GSL
 
@@ -120,6 +130,20 @@ class KdaPreBuild:
     lower_bound: float = -5.0
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
+    state_rows: int = VCH  # state rows a KDA task (16 or 32)
+    # in_proj weight dwords a thread keeps in LDS (``cached_projection``): 0
+    # none, 16 the last chunk, 20 also a column of the one before (wave-major)
+    cache_words: int = 0
+
+
+def tuned(tokens: int, qlen: int) -> dict:
+    """The measured ``state_rows`` / ``cache_words`` of a launch's rows and
+    request length."""
+    if tokens <= 16 and qlen in (2, 4, 6, 8):
+        return {"state_rows": VCH, "cache_words": 20 if qlen == 6 else 16}
+    if (tokens, qlen) in ((18, 6), (24, 6), (24, 8)):
+        return {"state_rows": 32, "cache_words": 20}
+    return {"state_rows": VCH, "cache_words": 0}
 
 
 ABI = KernelAbi(
@@ -158,6 +182,9 @@ ABI = KernelAbi(
 
 
 def scratch_layout(key: KdaPreBuild) -> dict:
+    """A tile's regions; past TILE_ROWS rows each tile's own (``tile_layout``)."""
+    if key.tokens > TILE_ROWS:
+        return tile_layout(key, scratch_layout, key.qlen, tile_tokens=TILE_ROWS)
     s, ns = key.tokens, key.nblocks + 1
     assert s % key.qlen == 0
     pairs = {
@@ -167,7 +194,7 @@ def scratch_layout(key: KdaPreBuild) -> dict:
         "xrdy": NA,
         "proj": s * NPROJ,
         "qk": s * NH * 2 * HD,
-        "onrm": s * NH * NVCH,
+        "onrm": s * NH * (HD // key.state_rows),
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -199,9 +226,11 @@ def ld_bf(ptr, i, cm=0):
     )
 
 
-def ld_bf4(ptr, i):
+def ld_bf4(ptr, i, cm=0):
     """bf16 elements i .. i + 4 (i a multiple of 4) as four f32."""
-    w = fx.Vector(bo.buffer_load(rsrc(ptr), i // 2, vec_width=2, dtype=T.i32))
+    w = fx.Vector(
+        bo.buffer_load(rsrc(ptr), i // 2, vec_width=2, dtype=T.i32, cache_modifier=cm)
+    )
     return [bf_lo(w[0]), bf_hi(w[0]), bf_lo(w[1]), bf_hi(w[1])]
 
 
@@ -241,6 +270,7 @@ def stage_slice(c, task):
     source) partial sum of squares and qk dot -> PART."""
     s, ns, nb, tid, lane = c["S"], c["NS"], c["NB"], c["tid"], c["lane"]
     a = c["args"]
+    stream = c.get("stream_attn", False)
     c0 = task * COLS
     n = s * ns * QC  # threads' work items
     for i in range_constexpr((n + THREADS - 1) // THREADS):
@@ -272,7 +302,10 @@ def stage_slice(c, task):
                 pre = [bf16r(pre[j] + dl[j]) for j in range(4)]
             if live & is_pre:
                 bo.buffer_store(
-                    bf4_words(pre), rsrc(a["prefix"]), (t * HIDDEN + col) // 2
+                    bf4_words(pre),
+                    rsrc(a["prefix"]),
+                    (t * HIDDEN + col) // 2,
+                    cache_modifier=CM_DEV if stream else 0,
                 )
         if const_expr(c.get("write_idx", -1) >= 0):  # noqa: SIM102 (traced: `and` does not combine traced values)
             # the block-write layer's attention seam: the updated prefix is
@@ -291,9 +324,10 @@ def stage_slice(c, task):
         q = ld_bf4(a["ares_qk"], col)
         # a thread past the end holds a clamped copy of the last element: it
         # must not store (it raced the owner with zeros)
-        if live:
-            for j in range_constexpr(4):
-                fx.ptr_store(v[j], c["vals"] + (row * COLS + (e % QC) * 4 + j))
+        if const_expr(not stream):  # noqa: SIM102
+            if live:
+                for j in range_constexpr(4):
+                    fx.ptr_store(v[j], c["vals"] + (row * COLS + (e % QC) * 4 + j))
         sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]
         dt = (
             v[0] * (w[0] * q[0])
@@ -307,6 +341,8 @@ def stage_slice(c, task):
             at = ((task * s + t) * ns + src) * 2
             c["put"](c["part"], at, sq)
             c["put"](c["part"], at + 1, dt)
+    if const_expr(stream):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
 
 
@@ -351,10 +387,158 @@ def stage_gate(c, t):
 
 
 @traced
+def stage_mix_streamed(c, task):
+    """Publish each normalized token panel before mixing the following panel."""
+    s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
+    a = c["args"]
+    stream = c.get("stream_attn", False)
+    mixed_stride = COLS if stream else ns * COLS
+    norm = red + s * (ns + 1)
+    for i in range_constexpr((s * (ns + 1) + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * (ns + 1):
+            value = c["poll"]([(c["wgt"], at, 1)])[0][0]
+            fx.ptr_store(f32_of(value), red + at)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        count = min(16, s - first)
+        t = first + fx.min(tid // QC, count - 1)
+        mine = tid // QC < count
+        cc = (tid % QC) * 4
+        if const_expr(stream):
+            sources = [
+                ld_bf4(
+                    a["blocks"], t * a["blk_sm"] + src * a["blk_sr"] + task * COLS + cc
+                )
+                for src in range(ns - 1)
+            ] + [ld_bf4(a["prefix"], t * HIDDEN + task * COLS + cc, CM_DEV)]
+        mixed = []
+        for j in range_constexpr(4):
+            acc = fx.Float32(0.0)
+            for src in range_constexpr(ns):
+                if const_expr(stream):
+                    value = sources[src][j]
+                else:
+                    value = fx.ptr_load(c["vals"] + (t * ns + src) * COLS + cc + j)
+                acc = acc + fx.ptr_load(red + t * (ns + 1) + src) * value
+            mixed.append(acc / fx.ptr_load(red + t * (ns + 1) + ns))
+        if mine:
+            for j in range_constexpr(4):
+                fx.ptr_store(mixed[j], c["vals"] + t * mixed_stride + cc + j)
+        sq = sum(value * value for value in mixed)
+        sq = butterfly(sq, (16, 8, 4, 2, 1))
+        if mine & (lane % 32 == 0):
+            c["put"](c["msq"], task * s + t, sq)
+        gpu.barrier()
+        if tid < 8 * count:
+            group, token = tid // count, first + tid % count
+            values = c["poll"](
+                [(c["msq"], (group * GSL + k) * s + token, 1) for k in range(GSL)]
+            )
+            fx.ptr_store(sum_polled(values), norm + tid)
+        gpu.barrier()
+        total = fx.ptr_load(norm + t - first)
+        for group in range_constexpr(1, 8):
+            total = total + fx.ptr_load(norm + group * count + t - first)
+        r = hw_rsq(total * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["out_eps"]))
+        weight = ld_bf4(a["in_nw"], task * COLS + cc)
+        values = [
+            fx.ptr_load(c["vals"] + t * mixed_stride + cc + j) * r * weight[j]
+            for j in range(4)
+        ]
+        if mine:
+            at = (t * HIDDEN + task * COLS + cc) // 2
+            bo.buffer_store(
+                bf4_words(values), rsrc(c["xbuf"]), at, cache_modifier=CM_DEV
+            )
+        publish(c["put"], c["xpanels"], first // 16 * NA + task, fx.Int32(1), tid == 0)
+        gpu.barrier()
+    publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
+def stage_mix_wide(c, task):
+    """Mix token panels before reusing the source-weight reduction storage."""
+    if const_expr(c.get("stream_x", False)):
+        stage_mix_streamed(c, task)
+        return
+    s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
+    a = c["args"]
+    stream = c.get("stream_attn", False)
+    mixed_stride = COLS if stream else ns * COLS
+    for i in range_constexpr((s * (ns + 1) + THREADS - 1) // THREADS):
+        at = tid + i * THREADS
+        if at < s * (ns + 1):
+            value = c["poll"]([(c["wgt"], at, 1)])[0][0]
+            fx.ptr_store(f32_of(value), red + at)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        t = first + fx.min(tid // QC, min(16, s - first) - 1)
+        mine = first + tid // QC < s
+        cc = (tid % QC) * 4
+        if const_expr(stream):
+            # stage_slice has already rounded and stored the updated prefix.
+            sources = [
+                ld_bf4(
+                    a["blocks"], t * a["blk_sm"] + src * a["blk_sr"] + task * COLS + cc
+                )
+                for src in range(ns - 1)
+            ] + [ld_bf4(a["prefix"], t * HIDDEN + task * COLS + cc, CM_DEV)]
+        mixed = []
+        for j in range_constexpr(4):
+            acc = fx.Float32(0.0)
+            for src in range_constexpr(ns):
+                if const_expr(stream):
+                    value = sources[src][j]
+                else:
+                    value = fx.ptr_load(c["vals"] + (t * ns + src) * COLS + cc + j)
+                acc = acc + fx.ptr_load(red + t * (ns + 1) + src) * value
+            mixed.append(acc / fx.ptr_load(red + t * (ns + 1) + ns))
+        if mine:
+            for j in range_constexpr(4):
+                fx.ptr_store(mixed[j], c["vals"] + t * mixed_stride + cc + j)
+        sq = sum(value * value for value in mixed)
+        sq = butterfly(sq, (16, 8, 4, 2, 1))
+        if mine & (lane % 32 == 0):
+            c["put"](c["msq"], task * s + t, sq)
+    gpu.barrier()
+    if tid < 8 * s:
+        group, t = tid // s, tid % s
+        values = c["poll"](
+            [(c["msq"], (group * GSL + k) * s + t, 1) for k in range(GSL)]
+        )
+        fx.ptr_store(sum_polled(values), red + group * s + t)
+    gpu.barrier()
+    for first in range_constexpr(0, s, 16):
+        t = first + fx.min(tid // QC, min(16, s - first) - 1)
+        cc = (tid % QC) * 4
+        total = fx.ptr_load(red + t)
+        for group in range_constexpr(1, 8):
+            total = total + fx.ptr_load(red + group * s + t)
+        r = hw_rsq(total * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["out_eps"]))
+        weight = ld_bf4(a["in_nw"], task * COLS + cc)
+        values = [
+            fx.ptr_load(c["vals"] + t * mixed_stride + cc + j) * r * weight[j]
+            for j in range(4)
+        ]
+        if first + tid // QC < s:
+            at = (t * HIDDEN + task * COLS + cc) // 2
+            bo.buffer_store(
+                bf4_words(values), rsrc(c["xbuf"]), at, cache_modifier=CM_DEV
+            )
+    publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
 def stage_mix(c, task):
     """Columns 128 task ..: the softmax mix of ``vals`` (4 columns a thread), its
     sum of squares (MSQ), every slice's -> rstd, then bf16 x = mixed rstd w ->
     the plain x rows, and the slice's XRDY flag."""
+    if const_expr(c["S"] > 16):
+        stage_mix_wide(c, task)
+        return
     s, ns, tid, lane, red = c["S"], c["NS"], c["tid"], c["lane"], c["red"]
     a = c["args"]
     c0 = task * COLS
@@ -404,7 +588,7 @@ def stage_mix(c, task):
 
 
 # ---------------------------------------------------------------- gemv CTAs
-def gemv_loads(c, rg, chunks):
+def gemv_loads(c, rg, chunks, columns=4, first_column=0):
     """This wave's weight operands of rows 16 rg .. for its K chunks ``chunks``
     (indices into wave, wave + 8, ..): a lane 64 contiguous bytes of its row a
     chunk (4 dwordx4). ``rg`` past the last group loads the last group."""
@@ -427,7 +611,7 @@ def gemv_loads(c, rg, chunks):
                         cache_modifier=CM_NT,
                     )
                 )
-                for q in range(4)
+                for q in range(first_column, columns)
             ]
         )
     return out
@@ -486,6 +670,215 @@ def stage_gemv(c, rg, ops):
     gpu.barrier()
 
 
+@traced
+def projection_chunk(c, half, ops0, ops1, acc0, acc1):
+    """One K slice's weights against every row of a token tile."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    if tid < NA:
+        c["poll"]([(c["xrdy"], tid, 1)])
+    gpu.barrier()
+    row = c["XCOLS"] + LDS_PAD
+    count = 4 if half == 0 else 3
+    width = count * WAVES * KCH
+    words = s * width // 8
+    for i in range_constexpr((words + THREADS - 1) // THREADS):
+        e = fx.min(tid + THREADS * i, words - 1)
+        tt = e // (width // 8)
+        kk = e % (width // 8) * 8
+        v = fx.Vector(
+            bo.buffer_load(
+                rsrc(c["xbuf"]),
+                (tt * HIDDEN + half * 4096 + kk) // 2,
+                vec_width=4,
+                dtype=T.i32,
+                cache_modifier=CM_DEV,
+            )
+        )
+        if tid + THREADS * i < words:
+            fx.ptr_store(v, c["xl"] + (tt * row + kk) // 2)
+    gpu.barrier()
+    t, g = fx.min(lane % ROWS, s - 1), lane // ROWS
+    for i in range_constexpr(count):
+        k = (wave + WAVES * i) * KCH + g * 8
+        for q in range_constexpr(4):
+            xb = fx.Vector(
+                fx.ptr_load(
+                    c["xl"] + (t * row + k + 32 * q) // 2,
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            ).bitcast(fx.BFloat16)
+            acc0 = mfma_bf16(ops0[i][q].bitcast(fx.BFloat16), xb, acc0)
+            acc1 = mfma_bf16(ops1[i][q].bitcast(fx.BFloat16), xb, acc1)
+    gpu.barrier()
+    return acc0, acc1
+
+
+@traced
+def projection_out(c, rg, acc):
+    """Publish a projection group's bf16 results after the K reduction."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    fx.ptr_store(acc, c["red"] + (wave * 64 + lane) * 4)
+    gpu.barrier()
+    if (tid < ROWS * s) & (rg < GEMV_TASKS):
+        r, tt = tid % ROWS, tid // ROWS
+        v = bf16r(row_sum(c["red"], r, tt))
+        c["put"](c["proj"], tt * NPROJ + rg * ROWS + r, v)
+    gpu.barrier()
+
+
+@traced
+def cache_input(c, start, width):
+    """Columns start .. start + width of every x row -> LDS ``xl``, two loads in
+    flight a thread."""
+    words = c["S"] * width // 8
+    count = (words + THREADS - 1) // THREADS
+    for first in range_constexpr(0, count, 2):
+        values = []
+        for i in range_constexpr(first, min(first + 2, count)):
+            e = fx.min(c["tid"] + THREADS * i, words - 1)
+            token, col = e // (width // 8), e % (width // 8) * 8
+            value = fx.Vector(
+                bo.buffer_load(
+                    rsrc(c["xbuf"]),
+                    (token * HIDDEN + start + col) // 2,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
+            )
+            values.append((token, col, value))
+        for i in range_constexpr(len(values)):
+            token, col, value = values[i]
+            if c["tid"] + THREADS * (first + i) < words:
+                fx.ptr_store(
+                    value, c["xl"] + (token * (c["XCOLS"] + LDS_PAD) + col) // 2
+                )
+    gpu.barrier()
+
+
+def weight_offset(c, group, vector):
+    """A thread's cached dwordx4 ``vector`` of row group ``group`` in ``wl``."""
+    if c["cache_words"] == 20:
+        return group * THREADS * 16 + vector * THREADS * 4 + c["tid"] * 4
+    return (group * THREADS + c["tid"]) * 16 + vector * 4
+
+
+def cached_chunks(c, count, ops0, ops1, acc0, acc1, start):
+    """K chunks start .. start + count of both row groups against the LDS x; at
+    20 cached words chunk 5's last column is read from ``wl``."""
+    token = fx.min(c["lane"] % ROWS, c["S"] - 1)
+    stride = c["XCOLS"] + LDS_PAD
+    for i in range(count):
+        col = (c["wave"] + WAVES * i) * KCH + c["lane"] // ROWS * 8
+        for q in range(4):
+            xb = fx.Vector(
+                fx.ptr_load(
+                    c["xl"] + (token * stride + col + 32 * q) // 2,
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            ).bitcast(fx.BFloat16)
+            if c["cache_words"] == 20 and start + i == 5 and q == 3:
+                off = 2 * THREADS * 16 + c["tid"] * 4
+                w0 = fx.Vector(
+                    fx.ptr_load(
+                        c["wl"] + off, result_type=fx.Vector.make_type(4, fx.Int32)
+                    )
+                )
+                w1 = fx.Vector(
+                    fx.ptr_load(
+                        c["wl"] + off + THREADS * 4,
+                        result_type=fx.Vector.make_type(4, fx.Int32),
+                    )
+                )
+                acc0 = mfma_bf16(w0.bitcast(fx.BFloat16), xb, acc0)
+                acc1 = mfma_bf16(w1.bitcast(fx.BFloat16), xb, acc1)
+            else:
+                acc0 = mfma_bf16(ops0[i][q].bitcast(fx.BFloat16), xb, acc0)
+                acc1 = mfma_bf16(ops1[i][q].bitcast(fx.BFloat16), xb, acc1)
+    return acc0, acc1
+
+
+def cached_tail(c, acc0, acc1):
+    """The last K chunk of both row groups, its weights from ``wl``."""
+    token = fx.min(c["lane"] % ROWS, c["S"] - 1)
+    col = c["wave"] * KCH + c["lane"] // ROWS * 8
+    for q in range(4):
+        xb = fx.Vector(
+            fx.ptr_load(
+                c["xl"] + (token * (c["XCOLS"] + LDS_PAD) + col + 32 * q) // 2,
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        ).bitcast(fx.BFloat16)
+        w0 = fx.Vector(
+            fx.ptr_load(
+                c["wl"] + weight_offset(c, 0, q),
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        ).bitcast(fx.BFloat16)
+        acc0 = mfma_bf16(w0, xb, acc0)
+        w1 = fx.Vector(
+            fx.ptr_load(
+                c["wl"] + weight_offset(c, 1, q),
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        ).bitcast(fx.BFloat16)
+        acc1 = mfma_bf16(w1, xb, acc1)
+    return acc0, acc1
+
+
+@traced
+def cached_projection(contexts, rg0, rg1):
+    """Rows 16 rg0 .. and 16 rg1 .. of in_proj for every tile: the last K chunk's
+    weights (and at 20 words a column of the one before) parked in LDS to bound
+    register lifetime, the rest issued once for every tile; x streamed into LDS
+    two chunks at a time."""
+    c0 = contexts[0]
+    for group in range_constexpr(2):
+        tail = gemv_loads(c0, rg0 if group == 0 else rg1, [6])
+        for q in range_constexpr(4):
+            fx.ptr_store(tail[0][q], c0["wl"] + weight_offset(c0, group, q))
+    if const_expr(c0["cache_words"] == 20):
+        for group in range_constexpr(2):
+            extra = gemv_loads(c0, rg0 if group == 0 else rg1, [5], first_column=3)
+            fx.ptr_store(
+                extra[0][0],
+                c0["wl"] + 2 * THREADS * 16 + (group * THREADS + c0["tid"]) * 4,
+            )
+        ops0 = gemv_loads(c0, rg0, range(5)) + gemv_loads(c0, rg0, [5], columns=3)
+        ops1 = gemv_loads(c0, rg1, range(5)) + gemv_loads(c0, rg1, [5], columns=3)
+    else:
+        ops0 = gemv_loads(c0, rg0, range(6))
+        ops1 = gemv_loads(c0, rg1, range(6))
+    gpu.barrier()
+    for tile in range_constexpr(len(contexts)):
+        c = contexts[tile]
+        if c["tid"] < NA:
+            c["poll"]([(c["xrdy"], c["tid"], 1)])
+        gpu.barrier()
+        acc0, acc1 = (
+            fx.Vector.filled(4, 0.0, fx.Float32),
+            fx.Vector.filled(4, 0.0, fx.Float32),
+        )
+        for start in range_constexpr(0, PER_WAVE, 2):
+            count = min(2, PER_WAVE - start)
+            cache_input(c, start * WAVES * KCH, count * WAVES * KCH)
+            if const_expr(start < 6):
+                acc0, acc1 = cached_chunks(
+                    c,
+                    count,
+                    ops0[start : start + count],
+                    ops1[start : start + count],
+                    acc0,
+                    acc1,
+                    start,
+                )
+            else:
+                acc0, acc1 = cached_tail(c, acc0, acc1)
+            gpu.barrier()
+        projection_out(c, rg0, acc0)
+        projection_out(c, rg1, acc1)
+
+
 # ---------------------------------------------------------------- kda
 def kda_stage(c, req, h, ch):
     """The task's inputs that need no hand-off, issued before its first poll:
@@ -501,10 +894,10 @@ def kda_stage(c, req, h, ch):
     k["slots"] = [
         uniform(ld_i32(a["st_idx"], req * a["st_stride"] + j)) for j in range(L)
     ]
-    # conv: thread < 48 owns channel (part, d)
-    ct = fx.min(tid, 3 * VCH - 1)
-    part = ct // VCH
-    chan = part * PROJ + h * HD + ch * VCH + ct % VCH
+    # The first 3 * VCH threads own the q, k and v conv channels.
+    ct = fx.min(tid, 3 * c["VCH"] - 1)
+    part = ct // c["VCH"]
+    chan = part * PROJ + h * HD + ch * c["VCH"] + ct % c["VCH"]
     cs = a["conv_st"] + fx.Int64(fx.max(k["slot_c"], 0)) * fx.Int64(a["cs_seq"]) * 2
     co = chan * a["cs_dim"]  # the channel's first entry (bf16 elements)
     k["cs"], k["co"], k["chan"], k["part"] = cs, co, chan, part
@@ -518,13 +911,18 @@ def kda_stage(c, req, h, ch):
         ld_bf(cs, co + (k["acc_idx"] + 1 + j) * a["cs_tok"]) for j in range(sl - L)
     ]
     # recurrence: thread -> state row v = tid / 32, k columns (tid % 32) 4 ..
-    vr = ch * VCH + tid // 32
+    vr = ch * c["VCH"] + tid // 32
     k0 = (tid % 32) * 4
     k["head_off"] = (h * HD + vr) * HD + k0
     base0 = a["rstate"] + fx.Int64(fx.max(k["slot0"], 0)) * fx.Int64(a["rs_seq"]) * 4
-    k["st"] = fx.Vector(
-        bo.buffer_load(rsrc(base0), k["head_off"], vec_width=4, dtype=T.f32)
-    )
+    k["st"] = [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(base0), k["head_off"] + r * 16 * HD, vec_width=4, dtype=T.f32
+            )
+        )
+        for r in range(c["VCH"] // 16)
+    ]
     # f_b: wave w's rows 16 w .. of head h, a lane 64 B of its row
     fr = h * HD + wave * 16 + lane % 16
     fb = (fr * HD + (lane // 16) * 32) // 2
@@ -546,7 +944,7 @@ def kda_conv(c, k, req, h, ch):
     conv state; q / k out through QK, v to LDS."""
     L, sl, tid = c["L"], c["SL"], c["tid"]
     a = c["args"]
-    if tid < 3 * VCH:
+    if tid < 3 * c["VCH"]:
         xs = c["poll"](
             [(c["proj"], (req * L + j) * NPROJ + k["chan"], 1) for j in range(L)]
         )
@@ -569,12 +967,12 @@ def kda_conv(c, k, req, h, ch):
                     c["qk"],
                     ((req * NH + h) * L + j) * 2 * HD
                     + k["part"] * HD
-                    + ch * VCH
-                    + tid % VCH,
+                    + ch * c["VCH"]
+                    + tid % c["VCH"],
                     o,
                 )
             if k["part"] == 2:
-                fx.ptr_store(o, c["vloc"] + (j * VCH + tid % VCH))
+                fx.ptr_store(o, c["vloc"] + (j * c["VCH"] + tid % c["VCH"]))
     gpu.barrier()
 
 
@@ -640,65 +1038,84 @@ def kda_gates(c, k, req, h):
 
 @traced
 def kda_recur(c, k, req, h, ch):
-    """State rows 16 ch .. of head h: the recurrence over the L tokens, a state
+    """State rows VCH ch .. of head h: the recurrence over the L tokens, a state
     written a token, bf16 outputs to LDS ``ol`` and their partial norms (ONRM)."""
     L, tid, lane = c["L"], c["tid"], c["lane"]
     a = c["args"]
     v = tid // 32
     k0 = (tid % 32) * 4
     live0 = k["slot0"] > 0
-    stv = [live0.select(k["st"][e], fx.Float32(0.0)) for e in range(4)]
+    stv = [
+        [live0.select(k["st"][r][e], fx.Float32(0.0)) for e in range(4)]
+        for r in range(c["VCH"] // 16)
+    ]
     for j in range_constexpr(L):
         qv = [fx.ptr_load(c["qkl"] + ((2 * j) * HD + k0 + e)) for e in range(4)]
         kv = [fx.ptr_load(c["qkl"] + ((2 * j + 1) * HD + k0 + e)) for e in range(4)]
         dk = [fx.ptr_load(c["decay"] + (j * HD + k0 + e)) for e in range(4)]
-        stv = [stv[e] * dk[e] for e in range(4)]
-        p = stv[0] * kv[0] + stv[1] * kv[1] + stv[2] * kv[2] + stv[3] * kv[3]
-        p = butterfly(p, (16, 8, 4, 2, 1))
-        vn = (fx.ptr_load(c["vloc"] + (j * VCH + v)) - p) * fx.ptr_load(c["beta"] + j)
-        stv = [stv[e] + vn * kv[e] for e in range(4)]
-        o = stv[0] * qv[0] + stv[1] * qv[1] + stv[2] * qv[2] + stv[3] * qv[3]
-        o = bf16r(butterfly(o, (16, 8, 4, 2, 1)))
-        o = live0.select(o, fx.Float32(0.0))
+        beta = fx.ptr_load(c["beta"] + j)
         slot = k["slots"][j]
-        if (slot > 0) & live0:
-            dst = rsrc(a["rstate"] + fx.Int64(slot) * fx.Int64(a["rs_seq"]) * 4)
-            bo.buffer_store(
-                fx.Vector.from_elements(stv, fx.Float32), dst, k["head_off"]
+        for r in range_constexpr(c["VCH"] // 16):
+            stv[r] = [stv[r][e] * dk[e] for e in range(4)]
+            p = (
+                stv[r][0] * kv[0]
+                + stv[r][1] * kv[1]
+                + stv[r][2] * kv[2]
+                + stv[r][3] * kv[3]
             )
-        if lane % 32 == 0:
-            fx.ptr_store(o, c["ol"] + (j * VCH + v))
+            p = butterfly(p, (16, 8, 4, 2, 1))
+            vn = (fx.ptr_load(c["vloc"] + (j * c["VCH"] + v + 16 * r)) - p) * beta
+            stv[r] = [stv[r][e] + vn * kv[e] for e in range(4)]
+            o = (
+                stv[r][0] * qv[0]
+                + stv[r][1] * qv[1]
+                + stv[r][2] * qv[2]
+                + stv[r][3] * qv[3]
+            )
+            o = live0.select(bf16r(butterfly(o, (16, 8, 4, 2, 1))), fx.Float32(0.0))
+            if (slot > 0) & live0:
+                dst = rsrc(a["rstate"] + fx.Int64(slot) * fx.Int64(a["rs_seq"]) * 4)
+                bo.buffer_store(
+                    fx.Vector.from_elements(stv[r], fx.Float32),
+                    dst,
+                    k["head_off"] + r * 16 * HD,
+                )
+            if lane % 32 == 0:
+                fx.ptr_store(o, c["ol"] + (j * c["VCH"] + v + 16 * r))
     gpu.barrier()
     if tid < L:
         ss = fx.Float32(0.0)
-        for e in range_constexpr(VCH):
-            x = fx.ptr_load(c["ol"] + (tid * VCH + e))
+        for e in range_constexpr(c["VCH"]):
+            x = fx.ptr_load(c["ol"] + (tid * c["VCH"] + e))
             ss = ss + x * x
-        c["put"](c["onrm"], ((req * NH + h) * L + tid) * NVCH + ch, ss)
+        c["put"](c["onrm"], ((req * NH + h) * L + tid) * c["NVCH"] + ch, ss)
     gpu.barrier()
 
 
 @traced
 def kda_norm(c, req, h, ch):
-    """Rows 16 ch ..: gated RMSNorm over the head's 128 (every chunk's partial)
+    """Rows VCH ch ..: gated RMSNorm over the head's 128 (every chunk's partial)
     -> core_out."""
     L, tid = c["L"], c["tid"]
     a = c["args"]
-    if tid < L * VCH:
-        j = tid // VCH
-        e = tid % VCH
-        vr = ch * VCH + e
+    if tid < L * c["VCH"]:
+        j = tid // c["VCH"]
+        e = tid % c["VCH"]
+        vr = ch * c["VCH"] + e
         got = c["poll"](
-            [(c["onrm"], ((req * NH + h) * L + j) * NVCH + q, 1) for q in range(NVCH)]
+            [
+                (c["onrm"], ((req * NH + h) * L + j) * c["NVCH"] + q, 1)
+                for q in range(c["NVCH"])
+            ]
             + [(c["proj"], (req * L + j) * NPROJ + G2_0 + h * HD + vr, 1)]
         )
-        ss = sum_polled(got[:NVCH])
+        ss = sum_polled(got[: c["NVCH"]])
         r = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["onorm_eps"]))
         y = (
-            fx.ptr_load(c["ol"] + (j * VCH + e))
+            fx.ptr_load(c["ol"] + (j * c["VCH"] + e))
             * r
             * ld_bf(a["on_w"], vr)
-            * sigmoid(f32_of(got[NVCH][0]))
+            * sigmoid(f32_of(got[c["NVCH"]][0]))
         )
         bo.buffer_store(
             y.to(fx.BFloat16), rsrc(a["core_out"]), (req * L + j) * PROJ + h * HD + vr
@@ -707,17 +1124,22 @@ def kda_norm(c, req, h, ch):
 
 
 @traced
+def kda_task(c, task):
+    req = task // (NH * c["NVCH"])
+    h = (task // c["NVCH"]) % NH
+    ch = task % c["NVCH"]
+    k = kda_stage(c, req, h, ch)
+    kda_conv(c, k, req, h, ch)
+    kda_gates(c, k, req, h)
+    kda_recur(c, k, req, h, ch)
+    kda_norm(c, req, h, ch)
+
+
+@traced
 def kda_tasks(c):
     s, L, bid = c["S"], c["L"], c["bid"]
-    for task in range(first_task(bid, c["kda0"]), (s // L) * NH * NVCH, BLOCKS):
-        req = task // (NH * NVCH)
-        h = (task // NVCH) % NH
-        ch = task % NVCH
-        k = kda_stage(c, req, h, ch)
-        kda_conv(c, k, req, h, ch)
-        kda_gates(c, k, req, h)
-        kda_recur(c, k, req, h, ch)
-        kda_norm(c, req, h, ch)
+    for task in range(first_task(bid, c["kda0"]), (s // L) * NH * c["NVCH"], BLOCKS):
+        kda_task(c, task)
 
 
 # ---------------------------------------------------------------- kernel
@@ -727,11 +1149,24 @@ _BUILDS: dict = {}
 def build(key: KdaPreBuild):
     if key in _BUILDS:
         return _BUILDS[key]
-    s, L = key.tokens, key.qlen
+    assert key.state_rows in (16, 32) and key.cache_words in (0, 16, 20)
+    nvch = HD // key.state_rows
+    tiles = token_tiles(key.tokens, key.qlen, tile_tokens=TILE_ROWS)
+    s, L = max(rows for _, rows in tiles), key.qlen
     ns = key.nblocks + 1
-    lay = scratch_layout(key)
-    xrow = HIDDEN + LDS_PAD
+    layouts = [scratch_layout(replace(key, tokens=rows)) for _, rows in tiles]
+    offsets = []
+    total = 0
+    for layout in layouts:
+        total = (total + 255) // 256 * 256
+        offsets.append(total)
+        total += max(o + n for o, n in layout.values())
+    # the x columns LDS holds at once: two K chunks a wave when caching weights,
+    # four of seven past TILE_TOKENS rows (``projection_chunk``), else the row
+    xcols = 2 * WAVES * KCH if key.cache_words else 4096 if s > TILE_TOKENS else HIDDEN
+    xrow = xcols + LDS_PAD
     assert s * xrow * 2 <= 136 * 1024, "x rows exceed LDS"
+    assert s * xrow * 2 + 2 * THREADS * key.cache_words * 4 <= 152 * 1024
     assert L <= 16 and key.nblocks >= 1
 
     @fx.struct
@@ -741,14 +1176,16 @@ def build(key: KdaPreBuild):
     @fx.struct
     class GemvLds:
         xl: fx.Array[fx.Int32, s * xrow // 2, 16]
+        # ``cached_projection``'s weights (a placeholder word without them)
+        weights: fx.Array[fx.Int32, max(2 * THREADS * key.cache_words, 1), 16]
 
     @fx.struct
     class KdaLds:
         fa: fx.Array[fx.Float32, L * HD, 16]
         qkl: fx.Array[fx.Float32, L * 2 * HD, 16]
         decay: fx.Array[fx.Float32, L * HD, 16]
-        vloc: fx.Array[fx.Float32, L * VCH, 16]
-        ol: fx.Array[fx.Float32, L * VCH, 16]
+        vloc: fx.Array[fx.Float32, L * key.state_rows, 16]
+        ol: fx.Array[fx.Float32, L * key.state_rows, 16]
         beta: fx.Array[fx.Float32, 16, 16]
 
     @fx.union
@@ -762,7 +1199,10 @@ def build(key: KdaPreBuild):
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
 
     keyed = key_tuple(key, _SOURCES)
-    name = f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
+    name = (
+        f"k3_mono_kda_pre_s{key.tokens}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
+        f"_v{key.state_rows}_c{key.cache_words}"
+    )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kda_pre(
@@ -804,81 +1244,135 @@ def build(key: KdaPreBuild):
         role = alloc.allocate(RoleLds)
         al, gl, kl = role.attn.peek(), role.gemv.peek(), role.kda.peek()
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
-        c = {
-            "S": s,
-            "L": L,
-            "NS": ns,
-            "NB": key.nblocks,
-            "SL": key.state_len,
-            "tid": tid,
-            "bid": bid,
-            "lane": tid % 64,
-            "wave": tid // 64,
-            "delta": key.delta,
-            "eps": key.eps,
-            "out_eps": key.out_eps,
-            "onorm_eps": key.onorm_eps,
-            "lb": key.lower_bound,
-            "kda0": key.kda0,
-            "write_idx": key.write_idx,
-            "put": mb.put,
-            "poll": mb.poll,
-            "red": lds.red.ptr,
-            "vals": al.vals.ptr,
-            "xl": gl.xl.ptr,
-            "fa": kl.fa.ptr,
-            "qkl": kl.qkl.ptr,
-            "decay": kl.decay.ptr,
-            "vloc": kl.vloc.ptr,
-            "ol": kl.ol.ptr,
-            "beta": kl.beta.ptr,
-            "xbuf": scratch + fx.Int64(lay["x"][0]),
-            "args": {
-                "prefix": prefix,
-                "delta": delta,
-                "blocks": blocks,
-                "blk_sm": blk_sm,
-                "blk_sr": blk_sr,
-                "ares_nw": ares_nw,
-                "ares_qk": ares_qk,
-                "in_nw": in_nw,
-                "w_in": w_in,
-                "w_fb": w_fb,
-                "conv_w": conv_w,
-                "conv_st": conv_st,
-                "cs_seq": cs_seq,
-                "cs_dim": cs_dim,
-                "cs_tok": cs_tok,
-                "a_log": a_log,
-                "dt_bias": dt_bias,
-                "on_w": on_w,
-                "rstate": rstate,
-                "rs_seq": rs_seq,
-                "st_idx": st_idx,
-                "st_stride": st_stride,
-                "num_acc": num_acc,
-                "core_out": core_out,
-            },
-        }
-        for region in REGIONS:
-            c[region] = sreg(scratch, lay[region][0], region)
-        if bid < NA:
-            stage_slice(c, bid)
-            if bid < s:
-                stage_gate(c, bid)
-            stage_mix(c, bid)
-        if bid >= NA:
-            gi = bid - NA
-            rg0 = 2 * gi
-            rg1 = 2 * gi + 1
-            ops0 = gemv_loads(c, rg0, range(PER_WAVE))
-            load_x(c)
-            # the second group's first half in flight under the first's MFMAs
-            ops1 = gemv_loads(c, rg1, range(4))
-            stage_gemv(c, rg0, ops0)
-            ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
-            stage_gemv(c, rg1, ops1)
-        kda_tasks(c)
+        contexts = []
+        for tile in range_constexpr(len(tiles)):
+            first, s = tiles[tile]
+            lay = layouts[tile]
+            tile_scratch = scratch + fx.Int64(offsets[tile])
+            c = {
+                "S": s,
+                "XCOLS": xcols,
+                "L": L,
+                "VCH": key.state_rows,
+                "NVCH": nvch,
+                "NS": ns,
+                "NB": key.nblocks,
+                "SL": key.state_len,
+                "tid": tid,
+                "bid": bid,
+                "lane": tid % 64,
+                "wave": tid // 64,
+                "delta": key.delta,
+                "eps": key.eps,
+                "out_eps": key.out_eps,
+                "onorm_eps": key.onorm_eps,
+                "lb": key.lower_bound,
+                "kda0": (key.kda0 + first // L * NH * nvch) % BLOCKS,
+                "cache_words": key.cache_words,
+                "write_idx": key.write_idx,
+                "put": mb.put,
+                "poll": mb.poll,
+                "red": lds.red.ptr,
+                "vals": al.vals.ptr,
+                "xl": gl.xl.ptr,
+                "fa": kl.fa.ptr,
+                "qkl": kl.qkl.ptr,
+                "decay": kl.decay.ptr,
+                "vloc": kl.vloc.ptr,
+                "ol": kl.ol.ptr,
+                "beta": kl.beta.ptr,
+                "xbuf": tile_scratch + fx.Int64(lay["x"][0]),
+                "args": {
+                    "prefix": prefix + fx.Int64(first * HIDDEN * 2),
+                    "delta": delta + fx.Int64(first * HIDDEN * 2)
+                    if key.delta
+                    else delta,
+                    "blocks": blocks + fx.Int64(first) * fx.Int64(blk_sm) * 2,
+                    "blk_sm": blk_sm,
+                    "blk_sr": blk_sr,
+                    "ares_nw": ares_nw,
+                    "ares_qk": ares_qk,
+                    "in_nw": in_nw,
+                    "w_in": w_in,
+                    "w_fb": w_fb,
+                    "conv_w": conv_w,
+                    "conv_st": conv_st,
+                    "cs_seq": cs_seq,
+                    "cs_dim": cs_dim,
+                    "cs_tok": cs_tok,
+                    "a_log": a_log,
+                    "dt_bias": dt_bias,
+                    "on_w": on_w,
+                    "rstate": rstate,
+                    "rs_seq": rs_seq,
+                    "st_idx": st_idx + fx.Int64(first // L) * fx.Int64(st_stride) * 4,
+                    "st_stride": st_stride,
+                    "num_acc": num_acc + fx.Int64(first // L * 4),
+                    "core_out": core_out + fx.Int64(first * PROJ * 2),
+                },
+            }
+            for region in REGIONS:
+                c[region] = sreg(tile_scratch, lay[region][0], region)
+            if const_expr(key.cache_words):
+                c["wl"] = gl.weights.ptr
+            contexts.append(c)
+        if const_expr(key.tokens > TILE_TOKENS):
+            # every tile's AttnRes, then in_proj with each weight chunk loaded
+            # once for every tile, then every tile's KDA tasks
+            if bid < NA:
+                for tile in range_constexpr(len(tiles)):
+                    c = contexts[tile]
+                    stage_slice(c, bid)
+                    if bid < c["S"]:
+                        stage_gate(c, bid)
+                    stage_mix(c, bid)
+            if bid >= NA:
+                rg0, rg1 = 2 * (bid - NA), 2 * (bid - NA) + 1
+                if const_expr(key.cache_words):
+                    cached_projection(contexts, rg0, rg1)
+                else:
+                    accs0 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                    accs1 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                    for half in range_constexpr(2):
+                        chunks = range(half * 4, min(half * 4 + 4, PER_WAVE))
+                        ops0 = gemv_loads(contexts[0], rg0, chunks)
+                        ops1 = gemv_loads(contexts[0], rg1, chunks)
+                        for tile in range_constexpr(len(tiles)):
+                            accs0[tile], accs1[tile] = projection_chunk(
+                                contexts[tile],
+                                half,
+                                ops0,
+                                ops1,
+                                accs0[tile],
+                                accs1[tile],
+                            )
+                    for tile in range_constexpr(len(tiles)):
+                        projection_out(contexts[tile], rg0, accs0[tile])
+                        projection_out(contexts[tile], rg1, accs1[tile])
+            for tile in range_constexpr(len(tiles)):
+                kda_tasks(contexts[tile])
+        else:
+            c = contexts[0]
+            if bid < NA:
+                stage_slice(c, bid)
+                if bid < c["S"]:
+                    stage_gate(c, bid)
+                stage_mix(c, bid)
+            if bid >= NA:
+                gi = bid - NA
+                rg0 = 2 * gi
+                rg1 = 2 * gi + 1
+                if const_expr(key.cache_words):
+                    cached_projection([c], rg0, rg1)
+                else:
+                    ops0 = gemv_loads(c, rg0, range(PER_WAVE))
+                    load_x(c)
+                    # Prefetch the second group under the first group's MFMAs.
+                    ops1 = gemv_loads(c, rg1, range(4))
+                    stage_gemv(c, rg0, ops0)
+                    ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
+                    stage_gemv(c, rg1, ops1)
+            kda_tasks(c)
 
     @flyc.jit
     def launch(
