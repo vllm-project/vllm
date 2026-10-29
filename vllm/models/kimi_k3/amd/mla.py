@@ -7,6 +7,7 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import split_kv_b_proj
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -46,6 +47,18 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self._fused_q_heads = AiterMLAHelper.get_actual_mla_num_heads(
                 self.num_heads
             )
+        # Positions fed to the fused kernel's identity RoPE; see _fused_decode.
+        # Allocated once here so every captured CUDA graph shares one zeroed
+        # buffer instead of capturing a memset per layer.
+        zero_positions = None
+        if self._fused_qk_prep:
+            vllm_config = get_current_vllm_config()
+            max_tokens = max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+            zero_positions = torch.zeros(max_tokens, dtype=torch.int64)
+        self.register_buffer("_zero_positions", zero_positions, persistent=False)
         # The fold reads q_b_proj.weight as plain bf16/fp16 rows, so a quantized
         # q_b_proj keeps the unfused path.
         self._fold_qb_uk = (
@@ -174,7 +187,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        positions: torch.Tensor,
         output_shape: tuple[int, int],
         attn_metadata,
         layer,
@@ -228,9 +240,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         if self._identity_rope is None:
             # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is
-            # what a NoPE model needs. One row suffices because the `_opt`
-            # kernel clamps `pos` into [0, cos_cache.size(0)); a full-length
-            # cache would cost ~268 MB at K3's 1M max_position_embeddings.
+            # what a NoPE model needs. A full-length cache would cost ~268 MB at
+            # K3's 1M max_position_embeddings, so it holds one row and the
+            # kernel is given all-zero positions below.
             half = self.qk_rope_head_dim // 2
             opts = {"dtype": kv_c_normed.dtype, "device": kv_c_normed.device}
             self._identity_rope = (
@@ -253,6 +265,15 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             device=ql_nope.device,
         )
         q_out = q_out_padded[:, :num_heads]
+        # The kernel must not see the real positions: not every AITER variant
+        # clamps them into the one-row cos/sin cache. The head-grouped kernel
+        # (AITER v0.1.26) reads cos = sin = 0 past the cache at one head per
+        # block, zeroing q_pe and the cached k_pe, and faults at more heads per
+        # block. RoPE is the identity, so position 0 is exact for every token.
+        # The kernel takes its token count from slot_mapping.
+        slot_mapping = slot_mapping.flatten()
+        num_slots = slot_mapping.shape[0]
+        assert num_slots <= self._zero_positions.shape[0]
         fused_qk_rope_concat_and_cache_mla(
             ql_nope,
             q_pe,
@@ -260,10 +281,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe.squeeze(1),
             kv_cache.view(kv_cache.shape[0], -1, head_size),
             q_out,
-            slot_mapping.flatten(),
+            slot_mapping,
             layer._k_scale,
             layer._q_scale,
-            positions,
+            self._zero_positions[:num_slots],
             cos_cache,
             sin_cache,
             is_neox=True,
@@ -383,7 +404,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 q,
                 kv_c_normed,
                 k_pe,
-                positions,
                 output_shape,
                 attn_metadata,
                 layer,
