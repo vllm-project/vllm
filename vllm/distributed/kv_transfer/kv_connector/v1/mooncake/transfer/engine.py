@@ -34,7 +34,6 @@ class RangeRequest:
 class TransferEvent:
     range_id: int
     state: TransferState
-    transferred_bytes: int | None = None
     error: str | None = None
 
 
@@ -60,14 +59,15 @@ class TransferBackend(ABC):
         """Releases memory pinned by `register_regions`."""
 
     @abstractmethod
-    def submit(self, peer: str, op: TransferOp, ranges: Sequence[RangeRequest]) -> None:
-        """Starts one transfer request. Called from a worker thread and may
-        block until the engine finishes, so never call it on the event loop."""
+    def transfer(
+        self, peer: str, op: TransferOp, ranges: Sequence[RangeRequest]
+    ) -> list[TransferEvent]:
+        """Moves every range and returns one terminal event for each.
 
-    @abstractmethod
-    def poll(self) -> list[TransferEvent]:
-        """Returns the terminal events observed since the previous call."""
+        Blocks until every range reached a terminal state. Called from worker
+        threads, so an implementation must accept concurrent calls.
+        """
 
     @abstractmethod
     def shutdown(self) -> None:
-        """Stops the backend. No submit or poll after this returns."""
+        """Stops the backend. No transfer runs after this returns."""

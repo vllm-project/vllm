@@ -231,13 +231,9 @@ def _bare_worker() -> MooncakeConnectorWorker:
 
 def test_send_blocks_records_success():
     worker = _bare_worker()
-    worker.transfer.poll.return_value = [
-        TransferEvent(
-            range_id=0, state=TransferState.COMPLETED, transferred_bytes=1024
-        ),
-        TransferEvent(
-            range_id=1, state=TransferState.COMPLETED, transferred_bytes=2048
-        ),
+    worker.transfer.transfer.return_value = [
+        TransferEvent(range_id=0, state=TransferState.COMPLETED),
+        TransferEvent(range_id=1, state=TransferState.COMPLETED),
     ]
 
     events = worker._send_blocks(
@@ -257,7 +253,7 @@ def test_send_blocks_records_success():
 
 def test_send_blocks_records_failure():
     worker = _bare_worker()
-    worker.transfer.poll.return_value = [
+    worker.transfer.transfer.return_value = [
         TransferEvent(
             range_id=0,
             state=TransferState.FAILED,
@@ -274,11 +270,11 @@ def test_send_blocks_records_failure():
 
 def test_send_blocks_submits_one_range_per_descriptor():
     worker = _bare_worker()
-    worker.transfer.poll.return_value = []
+    worker.transfer.transfer.return_value = []
 
     worker._send_blocks("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
 
-    _, op, ranges = worker.transfer.submit.call_args.args
+    _, op, ranges = worker.transfer.transfer.call_args.args
     assert op is TransferOp.WRITE
     assert [
         (request.local_addr, request.remote_addr, request.length) for request in ranges
@@ -296,8 +292,8 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
-    worker.transfer.poll.return_value = [
-        TransferEvent(range_id=0, state=TransferState.COMPLETED, transferred_bytes=4096)
+    worker.transfer.transfer.return_value = [
+        TransferEvent(range_id=0, state=TransferState.COMPLETED)
     ]
     worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 

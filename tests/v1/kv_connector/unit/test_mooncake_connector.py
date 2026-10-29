@@ -1250,7 +1250,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
-            worker.transfer.engine, "batch_register_memory", return_value=0
+            FakeMooncakeWrapper, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
 
@@ -2797,7 +2797,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     worker.is_kv_consumer = True
     # The first register built a producer. Its thread patch is already gone,
     # so stay on the consumer path and return before the sender thread starts.
-    with patch.object(worker.transfer.engine, "batch_register_memory", return_value=0):
+    with patch.object(FakeMooncakeWrapper, "batch_register_memory", return_value=0):
         worker.register_kv_caches(kv_caches)
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
@@ -3408,7 +3408,7 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.register_kv_caches(dict(zip(layer_names, views)))
         reg.reset_mock()
         with patch.object(
-            worker.transfer.engine, "batch_unregister_memory", return_value=0
+            FakeMooncakeWrapper, "batch_unregister_memory", return_value=0
         ) as unreg:
             worker.unregister_kv_caches()
             worker.unregister_kv_caches()

@@ -2237,8 +2237,7 @@ class MooncakeConnectorWorker:
             for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
         ]
         start_time = time.perf_counter()
-        self.transfer.submit(remote_session, TransferOp.WRITE, ranges)
-        events = self.transfer.poll()
+        events = self.transfer.transfer(remote_session, TransferOp.WRITE, ranges)
         duration = time.perf_counter() - start_time
         failed_event = next(
             (event for event in events if event.state is TransferState.FAILED), None

@@ -85,11 +85,11 @@ def test_backend_initializes_engine_with_p2p_handshake():
     assert backend.rpc_port == 12345
 
 
-def test_submit_reports_completion_per_range_and_drains_once():
+def test_transfer_reports_completion_per_range():
     engine = FakeEngine()
     backend = make_backend(engine)
 
-    backend.submit(
+    events = backend.transfer(
         "10.0.0.2:1234",
         TransferOp.WRITE,
         [
@@ -97,7 +97,6 @@ def test_submit_reports_completion_per_range_and_drains_once():
             RangeRequest(range_id=1, local_addr=0x1100, remote_addr=0x2100, length=256),
         ],
     )
-    events = backend.poll()
 
     assert engine.calls[-1] == (
         "write",
@@ -110,39 +109,44 @@ def test_submit_reports_completion_per_range_and_drains_once():
         (0, TransferState.COMPLETED),
         (1, TransferState.COMPLETED),
     ]
-    assert [event.transferred_bytes for event in events] == [256, 256]
-    assert backend.poll() == []
+    assert [event.error for event in events] == [None, None]
 
 
-def test_submit_reports_engine_failure_for_every_range():
+def test_transfer_reports_engine_failure_for_every_range():
     engine = FakeEngine(write_status=7)
     backend = make_backend(engine)
 
-    backend.submit(
+    events = backend.transfer(
         "10.0.0.2:1234",
         TransferOp.WRITE,
         [RangeRequest(range_id=3, local_addr=0x1000, remote_addr=0x2000, length=64)],
     )
-    events = backend.poll()
 
     assert len(events) == 1
     assert events[0].state is TransferState.FAILED
-    assert events[0].transferred_bytes is None
     assert events[0].error == "Mooncake transfer engine returned 7"
 
 
-def test_submit_reads_when_op_is_read():
+def test_transfer_reads_when_op_is_read():
     engine = FakeEngine(read_status=5)
     backend = make_backend(engine)
 
-    backend.submit(
+    events = backend.transfer(
         "10.0.0.2:1234",
         TransferOp.READ,
         [RangeRequest(range_id=0, local_addr=0x1000, remote_addr=0x2000, length=8)],
     )
 
     assert engine.calls[-1][0] == "read"
-    assert backend.poll()[0].state is TransferState.FAILED
+    assert events[0].state is TransferState.FAILED
+
+
+def test_transfer_returns_nothing_for_an_empty_request():
+    engine = FakeEngine()
+    backend = make_backend(engine)
+
+    assert backend.transfer("10.0.0.2:1234", TransferOp.WRITE, []) == []
+    assert engine.calls[-1][0] == "initialize"
 
 
 def test_register_regions_forwards_addresses_and_lengths():
@@ -193,15 +197,15 @@ def test_backend_rejects_failed_initialize():
         make_backend(FailingEngine())
 
 
-def test_concurrent_submissions_keep_their_own_events():
+def test_concurrent_transfers_keep_their_own_events():
     engine = FakeEngine()
     backend = make_backend(engine)
     results: dict[str, list] = {}
     submitted = threading.Barrier(2)
 
-    def submit_and_poll(name: str, range_id: int) -> None:
+    def submit_and_collect(name: str, range_id: int) -> None:
         submitted.wait()
-        backend.submit(
+        results[name] = backend.transfer(
             "10.0.0.2:1234",
             TransferOp.WRITE,
             [
@@ -210,11 +214,10 @@ def test_concurrent_submissions_keep_their_own_events():
                 )
             ],
         )
-        results[name] = backend.poll()
 
     threads = [
-        threading.Thread(target=submit_and_poll, args=("first", 0)),
-        threading.Thread(target=submit_and_poll, args=("second", 1)),
+        threading.Thread(target=submit_and_collect, args=("first", 0)),
+        threading.Thread(target=submit_and_collect, args=("second", 1)),
     ]
     for thread in threads:
         thread.start()
@@ -223,4 +226,3 @@ def test_concurrent_submissions_keep_their_own_events():
 
     assert [event.range_id for event in results["first"]] == [0]
     assert [event.range_id for event in results["second"]] == [1]
-    assert backend.poll() == []
