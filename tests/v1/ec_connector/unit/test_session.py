@@ -95,8 +95,10 @@ def _xfer_req(mm_hash: str = "h1", session_id: str = "sess-1") -> XferReq:
     )
 
 
-def _make_producer_session(cache: EmbeddingCache | None = None) -> ProducerSession:
-    data = _make_data()
+def _make_producer_session(
+    cache: EmbeddingCache | None = None, data: MagicMock | None = None
+) -> ProducerSession:
+    data = data or _make_data()
     data.get_agent_metadata.return_value = b"meta"
     data.get_mem_descriptor.return_value = b"desc"
     return ProducerSession(
@@ -117,6 +119,7 @@ def test_producer_session_grant_pins_ready_entry_and_returns_blocks():
 
     assert ack.status == XferStatus.OK
     entry = cache.get("h1")
+    assert entry is not None
     assert not entry.evictable  # pinned by the grant
     assert list(ack.src_block_indices) == list(entry.block_ids)
 
@@ -153,6 +156,7 @@ def test_producer_session_grant_nacks_version_mismatch():
 
     assert ack.status == XferStatus.NACK_VERSION
     entry = cache.get("h1")
+    assert entry is not None
     assert entry.evictable  # nothing was pinned
 
 
@@ -167,6 +171,7 @@ def test_producer_session_grant_nacks_compat_hash_mismatch():
 
     assert ack.status == XferStatus.NACK_INCOMPAT
     entry = cache.get("h1")
+    assert entry is not None
     assert entry.evictable  # nothing was pinned
 
 
@@ -174,12 +179,14 @@ def test_producer_session_notif_unpins_via_cache():
     cache = EmbeddingCache(num_blocks=8)
     cache.alloc("h1", 2)
     cache.mark_ready("h1")
-    s = _make_producer_session(cache)
+    data = _make_data()
+    s = _make_producer_session(cache, data)
     s._grant_or_nack(_xfer_req(mm_hash="h1", session_id="sess-1"))
     entry = cache.get("h1")
+    assert entry is not None
     assert not entry.evictable  # pinned
 
-    s._data.get_new_notifs.return_value = {"agent": [b"sess-1:h1"]}
+    data.get_new_notifs.return_value = {"agent": [b"sess-1:h1"]}
     s._drain_notifs()
 
     assert entry.evictable  # unpinned via cache
@@ -197,7 +204,9 @@ def test_producer_session_sweep_timeouts_unpins_via_cache():
 
     s._sweep_timeouts()
 
-    assert cache.get("h1").evictable
+    entry = cache.get("h1")
+    assert entry is not None
+    assert entry.evictable
     assert s._active_xfers == {}
 
 
@@ -329,7 +338,6 @@ def test_consumer_xfer_quarantined_exception_settles():
 
 def test_consumer_xfer_quarantined_timeout_evicts_blocks():
     """Quarantine timeout should release handle and return READ_FAILED."""
-
     data = _make_data(xfer_state="PROC")
     x = _started(data)
     # First poll transitions to QUARANTINED (deadline extended by 60s)
@@ -451,14 +459,16 @@ def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
     assert not results.completed
 
 
-def test_consumer_session_take_results_clears_state():
+def test_consumer_session_ack_timeout_reports_retry_once():
+    """A delayed producer ACK is retryable, and its result is drained once."""
     s = _make_consumer_session()
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
     s.poll([], time.monotonic())
     r1 = s.take_results()
-    assert "h1" in r1.tombstoned
+    assert "h1" in r1.retryable
+    assert not r1.tombstoned
     r2 = s.take_results()
-    assert not r2.tombstoned  # cleared after first take
+    assert not r2.retryable  # cleared after first take
 
 
 def test_consumer_session_on_peer_down_cancels_waiting_ack():

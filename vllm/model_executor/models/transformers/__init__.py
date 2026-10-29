@@ -14,14 +14,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper around `transformers` models"""
+"""Wrapper around `transformers` models."""
 
 from typing import TYPE_CHECKING
 
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR, Base
+from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
@@ -40,6 +40,29 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 if TYPE_CHECKING:
     import torch
 
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+
+def check_sinks(
+    module: "torch.nn.Module",
+    self_attn: "Attention | MLAAttention",
+    s_aux: "torch.Tensor | None",
+):
+    """Fail loudly if the model applies a sink the attention layer will not.
+
+    Only the attention impl can fold a sink into the softmax denominator, so a sink
+    that never reached `Attention` is dropped and every softmax is subtly wrong.
+    """
+    if s_aux is None or getattr(self_attn, "has_sink", False):
+        return
+    raise ValueError(
+        f"{type(module).__name__} applies attention sinks, but they were not passed "
+        f"to {type(self_attn).__name__}, so the output would be wrong. Either the "
+        "Transformers modeling backend could not find the parameter holding them, or "
+        "vLLM does not support sinks for this kind of attention. Please open an issue "
+        "at https://github.com/vllm-project/vllm/issues/new"
+    )
+
 
 def vllm_attention_forward(
     # Transformers args
@@ -51,6 +74,7 @@ def vllm_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
@@ -80,6 +104,7 @@ def vllm_mla_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
     num_tokens, num_heads = query.shape[:2]
@@ -101,10 +126,10 @@ ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 
 
 # Text only models
-class TransformersForCausalLM(CausalMixin, Base): ...
+class TransformersForCausalLM(CausalMixin): ...
 
 
-class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
+class TransformersMoEForCausalLM(MoEMixin, CausalMixin): ...
 
 
 # Multimodal models
@@ -113,7 +138,7 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
+class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin): ...
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -121,16 +146,14 @@ class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-class TransformersMultiModalMoEForCausalLM(
-    MoEMixin, MultiModalMixin, CausalMixin, Base
-): ...
+class TransformersMultiModalMoEForCausalLM(MoEMixin, MultiModalMixin, CausalMixin): ...
 
 
 # Embedding models
-class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin, Base): ...
+class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin): ...
 
 
-class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
+class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin): ...
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -138,17 +161,17 @@ class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base): ...
+class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin): ...
 
 
 # Sequence classification models
 class TransformersForSequenceClassification(
-    SequenceClassificationMixin, LegacyMixin, Base
+    SequenceClassificationMixin, LegacyMixin
 ): ...
 
 
 class TransformersMoEForSequenceClassification(
-    SequenceClassificationMixin, MoEMixin, Base
+    SequenceClassificationMixin, MoEMixin
 ): ...
 
 
@@ -158,7 +181,7 @@ class TransformersMoEForSequenceClassification(
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
 class TransformersMultiModalForSequenceClassification(
-    SequenceClassificationMixin, MultiModalMixin, Base
+    SequenceClassificationMixin, MultiModalMixin
 ): ...
 
 

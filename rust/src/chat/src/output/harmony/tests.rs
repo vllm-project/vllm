@@ -11,6 +11,7 @@ use vllm_text::output::{
 };
 
 use super::*;
+use crate::event::AssistantBlockKind;
 use crate::output::ChatOutputProcessor;
 use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
 use crate::{AssistantMessageExt, ChatEvent, ChatTokenUsage, FinishReason};
@@ -53,11 +54,14 @@ fn finished() -> Finished {
         usage: vllm_llm::TokenUsage {
             prompt_token_count: 0,
             output_token_count: 0,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
         },
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
         ec_transfer_params: None,
+        sampling_mask: None,
+        spec_decode_metrics: None,
+        timestamps: Default::default(),
     }
 }
 
@@ -98,6 +102,7 @@ fn request_with_tools() -> ChatRequest {
             "required": ["city"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     ChatRequest {
         tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
@@ -128,8 +133,10 @@ fn interrupted_final_message_is_preserved() {
             usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             }),
+            timestamps: Default::default(),
+            spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -176,11 +183,16 @@ fn interrupted_analysis_message_is_preserved() {
                     text: "think".to_string(),
                 }],
             },
-            usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
-                prompt_token_count: 0,
-                output_token_count: 0,
-                cached_token_count: 0,
-            }),
+            usage: ChatTokenUsage {
+                engine: vllm_llm::TokenUsage {
+                    prompt_token_count: 0,
+                    output_token_count: 0,
+                    prompt_cache_usage: Default::default(),
+                },
+                reasoning_tokens: 1,
+            },
+            timestamps: Default::default(),
+            spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -276,6 +288,124 @@ fn tool_calls_stream_arguments_and_finish_with_local_id_shape() {
     let end = saw_end.expect("tool end");
     assert_eq!(end.id, start_id);
     assert_eq!(end.arguments, r#"{"city":"Paris"}"#);
+}
+
+fn content_token_count(text: &str) -> usize {
+    harmony_encoding().unwrap().tokenizer().encode_ordinary(text).len()
+}
+
+fn reasoning_token_counts(events: &[ChatEvent]) -> (Vec<usize>, usize) {
+    let deltas = events
+        .iter()
+        .filter_map(|event| match event {
+            ChatEvent::BlockDelta {
+                kind: AssistantBlockKind::Reasoning,
+                token_count,
+                ..
+            // The newline separating two reasoning messages has no tokens.
+            } => Some(token_count.unwrap_or_default()),
+            _ => None,
+        })
+        .collect();
+    let ChatEvent::Done { usage, .. } = events.last().unwrap() else {
+        panic!("expected done");
+    };
+    (deltas, usage.reasoning_tokens)
+}
+
+#[test]
+fn reasoning_tokens_count_analysis_and_tool_call_content() {
+    let analysis = "Let me check the weather.";
+    let arguments = r#"{"city":"Paris"}"#;
+    let tokens = completion_tokens(&[
+        text_message("analysis", analysis),
+        tool_message("get_weather", arguments, "commentary"),
+    ]);
+    let events = block_on(collect_events(
+        HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
+        vec![
+            decoded_start(),
+            decoded_tokens(tokens, None, Some(finished())),
+        ],
+    ));
+
+    // Like Python, content of `analysis` and of `commentary` with a recipient
+    // counts, Harmony control and header tokens do not. Tool-call tokens are
+    // only in the final usage.
+    let (deltas, total) = reasoning_token_counts(&events);
+    assert_eq!(deltas.iter().sum::<usize>(), content_token_count(analysis));
+    assert_eq!(
+        total,
+        content_token_count(analysis) + content_token_count(arguments)
+    );
+}
+
+#[test]
+fn reasoning_tokens_exclude_final_and_preamble_content() {
+    let tokens = completion_tokens(&[
+        text_message("commentary", "Let me check."),
+        text_message("final", "Hello"),
+    ]);
+    let events = block_on(collect_events(
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        vec![
+            decoded_start(),
+            decoded_tokens(tokens, None, Some(finished())),
+        ],
+    ));
+
+    assert_eq!(reasoning_token_counts(&events), (vec![], 0));
+}
+
+fn stream_one_token_per_update(messages: &[Message]) -> Vec<ChatEvent> {
+    let tokens = completion_tokens(messages);
+    let last = tokens.len() - 1;
+    let mut decoded = vec![decoded_start()];
+    for (i, token) in tokens.into_iter().enumerate() {
+        decoded.push(decoded_tokens(
+            vec![token],
+            None,
+            (i == last).then(finished),
+        ));
+    }
+    block_on(collect_events(
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        decoded,
+    ))
+}
+
+#[test]
+fn reasoning_tokens_are_attributed_to_their_streamed_deltas() {
+    let first = "Let me think about this.";
+    let second = "Then answer.";
+    let events = stream_one_token_per_update(&[
+        text_message("analysis", first),
+        text_message("analysis", second),
+        text_message("final", "Hi"),
+    ]);
+
+    // One delta per content token, and the separating newline carries none.
+    let mut expected = vec![1; content_token_count(first)];
+    expected.push(0);
+    expected.extend(vec![1; content_token_count(second)]);
+    let total = expected.iter().sum();
+    assert_eq!(reasoning_token_counts(&events), (expected, total));
+}
+
+#[test]
+fn reasoning_tokens_of_a_split_character_join_its_delta() {
+    // Each of these characters spans several byte-level tokens, so the first
+    // tokens of a character produce no text delta of their own.
+    let text = "\u{1D518}\u{1D52B}";
+    let tokens = content_token_count(text);
+    assert!(tokens > text.chars().count());
+    let events =
+        stream_one_token_per_update(&[text_message("analysis", text), text_message("final", "Hi")]);
+
+    let (deltas, total) = reasoning_token_counts(&events);
+    assert_eq!(deltas.len(), text.chars().count());
+    assert_eq!(deltas.iter().sum::<usize>(), tokens);
+    assert_eq!(total, tokens);
 }
 
 #[test]

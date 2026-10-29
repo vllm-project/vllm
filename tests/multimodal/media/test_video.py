@@ -9,8 +9,10 @@ import numpy as np
 import numpy.typing as npt
 import pybase64
 import pytest
+import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import (
     video_get_metadata,
@@ -18,6 +20,7 @@ from vllm.assets.video import (
     video_to_pil_images_list,
 )
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
@@ -47,18 +50,28 @@ class Assert10Frames1FPSVideoLoader(VideoLoader):
         return FAKE_OUTPUT_2
 
 
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_counts_torch_frames(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 16)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget))
+    frames = torch.zeros((2, 2, 2, 3), dtype=torch.uint8)
+    video_io.video_loader = SimpleNamespace(load_bytes=lambda *_args, **_kwargs: frames)
+
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        video_io.load_bytes(b"video")
+
+
 def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "assert_10_frames_1_fps")
         imageio = ImageMediaIO()
 
         # Verify that different args pass/fail assertions as expected.
-        videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 1.0})
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0)
         _ = videoio.load_bytes(b"test")
 
-        videoio = VideoMediaIO(
-            imageio, **{"num_frames": 10, "fps": 1.0, "not_used": "not_used"}
-        )
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0, not_used="not_used")
         _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
@@ -66,19 +79,18 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 9, "fps": 1.0})
+            videoio = VideoMediaIO(imageio, num_frames=9, fps=1.0)
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad fps"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
+            videoio = VideoMediaIO(imageio, num_frames=10, fps=2.0)
             _ = videoio.load_bytes(b"test")
 
 
 @pytest.mark.parametrize("is_color", [True, False])
 @pytest.mark.parametrize("fourcc, ext", [("mp4v", "mp4"), ("XVID", "avi")])
 def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: str):
-    """
-    Test all functions that use OpenCV for video I/O return RGB format.
+    """Test all functions that use OpenCV for video I/O return RGB format.
     Both RGB and grayscale videos are tested.
     """
     image_path = get_vllm_public_assets(
@@ -87,14 +99,14 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
     image = Image.open(image_path)
 
     if not is_color:
-        image_path = f"{tmp_path}/test_grayscale_image.png"
+        image_path = Path(tmp_path) / "test_grayscale_image.png"
         image = image.convert("L")
         image.save(image_path)
         # Convert to gray RGB for comparison
         image = image.convert("RGB")
     video_path = f"{tmp_path}/test_RGB_video.{ext}"
     create_video_from_image(
-        image_path,
+        str(image_path),
         video_path,
         num_frames=2,
         is_color=is_color,
@@ -168,8 +180,7 @@ class TestVideoBackendOverride2(VideoLoader):
 
 
 def test_video_media_io_backend_kwarg_override(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that video_backend kwarg can override the VLLM_VIDEO_LOADER_BACKEND
+    """Test that video_backend kwarg can override the VLLM_VIDEO_LOADER_BACKEND
     environment variable.
 
     This allows users to dynamically select a different video backend
@@ -201,8 +212,7 @@ def test_video_media_io_backend_kwarg_override(monkeypatch: pytest.MonkeyPatch):
 def test_video_media_io_backend_kwarg_not_passed_to_loader(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that video_backend kwarg is consumed by VideoMediaIO and NOT passed
+    """Test that video_backend kwarg is consumed by VideoMediaIO and NOT passed
     through to the underlying video loader's load_bytes method.
 
     This ensures the kwarg is properly popped from kwargs before forwarding.
@@ -245,8 +255,7 @@ def test_video_media_io_backend_kwarg_not_passed_to_loader(
 
 
 def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that when video_backend kwarg is None or not provided,
+    """Test that when video_backend kwarg is None or not provided,
     VideoMediaIO falls back to VLLM_VIDEO_LOADER_BACKEND env var.
     """
     with monkeypatch.context() as m:
@@ -285,7 +294,6 @@ def test_load_base64_jpeg_returns_metadata():
     metadata, which broke downstream consumers that rely on fields like
     total_num_frames and fps. See PR #37301.
     """
-
     num_test_frames = 3
 
     b64_frames = _make_jpeg_b64_frames(num_test_frames)
@@ -379,9 +387,14 @@ def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
     original_error = RuntimeError("GPU decoder unavailable")
 
-    def raise_unrelated_error(cls, file_path, nvc):
+    def raise_unrelated_error(cls, file_path, nvc, max_width, max_height):
         raise original_error
 
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_validate_decoder_caps",
+        classmethod(lambda cls, file_path, nvc, **kwargs: (4096, 4096)),
+    )
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_read_source_metadata",
@@ -390,7 +403,9 @@ def test_pynvvideocodec_unrelated_error_propagates(
 
     with pytest.raises(RuntimeError) as exc_info:
         PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
-            None, b"video", None
+            None,
+            b"video",
+            None,
         )
 
     assert exc_info.value is original_error
@@ -453,6 +468,18 @@ class TestMergeKwargsGpuBackendPolicy:
             runtime_kwargs={"hw_decoders": 4},
         )
         assert result["hw_decoders"] == 2
+
+    def test_prevents_request_level_pynv_dimension_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "backend": "pynvvideocodec",
+                "max_width": 3840,
+                "max_height": 2160,
+            },
+            runtime_kwargs={"max_width": 1920, "max_height": 1080},
+        )
+        assert result["max_width"] == 3840
+        assert result["max_height"] == 2160
 
     @pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
@@ -531,6 +558,50 @@ class TestMergeKwargsGpuBackendPolicy:
 
     def test_unknown_backend_not_treated_as_gpu(self):
         assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
+
+    def test_strips_request_level_device(self):
+        """The decode device is a startup-only knob: a request must not move
+        decoding onto the GPU when the startup config did not opt in, nor off
+        it when it did."""
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "torchcodec"},
+            runtime_kwargs={"device": "cuda"},
+        )
+        assert "device" not in result
+
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "torchcodec", "device": "cuda"},
+            runtime_kwargs={"device": "cpu", "num_frames": 8},
+        )
+        assert result["device"] == "cuda"
+        assert result["num_frames"] == 8
+
+
+@pytest.mark.parametrize(
+    "default_kwargs",
+    [
+        {"backend": "torchcodec", "device": "cuda", "seek_mode": "approximate"},
+        {"backend": "pynvvideocodec", "hw_decoders": 2},
+    ],
+)
+def test_switching_backend_drops_stale_codec_options(default_kwargs):
+    """Codec-specific options from the static config must not leak into a
+    different codec backend selected per-request, where they would fail the
+    new backend's option validation."""
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={**default_kwargs, "num_frames": 8},
+        runtime_kwargs={"backend": "opencv"},
+    )
+    assert result == {"backend": "opencv", "num_frames": 8}
+
+
+def test_same_backend_keeps_codec_options():
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={"backend": "torchcodec", "device": "cuda"},
+        runtime_kwargs={"backend": "torchcodec", "num_frames": 8},
+    )
+    assert result["device"] == "cuda"
+    assert result["num_frames"] == 8
 
 
 @pytest.mark.parametrize("layout", ["nhwc", "nchw"])

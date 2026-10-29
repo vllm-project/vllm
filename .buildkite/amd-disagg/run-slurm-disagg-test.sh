@@ -37,12 +37,12 @@ IMAGE="${IMAGE:-vllm/vllm-openai-rocm:nightly}"
 NODES="${NODES:-2}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 PARTITION="${SLURM_PARTITION:-}"
-TIME_LIMIT="${SLURM_TIME_LIMIT:-02:00:00}"
+TIME_LIMIT="${SLURM_TIME_LIMIT:-03:00:00}"
 WIDE_EP_MODE="${WIDE_EP_MODE:-0}"              # 0 -> 1P1D TP8 (default); 1 -> wide-EP
 xP="${xP:-1}"
 yD="${yD:-1}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"
-HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"   # P/D bring-up budget; +900s grace must fit the 2h wall
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"   # P/D bring-up budget; +900s grace must fit the CI step timeout
 SHARED_MOUNT="${SHARED_MOUNT:-/data}"
 LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -67,9 +67,14 @@ cp -rL --no-preserve=ownership,timestamps "${SCRIPT_DIR}/." "${STAGED_DIR}/"
 chmod -R u+rwX "${STAGED_DIR}" 2>/dev/null || true
 export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
+
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
+# Leave the image's own ionic userspace in place instead of mounting the host's.
+export SKIP_IONIC_MOUNTS
+# Bake a different repo.radeon.com ionic userspace channel into the run image.
+export AINIC_SWAP_CHANNEL
 
 # Model selection.
 [[ -n "${MODEL_NAME:-}" ]] && export MODEL_NAME
@@ -88,6 +93,19 @@ fi
 # Job name comes from the script's #SBATCH --job-name (SLURM sets SLURM_JOB_NAME
 JOB_NAME="$(grep -oE '^#SBATCH[[:space:]]+--job-name=[^[:space:]]+' "${JOB_SCRIPT}" | sed -E 's/.*--job-name=//' | head -n1)"
 JOB_NAME="${JOB_NAME:-vllm-disagg-pd}"
+
+# Spur schedules onto reserved nodes only for jobs that name the reservation, and
+# a job naming a missing or ended one stays PENDING forever, so ask only while
+# the reservation is active.
+if [[ -n "${SBATCH_RESERVATION:-}" ]]; then
+    if scontrol show reservation "${SBATCH_RESERVATION}" 2>/dev/null | grep -q 'State=ACTIVE'; then
+        export SBATCH_RESERVATION
+        echo "[slurm-submit] reservation=${SBATCH_RESERVATION}" >&2
+    else
+        echo "[slurm-submit] reservation ${SBATCH_RESERVATION} is not active; submitting without it" >&2
+        unset SBATCH_RESERVATION
+    fi
+fi
 
 echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE} walltime=${TIME_LIMIT}"
 SUBMIT_OUT="$(sbatch --time="${TIME_LIMIT}" "${SUBMIT_SCRIPT}")"

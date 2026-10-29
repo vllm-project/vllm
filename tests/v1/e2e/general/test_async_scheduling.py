@@ -15,7 +15,7 @@ from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 from ....conftest import VllmRunner
 from ....models.utils import check_outputs_equal
@@ -111,7 +111,6 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
     """
-
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -171,7 +170,6 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     - Async scheduling enabled (as in production)
     - Different executors and chunking settings
     """
-
     # Variant with larger speculation window
     ngram_gpu_config = {
         "method": "ngram_gpu",
@@ -207,7 +205,6 @@ def run_tests(
 ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
-
     # Flex attention supports float32.
     attention_config = {"backend": "FLEX_ATTENTION"}
 
@@ -244,15 +241,15 @@ def run_tests(
     print(f"BASELINE: config=[{baseline_config}], accept_rates={baseline_acceptances}")
 
     failure = None
-    for test_config, test_outputs, test_acceptance_rates in outputs[1:]:
-        for (base_outs, base_logprobs), base_acceptance_rate, (
+    for test_config, test_outputs, test_acceptance_lengths in outputs[1:]:
+        for (base_outs, base_logprobs), base_acceptance_length, (
             test_outs,
             test_logprobs,
-        ), test_acceptance_rate, params in zip(
+        ), test_acceptance_length, params in zip(
             baseline_tests,
             baseline_acceptances or repeat(None),
             test_outputs,
-            test_acceptance_rates or repeat(None),
+            test_acceptance_lengths or repeat(None),
             test_sampling_params,
         ):
             reason = None
@@ -275,8 +272,8 @@ def run_tests(
             if reason is None:
                 try:
                     if (
-                        base_acceptance_rate is not None
-                        and test_acceptance_rate is not None
+                        base_acceptance_length is not None
+                        and test_acceptance_length is not None
                     ):
                         if "spec_mml=None" in test_config:
                             # Preemption causes more variance in acceptance rates
@@ -288,14 +285,14 @@ def run_tests(
                             else:
                                 tolerance = 0.05
                             assert (
-                                test_acceptance_rate > base_acceptance_rate
-                                or test_acceptance_rate
-                                == pytest.approx(base_acceptance_rate, rel=tolerance)
+                                test_acceptance_length > base_acceptance_length
+                                or test_acceptance_length
+                                == pytest.approx(base_acceptance_length, rel=tolerance)
                             )
                         else:
                             # Currently the reported acceptance rate is expected to be
                             # lower when we sometimes skip drafting altogether.
-                            assert test_acceptance_rate > 0.1
+                            assert test_acceptance_length > 1.1
                 except AssertionError as e:
                     reason = "accept  ", e
 
@@ -303,14 +300,14 @@ def run_tests(
                 print(
                     f"\033[32mPASSED\033[0m:           "
                     f"config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
+                    f" accept_rate={test_acceptance_length}"
                 )
             else:
                 reason_str, _ = reason
                 print(
                     f"\033[31mFAILED\033[0m({reason_str}): "
                     f"config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
+                    f" accept_rate={test_acceptance_length}"
                 )
                 if failure is None:
                     _, failure = reason
@@ -369,7 +366,7 @@ def run_test(
         **cache_arg,
     ) as vllm_model:
         results = []
-        acceptance_rates: list[float] | None = [] if spec_decoding else None
+        acceptance_lengths: list[float] | None = [] if spec_decoding else None
         for override_params in sampling_param_tests:
             metrics_before = vllm_model.llm.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
@@ -381,10 +378,12 @@ def run_test(
                 )
             )
             metrics_after = vllm_model.llm.get_metrics()
-            if acceptance_rates is not None:
-                acceptance_rate = _get_acceptance_rate(metrics_before, metrics_after)
-                acceptance_rates.append(acceptance_rate)
-                print(f"ACCEPTANCE RATE {acceptance_rate}")
+            if acceptance_lengths is not None:
+                acceptance_length = _get_acceptance_length(
+                    metrics_before, metrics_after
+                )
+                acceptance_lengths.append(acceptance_length)
+                print(f"ACCEPTANCE RATE {acceptance_length}")
 
             if test_preemption:
                 preemptions = _get_count(
@@ -407,7 +406,7 @@ def run_test(
                 )
                 assert _all_logprobs_match(results[0][1], other_test_logprobs)
 
-    return test_config, results, acceptance_rates
+    return test_config, results, acceptance_lengths
 
 
 def _all_logprobs_match(req_a, req_b) -> bool:
@@ -441,13 +440,15 @@ def _logprobs_match(
     )
 
 
-def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
-    draft = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+def _get_acceptance_length(before: list[Metric], after: list[Metric]) -> float:
+    draft = _get_count(before, after, "vllm:spec_decode_num_drafts")
     accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
-    return accept / draft if draft > 0 else 0.0
+    return 1 + accept / draft if draft > 0 else 1.0
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
-    before_val = next(m.value for m in before if m.name == name)
-    after_val = next(m.value for m in after if m.name == name)
-    return after_val - before_val
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Counter)
+    assert isinstance(after_metric, Counter)
+    return after_metric.value - before_metric.value

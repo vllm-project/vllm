@@ -38,7 +38,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
+from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
+    ECCPUTransferDirection,
+    ECCPUWorker,
+)
 from vllm.platforms import current_platform
 
 # ── shape constants ──────────────────────────────────────────────────────────
@@ -88,7 +91,9 @@ def _make_region() -> ECSharedRegion:
 
 
 def _vllm_config(rank: int = 0) -> Mock:
-    return create_ec_vllm_config(rank=rank, dtype=_DTYPE)
+    config = create_ec_vllm_config(rank=rank, dtype=_DTYPE)
+    config.model_config.get_inputs_embeds_size.return_value = _HIDDEN_DIM
+    return config
 
 
 def _meta(
@@ -102,7 +107,7 @@ def _meta(
     return ECCPUConnectorMetadata(
         saves=saves or {},
         loads={
-            mm_hash: (idx, block_ids)
+            mm_hash: (idx, block_ids, (len(block_ids), _HIDDEN_DIM))
             for idx, (mm_hash, block_ids) in enumerate((loads or {}).items())
         },
     )
@@ -197,6 +202,71 @@ def _warm_up_stream_pools(worker: ECCPUWorker) -> None:
     worker.flush_saves()
     _wait_for_completion(worker, "w", "saves")
     assert worker._stream_pool, "warm-up did not recycle a stream"
+
+
+# ── backend extension points ────────────────────────────────────────────────
+
+
+def test_save_path_delegates_transfer_submission(make_worker):
+    worker = make_worker()
+    stream = Mock()
+    worker._acquire_stream = Mock(return_value=stream)
+    worker._acquire_event = Mock(side_effect=[Mock(), Mock()])
+    worker._submit_transfer = Mock()
+
+    src = MagicMock()
+    src.numel.return_value = _HIDDEN_DIM
+    src.element_size.return_value = _DTYPE.itemsize
+    src.view.return_value = src
+    src.data_ptr.return_value = 1000
+
+    platform = Mock()
+    platform.current_stream.return_value = Mock()
+    platform.stream.return_value = contextlib.nullcontext()
+    with patch(
+        "vllm.distributed.ec_transfer.ec_connector.cpu.worker.current_platform",
+        platform,
+    ):
+        worker.save_caches({"h": src}, "h", _meta(saves={"h": [3]}))
+        worker.flush_saves()
+
+    worker._submit_transfer.assert_called_once()
+    _, count, direction = worker._submit_transfer.call_args.args
+    assert count == 1
+    assert direction == ECCPUTransferDirection.DEVICE_TO_HOST
+
+
+def test_load_path_delegates_transfer_submission(make_worker):
+    worker = make_worker()
+    stream = Mock()
+    compute_stream = Mock()
+    worker._acquire_stream = Mock(return_value=stream)
+    worker._acquire_event = Mock(side_effect=[Mock(), Mock()])
+    worker._submit_transfer = Mock()
+
+    dst_buf = MagicMock()
+    dst_buf.data_ptr.return_value = 1000
+
+    platform = Mock()
+    platform.device_type = "cpu"
+    platform.current_stream.return_value = compute_stream
+    platform.stream.return_value = contextlib.nullcontext()
+    with (
+        patch(
+            "vllm.distributed.ec_transfer.ec_connector.cpu.worker.current_platform",
+            platform,
+        ),
+        patch(
+            "vllm.distributed.ec_transfer.ec_connector.cpu.worker.torch.empty",
+            return_value=dst_buf,
+        ),
+    ):
+        worker.start_load_caches({}, _meta(loads={"h": [3]}))
+
+    worker._submit_transfer.assert_called_once()
+    _, count, direction = worker._submit_transfer.call_args.args
+    assert count == 1
+    assert direction == ECCPUTransferDirection.HOST_TO_DEVICE
 
 
 # ── save_caches ──────────────────────────────────────────────────────────────
@@ -779,7 +849,7 @@ def test_init_pins_memory_when_available(pin_available, expected_pinned):
         region.cleanup()
 
 
-def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
+def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm, monkeypatch):
     """``shutdown`` must always call ``region.cleanup`` — and must never
     raise."""
     worker = object.__new__(ECCPUWorker)
@@ -792,8 +862,11 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     worker._inflight_loads = deque()
     worker._stream_pool = []
     worker._event_pool = []
+    shutdown_backend = MagicMock()
+    monkeypatch.setattr(worker, "_shutdown_transfer_backend", shutdown_backend)
 
     worker.shutdown()
+    shutdown_backend.assert_called_once()
     mock_region.cleanup.assert_called_once()
 
     mock_region.cleanup.side_effect = RuntimeError("boom")
@@ -834,21 +907,29 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     # Build scheduler sharing the same region.
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
-    scheduler = ECCPUScheduler(_vllm_config())
+    config = _vllm_config()
+    # DeepStack-wide output: each embedding spans four blocks.
+    width = 4 * _HIDDEN_DIM
+    config.ec_transfer_config.mm_encoder_output_widths = {"image": width}
+    scheduler = ECCPUScheduler(config)
 
     # -- Step 1: scheduler allocates, worker saves --
-    n_blocks = 3
-    src = torch.arange(
-        n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE
-    ).reshape(n_blocks, _HIDDEN_DIM)
+    n_tokens = 2
+    src = torch.arange(n_tokens * width, dtype=_DTYPE, device=DEVICE_TYPE).reshape(
+        n_tokens, width
+    )
 
     class _Pos:
         offset = 0
-        length = n_blocks
+        length = n_tokens
+
+        def get_num_embeds(self):
+            return self.length
 
     class _Feature:
         identifier = "img_001"
         mm_position = _Pos()
+        modality = "image"
 
     class _Request:
         request_id = "req_e2e"
@@ -878,8 +959,9 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     scheduler.update_state_after_alloc(_Request(), 0)
     meta_load = scheduler.build_connector_meta(scheduler_output=None)
     assert "img_001" in meta_load.loads
-    _, load_blocks = meta_load.loads["img_001"]
+    _, load_blocks, shape = meta_load.loads["img_001"]
     assert load_blocks == meta_save.saves["img_001"]
+    assert shape == tuple(src.shape)
 
     load_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(load_cache, meta_load)

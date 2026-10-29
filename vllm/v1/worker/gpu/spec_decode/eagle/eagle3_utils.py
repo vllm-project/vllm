@@ -12,6 +12,16 @@ from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle
 logger = init_logger(__name__)
 
 
+def requires_aux_hidden_states(spec_config: SpeculativeConfig) -> bool:
+    if spec_config.method == "eagle3":
+        eagle_config = (
+            getattr(spec_config.draft_model_config.hf_config, "eagle_config", None)
+            or {}
+        )
+        return eagle_config.get("use_aux_hidden_state", True)
+    return spec_config.method in ("dflash", "dspark", "extract_hidden_states")
+
+
 def set_eagle3_aux_hidden_state_layers(
     model: nn.Module,
     spec_config: SpeculativeConfig,
@@ -112,7 +122,14 @@ def get_eagle3_aux_layers_from_config(
     if not layer_ids:
         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
         if dspark_layer_ids:
-            layer_ids = [i + 1 for i in dspark_layer_ids]
+            if getattr(hf_config, "model_type", None) == "deepseek_v41":
+                # v4.1 reads the attention *inputs* of its target layers, and
+                # the target model captures the entry stream of layer L when
+                # idx+1 == L, so the ids are used as-is. (v4's ids are in
+                # capture-after semantics and keep the +1.)
+                layer_ids = list(dspark_layer_ids)
+            else:
+                layer_ids = [i + 1 for i in dspark_layer_ids]
     if not layer_ids:
         # Dense DSpark (e.g. Qwen3) also uses different aux layer semantics.
         target_layer_ids = getattr(hf_config, "target_layer_ids", None)

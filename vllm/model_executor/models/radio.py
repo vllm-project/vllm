@@ -9,16 +9,15 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import accumulate, repeat
+from itertools import accumulate
 from typing import TypeAlias
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -29,23 +28,6 @@ from vllm.model_executor.models.intern_vit import (
 )
 
 input_dim_t: TypeAlias = int | tuple[int, int]
-norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
-
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, Iterable) and not isinstance(x, str):
-            return tuple(x)
-        return tuple(repeat(x, n))
-
-    return parse
-
-
-to_1tuple = _ntuple(1)
-to_2tuple = _ntuple(2)
-to_3tuple = _ntuple(3)
-to_4tuple = _ntuple(4)
-to_ntuple = _ntuple
 
 
 def calc_seq_len(size: tuple[int, int], patch_size: int) -> int:
@@ -109,7 +91,7 @@ class ClsToken(nn.Module):
 class ViTPatchGenerator(nn.Module):
     def __init__(
         self,
-        #  config: PretrainedConfig,
+        #  config: PreTrainedConfig,
         patch_size: int,
         embed_dim: int,
         input_dims: input_dim_t,
@@ -137,8 +119,9 @@ class ViTPatchGenerator(nn.Module):
         if isinstance(max_input_dims, int):
             max_input_dims = (max_input_dims, max_input_dims)
 
-        max_input_dims = tuple(
-            int(math.ceil(d / patch_size) * patch_size) for d in max_input_dims
+        max_input_dims = (
+            int(math.ceil(max_input_dims[0] / patch_size) * patch_size),
+            int(math.ceil(max_input_dims[1] / patch_size) * patch_size),
         )
 
         self.cpe_mode = max_input_dims != input_dims
@@ -154,7 +137,10 @@ class ViTPatchGenerator(nn.Module):
 
         self.num_rows = max_input_dims[0] // patch_size
         self.num_cols = max_input_dims[1] // patch_size
-        self.input_dims = tuple(d // patch_size for d in input_dims)
+        self.input_dims = (
+            input_dims[0] // patch_size,
+            input_dims[1] // patch_size,
+        )
         self.num_patches = self.num_rows * self.num_cols
         self.max_input_dims = max_input_dims
 
@@ -223,6 +209,7 @@ class ViTPatchGenerator(nn.Module):
 
         Returns:
             Embedded patches with temporal compression applied.
+
         """
         assert self.temporal_patch_size > 1
         T = self.temporal_patch_size
@@ -369,7 +356,10 @@ class ViTPatchGenerator(nn.Module):
         if input_size is None:
             input_dims = self.input_dims
         else:
-            input_dims = tuple(d // self.patch_size for d in input_size)
+            input_dims = (
+                input_size[0] // self.patch_size,
+                input_size[1] // self.patch_size,
+            )
 
         pos_embed = self._get_pos_embeddings(batch_size, input_dims)
 
@@ -527,7 +517,7 @@ class RadioInternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig = None,
+        config: PreTrainedConfig = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -538,8 +528,9 @@ class RadioInternVisionModel(nn.Module):
 
         self.config = config
         self.img_size, self.grid_size, self.num_patches = self._init_img_size(
-            to_2tuple(config.patch_size), config.image_size
+            config.patch_size, config.image_size
         )
+        assert self.img_size is not None
         max_img_size = int(
             round(config.cpe_max_size / config.patch_size) * config.patch_size
         )
@@ -565,11 +556,21 @@ class RadioInternVisionModel(nn.Module):
             prefix=f"{prefix}.encoder",
         )
 
-    def _init_img_size(self, patch_size, img_size: int | tuple[int, int]):
+    def _init_img_size(
+        self,
+        patch_size: input_dim_t,
+        img_size: input_dim_t | None,
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None, int | None]:
         if img_size is None:
             return None, None, None
-        img_size = to_2tuple(img_size)
-        grid_size = tuple([s // p for s, p in zip(img_size, patch_size)])
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size)
+        grid_size = (
+            img_size[0] // patch_size[0],
+            img_size[1] // patch_size[1],
+        )
         num_patches = grid_size[0] * grid_size[1]
         return img_size, grid_size, num_patches
 
@@ -651,7 +652,7 @@ class RadioModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

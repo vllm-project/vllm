@@ -1,0 +1,817 @@
+meta:
+  title: "MiniMax-M3.1-Flash"
+  slug: "minimax-m3.1-flash"
+  provider: "MiniMax"
+  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
+  date_added: 2026-10-23
+  date_updated: 2026-10-27
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "MSA sparse attention, 1M context, DSpark speculative decoding built into the checkpoint"
+  related_recipes: ["MiniMaxAI/MiniMax-M3"]
+  default_hardware: b300
+  hardware:
+    mi355x: verified
+    b300: verified
+    gb200: verified
+    gb300: verified
+
+model:
+  model_id: "MiniMaxAI/MiniMax-M3.1-Flash"
+  min_vllm_version: "0.33.0"
+  nightly_required: true
+  docker_image:
+    nvidia: "vllm/vllm-openai:minimax-m31-flash"
+    amd: "vllm/vllm-openai-rocm:minimax-m31-flash"
+  install:
+    pip: false
+  architecture: moe
+  # From the model card (~428B total, 23B activated per token); the
+  # safetensors headers count 427.05B (experts 413.1B, vision 0.9B).
+  parameter_count: "428B"
+  active_parameters: "23B"
+  context_length: 1048576
+  base_args:
+    # MSA's sparse_block_size is 128 — KV cache block size must match.
+    - "--block-size"
+    - "128"
+    - "--disable-hybrid-kv-cache-manager"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "MiniMax M3 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "minimax_m3"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "MiniMax M3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "minimax_m3"
+  spec_decoding:
+    description: "DSpark speculative decoding with the draft shipped in the checkpoint (`dspark/`), FP8 draft KV cache. Per brand: seven speculative tokens with FLASHINFER_TS draft attention on NVIDIA, three with TRITON_ATTN on AMD."
+    # Per-brand draft attention backend (a feature's top-level `args` is the
+    # fallback when no hardware_overrides.<gen> matches; both brands are
+    # covered here).
+    hardware_overrides:
+      # Not enabled on Hopper.
+      hopper:
+        args: []
+      nvidia:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+      amd:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache."
+    args:
+      - "--language-model-only"
+  prefill_dbo_sp:
+    label: "DBO / SP prefill"
+    description: "AMD MI355X single node: faster long prefill steps. DBO (dual-batch overlap) splits a prefill step into two microbatches and runs one microbatch's all-reduce under the other's compute; decode steps are never split. SP (sequence-parallel prefill) keeps the residual stream sharded by tokens on steps of 4096+ tokens, so each layer's two all-reduces become an all-to-all and a reduce-scatter; it keeps a full o_proj copy per GPU (about 3.1 GB less KV cache)."
+    # Tested on the single-node TP4 engine only (not on a PD prefill node).
+    strategies: [single_node_tp]
+    default_mode: sp_dbo
+    # SP + DBO and SP were run on the default checkpoint only (MXFP8 MoE).
+    modes:
+      sp_dbo:
+        variants: [default]
+        label: "SP + DBO"
+        description: "SP prefill, and DBO on prefill steps of 16384+ tokens: each microbatch then has 8192+ tokens and stays on the SP path."
+        # DBO needs the V2 model runner: without it, --enable-dbo selects the
+        # V1 runner, which refuses the DSpark draft.
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "16384"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      dbo:
+        label: "DBO"
+        description: "DBO on prefill steps of 8192+ tokens, no SP."
+        args:
+          - "--enable-dbo"
+          - "--dbo-prefill-token-threshold"
+          - "8192"
+          - "--dbo-decode-token-threshold"
+          - "32768"
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+      sp:
+        variants: [default]
+        label: "SP"
+        description: "SP prefill on steps of 4096+ tokens, no DBO."
+        args: []
+        env:
+          VLLM_ROCM_MINIMAX_M3_SP_PREFILL: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+  mono_decode:
+    label: "Mono decode"
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
+    strategies: [single_node_tp]
+    modes:
+      # The kernels read the experts as AITER MXFP4 tables, which only the
+      # Quark export loads as; they need the AITER sparse PA path, i.e. FP8 KV
+      # and FP8 indexer K caches in the shuffled KV layout, and no piecewise
+      # graphs.
+      mono:
+        variants: [mxfp4]
+        args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"indexer_kv_dtype": "fp8"}'
+          - "--compilation-config"
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - "--gpu-memory-utilization"
+          - "0.85"
+        env:
+          VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+          VLLM_ROCM_MINIMAX_M3_MONO: "1"
+        # Measured on MI355X only.
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+          mi350x: unsupported
+      # No mono path for the other checkpoints: an empty mode, so enabling the
+      # feature there changes nothing (the recipe schema wants a mode per
+      # variant).
+      none:
+        variants: [default, fp8]
+        args: []
+
+opt_in_features:
+  - text_only
+  - prefill_dbo_sp
+  - mono_decode
+
+variants:
+  default:
+    # One checkpoint for both brands: MXFP8 dense layers + NVFP4 experts. The
+    # empty precision_hardware lifts the NVFP4 => NVIDIA Blackwell default;
+    # supported_hardware lists the eligible GPUs (meta.hardware marks the
+    # verified ones).
+    precision: nvfp4
+    precision_hardware: {}
+    supported_hardware:
+      - mi355x
+      - gb200
+      - gb300
+      - b200
+      - b300
+    # NVFP4 experts as stored (Blackwell runs them natively): 413.1B x 0.53
+    # bytes + 17.5 GB of other weights ≈ 237 GB, x 1.2 ≈ 285 GB.
+    vram_minimum_gb: 285
+    description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. Blackwell runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
+    hardware_overrides:
+      # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes
+      # + 17.5 GB ≈ 444 GB (measured 105.0 GiB per TP4 rank), x 1.2 ≈ 533 GB.
+      mi355x:
+        vram_minimum_gb: 533
+      # Only this checkpoint stores NVFP4 experts; the Quark export below
+      # already holds MXFP4 ones.
+      amd:
+        extra_args:
+          - "--quantization-config.moe"
+          - "mxfp8"
+
+  mxfp4:
+    # AMD's Quark export of the same model: routed experts in OCP MXFP4
+    # (static weights, dynamic MXFP4 activations); every other layer and the
+    # dspark/ draft as in the base checkpoint. 48 shards, 237.2 GB; measured
+    # 56.9 GiB per TP4 rank (244.5 GB), x 1.2 ≈ 293 GB.
+    model_id: "amd/MiniMax-M3.1-Flash-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (Quark)"
+    supported_hardware:
+      - mi355x
+    vram_minimum_gb: 293
+    description: "AMD Quark export: routed experts stored in OCP MXFP4 and run as W4A4 on the AITER MoE, with NVFP4 KV and indexer K caches. MI355X only."
+    hardware_overrides:
+      # The export's recommended MoE setup; the shared expert stays a separate
+      # MXFP8 MLP (no shared-expert fusion).
+      amd:
+        extra_args:
+          - "--moe-backend"
+          - "aiter"
+        extra_env:
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+
+  fp8:
+    # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
+    # caches, NVFP4 experts on the Marlin MoE. Footprint not measured; the
+    # MXFP8 estimate above is used as an upper bound. Hopper only: on MI355X
+    # and Blackwell the brand overrides replace its FP8 caches with NVFP4.
+    precision: fp8
+    supported_hardware:
+      - "arch:sm90"
+    vram_minimum_gb: 533
+    tp: 8
+    description: "Hopper: FP8 KV and indexer K caches, NVFP4 experts on the Marlin MoE, 256K context, video inputs off."
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype": "fp8"}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+
+hardware_overrides:
+  blackwell:
+    extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
+      - "--attention-config"
+      - '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+    extra_env:
+      VLLM_FLOAT32_MATMUL_PRECISION: "high"
+  amd:
+    extra_args:
+      - "--kv-cache-dtype"
+      - "nvfp4"
+      - "--attention-config"
+      - '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}'
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+
+strategy_overrides:
+  # MI355X serves TP4 on half of an 8-GPU node; Hopper keeps the fp8 variant's TP8.
+  single_node_tp:
+    tp:
+      mi355x: 4
+  # MI355X 1P1D as in the guide's AMD PD section: one TP4 engine per role, on
+  # GPUs 0-3 of its node. Exact-GPU role blocks layer after the `amd` baseline
+  # and win the last-wins dedupe: the prefill node drops indexer_decode_cp (it
+  # never decodes) and offloads KV to host memory in 1 GiB HugeTLB pages; both
+  # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
+  # of one per layer.
+  # GB200/GB300 1P1D as in the guide's NVIDIA PD section: a DEP2 prefill on
+  # one tray and a DEP4 decode on a second tray. vllm-router takes
+  # one DP size for both pools, so it sends each request to the endpoint and
+  # each engine picks its own DP rank.
+  pd_cluster:
+    router:
+      intra_node_data_parallel_size: 1
+    prefill:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
+      hardware_overrides:
+        gb200: &m31_gb_prefill
+          extra_args:
+            - "--data-parallel-size"
+            - "2"
+            - "--data-parallel-size-local"
+            - "2"
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.9"
+            - "--enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_prefill
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            - "--attention-config"
+            - '{"indexer_kv_dtype": "nvfp4"}'
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"num_threads":4}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":601295421440,"cpu_hugepage_block_size":"1GB","lazy_offload":false}}]}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
+    decode:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
+      hardware_overrides:
+        # 28 sequences per rank; graphs up to 28 x (1 + 7 DSpark tokens).
+        gb200: &m31_gb_decode
+          extra_args:
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":224}'
+            - "--max-num-seqs"
+            - "28"
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.95"
+            - "--watermark"
+            - "0.05"
+            - "--no-enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_decode
+        mi355x:
+          extra_args:
+            - "--tensor-parallel-size"
+            - "4"
+            # The validated AMD decode node runs vLLM's default graphs, not the
+            # strategy's FULL_DECODE_ONLY.
+            - "--compilation-config"
+            - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"num_threads":4}}'
+          extra_env:
+            CUDA_VISIBLE_DEVICES: "0,1,2,3"
+            VLLM_KV_CACHE_LAYOUT: "BLHNC"
+
+presets:
+  b300_agentx_tp4:
+    label: "AgentX TP4"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 engine on four of the node's eight B300 GPUs with the seven-token DSpark draft on FLASH_ATTN; GPU-resident KV up to concurrency 32, host-DRAM KV offload (about 1.5 TB per engine) at 24 and 40-56."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--speculative-config": { attention_backend: "FLASH_ATTN" }
+    # cpu_bytes_to_use is the engine-wide host budget (split across the TP
+    # ranks); the Simple option's per-rank default is dropped.
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2"], select: { kv_offload: "off" } }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8"], select: { kv_offload: "off" } }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16"], select: { kv_offload: "off" } }
+      c16: { label: "16", concurrency: 16, args: ["--max-num-seqs", "32"], select: { kv_offload: "off" } }
+      c24:
+        label: "24 (KV offload)"
+        concurrency: 24
+        args: ["--max-num-seqs", "48"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "64"], select: { kv_offload: "off" } }
+      c40:
+        label: "40 (KV offload)"
+        concurrency: 40
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c48:
+        label: "48 (KV offload)"
+        concurrency: 48
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c56:
+        label: "56 (KV offload)"
+        concurrency: 56
+        args: ["--max-num-seqs", "96"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+    runbook: |
+      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serves the default checkpoint (MXFP8 dense layers, NVFP4 experts, NVFP4 KV and indexer K caches) as one aggregated text-only vLLM engine on a single 8-GPU B300 node. Its TP4 points run the seven-token DSpark draft with `FLASH_ATTN` draft attention; the recipe's NVIDIA default, `FLASHINFER_TS`, is what the [AgentX TP2](#preset-b300_agentx_tp2) points run.
+
+      - **GPU-resident points** (concurrency 1-16 and 32) keep the whole KV cache in HBM, with `--max-num-seqs` at twice the concurrency (64 at 32).
+      - **KV offload points** (24 and 40-56) add a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (1,499 GB) is the budget for the whole engine: each of the four ranks pins 349 GiB of host memory, so the engine needs about 1.5 TB of free host RAM. Pinning takes a couple of minutes at startup.
+      - The CUDA graph capture sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
+
+  b300_agentx_tp2:
+    label: "AgentX TP2 + KV offload"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP2 engine on two of the node's eight B300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (about 750 GB per engine)."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 2
+    select:
+      features: { text_only: true }
+      kv_offload: simple
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 749000000000, lazy_offload: true } }
+    points:
+      c24: { label: "24", concurrency: 24, args: ["--max-num-seqs", "48"] }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "48"] }
+      c40: { label: "40", concurrency: 40, args: ["--max-num-seqs", "60"] }
+      c48: { label: "48", concurrency: 48, args: ["--max-num-seqs", "72"] }
+    runbook: |
+      The TP2 points of the B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serve the default checkpoint as one aggregated text-only vLLM engine on two GPUs of an 8-GPU B300 node, with the recipe's seven-token DSpark draft on `FLASHINFER_TS` (the [AgentX TP4](#preset-b300_agentx_tp4) points use `FLASH_ATTN`).
+
+      Every point adds a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (749 GB) is the budget for the whole engine: each of the two ranks pins about 349 GiB of host memory. The lane ran one engine per node; several TP2 engines on one node each need their own share of host RAM.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
+
+guide: |
+  ## Overview
+
+  [MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash) is a
+  vision-language MoE model from [MiniMax](https://www.minimax.io/) that keeps
+  the MoE architecture of [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3):
+  about 428B total / 23B active parameters and a 1M-token context, with MSA
+  sparse attention in every layer.
+
+  - **Quantization-aware training** — the checkpoint stores MXFP8 dense layers
+    and NVFP4 experts.
+  - **Built-in DSpark draft** — the `dspark/` directory of the checkpoint;
+    `--speculative-config` needs no draft model path.
+  - **Native multimodal** — image and video inputs.
+
+  ## Prerequisites
+
+  - **AMD:** MI355X (gfx950), ROCm 7.2+, TP4.
+  - **NVIDIA Blackwell:** GB200, GB300, B200 or B300, TP4; NVFP4 MoE runs
+    natively on the FP4 tensor cores.
+  - **NVIDIA Hopper:** H100 or H200, TP8 on a full node, with the FP8
+    variant: FP8 KV and indexer caches, NVFP4 MoE on Marlin.
+  - **`--block-size 128` is mandatory** (MSA sparse/index cache).
+
+  ## Launching the Server
+
+  ### Single node (TP4, AMD MI355X)
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --disable-hybrid-kv-cache-manager
+  ```
+
+  - `--kv-cache-dtype nvfp4` and `indexer_kv_dtype: nvfp4` store the KV cache
+    and the sparse-attention indexer's K cache in NVFP4.
+  - `indexer_decode_cp` splits the indexer's decode scoring across the TP ranks
+    by context instead of by index head.
+  - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
+    load for the AITER MoE.
+
+  ### DBO and SP prefill (TP4, AMD MI355X)
+
+  Two opt-in switches make long prefill steps faster on the single-node MI355X
+  engine (the **DBO / SP prefill** feature in the command builder):
+
+  - **DBO** (dual-batch overlap): `--enable-dbo` splits a prefill step into two
+    microbatches and runs one microbatch's all-reduce under the other's compute.
+    `--dbo-decode-token-threshold 32768` keeps decode steps whole. DBO needs
+    `VLLM_USE_V2_MODEL_RUNNER=1`: without it, `--enable-dbo` selects the V1
+    runner, which refuses the DSpark draft.
+  - **SP** (sequence-parallel prefill): `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1`
+    keeps the residual stream sharded by tokens on steps of 4096+ tokens, so
+    each layer's two all-reduces become an all-to-all and a reduce-scatter. It
+    keeps a full `o_proj` copy per GPU, about 3.1 GB less KV cache.
+  - **SP + DBO**: set both, with `--dbo-prefill-token-threshold 16384`, so each
+    DBO microbatch has 8192+ tokens and stays on the SP path.
+
+  On the MXFP8 MoE, one 32K-token prefill takes 1035 ms plain, 655 ms with DBO
+  and 484 ms with SP + DBO. The server log confirms SP with
+  `MiniMax-M3 sequence-parallel prefill (from 4096 tokens, DBO microbatches from 8192): on`.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1 \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --enable-dbo \
+    --dbo-prefill-token-threshold 16384 \
+    --dbo-decode-token-threshold 32768 \
+    --disable-hybrid-kv-cache-manager
+  ```
+
+  ### Single node (TP4, NVIDIA GB200)
+
+  ```bash
+  VLLM_FLOAT32_MATMUL_PRECISION=high \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 256 \
+    --disable-hybrid-kv-cache-manager
+  ```
+
+  - Blackwell runs the NVFP4 experts natively, so no
+    `--quantization-config.moe` override is needed.
+  - `use_prefill_query_quantization` quantizes the prefill query on the MSA
+    indexer path (Q8KV4).
+
+  ### Single node (TP8, NVIDIA H100 / H200)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --tensor-parallel-size 8 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype fp8 \
+    --attention-config '{"indexer_kv_dtype": "fp8"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --max-model-len 262144 \
+    --max-num-seqs 80 \
+    --limit-mm-per-prompt '{"video": 0}' \
+    --gpu-memory-utilization 0.9 \
+    --no-enable-log-requests \
+    --disable-hybrid-kv-cache-manager \
+    --moe-backend marlin \
+    --enable-auto-tool-choice \
+    --tool-call-parser minimax_m3
+  ```
+
+  - Hopper has no FP4 tensor cores: the KV cache and the indexer K cache use
+    FP8, and the NVFP4 experts run on the Marlin MoE kernel.
+  - `--limit-mm-per-prompt '{"video": 0}'` turns off video inputs; images
+    still work.
+  - DSpark speculative decoding is not enabled on Hopper.
+
+  ### Prefill/decode disaggregation (1P1D, TP4 + TP4, AMD MI355X)
+
+  Prefill node:
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_KV_CACHE_LAYOUT=BLHNC VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4"}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --disable-hybrid-kv-cache-manager \
+    --max-num-batched-tokens 32768 \
+    --port 8100 \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[
+      {"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"num_threads":4}},
+      {"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":601295421440,"cpu_hugepage_block_size":"1GB","lazy_offload":false}}]}}'
+  ```
+
+  Decode node:
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_KV_CACHE_LAYOUT=BLHNC VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    -tp 4 \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}' \
+    --quantization-config.moe mxfp8 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}' \
+    --disable-hybrid-kv-cache-manager \
+    --port 8200 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"num_threads":4}}'
+  ```
+
+  - `<P_IP>` and `<D_IP>` are each node's own address, reachable from the
+    other node (the NIXL side channel).
+  - `VLLM_KV_CACHE_LAYOUT=BLHNC` goes on both nodes. It keeps all layers of a
+    block contiguous, so NIXL reads one region per block instead of one per
+    layer.
+  - The prefill node never decodes, so it leaves `indexer_decode_cp` off.
+  - The prefill node also offloads KV to host memory
+    (`SimpleCPUOffloadConnector`): 560 GiB per rank in 1 GiB HugeTLB pages, so
+    2240 pages for the four ranks. Reserve them on the host before the start
+    (and allow them in the container's hugetlb limit), or the server fails at
+    startup with `Cannot map 560.00 GiB of 1024 MiB HugeTLB pages`:
+
+    ```bash
+    echo 2240 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+    ```
+
+  ### Prefill/decode disaggregation (1P1D, DEP2 + DEP4, NVIDIA GB200 / GB300)
+
+  A DEP2 prefill on one 4-GPU tray feeds a DEP4 decode on a second tray over
+  NIXL. Both roles run attention data parallel with the NVFP4 experts
+  on the DeepGEMM MegaMoE kernel over expert parallelism, the V2 model runner,
+  NUMA binding, and a seven-token DSpark draft on the FlashInfer PrimiTS
+  (`FLASHINFER_TS`) backend. The settings were tuned on GB300; GB200 uses the
+  same commands.
+
+  Prefill node:
+
+  ```bash
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 64 \
+    --max-num-batched-tokens 32768 \
+    --long-prefill-token-threshold 8192 \
+    --gpu-memory-utilization 0.9 \
+    --enable-prefix-caching \
+    --disable-hybrid-kv-cache-manager \
+    --port 8100 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+  ```
+
+  Decode node:
+
+  ```bash
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
+  vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
+    --reasoning-parser minimax_m3 \
+    --block-size 128 \
+    --kv-cache-dtype nvfp4 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "max_cudagraph_capture_size": 224}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 28 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.95 \
+    --watermark 0.05 \
+    --no-enable-prefix-caching \
+    --disable-hybrid-kv-cache-manager \
+    --port 8200 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+  ```
+
+  - `VLLM_ENGINE_READY_TIMEOUT_S=3600`: with data parallel, each API server
+    waits this long for its engines to start (default 600 s). A cold prefill
+    start (JIT builds, CUDA graph capture, FlashInfer autotune) takes longer
+    than 10 minutes.
+  - `--max-num-seqs` is per DP rank. The decode CUDA graphs cover 28 requests
+    of 1 + 7 tokens (224).
+  - `--watermark 0.05` keeps 5% of the decode KV cache free when admitting
+    requests, so extra requests wait in the queue instead of preempting
+    running ones. On GB300 (about 4.5M KV tokens per decode rank) at a
+    200K-token mean context, expect about 19-21 running requests per rank.
+  - Keep the decode `--max-num-batched-tokens` at 8192: a preempted request
+    recomputes its context in chunks of that size, and every DP rank runs
+    eager steps until it finishes.
+  - `engine_ttl: 0` turns off NIXL's cleanup of idle remote engines; with the
+    default one-hour TTL, a decode crashed an hour after its prefill went away.
+  - Prefix caching stays on the prefill node only. For multi-turn traffic, the
+    prefill node can also offload KV to host memory, 180 GiB per rank:
+    `--kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"engine_ttl":0}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":193273528320,"lazy_offload":true}}]}}'`.
+
+  For a quick test, put the toy NIXL proxy from the vLLM repository in front of
+  the two nodes and send requests to port 8000:
+
+  ```bash
+  python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8000 \
+    --prefiller-host <P_IP> --prefiller-port 8100 \
+    --decoder-host <D_IP> --decoder-port 8200
+  ```
+
+  ## Client Usage
+
+  Recommended sampling parameters (from the model card): `temperature = 1.0`,
+  `top_p = 0.95`. Set the reasoning effort per request with
+  `chat_template_kwargs: {"reasoning_effort": "<level>"}`: `low`, `medium`,
+  `high`, `xhigh` or `max`.
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "MiniMaxAI/MiniMax-M3.1-Flash",
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "messages": [
+        {"role": "user", "content": "Explain MSA sparse attention in 3 bullets."}
+      ]
+    }'
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model MiniMaxAI/MiniMax-M3.1-Flash \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 8192 \
+    --random-output 1024 \
+    --max-concurrency 32 \
+    --num-prompts 320
+  ```
+
+  ## Troubleshooting
+
+  - **`--block-size` mismatch.** MSA's sparse block size is 128; the vLLM KV
+    cache block size must match (otherwise `No common block size for 16`).
+  - **Parsers.** `--tool-call-parser` and `--reasoning-parser` both use
+    `minimax_m3`.
+  - **HugeTLB pages (PD prefill node).** See the AMD PD section above.
+
+  ## References
+
+  - [Model card](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)
+  - [MiniMax-M3 recipe](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3)
+  - [MiniMax](https://www.minimax.io/)

@@ -4,6 +4,9 @@
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 
@@ -269,3 +272,19 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[1] == "test-streaming-full-text"
         assert call_args[2] == " (streaming complete)"
         assert call_args[4] == "streaming_complete"
+
+
+@pytest.mark.parametrize("max_log_len", [None, 10])
+def test_request_logger_log_request_body_truncation(max_log_len):
+    """The JSON body is logged in full unless max_log_len truncates it."""
+    request = CompletionRequest(model="test-model", prompt="Hello, world!")
+    full_body = request.model_dump_json(exclude_unset=True)
+    mock_logger = MagicMock()
+
+    with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
+        RequestLogger(max_log_len=max_log_len).log_request_body(request)
+
+    mock_logger.log.assert_called_once()
+    assert mock_logger.log.call_args.args[0] == logging.DEBUG
+    logged_body = mock_logger.log.call_args.args[3]
+    assert logged_body == full_body[:max_log_len]

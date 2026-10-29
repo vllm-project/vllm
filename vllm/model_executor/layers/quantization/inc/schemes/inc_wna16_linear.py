@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -14,8 +13,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -254,16 +253,6 @@ class INCXPULinearBase(INCLinearScheme):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        g_idx = RowvLLMParameter(
-            data=torch.tensor(
-                [i // self.group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("g_idx", g_idx)
-
     def _convert_awq_qweight_to_gptq(self, qw: torch.Tensor) -> torch.Tensor:
         """Convert AWQ qweight [K, N // pf] to GPTQ qweight [K // pf, N].
 
@@ -334,11 +323,9 @@ class INCXPULinearMethod(INCXPULinearBase):
             qweight_data = self._convert_awq_qweight_to_gptq(qweight_data)
 
         qweight_ct = qweight_data.t().contiguous()
-        layer.qweight = Parameter(qweight_ct.t(), requires_grad=False)
-        layer.scales = Parameter(layer.scales.data, requires_grad=False)
-        layer.qzeros = Parameter(
-            torch.tensor([8], dtype=torch.int8, device=device),
-            requires_grad=False,
+        replace_parameter(layer, "qweight", qweight_ct.t())
+        replace_parameter(
+            layer, "qzeros", torch.tensor([8], dtype=torch.int8, device=device)
         )
 
     def apply_weights(
@@ -356,7 +343,7 @@ class INCXPULinearMethod(INCXPULinearBase):
             layer.scales,
             layer.qzeros,
             self.group_size,
-            None,
+            None,  # Retained by the external XPU op ABI.
         )
         return out.reshape(out_shape)
 
@@ -430,18 +417,18 @@ class INCARKLinearMethod(INCXPULinearBase):
             if self.is_awq_packed:
                 # ARK consumes GPTQ-style packed nibbles; convert AWQ losslessly.
                 qweight_src = self._convert_awq_qweight_to_gptq(qweight_src)
-            ark_linear.qweight.copy_(qweight_src)
+            ark_linear.qweight = qweight_src.contiguous()
             if hasattr(layer, "qzeros") and layer.qzeros is not None:
-                ark_linear.qzeros.copy_(layer.qzeros.detach())
+                ark_linear.qzeros = layer.qzeros.detach()
             else:
                 ark_linear.qzeros = None
-            ark_linear.scales.copy_(layer.scales.detach())
+            ark_linear.scales = layer.scales.detach().to(layer.params_dtype)
             if hasattr(layer, "bias") and layer.bias is not None:
                 ark_linear.bias.copy_(layer.bias.detach())
 
         ark_linear.post_init()
 
-        layer.qweight = Parameter(ark_linear.qweight.detach(), requires_grad=False)
+        replace_parameter(layer, "qweight", ark_linear.qweight.detach())
         layer.ark_bias = ark_linear.bias
         layer.ark_compute_type = ark_linear.cdt
         layer.ark_weight_type = ark_linear.wdt

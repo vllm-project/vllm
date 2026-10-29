@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 from torch.nn import Module
-from torch.nn.parameter import Parameter
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -37,6 +36,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     ModelWeightParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -155,10 +155,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # required by torch.compile
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
-
         weight = layer.weight
 
         if current_platform.is_fp8_fnuz():
@@ -166,10 +162,12 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                 weight=weight, weight_scale=layer.weight_scale, input_scale=None
             )
             if input_scale is not None:
-                layer.input_scale = Parameter(input_scale, requires_grad=False)
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+                replace_parameter(layer, "input_scale", input_scale)
+            replace_parameter(layer, "weight_scale", weight_scale)
 
-        layer.weight = Parameter(weight.t(), requires_grad=False)
+        replace_parameter(layer, "weight", weight.t())
+        # The param keeps its checkpoint dims; Humming reads the (K, N) layout.
+        layer.processed_weight_dims = (0, 1)
         if self.quant_config.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.

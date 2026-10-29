@@ -6,11 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config.multimodal import VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
+    Molmo2VisionBackbone,
     build_flat_image_bool_length,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_build_flat_image_bool_length_matches_molmoweb_processor_tokens():
@@ -83,8 +86,59 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
     data = builder.get_dummy_mm_data(
         seq_len=128,
         mm_counts={"image": 0, "video": 1},
-        mm_options={"video": VideoDummyOptions(num_frames=num_frames_override)},
+        mm_options=MultiModalDummyOptions(
+            video=VideoDummyOptions(num_frames=num_frames_override)
+        ),
     )
 
     video, _metadata = data["video"][0]
     assert video.shape[0] == expected_frames
+
+
+@pytest.mark.parametrize("masked_average", [False, True])
+def test_vision_pooling_means_preserve_batch_indices_and_drop_invalid_groups(
+    masked_average,
+):
+    """Isolate pooling preparation from the vision encoder and learned layers."""
+    image_features = (
+        torch.tensor([2, 4, 6, 8, 10, 20, 30, 40]).float().reshape(2, 2, 2, 1)
+    )
+    token_pooling = torch.tensor(
+        [
+            [[0, 3, 3, -1], [-1, -1, -1, -1]],
+            [[0, 2, 2, -1], [1, 3, 2, 0]],
+        ],
+        dtype=torch.int32,
+    )
+    expected_query = torch.tensor(
+        [6 if masked_average else 4.5, 0, 70 / 3 if masked_average else 17.5, 25]
+    ).reshape(4, 1, 1)
+
+    def pool(query, to_pool, *, attn_mask):
+        expected_patches = (
+            torch.tensor(
+                [[2, 8, 8, 0], [0, 0, 0, 0], [10, 30, 30, 0], [20, 40, 30, 10]]
+            )
+            .float()
+            .unsqueeze(-1)
+        )
+        torch.testing.assert_close(to_pool, expected_patches)
+        torch.testing.assert_close(query, expected_query)
+        if masked_average:
+            torch.testing.assert_close(
+                attn_mask, (token_pooling >= 0).reshape(4, 1, 1, 4)
+            )
+        else:
+            assert attn_mask is None
+        return query
+
+    backbone = SimpleNamespace(
+        device=image_features.device,
+        dtype=image_features.dtype,
+        adapter_config=SimpleNamespace(pooling_attention_mask=masked_average),
+        encode_image=lambda images: images,
+        image_pooling_2d=pool,
+        image_projector=torch.nn.Identity(),
+    )
+    actual = Molmo2VisionBackbone.forward(backbone, image_features, token_pooling)
+    torch.testing.assert_close(actual, expected_query[[0, 2, 3], 0])

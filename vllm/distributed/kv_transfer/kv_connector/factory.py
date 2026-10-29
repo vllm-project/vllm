@@ -87,6 +87,7 @@ class KVConnectorFactory:
 
         Returns:
             The connector class.
+
         """
         if connector_name not in cls._registry:
             raise ValueError(f"Connector '{connector_name}' is not registered.")
@@ -122,6 +123,11 @@ class KVConnectorFactory:
                 logger.error(msg)
                 raise ValueError(msg)
         elif connector_name in cls._registry:
+            if connector_name == "NixlConnector":
+                mode = kv_transfer_config.get_from_extra_config("transfer_mode", "pull")
+                if mode not in ("pull", "push"):
+                    raise ValueError(f"Invalid NixlConnector transfer_mode: {mode!r}")
+                connector_name = f"Nixl{mode.capitalize()}Connector"
             connector_cls = cls._registry[connector_name]()
         else:
             raise ValueError(f"Unsupported connector type: {connector_name}")
@@ -195,6 +201,12 @@ KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "HiSparseConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector",
+    "HiSparseConnector",
 )
 
 KVConnectorFactory.register_connector(

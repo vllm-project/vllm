@@ -14,8 +14,10 @@ import torch
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import (
     PrefillStats,
     RequestSpecDecodeMetrics,
@@ -39,14 +41,33 @@ EEP_NOTIFICATION_CALL_ID = -1
 FT_STATUS_CALL_ID = -2
 
 
+class CheckpointState(enum.StrEnum):
+    """Process checkpoint lifecycle of an engine. It serves only while
+    RUNNING, and may go through the cycle any number of times."""
+
+    RUNNING = "running"
+    # Draining, then releasing what a checkpoint must not contain.
+    PREPARING = "preparing"
+    # Safe to capture.
+    PREPARED = "prepared"
+    # Bringing back what preparing released.
+    RESTORING = "restoring"
+    FAILED = "failed"
+
+    @property
+    def is_restored(self) -> bool:
+        """Whether released state is back or coming back, so memory may wake and
+        scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESTORING)
+
+
 class EEPNotificationType(enum.Enum):
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
 class FinishReason(enum.IntEnum):
-    """
-    Reason a request finished - stop, length, abort, error, or repetition.
+    """Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -102,6 +123,15 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    # Full-attention block size in tokens after initialization, or unavailable.
+    effective_attention_block_size: int | None = None
+    coord_store_port: int = 0
+    coordinator_input_address: str | None = None
+    coordinator_output_address: str | None = None
+    # JSON-mode dump of this engine's VllmConfig, for frontends that serve
+    # `/server_info` without holding the config themselves (the Rust frontend).
+    # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
+    vllm_config: dict[str, Any] | None = None
 
 
 class EngineCoreRequest(
@@ -156,6 +186,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
 
     session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -233,6 +264,12 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
+    prompt_token_id_logprobs: torch.Tensor | None = None
+
+    # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
+    error: RequestError | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -276,14 +313,16 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
+    # Weight version used for this step.
+    weight_version: str | None = None
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
 
 
 class EngineCoreRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
+    """Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
 
@@ -308,9 +347,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
 
 
 class ReconfigureRankType(enum.IntEnum):
-    """
-    Rank type for reconfiguring distributed request.
-    """
+    """Rank type for reconfiguring distributed request."""
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
