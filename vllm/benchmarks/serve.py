@@ -205,7 +205,7 @@ class SpecDecodeMetrics:
     num_draft_tokens: int
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
-    num_verified_tokens: int | None
+    num_verified_tokens: int
 
 
 async def fetch_spec_decode_metrics(
@@ -226,7 +226,7 @@ async def fetch_spec_decode_metrics(
             num_draft_tokens = 0
             num_accepted_tokens = 0
             accepted_per_pos: dict[int, int] = {}
-            num_verified_tokens: int | None = None
+            num_verified_tokens = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -260,9 +260,7 @@ async def fetch_spec_decode_metrics(
                         elif "num_accepted_tokens" in metric_name:
                             num_accepted_tokens += int(float(parts[-1]))
                         elif metric_name.endswith("num_verified_tokens_total"):
-                            num_verified_tokens = (num_verified_tokens or 0) + int(
-                                float(parts[-1])
-                            )
+                            num_verified_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -1149,13 +1147,9 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
-        # Servers without the verified counter report None.
-        verified_before = spec_decode_metrics_before.num_verified_tokens
-        verified_after = spec_decode_metrics_after.num_verified_tokens
         delta_verified = (
-            verified_after - verified_before
-            if verified_after is not None and verified_before is not None
-            else None
+            spec_decode_metrics_after.num_verified_tokens
+            - spec_decode_metrics_before.num_verified_tokens
         )
         per_pos_rates: list[float] = []
         if delta_drafts > 0:
@@ -1397,8 +1391,7 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
-        if spec_decode_stats["verified_tokens"] is not None:
-            result["spec_decode_verified_tokens"] = spec_decode_stats["verified_tokens"]
+        result["spec_decode_verified_tokens"] = spec_decode_stats["verified_tokens"]
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
@@ -1507,12 +1500,11 @@ async def benchmark(
                 "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
             )
         )
-        if spec_decode_stats["verified_tokens"] is not None:
-            print(
-                "{:<40} {:<10}".format(
-                    "Verified tokens:", spec_decode_stats["verified_tokens"]
-                )
+        print(
+            "{:<40} {:<10}".format(
+                "Verified tokens:", spec_decode_stats["verified_tokens"]
             )
+        )
         per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])
         if per_pos:
             print("Per-position acceptance (%):")
