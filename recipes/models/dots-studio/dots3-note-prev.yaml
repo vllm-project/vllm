@@ -1,0 +1,318 @@
+meta:
+  title: "dots3-note-prev"
+  slug: "dots3-note-prev"
+  provider: "Dots"
+  description: "Multimodal MoE model available in BF16 and native FP8, with hybrid DSA and SWA, 512K context, and MTP speculative decoding."
+  date_added: 2026-08-13
+  date_updated: 2026-09-09
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Unified multimodal intelligence with strong agent capabilities"
+  hardware:
+    h100: verified
+    b200: unsupported
+    gb200: unsupported
+    b300: unsupported
+    gb300: unsupported
+    mi300x: unsupported
+    mi325x: unsupported
+    mi355x: unsupported
+
+model:
+  model_id: "dots-studio/dots3-note-prev"
+  min_vllm_version: "0.28.0"
+  architecture: moe
+  parameter_count: "288B"
+  active_parameters: "17B"
+  context_length: 524288
+  base_args:
+    - "--served-model-name"
+    - "dots3-note-prev"
+    - "--gpu-memory-utilization"
+    - "0.9"
+    - "--max-model-len"
+    - "262144"
+    - "--max-num-batched-tokens"
+    - "8192"
+    - "--block-size"
+    - "64"
+    - "--mm-processor-cache-gb"
+    - "32"
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Extract Qwen3-style <think> traces into the OpenAI reasoning field."
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  tool_calling:
+    description: "Parse dots3-note-prev's native XML tool-call format with automatic tool choice."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "dots"
+  text_only:
+    description: "Load only the language model for text workloads, skipping the vision and audio encoders."
+    args:
+      - "--language-model-only"
+  spec_decoding:
+    description: "Enable MTP speculative decoding with the checkpoint's prediction head."
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":3}'
+
+opt_in_features:
+  - reasoning
+  - tool_calling
+  - text_only
+  - spec_decoding
+
+variants:
+  default:
+    model_id: "dots-studio/dots3-note-prev-fp8"
+    precision: fp8
+    vram_minimum_gb: 359
+    description: "Native block-scaled FP8 language-model weights with BF16 multimodal encoders; verified on 8x 80GB NVIDIA GPUs."
+    hardware_overrides:
+      nvidia:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm"
+  bf16:
+    model_id: "dots-studio/dots3-note-prev"
+    precision: bf16
+    vram_minimum_gb: 692
+    description: "Full BF16 checkpoint using the Triton unquantized-MoE backend; its indexed weights total about 576.9 GB before runtime and KV-cache memory."
+    extra_args:
+      - "--gpu-memory-utilization"
+      - "0.95"
+    hardware_overrides:
+      nvidia:
+        extra_args:
+          - "--moe-backend"
+          - "triton"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+default_strategy: single_node_tep
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  dots3-note-prev is a native multimodal Mixture-of-Experts model supporting text, image,
+  video, and audio inputs through one model architecture. It is published as a full
+  BF16 checkpoint (`dots-studio/dots3-note-prev`) and a native FP8 checkpoint
+  (`dots-studio/dots3-note-prev-fp8`). Its language backbone has 256 routed experts
+  (top-8) plus a shared expert and mixes DSA and SWA layers. Both releases expose
+  MTP speculative decoding.
+
+  The model configuration supports up to 524,288 tokens. The commands below use a
+  validated 262,144-token serving limit and 8,192-token chunked-prefill budget so the
+  remaining GPU memory can be used for KV cache. Increase `--max-model-len` only after
+  checking the KV-cache budget for the target workload.
+
+  ## Prerequisites
+
+  - 8 NVIDIA GPUs with at least 80 GB each for the native FP8 checkpoint.
+  - The BF16 checkpoint contains about 576.9 GB of indexed weights and needs additional
+    memory for the runtime and KV cache; the recipe budgets 692 GB aggregate VRAM.
+  - A recent CUDA environment. Native FP8 uses DeepGEMM, while unquantized BF16
+    uses the Triton MoE backend.
+  - vLLM 0.28.0 or newer, which includes native dots3-note-prev support.
+
+  ## Launch commands
+
+  The examples expose an OpenAI-compatible endpoint on all network interfaces. Remove
+  `--host 0.0.0.0` if the service should only be reachable locally. The general
+  strategy examples use the FP8 checkpoint. BF16 needs a different MoE backend and
+  a larger memory budget, so use the explicit BF16 command below instead of only
+  replacing the model ID.
+
+  ### BF16 tensor parallel + expert parallel (TP=8, EP=8)
+
+  This command serves the full multimodal BF16 checkpoint. Triton is required because
+  DeepGEMM does not support unquantized MoE weights. A 0.95 memory-utilization target
+  leaves enough KV-cache capacity for the 262,144-token serving limit after profiling
+  the multimodal encoders. If the target hardware cannot reserve that much memory,
+  lower `--max-model-len` or add `--language-model-only` for text workloads.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend triton
+  ```
+
+  ### Tensor parallel (TP=8)
+
+  TP shards both dense and expert weights across all eight GPUs. It is the simplest
+  deployment, but it does not enable expert parallelism.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ### Tensor parallel + expert parallel (TP=8, EP=8)
+
+  This is the recommended single-node configuration. Dense layers use TP while MoE
+  experts are distributed across the eight expert-parallel ranks.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ### Data parallel + expert parallel (DP=8, EP=8)
+
+  DP+EP is intended for throughput-oriented serving. Each DP rank owns a replica of
+  the non-expert weights, while routed experts are distributed across all eight ranks.
+  It therefore needs more GPU memory than TP+EP.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ### Language-model-only serving
+
+  The checkpoint keeps a single multimodal architecture and model type. For pure-text
+  serving, add `--language-model-only`; a separate text checkpoint is not required.
+  The option can be combined with TP, TP+EP, or DP+EP.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --language-model-only \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ### MTP speculative decoding
+
+  Add the speculative configuration to any of the deployments above. The current
+  checkpoints expose an MTP prediction head that vLLM reuses for drafting without
+  loading a separate draft model. The example uses TP+EP with the native FP8 checkpoint.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ### Tool calling
+
+  dots3-note-prev emits tool calls inside `<dots_function_call>` XML wrappers. Enable
+  automatic tool choice with the native `dots` parser. These options can be combined
+  with any parallel strategy, `--language-model-only`, and MTP speculative decoding.
+
+  ```bash
+  vllm serve dots-studio/dots3-note-prev-fp8 \
+    --served-model-name dots3-note-prev \
+    --host 0.0.0.0 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --enable-auto-tool-choice \
+    --tool-call-parser dots \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 262144 \
+    --max-num-batched-tokens 8192 \
+    --block-size 64 \
+    --mm-processor-cache-gb 32 \
+    --moe-backend deep_gemm
+  ```
+
+  ## Client usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "dots3-note-prev",
+      "messages": [{"role": "user", "content": "Explain sparse attention briefly."}],
+      "temperature": 0.7
+    }'
+  ```
+
+  ## Tuning notes
+
+  - `--max-num-batched-tokens 8192` is the chunked-prefill budget, not the maximum
+    request length. Increase it only when prefill throughput is more important than
+    inter-token latency and enough temporary workspace is available.
+  - DP+EP replicates the non-expert portion on every DP rank. Prefer TP+EP when memory
+    capacity or long-context KV cache is the priority.
+  - `--language-model-only` skips multimodal encoder loading but does not change the
+    checkpoint's model type or architecture.
+  - Full multimodal BF16 serving at 262,144 tokens may not have enough KV-cache memory
+    with `--gpu-memory-utilization 0.9`; the BF16 variant uses `0.95`. Lower
+    `--max-model-len` instead when the extra memory cannot be reserved.
+  - DeepGEMM is specific to the native FP8 checkpoint in this recipe. BF16 is
+    unquantized and must use `--moe-backend triton`.
+  - MTP changes decode scheduling and memory use. Benchmark it against non-speculative
+    decoding with the same prompt/output distribution before production deployment.
+  - `--tool-call-parser dots` supports the model's XML invoke/parameter format and its
+    JSON fallback format, including multiple tool calls in one response.
+
+  ## References
+
+  - [dots3-note-prev FP8 on Hugging Face](https://huggingface.co/dots-studio/dots3-note-prev-fp8)
+  - [dots3-note-prev BF16 on Hugging Face](https://huggingface.co/dots-studio/dots3-note-prev)
+  - [vLLM dots3-note-prev support PR](https://github.com/vllm-project/vllm/pull/51255)
+  - [vLLM parallelism and scaling guide](https://docs.vllm.ai/en/latest/serving/parallelism_scaling.html)

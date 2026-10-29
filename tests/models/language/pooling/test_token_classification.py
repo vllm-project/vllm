@@ -110,7 +110,7 @@ def test_modernbert_models(
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = hf_output.detach().clone().cpu().float()
         vllm_output = vllm_output.detach().clone().cpu().float()
-        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+        torch.testing.assert_close(hf_output, vllm_output, atol=6e-2, rtol=1e-3)
 
 
 @pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])

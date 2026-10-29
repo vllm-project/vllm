@@ -46,8 +46,9 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -146,6 +147,7 @@ pub(super) fn prepare_completion_request(
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -157,6 +159,7 @@ pub(super) fn prepare_completion_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -183,7 +186,7 @@ pub(super) fn prepare_completion_request(
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
             return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
         },
         text_request,
     })
@@ -505,7 +508,7 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]

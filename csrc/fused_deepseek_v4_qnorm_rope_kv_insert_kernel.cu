@@ -32,9 +32,10 @@
  *     [0,      bs*576):          token data, 448 fp8 + 128 bf16 each
  *     [bs*576, bs*576 + bs*8):   UE8M0 scales, 7 real + 1 pad per token
  *   V4.1 (528 B/token, kv_mxfp8=true) -- RoPE is quantized as well, so the
- *   whole row is MXFP8 (fp8 e4m3 with one UE8M0 scale per 32 dims)
- *     [0,      bs*512):          token data, 512 fp8 each
- *     [bs*512, bs*512 + bs*16):  UE8M0 scales, 16 per token
+ *   whole row is MXFP8 (fp8 e4m3 with one UE8M0 scale per 32 dims), and each
+ *   token's scales follow its own data
+ *     [i*528, i*528 + 512):      token i data, 512 fp8
+ *     [i*528 + 512, (i+1)*528):  token i UE8M0 scales, 16
  */
 
 #include "torch_utils.h"
@@ -104,6 +105,8 @@ constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
 constexpr int kMxfp8QuantBlock = 32;
 constexpr int kMxfp8NumQuantBlocks = kHeadDim / kMxfp8QuantBlock;  // 16
 constexpr int kMxfp8TokenDataBytes = kHeadDim;                     // 512
+constexpr int kMxfp8BytesPerToken =
+    kMxfp8TokenDataBytes + kMxfp8NumQuantBlocks;  // 528
 // FNUZ on gfx942 / OCP elsewhere. FNUZ uses 224.0 (not the dtype's raw
 // 240.0) to match the rest of vLLM's FNUZ pipeline.
 #if defined(USE_ROCM) && defined(__gfx942__)
@@ -356,20 +359,20 @@ __device__ __forceinline__ void processDeepseekV4Slot(
     // V4.1 (kv_mxfp8) quantizes them too.
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
-      int const token_data_bytes =
-          kv_mxfp8 ? kMxfp8TokenDataBytes : kTokenDataBytes;
-      int const scale_bytes =
-          kv_mxfp8 ? kMxfp8NumQuantBlocks : kScaleBytesPerToken;
       int64_t const block_idx = slot_id / cache_block_size;
       int64_t const pos_in_block = slot_id % cache_block_size;
       uint8_t* block_base =
           k_cache + block_idx * static_cast<int64_t>(kv_block_stride);
-      uint8_t* token_fp8_ptr = block_base + pos_in_block * token_data_bytes;
+      uint8_t* token_fp8_ptr =
+          block_base +
+          pos_in_block * (kv_mxfp8 ? kMxfp8BytesPerToken : kTokenDataBytes);
       uint8_t* token_bf16_ptr = token_fp8_ptr + kNopeDim;
       uint8_t* token_scale_ptr =
-          block_base +
-          static_cast<int64_t>(cache_block_size) * token_data_bytes +
-          pos_in_block * scale_bytes;
+          kv_mxfp8
+              ? token_fp8_ptr + kMxfp8TokenDataBytes
+              : block_base +
+                    static_cast<int64_t>(cache_block_size) * kTokenDataBytes +
+                    pos_in_block * kScaleBytesPerToken;
 
 #pragma unroll
       for (int i = 0; i < kElemsPerLane; i++) {
@@ -790,7 +793,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 // backend.  Differences from the legacy path:
 //   * No Q head padding — output Q layout matches the input num_heads_q.
 //   * KV is written as a *contiguous* 512-wide row per token (token-strided),
-//     not the legacy UE8M0 paged layout with a separate scale tail.
+//     not the V4 paged record with a separate scale tail.
 //   * Q/KV are stored either as bf16 or as per-tensor E4M3 FP8 (one global
 //     scale), selected by the STORE_Q_FP8 / STORE_KV_FP8 template flags.
 //

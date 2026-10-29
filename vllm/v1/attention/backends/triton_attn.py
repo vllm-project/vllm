@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_num_attention_heads_from_layers,
+    set_triton_ptr_range,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -47,6 +48,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -549,6 +551,11 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
         self.supports_quant_query_input = current_platform.is_cuda()
+        if current_platform.is_rocm():
+            # Enable GPUs with fp8 MMA support
+            from vllm.platforms.rocm import on_gfx11, on_gfx90a
+
+            self.supports_quant_query_input = not (on_gfx90a() or on_gfx11())
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
@@ -567,6 +574,7 @@ class TritonAttentionImpl(AttentionImpl):
             self.use_td = current_platform.is_xpu()
         else:
             self.use_td = td_override
+        self._set_kv_ptr_range = current_platform.is_rocm()
 
     def forward(
         self,
@@ -653,6 +661,8 @@ class TritonAttentionImpl(AttentionImpl):
             ):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
+            if self._set_kv_ptr_range:
+                set_triton_ptr_range(kv_cache, key_cache, value_cache)
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
@@ -819,6 +829,8 @@ class TritonAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         triton_reshape_and_cache_flash(
             key,
             value,
