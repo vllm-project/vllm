@@ -6,6 +6,7 @@ ship a stale image."""
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,9 @@ def run_build(
     stderr, calls). `existing` are the image refs the registry already has.
     FAILURE=bake|missing|upload breaks the kernel symbol map; FAILURE=registry
     makes every registry lookup fail, FAILURE=pushed only lookups of pushed refs,
-    FAILURE=appear those of APPEARS refs once they appear."""
+    FAILURE=appear those of APPEARS refs once they appear, FAILURE=fetch-main and
+    FAILURE=merge-base the lookup of main. FAKE_CLOCK=<file> makes every `date` call
+    advance a minute; REAL_SLEEP=1 makes `sleep` real."""
     (tmp_path / "docker").symlink_to(ROOT / "docker")
     fake = tmp_path / "bin"
     fake.mkdir()
@@ -80,7 +83,8 @@ case $1 in
   rev-parse) [[ $2 == HEAD ]] && echo "${HEAD_REV:-c1}" || echo "${2%%^*}" ;;
   log) echo 0 ;;
   archive) tar -ch docker ;;
-  merge-base) echo mb ;;
+  fetch) [[ $FAILURE == fetch-main && " $* " == *" main "* ]] && exit 1 ;;
+  merge-base) [[ $FAILURE == merge-base ]] && exit 1; echo mb ;;
   show) cat "${2#*:}" ;;
   ls-tree)
     for f in "${@:4}"; do
@@ -102,6 +106,7 @@ case $2 in
     echo "$name $(sed -n 's/^LABEL [^=]*=//p')" >> "$REGISTRY.beats" ;;
   imagetools)
     if [[ $3 == inspect && $4 == *:building-* ]]; then
+      echo "beat? $4" >> "$CALLS"
       # BEAT_AGE: main's build of every image beat that many seconds ago.
       [[ -n $BEAT_AGE ]] && { echo $(( $(date +%s) - BEAT_AGE )); exit 0; }
       beat=$(awk -v r="$4" '$1 == r { b = $2 } END { print b }' "$REGISTRY.beats")
@@ -152,7 +157,17 @@ echo "upload ${PWD##*/}/$3" >> "$CALLS"
 exit 0
 """
     )
-    (fake / "sleep").write_text("#!/bin/bash\n")  # skip the registry retry delays
+    # Skip the registry retry delays.
+    (fake / "sleep").write_text(
+        '#!/bin/bash\n[[ -z $REAL_SLEEP ]] || exec /bin/sleep "$@"\n'
+    )
+    (fake / "date").write_text(
+        """#!/bin/bash
+[[ -n $FAKE_CLOCK ]] || exec /bin/date "$@"
+n=$(cat "$FAKE_CLOCK" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_CLOCK"
+echo $((1000000000 + n * 60))
+"""
+    )
     for tool in fake.iterdir():
         tool.chmod(0o755)
     # A map left by an earlier build in this checkout must never be uploaded.
@@ -170,6 +185,8 @@ exit 0
         "APPEARS": "",
         "APPEAR_AFTER": "3",
         "BEAT_AGE": "",
+        "FAKE_CLOCK": "",
+        "REAL_SLEEP": "",
         "ROCM_TRUSTED_POLL_SECONDS": "0",
         "ROCM_TRUSTED_WAIT_MINUTES": "0",  # tests that wait set a deadline
         "ROCM_TRUSTED_START_GRACE_MINUTES": "0",
@@ -466,3 +483,39 @@ def test_only_trusted_base_builds_mark(tmp_path, mode, repo):
     assert status == 0, stderr
     assert built_tags(calls, stderr)
     assert not any(c.startswith("heartbeat ") for c in calls)
+
+
+@pytest.mark.parametrize("failure", ["fetch-main", "merge-base"])
+def test_a_pr_that_cannot_read_main_builds_without_waiting(tmp_path, failure):
+    status, stderr, calls = untrusted_base(
+        tmp_path, FAILURE=failure, BEAT_AGE="60", ROCM_TRUSTED_WAIT_MINUTES="5"
+    )
+    assert status == 0, stderr
+    assert "waiting for main's build" not in stderr
+    assert len(built_tags(calls, stderr)) == 3
+
+
+def test_a_pr_gives_main_the_start_grace_once_per_build(tmp_path):
+    # Main is not building: after the stack's grace, the runtime and test-deps
+    # build without waiting again.
+    status, stderr, calls = untrusted_base(
+        tmp_path,
+        FAKE_CLOCK=str(tmp_path / "clock"),
+        ROCM_TRUSTED_START_GRACE_MINUTES="5",
+        ROCM_TRUSTED_WAIT_MINUTES="300",
+    )
+    assert status == 0, stderr
+    polls = [c.split(":building-")[1].rsplit("-", 1)[0] for c in calls if "beat?" in c]
+    assert polls.count("stack-rocm") > 1
+    assert polls.count("runtime-rocm") == polls.count("test-deps-rocm") == 1
+    assert len(built_tags(calls, stderr)) == 3
+
+
+def test_the_heartbeat_does_not_hold_up_the_build(tmp_path):
+    # The refresh loop must neither keep $(ensure ...) open nor outlive the bake.
+    start = time.monotonic()
+    status, stderr, _ = run_build(
+        tmp_path, "base", REAL_SLEEP="1", ROCM_HEARTBEAT_SECONDS="20"
+    )
+    assert status == 0, stderr
+    assert time.monotonic() - start < 15

@@ -165,17 +165,17 @@ pushed() {
 #   A Kr cache miss triggers a runtime rebuild (minutes).
 
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-# keys_at <rev>  — print "Ks Kr" for the files at <rev> (HEAD's Dockerfile.rocm from the context).
+# keys_at <rev>  — print "Ks Kr" for the files at <rev>. In $(), set -e is off: failures are returned.
 keys_at() {
   local rev=$1 Ks Kr
   # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
   # identity: an image left in an older format would hand later builds a second copy of the same layers.
-  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+    || return 1
   Kr=$(
     {
       echo "$Ks"
-      if [[ $rev == HEAD ]]; then cat .rocm-src/docker/Dockerfile.rocm; else git show "$rev:docker/Dockerfile.rocm"; fi \
-        | sed '/^# ==== per-commit stages/q'
+      git show "$rev:docker/Dockerfile.rocm" | sed -n '1,/^# ==== per-commit stages/p' || exit 1
       git ls-tree "$rev" -- \
         requirements/common.txt \
         requirements/rocm.txt \
@@ -184,10 +184,11 @@ keys_at() {
         tests/vllm_test_utils \
         tools/install_torchcodec_rocm.sh
     } | sha256sum | cut -c1-16
-  )
+  ) || return 1
   echo "$Ks $Kr"
 }
-read -r Ks Kr <<<"$(keys_at HEAD)"
+keys=$(keys_at HEAD) || { echo "cannot compute the image keys of HEAD" >&2; exit 1; }
+read -r Ks Kr <<<"$keys"
 
 # An untrusted base build whose keys are those of its merge base with main shares main's images.
 # Main's own CI build makes them (main's base builds run one at a time: see the concurrency group
@@ -197,7 +198,7 @@ MAIN_TAGS=""
 if [[ $MODE == base && $REPO != "$TRUSTED" ]] \
     && git fetch -q --filter=tree:0 origin "${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}" \
     && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
-    && read -r mKs mKr <<<"$(keys_at "$mb")"; then
+    && keys=$(keys_at "$mb") && read -r mKs mKr <<<"$keys"; then
   MAIN_TAGS="stack-$STACK-$mKs runtime-$STACK-$mKr test-deps-$STACK-$mKr"
 fi
 echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
@@ -281,13 +282,18 @@ heartbeat() {
 #   Poll the trusted registry for <tag>; print its pinned ref(s) as ensure() does, or return 1 to
 #   build it here. Waits only while main's build of <tag> is alive: its heartbeat is at most
 #   ROCM_HEARTBEAT_STALE_MINUTES (default 15) old. Without one, it gives main's build
-#   ROCM_TRUSTED_START_GRACE_MINUTES (default 10) to start. ROCM_TRUSTED_WAIT_MINUTES (default
-#   300, within the base step's 540-min timeout) bounds all waits of a build together.
+#   ROCM_TRUSTED_START_GRACE_MINUTES (default 10) to start, once per build: after a wait finds
+#   main not building, later images get no grace. ROCM_TRUSTED_WAIT_MINUTES (default 300) bounds
+#   all waits of a build together. It is reached only while main's mark stays fresh (a hung build,
+#   or a planted mark), and a stack built after it may not fit the step's 540-min timeout.
 WAIT_UNTIL=$(( $(date +%s) + ${ROCM_TRUSTED_WAIT_MINUTES:-300} * 60 ))
+NO_MAIN_BUILD=$(mktemp -u)   # a file, not a variable: each ensure() runs in its own subshell
+trap 'rm -f "$NO_MAIN_BUILD"' EXIT
 wait_for_trusted() {
   local tag=$1 sibling=${2:-} ref=$TRUSTED:$1 d ds rc beat now start
   local stale=$(( ${ROCM_HEARTBEAT_STALE_MINUTES:-15} * 60 ))
   local grace=$(( ${ROCM_TRUSTED_START_GRACE_MINUTES:-10} * 60 ))
+  [[ ! -e $NO_MAIN_BUILD ]] || grace=0
   start=$(date +%s)
   echo "--- :hourglass: $tag is main's; waiting for main's build to push $ref" >&2
   while (( $(date +%s) < WAIT_UNTIL )); do
@@ -302,6 +308,7 @@ wait_for_trusted() {
     beat=$(label "$TRUSTED:building-$tag" "$HEARTBEAT_LABEL" 2>/dev/null) || beat=""
     if ! { [[ $beat =~ ^[0-9]+$ ]] && (( now - beat <= stale )); } && (( now - start >= grace )); then
       echo "No build of $ref in progress (no heartbeat in the last $((stale / 60)) min); building it here" >&2
+      : >"$NO_MAIN_BUILD"
       return 1
     fi
     sleep "${ROCM_TRUSTED_POLL_SECONDS:-120}"
