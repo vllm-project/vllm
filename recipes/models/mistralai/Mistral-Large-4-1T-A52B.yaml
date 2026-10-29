@@ -646,7 +646,7 @@ notes:
       launch failure` once HiSparse spills KV to host
       ([vllm#64327](https://github.com/vllm-project/vllm/issues/64327); fix in
       [flashinfer#7782](https://github.com/flashinfer-ai/flashinfer/pull/7782)).
-      TRTLLM decodes ~3% slower. Not needed without HiSparse.
+      Not needed without HiSparse.
   - title: "H200: two 8-GPU nodes"
     when:
       hardware: [h200]
