@@ -3,6 +3,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
+from typing import TypeVar
 from unittest.mock import Mock, patch
 
 import pytest
@@ -13,8 +14,9 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -23,7 +25,8 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     stage_spec_decode_metadata,
 )
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
-from vllm.v1.attention.backend import AttentionMetadataBuilder
+from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -54,6 +57,8 @@ PRUNED_METADATA_FIELDS = {
     "flashinfer_prefill_query_start_loc",
     "flashinfer_prefill_seq_order",
 }
+
+_BuilderT = TypeVar("_BuilderT", bound=GDNAttentionMetadataBuilder)
 
 
 def _assert_matches_shared_gdn(
@@ -89,7 +94,7 @@ def _assert_matches_shared_gdn(
 
 
 def _make_builder(
-    builder_cls: type[AttentionMetadataBuilder],
+    builder_cls: type[_BuilderT],
     num_speculative_tokens: int,
     full_cuda_graph: bool,
     device: torch.device = DEVICE,
@@ -102,7 +107,7 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
-) -> AttentionMetadataBuilder:
+) -> _BuilderT:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -185,7 +190,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     )
 
     # This is the same compatibility check performed while initializing the
-    # model runner. RecoverSSM adds two workspace states that are not copied.
+    # model runner. RecoverSSM keeps its verify records outside the KV cache.
     validate_mamba_state_copy_funcs(
         {kv_cache_spec: [0]},
         {
@@ -194,11 +199,12 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             )
         },
     )
-    assert len(kv_cache_spec.shapes) == 4
+    assert len(kv_cache_spec.shapes) == 2
 
     builder_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(linear_key_head_dim=32)
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(linear_key_head_dim=32),
         ),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -219,7 +225,8 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         additional_config={},
         num_speculative_tokens=2,
-        use_v2_model_runner=False,
+        num_hash_lookahead_tokens=0,
+        use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -257,7 +264,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     # Creating the commit context is the first metadata path that consumes the
     # builder's layer_names. Mock only the GPU-cache-dependent constructor.
     builder.recoverssm_context = None
-    forward_layer = Mock()
+    forward_layer = Mock(recoverssm_backend="triton")
     builder.vllm_config.compilation_config.static_forward_context["layer.0"] = (
         forward_layer
     )
@@ -292,6 +299,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         [forward_layer],
         spec_query_len=3,
         max_num_reqs=builder.vllm_config.scheduler_config.max_num_seqs,
+        backend="triton",
     )
 
 
@@ -358,22 +366,37 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    (
+        "seq_len",
+        "disable_eagle_block_drop",
+        "num_hash_lookahead_tokens",
+        "prefix_match_unit",
+        "expected_offset",
+    ),
     [
-        (100, False, 16, 80),
-        (100, True, 16, 96),
-        (100, False, 8, None),
-        (96, False, 16, 80),
-        (96, True, 16, 80),
+        (100, False, 0, 16, 80),
+        (100, True, 0, 16, 96),
+        (100, False, 1, 16, 96),
+        (100, False, 0, 8, None),
+        (96, False, 0, 16, 80),
+        (96, True, 0, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
+    monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
+    num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
+    """Lookahead hashes need no back-off from the replay boundary."""
+    monkeypatch.setattr(
+        VllmConfig,
+        "num_hash_lookahead_tokens",
+        property(lambda _: num_hash_lookahead_tokens),
+    )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
@@ -638,6 +661,8 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         )
     context = builder.recoverssm_context
     assert context is not None
+    commit = context.commit
+    assert isinstance(commit, Mock)
     actual = builder.build(
         0,
         common_attn_metadata,
@@ -675,7 +700,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
             is common_attn_metadata.compute_num_computed_tokens()
         )
         assert postprocess.block_size == BLOCK_SIZE
-    args = context.commit.call_args.args
+    args = commit.call_args.args
     assert args[0] is num_accepted_tokens
     torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
@@ -786,7 +811,7 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
     ],
 )
 def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
-    builder_cls: type[AttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
+    builder_cls: type[GDNAttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
 ):
     """`build_for_cudagraph_capture` is not capture-only: a DP rank with nothing
     scheduled re-stages its FULL-graph metadata through it on every dummy step,
@@ -1086,3 +1111,44 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert staged is not None
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Kimi-K3 NVIDIA KDA layer")
+def test_recoverssm_layer_keeps_records_outside_kv_cache(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    """A RecoverSSM KDA layer stores the stock conv and SSM state in its Mamba
+    pages and its verify records in a buffer with one row per schedulable
+    request."""
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=1, rank_in_group=0),
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=2)
+    default_vllm_config.scheduler_config.max_num_seqs = 5
+    default_vllm_config.cache_config.use_replayssm = True
+    default_vllm_config.cache_config.use_kda_recoverssm = True
+    config = KimiLinearConfig(
+        hidden_size=16,
+        linear_attn_config={
+            "kda_layers": [0],
+            "full_attn_layers": [],
+            "head_dim": 32,
+            "num_heads": 4,
+            "short_conv_kernel_size": 4,
+            "use_full_rank_gate": True,
+        },
+    )
+    layer = KimiK3DeltaAttention(
+        config, default_vllm_config, prefix="model.layers.0.self_attn"
+    )
+    # The CuTe kernels need 128-wide heads: this layer runs the Triton ones.
+    assert layer.recoverssm_backend == "triton"
+    assert len(layer.get_state_shape()) == len(layer.get_state_dtype()) == 2
+    records = layer.recoverssm_records
+    assert records is not None
+    assert records.correction.shape == (5, 4, 3, 32)
+    assert records.correction.dtype == torch.float32
+    assert records.key_gate.shape == (5, 4, 3, 64)
+    assert records.key_gate.dtype == torch.bfloat16

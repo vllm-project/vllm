@@ -22,7 +22,10 @@ from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
 from vllm.transformers_utils import processors
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+    get_non_weight_snapshot_path,
+)
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
@@ -214,7 +217,12 @@ def get_processor(
     if revision is None:
         revision = "main"
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = requested_name = convert_model_repo_to_path(processor_name)
+        # A snapshot pinned to `revision` would shadow remote code at `code_revision`
+        if kwargs.get("code_revision") in (None, revision):
+            processor_name = get_non_weight_snapshot_path(
+                processor_name, revision=revision, token=kwargs.get("token")
+            )
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )
@@ -268,6 +276,11 @@ def get_processor(
             f"Expected type: {processor_cls}, but "
             f"found type: {type(processor)}"
         )
+
+    # Report the Hub ID rather than the local snapshot it was loaded from
+    tokenizer = getattr(processor, "tokenizer", processor)
+    if hasattr(tokenizer, "name_or_path"):
+        tokenizer.name_or_path = requested_name
 
     return processor
 

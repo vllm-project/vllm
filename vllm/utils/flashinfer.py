@@ -8,7 +8,9 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import importlib.metadata
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -16,6 +18,7 @@ from typing import Any, NoReturn
 
 import requests
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -24,6 +27,13 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+
+def is_flashinfer_autotuning() -> bool:
+    """Whether a FlashInfer autotune(True) context is active."""
+    from flashinfer.autotuner import AutoTuner
+
+    return AutoTuner.get().is_tuning_mode
 
 
 def flashinfer_bf16_mm(
@@ -98,10 +108,58 @@ def has_flashinfer() -> bool:
             "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
             "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
             "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
-            "PATH, or run `flashinfer download-kernels`."
+            "PATH, or run `vllm download-kernels`."
         )
         return False
     return True
+
+
+def _installed_version(distribution: str) -> str | None:
+    try:
+        return Version(importlib.metadata.version(distribution)).public
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def has_flashinfer_jit_cache_wheels() -> bool:
+    """Return whether FlashInfer publishes flashinfer-jit-cache for the installed
+    PyTorch's CUDA version, which it does from CUDA 12.9."""
+    cuda_version = torch.version.cuda
+    return cuda_version is not None and Version(cuda_version) >= Version("12.9")
+
+
+def warn_if_flashinfer_kernels_missing() -> None:
+    """Warn on Hopper and newer GPUs when FlashInfer's precompiled kernels are
+    missing or were installed for another FlashInfer version."""
+    if not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and has_flashinfer()
+    ):
+        return
+    flashinfer_version = _installed_version("flashinfer-python")
+    packages = []
+    if not envs.VLLM_HAS_FLASHINFER_CUBIN:
+        packages.append("flashinfer-cubin")
+    if has_flashinfer_jit_cache_wheels():
+        packages.append("flashinfer-jit-cache")
+    installed = {name: _installed_version(name) for name in packages}
+    if flashinfer_version is None or all(
+        version == flashinfer_version for version in installed.values()
+    ):
+        return
+    logger.warning_once(
+        "FlashInfer's precompiled kernels are missing or do not match "
+        "flashinfer-python %s (%s). FlashInfer then downloads and compiles "
+        "kernels at startup, which can take several minutes, or fails to import "
+        "mismatched ones. Run `vllm download-kernels` in this Python environment "
+        "to install them.",
+        flashinfer_version,
+        ", ".join(
+            f"{name} {version or 'not installed'}"
+            for name, version in installed.items()
+        ),
+    )
 
 
 @functools.cache
@@ -111,6 +169,15 @@ def has_flashinfer_bf16_gemm() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and callable(getattr(mod, "mm_bf16", None))
+
+
+@functools.cache
+def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
+    """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "concat_mla_kv_quant_fp8", None))
 
 
 @functools.cache
@@ -309,6 +376,19 @@ autotune = _lazy_import_wrapper(
 
 
 @functools.cache
+def has_flashinfer_autotune_v2() -> bool:
+    """Return ``True`` if FlashInfer ships the managed-cache autotuner
+    (``flashinfer.autotune_v2``, flashinfer-ai/flashinfer#3861)."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and all(
+        callable(getattr(mod, name, None))
+        for name in ("autotune_v2", "autotune_v2_reload")
+    )
+
+
+@functools.cache
 def has_flashinfer_comm() -> bool:
     """Return `True` if FlashInfer comm module is available."""
     return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
@@ -346,10 +426,24 @@ def has_flashinfer_nvlink_two_sided() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_one_sided() -> bool:
-    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    """Return whether FlashInfer exposes the NVLink MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+    mod = _get_submodule("flashinfer.moe_ep")
+    return (
+        mod is not None
+        and all(
+            hasattr(mod, name)
+            for name in (
+                "BootstrapConfig",
+                "MoEEpCommParams",
+                "NVLinkOneSidedAlltoAll",
+                "NVLinkOneSidedConfig",
+                "create_communication",
+            )
+        )
+        and hasattr(mod.MoEEpCommParams, "dispatch_format")
+    )
 
 
 @functools.cache
@@ -531,6 +625,33 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_localized_moe() -> bool:
+    """Return ``True`` if cute_dsl_fused_moe_nvfp4 accepts the ``localized_*`` args.
+
+    Locality-domain execution landed in flashinfer-ai/flashinfer#5276 and was
+    adapted to ``torch.cuda.execute_on_streams`` in #6488. Neither is in a
+    FlashInfer 0.7.x release, so probe the signature rather than the version.
+    """
+    if not has_flashinfer_cutedsl_moe_nvfp4():
+        return False
+    mod = _get_submodule("flashinfer")
+    if mod is None:
+        return False
+    try:
+        params = inspect.signature(mod.cute_dsl_fused_moe_nvfp4).parameters
+    except (TypeError, ValueError):
+        return False
+    required = {
+        "localized_weights",
+        "localized_streams",
+        "localized_sm_count",
+        "localized_memset_stream",
+        "localized_allow_nonlocalized",
+    }
+    return required <= params.keys()
 
 
 @functools.cache
@@ -1196,7 +1317,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
+    "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -1208,6 +1331,7 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "has_flashinfer_localized_moe",
     "flashinfer_b12x_fused_moe",
     "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
@@ -1219,6 +1343,7 @@ __all__ = [
     "flashinfer_fused_kda_decode",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
@@ -1243,4 +1368,6 @@ __all__ = [
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
+    "has_flashinfer_jit_cache_wheels",
+    "warn_if_flashinfer_kernels_missing",
 ]
