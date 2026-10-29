@@ -17,7 +17,10 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_sliding_window,
+)
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -48,6 +51,27 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 logger = init_logger(__name__)
+
+
+def _disable_aot_schedule_for_sliding_window_drafts(
+    attn_groups: list[list[AttentionGroup]],
+    draft_layer_names: set[str],
+) -> None:
+    """Disable FlashAttention's model-global AOT schedule on windowed drafts.
+
+    The inferred model-wide window can differ from a draft builder's geometry.
+    """
+    for groups in attn_groups:
+        for group in groups:
+            if draft_layer_names.isdisjoint(group.layer_names):
+                continue
+            for builder in group.metadata_builders:
+                if (
+                    getattr(builder, "aot_schedule", False)
+                    and get_kv_cache_spec_sliding_window(builder.kv_cache_spec)
+                    is not None
+                ):
+                    builder.aot_schedule = False  # type: ignore[attr-defined]
 
 
 def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
@@ -346,6 +370,12 @@ class DraftModelSpeculator(BaseSpeculator):
             self.device,
             active_layer_names=self.draft_attn_layer_names,
         )
+        # Some drafters use the runner's builders for prefill and their own
+        # builders for chain steps, so configure both copies.
+        for attn_groups in (target_attn_groups, self.attn_groups):
+            _disable_aot_schedule_for_sliding_window_drafts(
+                attn_groups, self.draft_attn_layer_names
+            )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
         # prefill reuses the target model's attention metadata, so its
