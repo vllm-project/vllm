@@ -8,7 +8,7 @@
 # Mirrors tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh:
 # brings up N prefillers + M decoders on the local host, fronts them
 # with p2p_connector_proxy.py, then runs
-#   1. test_p2p_transfer.py - asserts the decoders actually pulled KV over
+#   1. p2p_transfer_check.py - asserts the decoders actually pulled KV over
 #      the p2p tier (gsm8k alone passes even if the decoder recomputes), and
 #   2. the connector-agnostic test_accuracy.py (gsm8k via lm_eval).
 #
@@ -41,7 +41,7 @@
 #                               offloading config (topology-free host pages,
 #                               the supported route for mixed prefiller/decoder TP)
 #   ENFORCE_EAGER               default 1
-#   CHECK_TRANSFER              default 1; 0 skips test_p2p_transfer.py
+#   CHECK_TRANSFER              default 1; 0 skips p2p_transfer_check.py
 #   EXPECT_TRANSFER             default 1; 0 asserts no KV moved (safe fallback)
 #   VLLM_SERVE_EXTRA_ARGS       comma-separated extra args for vllm serve
 #   PYTHON_BIN / VLLM_BIN       override interpreter / vllm entrypoint
@@ -461,7 +461,7 @@ run_tests_for_model() {
     PROXY_URL="http://localhost:${PROXY_PORT}/v1" \
     DECODE_METRICS_URLS="$(IFS=,; echo "${metrics_urls[*]}")" \
     DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE} \
-      "${PYTHON_BIN}" -m pytest -s -x "${SCRIPT_DIR}/test_p2p_transfer.py"
+      "${PYTHON_BIN}" -m pytest -s -x "${SCRIPT_DIR}/p2p_transfer_check.py"
   fi
 
   # ---- Run accuracy test (reused from nixl_integration) ----
