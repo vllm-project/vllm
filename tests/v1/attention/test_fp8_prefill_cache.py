@@ -7,6 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.fp8_prefill_cache import (
+    PrefillCacheExpansion,
     expand_cache,
     expansion_bytes,
     plan_expansion,
@@ -68,7 +69,7 @@ def test_prefill_expansion_keeps_exact_values_and_independent_buffers(layout):
         storage = storage.transpose(1, 2).contiguous()
     keys, values = storage.split(256, dim=-1)
     original = storage.view(torch.uint8).clone()
-    plans = []
+    plans: list[PrefillCacheExpansion] = []
     expected_first = None
     budget = 1 << 20
     for pages in [[7, 0, 7], [3, 8, 1, 3, 9]]:
