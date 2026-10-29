@@ -85,8 +85,10 @@ class TestSanitizeMessageCoversLeakPatterns:
                 "cannot identify image file <_io.BytesIO object>",
             ),
             (
-                "<PIL.PngImagePlugin.PngImageFile image mode=RGB "
-                "size=8x8 at 0x7f3c1a2b4d90>",
+                (
+                    "<PIL.PngImagePlugin.PngImageFile image mode=RGB "
+                    "size=8x8 at 0x7f3c1a2b4d90>"
+                ),
                 "<PIL.PngImagePlugin.PngImageFile image mode=RGB size=8x8>",
             ),
             (

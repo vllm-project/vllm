@@ -190,8 +190,10 @@ def profile_graph(
 
 def format_summary(summary: dict[str, Any], top: int = 20) -> str:
     lines = [
-        f"span {summary['span_us']:.1f} us, busy {summary['busy_us']:.1f} us, "
-        f"{summary['activities']} activities/forward",
+        (
+            f"span {summary['span_us']:.1f} us, busy {summary['busy_us']:.1f} us, "
+            f"{summary['activities']} activities/forward"
+        ),
         f"{'us':>10} {'%':>6} {'calls':>6}  kernel",
     ]
     for row in summary["kernels"][:top]:
@@ -212,9 +214,11 @@ def format_diff(a: dict[str, Any], b: dict[str, Any], top: int = 20) -> str:
         deltas.append((us_b - us_a, us_a, us_b, calls_a, calls_b, name))
     deltas.sort(key=lambda d: -abs(d[0]))
     lines = [
-        f"span {a['span_us']:.1f} -> {b['span_us']:.1f} us "
-        f"({b['span_us'] - a['span_us']:+.1f}), busy {a['busy_us']:.1f} -> "
-        f"{b['busy_us']:.1f} us ({b['busy_us'] - a['busy_us']:+.1f})",
+        (
+            f"span {a['span_us']:.1f} -> {b['span_us']:.1f} us "
+            f"({b['span_us'] - a['span_us']:+.1f}), busy {a['busy_us']:.1f} -> "
+            f"{b['busy_us']:.1f} us ({b['busy_us'] - a['busy_us']:+.1f})"
+        ),
         f"{'delta us':>10} {'A us':>10} {'B us':>10} {'A n':>5} {'B n':>5}  kernel",
     ]
     for delta, us_a, us_b, calls_a, calls_b, name in deltas[:top]:

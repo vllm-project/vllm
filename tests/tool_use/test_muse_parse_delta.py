@@ -195,8 +195,10 @@ if __name__ == "__main__":
         ("<|message|>Think.<|eot|>", "Think.", ""),
         ("to=developer<|message|>internal<|eot|>", "", ""),
         (
-            "to=commentary<|message|>Working. to=developer<|message|>internal"
-            "<|eom|><|start|>assistant to=user<|message|>Done.<|eot|>",
+            (
+                "to=commentary<|message|>Working. to=developer<|message|>internal"
+                "<|eom|><|start|>assistant to=user<|message|>Done.<|eot|>"
+            ),
             "",
             "Working. Done.",
         ),

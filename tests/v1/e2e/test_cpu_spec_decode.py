@@ -27,10 +27,14 @@ SP = SamplingParams(max_tokens=48, temperature=0, logprobs=NUM_LOGPROBS)
 # Repetitive prompts so the ngram proposer finds matches and actually drafts;
 # without hits the run is indistinguishable from plain decoding.
 PROMPTS = [
-    "The capital of France is Paris. The capital of Italy is Rome. "
-    "The capital of Spain is Madrid. The capital of France is",
-    "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n"
-    "def mul(a, b):\n    return",
+    (
+        "The capital of France is Paris. The capital of Italy is Rome. "
+        "The capital of Spain is Madrid. The capital of France is"
+    ),
+    (
+        "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n"
+        "def mul(a, b):\n    return"
+    ),
     "one two three four five one two three four five one two three four",
 ]
 

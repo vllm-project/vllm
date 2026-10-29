@@ -406,8 +406,10 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
             return True, None
         return (
             False,
-            "FlashInfer b12x requires SM120+ and FlashInfer "
-            "with Sm120BlockScaledDenseGemmKernel",
+            (
+                "FlashInfer b12x requires SM120+ and FlashInfer "
+                "with Sm120BlockScaledDenseGemmKernel"
+            ),
         )
 
     @classmethod

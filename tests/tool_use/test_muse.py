@@ -520,8 +520,10 @@ def test_named_custom_tool_choice_skips_structured_outputs():
         ("<|message|>Thinking.<|eot|>", "Thinking.", None),
         ("to=developer<|message|>internal note<|eom|>", None, None),
         (
-            "to=commentary<|message|>Checking. "
-            "to=developer<|message|>internal note<|eom|>",
+            (
+                "to=commentary<|message|>Checking. "
+                "to=developer<|message|>internal note<|eom|>"
+            ),
             None,
             "Checking. ",
         ),
@@ -531,8 +533,10 @@ def test_named_custom_tool_choice_skips_structured_outputs():
             "Done.",
         ),
         (
-            "to=self<|message|>First.<|eom|>"
-            "<|start|>assistant<|message|>Second.<|eot|>",
+            (
+                "to=self<|message|>First.<|eom|>"
+                "<|start|>assistant<|message|>Second.<|eot|>"
+            ),
             "First.Second.",
             None,
         ),

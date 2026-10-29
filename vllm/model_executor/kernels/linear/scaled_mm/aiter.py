@@ -54,9 +54,11 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True."
+                ),
             )
         return True, None
 
@@ -136,9 +138,11 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_fp8_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True."
+                ),
             )
         try:
             import aiter  # noqa: F401
@@ -175,8 +179,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                f"requires N and K dimensions divisible by 16, received "
-                f"N={N} and K={K}.",
+                (
+                    f"requires N and K dimensions divisible by 16, received "
+                    f"N={N} and K={K}."
+                ),
             )
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
@@ -184,8 +190,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                (
+                    f"requires a tuned configuration for N: {N} and K: {K} "
+                    f"and fp8 dtype {fp8_dtype}."
+                ),
             )
 
         return True, None
@@ -230,9 +238,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_hipbmm_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1`, "
-                "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
-                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1`, "
+                    "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`."
+                ),
             )
         try:
             import aiter  # noqa: F401
@@ -271,8 +281,10 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                "requires N >= 16 and both N and K divisible by 16, "
-                f"received N={N} and K={K}.",
+                (
+                    "requires N >= 16 and both N and K divisible by 16, "
+                    f"received N={N} and K={K}."
+                ),
             )
 
         return True, None
@@ -351,8 +363,10 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                (
+                    f"requires a tuned configuration for N: {N} and K: {K} "
+                    f"and fp8 dtype {fp8_dtype}."
+                ),
             )
         return True, None
 
@@ -460,8 +474,10 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
         # RDNA only has the aiter Triton blockscale backend, which needs a

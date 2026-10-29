@@ -353,9 +353,11 @@ def test_multi_line_data_payload_is_joined_with_newlines():
     """The SSE spec allows one payload to span several `data:` lines."""
     script: list[bytes | float] = [
         PREAMBLE,
-        b"event: response.output_text.delta\n"
-        b'data: {"type": "response.output_text.delta",\n'
-        b'data:  "delta": "ok"}\n\n',
+        (
+            b"event: response.output_text.delta\n"
+            b'data: {"type": "response.output_text.delta",\n'
+            b'data:  "delta": "ok"}\n\n'
+        ),
         usage_event(5, 1),
     ]
     output = run(script)

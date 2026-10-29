@@ -307,8 +307,10 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
             if not is_sm90:
                 return (
                     False,
-                    "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
-                    "requires compute capability 90 (Hopper).",
+                    (
+                        "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
+                        "requires compute capability 90 (Hopper)."
+                    ),
                 )
         return True, None
 

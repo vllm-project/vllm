@@ -211,9 +211,11 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     )
     model_output_deltas = [
         "<function_calls>get_weather(city='San",
-        " Francisco', metric='celsius')\n"
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}\n"
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
+        (
+            " Francisco', metric='celsius')\n"
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}\n"
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(

@@ -273,8 +273,10 @@ FORMATS = {
     "indexed": (
         " ",
         "{id}",
-        "Reply on one line with each question's id immediately followed by its "
-        "label, separated by single spaces.",
+        (
+            "Reply on one line with each question's id immediately followed by its "
+            "label, separated by single spaces."
+        ),
     ),
 }
 

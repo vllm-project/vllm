@@ -48,15 +48,19 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         ):
             return (
                 False,
-                "Dynamic4bitLinearKernel on Arm requires Float32 or"
-                " BFloat16 or Float16 activations",
+                (
+                    "Dynamic4bitLinearKernel on Arm requires Float32 or"
+                    " BFloat16 or Float16 activations"
+                ),
             )
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide"
-                " the number of input features "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide"
+                    " the number of input features "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             try:
@@ -65,8 +69,10 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
             except AttributeError:
                 return (
                     False,
-                    f"PyTorch {torch.__version__} does not support"
-                    " _dyn_quant_matmul_4bit. Install a newer version",
+                    (
+                        f"PyTorch {torch.__version__} does not support"
+                        " _dyn_quant_matmul_4bit. Install a newer version"
+                    ),
                 )
         return True, None
 

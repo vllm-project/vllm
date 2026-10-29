@@ -1991,8 +1991,10 @@ def test_online_targeting_only_one_shared_projection_rejects_fse() -> None:
         shared_prefix,
     ) == (
         False,
-        "online quantization targets only part of the shared expert at "
-        f"{shared_prefix}",
+        (
+            "online quantization targets only part of the shared expert at "
+            f"{shared_prefix}"
+        ),
     )
 
 

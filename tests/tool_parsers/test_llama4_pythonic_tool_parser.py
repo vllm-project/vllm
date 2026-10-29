@@ -229,9 +229,11 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
         default_tokenizer
     )
     model_output_deltas = [
-        "<|python_start|>[get_weather(city='LA', metric='C'), "
-        "get_weather(), "
-        "do_something_cool(steps=[])]<|python_end|>",
+        (
+            "<|python_start|>[get_weather(city='LA', metric='C'), "
+            "get_weather(), "
+            "do_something_cool(steps=[])]<|python_end|>"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(

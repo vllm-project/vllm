@@ -68,8 +68,10 @@ V2_FEATURES = {
     "spec_decode": (
         [
             "--speculative-config",
-            '{"method": "ngram", "num_speculative_tokens": 2, '
-            '"prompt_lookup_max": 4, "prompt_lookup_min": 2}',
+            (
+                '{"method": "ngram", "num_speculative_tokens": 2, '
+                '"prompt_lookup_max": 4, "prompt_lookup_min": 2}'
+            ),
         ],
         1,
     ),

@@ -223,9 +223,11 @@ class TestStreamedToolArguments:
         "raw_args",
         [
             "<arg_key>k</arg_key><arg_value>x</arg_value>",
-            "<arg_key>k</arg_key><arg_value>1</arg_value>"
-            "<arg_key>j</arg_key><arg_value>2</arg_value>"
-            "<arg_key>k</arg_key><arg_value>3",
+            (
+                "<arg_key>k</arg_key><arg_value>1</arg_value>"
+                "<arg_key>j</arg_key><arg_value>2</arg_value>"
+                "<arg_key>k</arg_key><arg_value>3"
+            ),
         ],
         ids=["closed_value", "repeated_key_not_last"],
     )

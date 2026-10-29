@@ -60,8 +60,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
-            '"allow_target_only_watermarking":true}',
+            (
+                '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+                '"allow_target_only_watermarking":true}'
+            ),
         ]
     )
 
@@ -82,8 +84,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"key":42,"deduplicate_contexts":"none",'
-            '"deduplicate_contexts_max_history":32}',
+            (
+                '{"key":42,"deduplicate_contexts":"none",'
+                '"deduplicate_contexts_max_history":32}'
+            ),
         ]
     )
     config = EngineArgs.from_cli_args(args).create_watermark_config()
@@ -485,9 +489,11 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "--compilation-config="
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            (
+                "--compilation-config="
+                '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+                '"backend": "inductor"}'
+            ),
         ]
     )
     assert (
@@ -567,11 +573,13 @@ def test_attention_config():
     # set to string form of a dict with all fields
     args = parser.parse_args(
         [
-            "--attention-config="
-            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            (
+                "--attention-config="
+                '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+                '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+                '"use_trtllm_attention": false, '
+                '"disable_flashinfer_q_quantization": false}'
+            ),
         ]
     )
     assert args is not None

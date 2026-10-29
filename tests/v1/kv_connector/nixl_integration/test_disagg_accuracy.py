@@ -11,16 +11,20 @@ import requests
 MAX_OUTPUT_LEN = 30
 
 SAMPLE_PROMPTS = (
-    "Red Hat is the best company in the world to work for because it works on "
-    "open source software, which means that all the contributions are "
-    "delivered to the community. As a result, when working on projects like "
-    "vLLM we are able to meet many amazing people from various organizations "
-    "like AMD, Google, NVIDIA, ",
-    "We hold these truths to be self-evident, that all men are created equal, "
-    "that they are endowed by their Creator with certain unalienable Rights, "
-    "that among these are Life, Liberty and the pursuit of Happiness.--That "
-    "to secure these rights, Governments are instituted among Men, deriving "
-    "their just powers from the consent of the governed, ",
+    (
+        "Red Hat is the best company in the world to work for because it works on "
+        "open source software, which means that all the contributions are "
+        "delivered to the community. As a result, when working on projects like "
+        "vLLM we are able to meet many amazing people from various organizations "
+        "like AMD, Google, NVIDIA, "
+    ),
+    (
+        "We hold these truths to be self-evident, that all men are created equal, "
+        "that they are endowed by their Creator with certain unalienable Rights, "
+        "that among these are Life, Liberty and the pursuit of Happiness.--That "
+        "to secure these rights, Governments are instituted among Men, deriving "
+        "their just powers from the consent of the governed, "
+    ),
 )
 
 
