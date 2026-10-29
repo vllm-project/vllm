@@ -4985,12 +4985,12 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         (16, 8),  # fp8 local and gathered heads would pad to 64 vs 128
     ],
 )
-def test_bf16_dcp_skips_fp8_guards(local_heads, dcp_world_size):
+def test_bf16_dcp_skips_fp8_guards(monkeypatch, local_heads, dcp_world_size):
     """The bf16 kernel returns the LSE for every token and pads the gathered
     heads itself, so the fp8-only DCP guards must not reject bf16 configs."""
     device = torch.device(DEVICE_TYPE)
     vllm_config = _build_sparse_dcp_vllm_config(
-        local_heads, dcp_world_size, cache_dtype="bfloat16"
+        monkeypatch, local_heads, dcp_world_size, cache_dtype="bfloat16"
     )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     builder_cls = FlashMLASparseBackend.get_builder_cls()
@@ -5055,6 +5055,7 @@ def test_bf16_dcp_filters_topk_and_neutralizes_empty_rows(monkeypatch):
         num_heads,
     )
 
+    assert lse is not None
     dcp_filter.assert_called_once()
     assert dcp_filter.call_args.kwargs["dcp_size"] == 2
     assert dcp_filter.call_args.kwargs["dcp_rank"] == 1
