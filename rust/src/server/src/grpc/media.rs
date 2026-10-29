@@ -10,7 +10,7 @@ use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
-use vllm_chat::multimodal::MultimodalInput;
+use vllm_chat::multimodal::{MediaPart, MultimodalInput};
 use vllm_engine_core_client::protocol::multimodal::{
     MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
 };
@@ -117,7 +117,7 @@ fn mixed_media_error() -> Status {
     Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
 }
 
-fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPart>, Status> {
+fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
         let modality = item.modality();
@@ -189,7 +189,7 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
             (_, pb::media_item::Source::Features(_)) => return Err(mixed_media_error()),
             (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
         };
-        parts.push(part);
+        parts.push(MediaPart::Content(part));
     }
     Ok(parts)
 }

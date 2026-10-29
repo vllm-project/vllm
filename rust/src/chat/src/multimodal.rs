@@ -49,7 +49,7 @@ mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
-pub use self::input::MultimodalInput;
+pub use self::input::{MediaPart, MultimodalInput};
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
 
@@ -653,7 +653,7 @@ pub(crate) async fn finalize_rendered_prompt(
     };
     let prepared = info
         .prepare_multimodal(
-            media_parts,
+            media_parts.into_iter().map(MediaPart::Content).collect(),
             &mut prompt_token_ids,
             model_dtype,
             max_model_len,
@@ -788,8 +788,10 @@ impl MultimodalModelInfo {
     /// per-modality item count, before any fetch/decode work is spent on them.
     ///
     /// Modalities without a configured count are unlimited.
-    fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
-        self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
+    fn validate_mm_limits(&self, media_parts: &[MediaPart]) -> Result<()> {
+        self.validate_modality_limits(media_parts.iter().filter_map(|part| match part {
+            MediaPart::Content(part) => media_part_limit_modality(part),
+        }))
     }
 
     fn validate_modality_limits(
@@ -856,7 +858,7 @@ impl MultimodalModelInfo {
     /// text generation resolves the request's max tokens.
     pub(crate) async fn prepare_multimodal(
         &self,
-        media_parts: Vec<MediaContentPart>,
+        media_parts: Vec<MediaPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
@@ -878,7 +880,7 @@ impl MultimodalModelInfo {
     )]
     async fn prepare_multimodal_timed(
         &self,
-        media_parts: Vec<MediaContentPart>,
+        media_parts: Vec<MediaPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
@@ -973,7 +975,7 @@ impl MultimodalModelInfo {
         skip_all,
         fields(stage = "media_fetch")
     )]
-    async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
+    async fn fetch_media(&self, media_parts: Vec<MediaPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         if let Some((sampling, default_fps)) = self.video_sampling_policy() {
             tracker = tracker
@@ -981,7 +983,11 @@ impl MultimodalModelInfo {
                 .with_default_video_sample_fps(default_fps);
         }
         for part in media_parts {
-            tracker.push_part(part)?;
+            match part {
+                MediaPart::Content(part) => {
+                    tracker.push_part(part)?;
+                }
+            }
         }
 
         let mut tracker_output = tracker.finalize().await?;
@@ -1346,7 +1352,7 @@ mod tests {
         tokens.push(1018);
 
         let features = info
-            .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, None)
+            .prepare_multimodal(vec![media.into()], &mut tokens, ModelDtype::Float32, None)
             .await
             .unwrap();
         assert_eq!(features.len(), 1);
@@ -1395,7 +1401,12 @@ mod tests {
             let mut tokens = vec![11; 100];
             tokens.push(1018);
             let features = info
-                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, max_model_len)
+                .prepare_multimodal(
+                    vec![media.into()],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    max_model_len,
+                )
                 .await
                 .unwrap();
             let feature = &features[0];
@@ -1807,13 +1818,14 @@ mod tests {
         .assert_debug_eq(&uuids);
     }
 
-    fn image_url_part() -> MediaContentPart {
+    fn image_url_part() -> MediaPart {
         MediaContentPart::ImageUrl {
             url: "https://example.com/image.png".to_string(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
         }
+        .into()
     }
 
     fn qwen3_vl_info_with_limits(limit_mm_per_prompt: MmLimitPerPrompt) -> MultimodalModelInfo {
@@ -1828,13 +1840,15 @@ mod tests {
     #[test]
     fn validate_mm_limits_ignores_text_parts() {
         let info = qwen3_vl_info();
-        let parts = vec![
+        let parts: Vec<MediaPart> = vec![
             MediaContentPart::Text {
                 text: "hello".to_string(),
-            },
+            }
+            .into(),
             MediaContentPart::Text {
                 text: "world".to_string(),
-            },
+            }
+            .into(),
         ];
         assert!(info.validate_mm_limits(&parts).is_ok());
     }
@@ -1870,7 +1884,8 @@ mod tests {
         let image_embeds_part = MediaContentPart::ImageEmbeds {
             payload: serde_json::Value::String("AAAA".to_string()),
             uuid: None,
-        };
+        }
+        .into();
 
         let error = info.validate_mm_limits(&[image_url_part(), image_embeds_part]).unwrap_err();
         assert_eq!(
