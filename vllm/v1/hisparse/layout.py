@@ -138,7 +138,7 @@ def _lay_out_hisparse_groups(
         max(
             spec.topk_buffer_width
             if spec.topk_buffer_width is not None
-            else vllm_config.model_config.hf_config.index_topk
+            else vllm_config.model_config.hf_text_config.index_topk
             for spec in source_specs.values()
         ),
         gpu_block_size,

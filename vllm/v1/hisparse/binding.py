@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
+from collections import defaultdict
 from collections.abc import Mapping
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -126,8 +128,10 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
+    backend = get_hisparse_backend()
+    backend.validate_kv_cache_config(kv_cache_config)
     host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
@@ -137,6 +141,7 @@ def init_hisparse_kv_cache(
             kernel_block_sizes,
             host_pool,
         )
+        backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
@@ -150,10 +155,7 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
-        elif host_pool.registered is not None:
-            release_pinned_state([], [host_pool.registered])
+        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -165,6 +167,20 @@ def _get_hisparse_cache(
     hisparse_cache = attention_layer.hisparse_cache
     assert hisparse_cache is not None
     return hisparse_cache
+
+
+def get_kv_sharing_readers(
+    forward_context: dict[str, Any],
+) -> defaultdict[str, list[HiSparseCacheHandle]]:
+    """Cross-layer KV-sharing layers by target: they own no cache, so HiSparse
+    binds them to their target's resident, hot and host buffers."""
+    readers: defaultdict[str, list[HiSparseCacheHandle]] = defaultdict(list)
+    for layer in forward_context.values():
+        target = getattr(layer, "kv_sharing_target_layer_name", None)
+        cache = getattr(layer, "hisparse_cache", None)
+        if target is not None and cache is not None:
+            readers[target].append(cache)
+    return readers
 
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
@@ -188,6 +204,7 @@ def bind_hisparse_kv_caches(
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
+    kv_sharing_readers = get_kv_sharing_readers(forward_context)
     tensor_configs = {
         name: (
             tensor_config,
@@ -210,7 +227,7 @@ def bind_hisparse_kv_caches(
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
         residency = torch.zeros(
-            (max_num_reqs, len(resident_groups), max_num_pages),
+            (len(resident_groups), max_num_reqs, max_num_pages),
             dtype=torch.int32,
             device=block_tables.input_block_tables[resident_groups[0][0]].device,
         )
@@ -222,19 +239,20 @@ def bind_hisparse_kv_caches(
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
-            cache_handle.bind_cache(
-                kv_caches[cache_name],
-                byte_offset=byte_offset,
-                block_stride=tensor_config.block_stride,
-                num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
-                block_table=residency[:, resident_source_index],
-                slot_mapping=block_tables.slot_mappings[group_id],
-            )
-            cache_handle.residency = residency
+            for handle in (cache_handle, *kv_sharing_readers[layer_name]):
+                handle.bind_cache(
+                    kv_caches[cache_name],
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=group.kv_cache_spec.block_size,
+                    block_table=residency[resident_source_index],
+                    slot_mapping=block_tables.slot_mappings[group_id],
+                )
+                handle.residency = residency
+                handle.runtime.resident_source_index = resident_source_index
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
-            cache_handle.runtime.resident_source_index = resident_source_index
 
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []
@@ -254,14 +272,17 @@ def bind_hisparse_kv_caches(
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
-            cache_handle.runtime.bind_hot_cache(
-                raw_tensor,
-                byte_offset=byte_offset,
-                block_stride=tensor_config.block_stride,
-                num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
-                block_table=block_tables.input_block_tables[group_id],
-            )
+            readers = kv_sharing_readers[layer_name]
+            for handle in (cache_handle, *readers):
+                handle.runtime.bind_hot_cache(
+                    raw_tensor,
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=group.kv_cache_spec.block_size,
+                    block_table=block_tables.input_block_tables[group_id],
+                    owner=None if handle is cache_handle else cache_handle.runtime,
+                )
             resident = cache_handle.view
             hot = cache_handle.runtime.hot
             assert resident is not None
@@ -276,13 +297,14 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
-            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.shared_host_region = host_pool.shared_region
-            cache_handle.runtime.bind_source_cache(
-                source_cache,
-                registered_host_pool=host_pool.registered,
-            )
-            cache_handles.append(cache_handle)
+            for handle in (cache_handle, *readers):
+                handle.draft_layer = forward_context[layer_name].is_draft_layer
+                handle.runtime.host_pool = host_pool
+                handle.runtime.bind_source_cache(
+                    source_cache,
+                    registered_host_pool=host_pool.registered,
+                )
+            cache_handles.extend((cache_handle, *readers))
             # The hot slab is raw storage owned by the runtime, not a layer
             # cache: nothing downstream binds or registers it.
             del kv_caches[cache_name]

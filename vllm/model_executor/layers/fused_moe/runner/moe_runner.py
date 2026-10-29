@@ -29,6 +29,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPMonolithic,
+    _quantize_input,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -602,6 +606,7 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
+        hidden_states_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -612,6 +617,9 @@ class MoERunner(MoERunnerInterface):
         `shared_experts_overlapping` should be True only if using multi-stream
         overlap. Then the shared expert was already launched in a separate
         stream, so the results only have to be awaited here.
+
+        `hidden_states_scale` is set when `hidden_states` were quantized before
+        the PCP all-gather.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
@@ -624,8 +632,10 @@ class MoERunner(MoERunnerInterface):
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                x_scale=hidden_states_scale,
             )
         else:
+            assert hidden_states_scale is None
             # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
@@ -803,11 +813,35 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
         ) and not self._quant_method.supports_internal_mk
 
+    def _quantizes_before_pcp_gather(self) -> bool:
+        """Whether the routed experts take input quantized row by row by a plain
+        monolithic prepare: dynamic per-token-group fp8, or NVFP4 with a static
+        global scale and unswizzled block scales."""
+        kernel = self._quant_method.moe_kernel
+        qc = self._quant_method.moe_quant_config
+        if (
+            not self._quant_method.accepts_quantized_input
+            or kernel is None
+            or not isinstance(
+                kernel.prepare_finalize, MoEPrepareAndFinalizeNoDPEPMonolithic
+            )
+            or kernel.fused_experts.expects_unquantized_inputs
+            or qc is None
+        ):
+            return False
+        if qc.use_nvfp4_w4a4:
+            return qc.a1_gscale is not None and not qc.is_scale_swizzled
+        return (
+            qc.quant_dtype == current_platform.fp8_dtype()
+            and qc.block_shape is not None
+            and qc.a1_scale is None
+        )
+
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
         # NOTE: this will be removed once all kernels are migrated into the
@@ -821,14 +855,23 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
+        hidden_states_scale = None
         if (
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
         ):
-            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
-            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
+            pcp_group = get_pcp_group()
+            if self._quantizes_before_pcp_gather():
+                qc = self._quant_method.moe_quant_config
+                assert qc is not None
+                # The same quantization the prepare step would apply.
+                hidden_states, hidden_states_scale = _quantize_input(hidden_states, qc)
+            hidden_states = pcp_group.all_gather(hidden_states, dim=0)
+            if hidden_states_scale is not None:
+                hidden_states_scale = pcp_group.all_gather(hidden_states_scale, dim=0)
+            router_logits = pcp_group.all_gather(router_logits, dim=0)
 
-        return hidden_states, router_logits
+        return hidden_states, router_logits, hidden_states_scale
 
     def _maybe_combine(
         self,
@@ -917,7 +960,7 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            hidden_states, router_logits = self._maybe_dispatch(
+            hidden_states, router_logits, hidden_states_scale = self._maybe_dispatch(
                 hidden_states,
                 router_logits,
             )
@@ -928,6 +971,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
+                hidden_states_scale=hidden_states_scale,
             )
 
             return self._maybe_combine(

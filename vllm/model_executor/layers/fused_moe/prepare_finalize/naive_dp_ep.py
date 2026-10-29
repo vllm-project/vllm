@@ -322,8 +322,10 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
+        assert a1_scale is None, "naive DP/EP dispatch quantizes its own input"
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )

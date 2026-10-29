@@ -588,6 +588,83 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         assert set(actual[row].cpu().tolist()) == set(expected[row].cpu().tolist())
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("epoch", [1, 2])
+# 14 id bits fit the spare score bits; 20 leave 4 for the token-id passes.
+@pytest.mark.parametrize("score_bits,id_bits", [(32, 32), (16, 14), (16, 20)])
+def test_cutedsl_pingpong_select_matches_gathered_select(
+    epoch: int, score_bits: int, id_bits: int
+):
+    """The direct-exchange selector (32-bit score keys, token-id pass only for
+    boundary ties, no radix when the valid candidates fit) selects the same set
+    as the all-gather selector, reading the inbox slot of the published epoch.
+    Upcast BF16 scores rank on their high 16 bits and the ids on the bits they
+    need, in both selectors."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_pingpong_cutedsl import (  # noqa: E501
+        stable_topk_from_pingpong_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    world, topk, max_rows = 8, 2048, 8
+    num_candidates = world * topk
+    gathered = torch.empty((max_rows, num_candidates, 2), device=device)
+    gathered[..., 0] = torch.randn((max_rows, num_candidates), device=device)
+    gathered[..., 1] = torch.randperm(num_candidates, device=device).float()
+    # Row 1: coarse scores, so ties straddle the top-k boundary.
+    gathered[1, :, 0] = torch.randint(0, 64, (num_candidates,), device=device).float()
+    # Row 2: fewer valid candidates than topk.
+    gathered[2, 1000:, 1] = -1
+    # Row 3: no valid candidate.
+    gathered[3, :, 1] = -1
+    # Row 4: negative scores and padding mixed in.
+    gathered[4, :, 0] = -gathered[4, :, 0].abs()
+    gathered[4, ::3, 1] = -1
+    if score_bits == 16:
+        gathered[..., 0] = gathered[..., 0].bfloat16().float()
+
+    inboxes = torch.full((2, max_rows, num_candidates, 2), float("nan"), device=device)
+    inboxes[(epoch - 1) & 1] = gathered
+    write_seq = torch.tensor([epoch], device=device, dtype=torch.int64)
+
+    rows = 6
+    expected = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered[:rows].contiguous(), topk, out=expected
+    )
+    compact = torch.empty_like(expected)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered[:rows].contiguous(),
+        topk,
+        out=compact,
+        score_bits=score_bits,
+        id_bits=id_bits,
+    )
+    for row in range(rows):
+        assert sorted(compact[row].tolist()) == sorted(expected[row].tolist())
+    for use_pdl in (False, True):
+        actual = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        stable_topk_from_pingpong_candidates_cutedsl(
+            inboxes,
+            write_seq,
+            topk,
+            out=actual,
+            use_pdl=use_pdl,
+            score_bits=score_bits,
+            id_bits=id_bits,
+        )
+        for row in range(rows):
+            got = actual[row].cpu().tolist()
+            want = expected[row].cpu().tolist()
+            assert sorted(got) == sorted(want), f"row {row}"
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     device = torch.device("cuda")

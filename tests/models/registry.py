@@ -1567,6 +1567,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="meta-models/Muse-Spark-1.2-816B-A42B-open",
         is_available_online=False,
     ),
+    "MistralLarge4DSparkModel": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B",
+        speculative_model="mistralai/Mistral-Large-4-1T-A52B",  # mtp_dspark.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",

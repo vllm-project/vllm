@@ -163,10 +163,12 @@ class PCPManager:
         if speculative_config is not None:
             if speculative_config.use_dspark():
                 dcp_size = parallel_config.decode_context_parallel_size
-                if (
-                    dcp_size not in (1, pcp_size)
-                    and speculative_config.draft_model_config.use_mla
-                ):
+                from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
+                    DSparkSpeculator,
+                )
+
+                draft_uses_dcp = DSparkSpeculator.drafter_supports_dcp(vllm_config)
+                if dcp_size not in (1, pcp_size) and draft_uses_dcp:
                     raise NotImplementedError(
                         "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
                         f"DCP={dcp_size}, PCP={pcp_size}."

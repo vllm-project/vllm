@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 
 def _copy_to_cpu(value, device=None, dtype=None, out=None):
@@ -79,18 +80,20 @@ def test_validate_config_rejects_full_graph_for_prefills():
         )
 
 
-@pytest.mark.parametrize("draft_uses_mla", [False, True])
+@pytest.mark.parametrize("drafter_supports_dcp", [False, True])
 @pytest.mark.parametrize("dcp_size", [1, 2, 4])
-def test_validate_config_dcp_for_dspark(draft_uses_mla, dcp_size):
+def test_validate_config_dcp_for_dspark(monkeypatch, drafter_supports_dcp, dcp_size):
+    monkeypatch.setattr(
+        DSparkSpeculator,
+        "drafter_supports_dcp",
+        classmethod(lambda cls, vllm_config: drafter_supports_dcp),
+    )
     config = _make_config(CUDAGraphMode.NONE)
     config.parallel_config.prefill_context_parallel_size = 4
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.model_config.hf_text_config.index_topk = 1
-    config.speculative_config = SimpleNamespace(
-        use_dspark=lambda: True,
-        draft_model_config=SimpleNamespace(use_mla=draft_uses_mla),
-    )
-    if draft_uses_mla and dcp_size == 2:
+    config.speculative_config = SimpleNamespace(use_dspark=lambda: True)
+    if drafter_supports_dcp and dcp_size == 2:
         with pytest.raises(NotImplementedError, match="requires DCP=1 or DCP=PCP"):
             PCPManager.validate_config(config, supports_mm_inputs=False)
         return

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+"""A kernel's mailbox regions laid out in its scratch or peer buffer."""
+
+PAIR_BYTES = 8  # a (value, tag) pair
+# a debug build's wait record, one a CTA: flag, region id, pair index, tag,
+# seen tag, CTA, clock, pad (``vllm.models.mistral_large4.amd.specialized_decode.mono.common.device.sync._spin_bounded``)
+DIAG_WORDS = 8
+
+
+def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
+    """``items`` (name, pairs) laid out in order: name -> (byte offset, bytes),
+    each region from an ``align``-byte boundary at or past ``start``."""
+    out, off = {}, start
+    for name, pairs in items:
+        off = (off + align - 1) // align * align
+        out[name] = (off, pairs * PAIR_BYTES)
+        off += pairs * PAIR_BYTES
+    return out

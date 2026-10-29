@@ -59,6 +59,9 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# FlyDSL kernel source adapted from ROCm/ATOM: traced DSL code (closures in
+# unrolled loops, long tiled-address expressions)
+"vllm/models/mistral_large4/amd/specialized_decode/mono/**" = ["B023", "E501", "SIM102"]
 # test args are mostly pytest fixtures, which don't benefit from descriptions
 "tests/**" = ["D417"]
 

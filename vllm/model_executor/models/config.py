@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -84,6 +85,47 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         if cache_config.cache_dtype == "bfloat16":
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+
+class MistralLarge4ForCausalLM(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # KV-sharing layers have no latent KV of their own for the new tokens,
+        # so they cannot use the dense MHA prefill path; run all tokens through
+        # sparse MQA.
+        vllm_config.attention_config.sparse_mla_force_mqa = True
+
+        # The direct A2A combine beats all-gather + reduce-scatter; PCP+DCP
+        # only supports the latter.
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size == 1:
+            parallel_config.set_dcp_defaults(comm_backend="a2a")
+
+        # The checkpoint declares the latent KV cache precision; an explicit
+        # `--kv-cache-dtype bfloat16` opts out of FP8.
+        cache_config = vllm_config.cache_config
+        text_config = vllm_config.model_config.hf_text_config
+        if cache_config.cache_dtype == "auto" and getattr(
+            text_config, "fp8_kv_cache", False
+        ):
+            if current_platform.is_rocm():
+                # ROCm sparse MLA has no fp8_ds_mla layout; honor the flag
+                # with the plain e4m3 latent cache of the AITER sparse kernel.
+                cache_config.cache_dtype = "fp8"
+                logger.info("Using fp8 kv-cache for Mistral Large 4 on ROCm")
+            else:
+                cache_config.cache_dtype = "fp8_ds_mla"
+                logger.info("Using fp8_ds_mla kv-cache for Mistral Large 4")
+        elif cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+
+
+class PixtralForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        text_config = vllm_config.model_config.hf_text_config
+        if getattr(text_config, "model_type", None) == "mistral_large_4":
+            MistralLarge4ForCausalLM.verify_and_update_config(vllm_config)
 
 
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
@@ -1248,10 +1290,12 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
+    "MistralLarge4ForCausalLM": MistralLarge4ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "NomicBertModel": NomicBertModelConfig,
+    "PixtralForConditionalGeneration": PixtralForConditionalGenerationConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,

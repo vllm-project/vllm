@@ -32,13 +32,21 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+    get_dspark_draft_vllm_config,
+    load_dspark_model,
+)
 
 logger = init_logger(__name__)
 
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+    _model_tag = "dspark_head"
+
+    @staticmethod
+    def get_draft_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
+        return get_dspark_draft_vllm_config(vllm_config)
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -153,6 +161,21 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
         )
 
+    def _markov_step(
+        self,
+        prev: torch.Tensor,
+        draft_hidden: torch.Tensor,
+        state: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Markov embedding of the previous token at one draft position.
+
+        Recurrent heads also read the backbone hidden state and carry a state
+        across the positions of one proposal, starting from None (zeros).
+        """
+        if getattr(self.model, "has_recurrent_markov_head", False):
+            return self.model.markov_step(prev, draft_hidden, state)
+        return self.model.markov_embed(prev), None
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
@@ -183,10 +206,12 @@ class DSparkSpeculator(DFlashSpeculator):
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        hidden_by_step = sample_hidden.view(num_reqs, n_spec, -1)
+        state: torch.Tensor | None = None
 
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
-            markov_embed = self.model.markov_embed(prev)
+            markov_embed, state = self._markov_step(prev, hidden_by_step[:, i], state)
             if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
@@ -231,9 +256,11 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        hidden_by_step = sample_hidden.view(num_reqs, n_spec, -1)
+        state: torch.Tensor | None = None
 
         for i in range(n_spec):
-            markov_embed = self.model.markov_embed(prev)
+            markov_embed, state = self._markov_step(prev, hidden_by_step[:, i], state)
             if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(

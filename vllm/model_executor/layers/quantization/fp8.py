@@ -202,6 +202,16 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
+            if (
+                envs.VLLM_FP8_MOE_REQUANT == "mxfp4"
+                and self.weight_block_size is not None
+                and current_platform.is_rocm()
+            ):
+                from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
+                    Fp8BlockExpertsAsMxfp4FusedMoE,
+                )
+
+                return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -476,6 +486,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -802,6 +813,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -819,6 +831,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(

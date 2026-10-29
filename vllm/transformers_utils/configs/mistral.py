@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+import math
 from typing import Any
 
 from transformers import PreTrainedConfig, WhisperConfig
@@ -27,8 +29,15 @@ def adapt_config_dict(
     is_mistral_large_3 = (
         is_moe and (config_dict["moe"].get("num_shared_experts") or 0) > 0
     )
+    is_dsa = bool(config_dict.get("dsa"))
     if config_dict.get("model_type") == "mamba":
         config_dict["architectures"] = ["Mamba2ForCausalLM"]
+    elif is_dsa:
+        assert is_mla and is_mistral_large_3, "Mistral DSA requires MLA + MoE."
+        config_dict = _remap_moe_args(config_dict)
+        config_dict = _remap_mistral_large_4_args(config_dict)
+        config_dict["model_type"] = "mistral_large_4"
+        config_dict["architectures"] = ["MistralLarge4ForCausalLM"]
     elif is_moe and is_mistral_large_3:
         config_dict = _remap_moe_args(config_dict)
         config_dict["model_type"] = "deepseek_v3"
@@ -201,14 +210,24 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
         quantization = config.pop("quantization", {})
         if quantization.get("qformat_weight") == "fp8_e4m3":
             qscheme_act = quantization.get("qscheme_act")
-            assert qscheme_act in ("NO_SCALES", "TENSOR", None), (
-                "Only NO_SCALES and TENSOR (default) are supported for qscheme_act"
+            qscheme_weight = quantization.get("qscheme_weight")
+            assert qscheme_act in ("NO_SCALES", "TENSOR", "BLOCK", None), (
+                "Only NO_SCALES, TENSOR (default) and BLOCK are supported for "
+                "qscheme_act"
             )
-            is_dynamic = qscheme_act == "NO_SCALES"
+            assert (qscheme_act == "BLOCK") == (qscheme_weight == "BLOCK"), (
+                "BLOCK quantization must be used for both weights and activations"
+            )
+            is_dynamic = qscheme_act in ("NO_SCALES", "BLOCK")
             config["quantization_config"] = {
                 "quant_method": "fp8",
                 "activation_scheme": "dynamic" if is_dynamic else "static",
             }
+            if qscheme_weight == "BLOCK":
+                config["quantization_config"]["weight_block_size"] = [
+                    quantization["block_size_out"],
+                    quantization["block_size_in"],
+                ]
         elif (
             str(quantization.get("quant_method", "")).lower().replace("_", "-")
             == "compressed-tensors"
@@ -323,4 +342,204 @@ def _remap_mistral_mla_args(config: dict) -> dict:
             "num_expert_groups_per_tok": 1,
         }
         config["moe"] = moe
+    return config
+
+
+def _expand_layer_pattern(pattern: list[Any], num_layers: int) -> list[Any]:
+    assert pattern, "Per-layer patterns must not be empty."
+    return (pattern * math.ceil(num_layers / len(pattern)))[:num_layers]
+
+
+# Unprefixed `dsa` keys (written by the Mistral checkpoint converter) -> the
+# prefixed spelling of earlier checkpoints.
+_DSA_KEY_ALIASES = {
+    "topk": "index_topk",
+    "n_heads": "index_n_heads",
+    "head_dim": "index_head_dim",
+    "rope_head_dim": "index_rope_head_dim",
+    "nope": "index_nope",
+    "match_nope": "indexer_match_nope",
+    "ssmax_scaling": "indexer_ssmax_scaling",
+    "norm_eps": "indexer_norm_eps",
+    "sharing": "index_sharing",
+}
+
+
+def _normalize_dsa_keys(dsa: dict) -> dict:
+    """Accept both the unprefixed and the prefixed `dsa` keys."""
+    dsa = dict(dsa)
+    for key, prefixed in _DSA_KEY_ALIASES.items():
+        if key not in dsa:
+            continue
+        value = dsa.pop(key)
+        assert dsa.get(prefixed, value) == value, (
+            f"Conflicting dsa keys: {key}={value!r}, {prefixed}={dsa[prefixed]!r}"
+        )
+        dsa[prefixed] = value
+    return dsa
+
+
+def _remap_mistral_large_4_args(config: dict) -> dict:
+    """Expand Mistral per-layer patterns into explicit per-layer lists.
+
+    Scalar features (``ssmax_scaling``, ``lerope``, ``softmax_tanh_gating``)
+    are passed through unchanged.
+    """
+    num_layers = config["num_hidden_layers"]
+
+    nope = config.pop("nope", None)
+    config["nope_layer_flags"] = (
+        _expand_layer_pattern([v == "nope" for v in nope.split(",")], num_layers)
+        if nope
+        else [False] * num_layers
+    )
+
+    kv_sharing = config.pop("kv_sharing", None) or {}
+    assert set(kv_sharing) <= {"source_layers_str"}, (
+        f"Unsupported kv_sharing config: {kv_sharing}"
+    )
+    if source_layers_str := kv_sharing.get("source_layers_str"):
+        sources = [int(v) for v in source_layers_str.split(",")]
+    else:
+        sources = list(range(num_layers))
+    assert len(sources) == num_layers
+    for layer, source in enumerate(sources):
+        assert source <= layer and sources[source] == source, (
+            f"Layer {layer} must share KV with an earlier, non-sharing layer"
+        )
+        assert config["nope_layer_flags"][layer] == config["nope_layer_flags"][source]
+    config["kv_source_layers"] = sources
+
+    dsa = _normalize_dsa_keys(config.pop("dsa"))
+    for key in (
+        "index_topk",
+        "index_n_heads",
+        "index_head_dim",
+        "indexer_norm_eps",
+        "indexer_ssmax_scaling",
+    ):
+        config[key] = dsa.pop(key)
+    assert dsa.pop("index_rope_head_dim", None) in (
+        None,
+        -1,
+        config["qk_rope_head_dim"],
+    )
+    assert not dsa.pop("index_nope", False), "index_nope is not supported"
+    config["indexer_nope_layer_flags"] = (
+        list(config["nope_layer_flags"])
+        if dsa.pop("indexer_match_nope", False)
+        else [False] * num_layers
+    )
+    assert dsa.pop("fp8_indexer", True), "Only the FP8 indexer cache is supported"
+    # Default latent KV cache dtype; --kv-cache-dtype overrides it.
+    config["fp8_kv_cache"] = dsa.pop("fp8_kv_cache", False)
+    index_sharing = dsa.pop("index_sharing", None)
+    config["index_sharing"] = (
+        _expand_layer_pattern(index_sharing.split(","), num_layers)
+        if index_sharing
+        else ["full"] * num_layers
+    )
+    assert set(config["index_sharing"]) <= {"full", "shared"}
+    assert config["index_sharing"][0] == "full"
+    assert not dsa, f"Unparsed dsa config: {dsa}"
+    if (mtp := config.pop("mtp", None)) is not None:
+        config["mtp_config"] = mtp
+    return config
+
+
+def _parse_dspark_target_layers(serialized: str | None) -> list[int]:
+    layers = [int(v) for v in (serialized or "").split(",") if v.strip()]
+    assert layers, "DSpark requires mtp.target_activation_layers"
+    assert all(layer >= 0 for layer in layers), (
+        "DSpark target_activation_layers must be non-negative (-1, the final "
+        f"post-norm hidden state, is not supported), got {layers}"
+    )
+    assert layers == sorted(set(layers)), (
+        f"DSpark target_activation_layers must be unique and ascending, got {layers}"
+    )
+    return layers
+
+
+def _parse_dspark_window(serialized: str | None) -> int | None:
+    """``mtp.ragged_attention``: one sliding window for all draft layers."""
+    if not serialized:
+        return None
+    windows = {int(v) for v in serialized.split(",")}
+    if len(windows) != 1:
+        raise NotImplementedError(
+            f"DSpark draft layers must share one sliding window, got {serialized}"
+        )
+    window = windows.pop()
+    assert window > 0, f"DSpark attention window must be positive, got {window}"
+    return window
+
+
+def get_mistral_large_4_dspark_config(
+    text_config: PreTrainedConfig,
+) -> PreTrainedConfig:
+    """Build the DSpark draft config from a Mistral Large 4 ``mtp`` block.
+
+    Mistral DSpark checkpoints describe the drafter in ``params.json``::
+
+        "mtp": {"n_layers": L, "depth": D, "target_activation_layers": "i,j,...",
+                "ragged_attention": "W,..." | null,
+                "dspark": {"markov_rank": r, "head_type": "vanilla" | "rnn",
+                           "draft_input": "shared_mask" | "position_specific"}}
+
+    and ship its BF16 weights in the target checkpoint (``mtp_dspark.*``).
+    Draft layers are dense MLA blocks with the target's attention geometry,
+    FFN width and RoPE (YaRN, without the target's LeRoPE alpha).
+    """
+    mtp = getattr(text_config, "mtp_config", None) or {}
+    dspark = mtp.get("dspark")
+    if dspark is None:
+        raise ValueError(
+            "Mistral Large 4 DSpark requires a checkpoint with an `mtp.dspark` block"
+        )
+    dspark = dict(dspark)
+    head_type = str(dspark.pop("head_type", "vanilla"))
+    draft_input = str(dspark.pop("draft_input", "shared_mask"))
+    markov_rank = int(dspark.pop("markov_rank"))
+    assert not dspark, f"Unparsed mtp.dspark config: {dspark}"
+    if head_type not in ("vanilla", "rnn"):
+        raise ValueError(f"Unsupported DSpark head type: {head_type!r}")
+    if draft_input not in ("shared_mask", "position_specific"):
+        raise ValueError(f"Unsupported DSpark draft input: {draft_input!r}")
+    target_layers = _parse_dspark_target_layers(mtp.get("target_activation_layers"))
+    n_layers = int(mtp["n_layers"])
+    depth = int(mtp["depth"])
+    if draft_input == "position_specific" and depth < 2:
+        raise ValueError(f"Position-specific DSpark masks need depth > 1, got {depth}")
+    window = _parse_dspark_window(mtp.get("ragged_attention"))
+
+    config = copy.deepcopy(text_config)
+    del config.mtp_config
+    config.quantization_config = None
+    vocab_size = config.vocab_size
+    config.update(
+        {
+            "architectures": ["MistralLarge4DSparkModel"],
+            "num_hidden_layers": n_layers,
+            "layer_types": ["full_attention" if window is None else "sliding_attention"]
+            * n_layers,
+            "sliding_window": window,
+            "n_predict": depth,
+            "dspark_block_size": depth,
+            "markov_rank": markov_rank,
+            "dspark_head_type": head_type,
+            "dspark_draft_input": draft_input,
+            "draft_vocab_size": vocab_size,
+            "target_hidden_size": config.hidden_size,
+            "num_target_layers": len(target_layers),
+            "sample_from_anchor": True,
+            "ssmax_scaling": False,
+            "dflash_config": {
+                "causal": False,
+                # Out-of-vocabulary sentinel replaced by the learned mask embedding.
+                "mask_token_id": vocab_size,
+                "target_layer_ids": target_layers,
+                "use_aux_hidden_state": True,
+            },
+        }
+    )
     return config

@@ -1408,6 +1408,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
@@ -1420,12 +1421,15 @@ class RoutedExperts(PluggableLayer):
             x: Input tensor after any transforms
             router_logits: Router logits (for monolithic kernels)
             input_ids: input ids for DeepSeek V4
+            x_scale: Scales of `x` when the caller already quantized it (needs
+                `quant_method.accepts_quantized_input`)
 
         Returns:
             Finalized routed states or a deferred-finalize output.
 
         """
         assert self.quant_method.is_monolithic
+        extra = {} if x_scale is None else {"x_scale": x_scale}
 
         # Monolithic kernels handle routing internally
         return self.quant_method.apply_monolithic(
@@ -1433,6 +1437,7 @@ class RoutedExperts(PluggableLayer):
             x=x,
             router_logits=router_logits,
             input_ids=input_ids,
+            **extra,
         )
 
     def forward(

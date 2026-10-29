@@ -8,6 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Annotated, Literal
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -350,6 +351,29 @@ class PixtralForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsEagle3, SupportsMultiModal, SupportsPP
 ):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wq(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.q_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wk(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.k_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wv(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.v_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.attention\.wo(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.attention.o_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w1(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.gate_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w2(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.down_proj",
+            re.compile(
+                r"^vision_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w3(?=\.|$)"
+            ): r"vision_encoder.transformer.layers.\1.feed_forward.up_proj",
+        },
         orig_to_new_prefix={
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_encoder.",
@@ -398,6 +422,10 @@ class PixtralForConditionalGeneration(
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        # a text model with its own Model Runner V2 state (e.g. Mistral Large 4's
+        # specialized decode) keeps it under this wrapper
+        if hasattr(self.language_model, "get_model_state_cls"):
+            self.get_model_state_cls = self.language_model.get_model_state_cls
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(

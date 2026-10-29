@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -24,7 +25,11 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
+    draft_attention_supports_dcp,
+    get_dflash_draft_vllm_config,
+    load_dflash_model,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -37,20 +42,48 @@ logger = init_logger(__name__)
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+    _model_tag = "dflash_head"
+
+    @staticmethod
+    def get_draft_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
+        return get_dflash_draft_vllm_config(vllm_config)
+
+    @classmethod
+    def drafter_supports_dcp(cls, vllm_config: VllmConfig) -> bool:
+        """Whether the draft can run with the target's DCP; see
+        ``draft_attention_supports_dcp``."""
+        parallel_config = vllm_config.parallel_config
+        # The draft runs without PCP, so a DCP group spanning PCP does not fit.
+        if (
+            parallel_config.tensor_parallel_size
+            % parallel_config.decode_context_parallel_size
+        ):
+            return False
+        draft_config = copy.copy(vllm_config)
+        draft_config.parallel_config = replace(
+            vllm_config.parallel_config, prefill_context_parallel_size=1
+        )
+        return draft_attention_supports_dcp(
+            cls.get_draft_vllm_config(draft_config), cls._model_tag
+        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
+        dcp_size = parallel_config.decode_context_parallel_size
+        if dcp_size > 1 and not self.drafter_supports_dcp(vllm_config):
+            logger.info_once(
+                "The %s draft cannot shard its KV cache with the target's DCP; "
+                "running it at DCP=1 with a replicated KV cache.",
+                self._speculator_name,
+            )
+            dcp_size = 1
         vllm_config = copy.copy(vllm_config)
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if speculative_config.draft_model_config.use_mla
-                else 1
-            ),
+            decode_context_parallel_size=dcp_size,
         )
         super().__init__(vllm_config, device)
 
@@ -630,6 +663,18 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+
+        if self.pcp_manager is not None and not dummy_run:
+            # Replicated drafts must publish the same proposal and distribution.
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(self.draft_tokens[:num_reqs], src=0)
+            if self.draft_logits is not None:
+                # Logits are indexed by persistent request slots.
+                draft_logits = self.draft_logits.index_select(
+                    0, input_batch.idx_mapping
+                )
+                pcp_group.broadcast(draft_logits, src=0)
+                self.draft_logits.index_copy_(0, input_batch.idx_mapping, draft_logits)
 
         return self.draft_tokens[:num_reqs]
 

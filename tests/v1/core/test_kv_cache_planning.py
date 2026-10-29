@@ -12,7 +12,6 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
     new_kv_cache_spec,
     new_mamba_spec,
@@ -26,6 +25,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
@@ -70,7 +70,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch, gpu_block_size, shared_host_pool
 ):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -91,7 +93,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=128),
+            hf_text_config=SimpleNamespace(index_topk=128),
             max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(
@@ -190,7 +192,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
@@ -1465,6 +1469,54 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     assert all(
         not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups
     )
+
+
+@pytest.mark.parametrize("draft_dcp_sharded", [True, False])
+def test_windowed_dspark_draft_gets_own_group_and_contiguous_caches(draft_dcp_sharded):
+    """Sliding-window DSpark draft layers (non-causal marker) next to a sparse
+    MLA target: the target stays one group and every layer gets a contiguous
+    per-layer cache; the bf16 draft cannot alias the target's pages. Under a
+    DCP target the draft cache is replicated (not DCP-sharded)."""
+    target = new_mla_spec(cache_dtype_str="fp8_ds_mla", block_size=64)
+    draft = replace(
+        new_swa_mla_spec(sliding_window=36),
+        block_size=64,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+        dcp_sharded=draft_dcp_sharded,
+    )
+    specs = {
+        "target.0.attn": target,
+        "target.0.indexer.k_cache": new_indexer_mla_spec(block_size=64),
+        "target.1.attn": target,
+        "draft.2.attn": draft,
+        "draft.3.attn": draft,
+    }
+    config = _grouping_config()
+    groups = get_kv_cache_groups(config, specs)
+    assert [g.layer_names for g in groups] == [
+        ["target.0.attn", "target.0.indexer.k_cache", "target.1.attn"],
+        ["draft.2.attn", "draft.3.attn"],
+    ]
+    assert groups[0].kv_cache_spec.dcp_sharded
+    assert groups[1].kv_cache_spec.dcp_sharded is draft_dcp_sharded
+
+    config.cache_config.num_gpu_blocks_override = None
+    config.cache_config.prefix_cache_retention_interval = None
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    pages = [spec.page_size_bytes for spec in specs.values()]
+    kv_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=10 * sum(pages)
+    )
+    assert kv_config.num_blocks == 10
+    tensors = {t.layers[0]: t for t in kv_config.kv_cache_tensors}
+    assert [len(t.layers) for t in kv_config.kv_cache_tensors] == [1] * len(specs)
+    offset = 0
+    for name, spec in specs.items():
+        assert tensors[name].offset == offset
+        assert tensors[name].block_stride == spec.page_size_bytes
+        offset += spec.page_size_bytes * 10
+    assert kv_cache_planning._pool_bytes_per_block(config, groups) == sum(pages)
 
 
 def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):

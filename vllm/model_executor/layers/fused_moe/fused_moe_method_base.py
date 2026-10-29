@@ -26,6 +26,8 @@ logger = init_logger(__name__)
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
+    accepts_quantized_input: bool = False
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe: FusedMoEConfig = moe

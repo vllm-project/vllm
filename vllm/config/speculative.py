@@ -701,6 +701,15 @@ class SpeculativeConfig:
                 }
             )
             return hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
+            text_config, "mtp_config", None
+        ):
+            from vllm.transformers_utils.configs.mistral import (
+                get_mistral_large_4_dspark_config,
+            )
+
+            return get_mistral_large_4_dspark_config(text_config)
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1233,7 +1242,12 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for dspark")
                 self.model = self.target_model_config.model
-                if not self.quantization:
+                # Mistral Large 4 DSpark drafts ship in BF16.
+                if (
+                    not self.quantization
+                    and self.target_model_config.hf_text_config.model_type
+                    != "mistral_large_4"
+                ):
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
@@ -1488,6 +1502,8 @@ class SpeculativeConfig:
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and "MistralLarge4DSparkModel"
+                    not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.
@@ -1520,6 +1536,13 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+                if (
+                    "MistralLarge4DSparkModel" in self.draft_model_config.architectures
+                    and self.kv_cache_dtype is None
+                ):
+                    # The target's sparse fp8_ds_mla cache layout does not apply
+                    # to the dense MLA draft layers.
+                    self.kv_cache_dtype = "auto"
 
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None

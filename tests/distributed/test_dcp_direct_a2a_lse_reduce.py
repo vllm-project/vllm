@@ -1130,5 +1130,95 @@ def test_distributed_direct_a2a_matches_reference(
     )
 
 
+def _distributed_direct_dcp_topk_worker(env: dict[str, str]) -> None:
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        DirectDCPTopKWorkspace,
+    )
+
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        topk, max_rows, local_len = 2048, 64, 3000
+        workspace = DirectDCPTopKWorkspace(dist.group.WORLD, device, max_rows, topk)
+
+        def make_inputs(rows: int, seed: int, valid: int):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed * 101 + rank)
+            logits = torch.randn(
+                rows, local_len, device=device, generator=generator
+            ).round_(decimals=1)
+            local = logits.topk(topk, dim=1).indices.to(torch.int32)
+            local[:, valid:] = -1
+            return logits, local
+
+        def reference(logits: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+            rows = local.shape[0]
+            packed = torch.empty((rows, topk, 2), device=device)
+            pack_dcp_topk_candidates_cutedsl(
+                logits, local, packed, rank, world_size, 1, None
+            )
+            gathered = torch.empty((world_size, rows, topk, 2), device=device)
+            dist.all_gather_into_tensor(gathered, packed)
+            gathered = gathered.movedim(0, 1).reshape(rows, world_size * topk, 2)
+            out = torch.empty((rows, topk), device=device, dtype=torch.int32)
+            stable_topk_from_gathered_candidates_cutedsl(
+                gathered.contiguous(), topk, out=out
+            )
+            return out
+
+        def check(actual: torch.Tensor, expected: torch.Tensor) -> None:
+            for row in range(actual.shape[0]):
+                assert sorted(actual[row].tolist()) == sorted(expected[row].tolist())
+            peers = [torch.empty_like(actual) for _ in range(world_size)]
+            dist.all_gather(peers, actual)
+            for peer in peers:
+                assert torch.equal(peer.sort(dim=1).values, actual.sort(dim=1).values)
+
+        # An odd number of exchanges covers both ping-pong inboxes; the
+        # rounded scores create top-k boundary ties; valid=200 fits in topk.
+        for it, (rows, valid) in enumerate(
+            ((1, topk), (64, topk), (17, topk), (3, 200), (64, 1000))
+        ):
+            logits, local = make_inputs(rows, it, valid)
+            expected = reference(logits, local)
+            actual = local.clone()
+            workspace.merge(logits, actual, 1, None)
+            check(actual, expected)
+
+        rows = 17
+        static_logits, static_local = make_inputs(rows, 100, topk)
+        static_topk = static_local.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            workspace.merge(static_logits, static_topk, 1, None)
+        for it in range(3):
+            logits, local = make_inputs(rows, 200 + it, topk)
+            expected = reference(logits, local)
+            static_logits.copy_(logits)
+            static_topk.copy_(local)
+            graph.replay()
+            check(static_topk, expected)
+        torch.accelerator.synchronize()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4 or not torch.cuda.is_available(),
+    reason="Need 4 GPUs.",
+)
+def test_distributed_direct_dcp_topk_matches_all_gather():
+    _distributed_run(_distributed_direct_dcp_topk_worker, world_size=4, extra_env={})
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -69,20 +69,13 @@ def _get_dspark_parallel_config(
     )
 
 
-def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
+def get_dspark_draft_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
 
-    from vllm.compilation.backends import set_model_tag
-    from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
     from vllm.model_executor.models.utils import get_draft_quant_config
-    from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
-        _should_share,
-        get_target_lm_head,
-        maybe_share_target_embed,
-    )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
         draft_model_config,
@@ -115,6 +108,23 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
     draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
+    return draft_vllm_config
+
+
+def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
+
+    from vllm.compilation.backends import set_model_tag
+    from vllm.model_executor.model_loader import get_model
+    from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+        _should_share,
+        get_target_lm_head,
+        maybe_share_target_embed,
+    )
+
+    draft_vllm_config = get_dspark_draft_vllm_config(vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
 
@@ -60,6 +62,11 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        DirectDCPTopKWorkspace,
+    )
+
 logger = init_logger(__name__)
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
@@ -92,6 +99,23 @@ def _assert_cutedsl_dcp_merge_supported(
         )
 
 
+def _get_direct_dcp_topk_workspace(
+    device: torch.device, max_rows: int, topk_tokens: int
+) -> "DirectDCPTopKWorkspace | None":
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        get_direct_dcp_topk_workspace,
+    )
+
+    # Follows the direct A2A combine it is paired with.
+    return get_direct_dcp_topk_workspace(
+        get_dcp_group(),
+        device,
+        max_rows,
+        topk_tokens,
+        envs.VLLM_USE_DIRECT_DCP_A2A,
+    )
+
+
 def _merge_dcp_topk_global(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -100,6 +124,9 @@ def _merge_dcp_topk_global(
     dcp_world_size: int,
     cp_interleave: int,
     row_starts: torch.Tensor | None = None,
+    direct_max_rows: int = 0,
+    score_bits: int = 32,
+    max_model_len: int | None = None,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -112,18 +139,37 @@ def _merge_dcp_topk_global(
     score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
     padding); the attention backend localizes them back to physical slots per
     rank.
+
+    Batches of at most ``direct_max_rows`` rows exchange the candidates over
+    symmetric memory instead of an NCCL all-gather (the workspace was created
+    by ``SparseAttnIndexer``).
+    The selector ranks the high ``score_bits`` of the scores (16 when the
+    logits are upcast BF16) and only the token-id bits that positions below
+    ``max_model_len`` use.
     """
     if dcp_world_size <= 1:
         return
 
-    # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
-    # (score, global_id) candidates on-device, all-gather, then the CuteDSL
+    # CuteDSL-only path (no PyTorch fallback): pack each rank's
+    # (score, global_id) candidates on-device, exchange them, then the CuteDSL
     # stable-topk selector.
     _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
         pack_dcp_topk_candidates_cutedsl,
         stable_topk_from_gathered_candidates_cutedsl,
     )
+
+    id_bits = 32 if max_model_len is None else dcp_topk_id_bits(max_model_len)
+    if 0 < topk_indices.shape[0] <= direct_max_rows:
+        workspace = _get_direct_dcp_topk_workspace(
+            topk_indices.device, direct_max_rows, topk_tokens
+        )
+        assert workspace is not None
+        workspace.merge(
+            logits, topk_indices, cp_interleave, row_starts, score_bits, id_bits
+        )
+        return
 
     packed = torch.empty(
         (*topk_indices.shape, 2),
@@ -141,7 +187,11 @@ def _merge_dcp_topk_global(
     )
     gathered = get_dcp_group().all_gather(packed, dim=1)
     stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
+        gathered,
+        topk_tokens,
+        out=topk_indices,
+        score_bits=score_bits,
+        id_bits=id_bits,
     )
 
 
@@ -253,7 +303,7 @@ def fused_indexer_q_rope_quant(
     head_scale: float,
     is_neox: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert current_platform.is_cuda()
+    assert current_platform.is_cuda_alike()
     assert q.dtype == torch.bfloat16
     assert q.shape[-1] == 128
     assert cos_sin_cache.shape[-1] == 64
@@ -463,6 +513,7 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -690,6 +741,7 @@ def sparse_attn_indexer(
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
+            score_bits = 32
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
@@ -724,17 +776,17 @@ def sparse_attn_indexer(
                         q_slice_cast, q_scale_slice, weights[row_start:row_end]
                     )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        chunk_weights,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        chunk.max_seqlen_k,
                     )
+                    if logits.dtype == torch.bfloat16:
+                        score_bits = 16
+                    logits = as_fp32_logits(logits, row_ends)
                 num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
@@ -782,6 +834,9 @@ def sparse_attn_indexer(
                     dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
+                    direct_max_rows=dcp_direct_topk_max_rows,
+                    score_bits=score_bits,
+                    max_model_len=max_model_len,
                 )
 
         if row_shard is not None:
@@ -858,6 +913,7 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        score_bits = 32
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -887,6 +943,8 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 indices=decode_metadata.indices,
             )
+            if logits.dtype == torch.bfloat16:
+                score_bits = 16
             # Keeping bf16 halves top-k/candidate reads; other top-k backends and
             # DCP need fp32. SM100 decode is varlen: one context length per row.
             if topk_backend != "deep_select" or dcp_world_size != 1:
@@ -941,6 +999,9 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+                direct_max_rows=dcp_direct_topk_max_rows,
+                score_bits=score_bits,
+                max_model_len=max_model_len,
             )
 
         if needs_padded_path:
@@ -985,6 +1046,7 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1027,6 +1089,7 @@ class SparseAttnIndexer(CustomOp):
         candidate_blocks: torch.Tensor | None = None,
         candidate_block_size: int = 0,
         candidate_write: bool = False,
+        skip_topk_buffer_clear: bool = False,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -1038,6 +1101,9 @@ class SparseAttnIndexer(CustomOp):
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
+        # Set when the caller already filled topk_indices_buffer[:num_tokens]
+        # with -1 earlier in the forward.
+        self.skip_topk_buffer_clear = skip_topk_buffer_clear
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
         # v4.1 two-level selection: the candidate source indexer writes the
@@ -1058,6 +1124,24 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
+        self.dcp_direct_topk_max_rows = 0
+        if (
+            self.dcp_world_size > 1
+            and not self.use_pcp
+            and parallel_config.dcp_comm_backend == "a2a"
+            and not parallel_config.use_ubatching
+            and current_platform.is_cuda()
+            and has_cutedsl()
+        ):
+            from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
+
+            # Rendezvous now, while every rank is constructing the model.
+            max_rows = get_dcp_workspace_max_num_tokens(vllm_config)
+            workspace = _get_direct_dcp_topk_workspace(
+                topk_indices_buffer.device, max_rows, topk_tokens
+            )
+            if workspace is not None:
+                self.dcp_direct_topk_max_rows = max_rows
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1159,11 +1243,12 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
-            False,
+            self.skip_topk_buffer_clear,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
+            dcp_direct_topk_max_rows=self.dcp_direct_topk_max_rows,
         )
 
     def forward_xpu(

@@ -397,6 +397,52 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
 
+@pytest.mark.parametrize("host_prefix", ["", "language_model"])
+def test_modelopt_mixed_precision_resolves_mistral_large_4_modules(host_prefix):
+    """A Mistral-format checkpoint lists checkpoint modules; Mistral Large 4
+    maps them to its modules, standalone or hosted by Pixtral."""
+    from vllm.models.mistral_large4.nvidia.model import _map_quant_config_layers
+
+    config = _mixed_precision_config(
+        {
+            "layers.0.feed_forward.w1": {"quant_algo": "FP8_PB_WO"},
+            "layers.0.feed_forward.w2": {"quant_algo": "FP8_PB_WO"},
+            "layers.0.feed_forward.w3": {"quant_algo": "FP8_PB_WO"},
+            "layers.1.attention.wq": {"quant_algo": "FP8_PB_WO"},
+            "layers.1.attention.indexer.wq_b": {"quant_algo": "FP8_PB_WO"},
+            "layers.1.shared_experts.w1": {"quant_algo": "FP8_PB_WO"},
+            "layers.1.shared_experts.w3": {"quant_algo": "FP8_PB_WO"},
+            "layers.1.experts": {"quant_algo": "NVFP4", "group_size": 16},
+        }
+    )
+
+    _map_quant_config_layers(config, host_prefix)
+
+    model = f"{host_prefix}.model" if host_prefix else "model"
+    assert {
+        module: config._resolve_quant_algo(f"{model}.layers.{module}")
+        for module in (
+            "0.mlp.gate_up_proj",
+            "0.mlp.down_proj",
+            "1.self_attn.q_proj",
+            "1.self_attn.indexer.wq_b",
+            "1.mlp.shared_experts.gate_up_proj",
+            "1.mlp.experts",
+            "1.self_attn.kv_b_proj",
+            "1.self_attn.indexer.wk_weights_proj",
+        )
+    } == {
+        "0.mlp.gate_up_proj": "FP8_PB_WO",
+        "0.mlp.down_proj": "FP8_PB_WO",
+        "1.self_attn.q_proj": "FP8_PB_WO",
+        "1.self_attn.indexer.wq_b": "FP8_PB_WO",
+        "1.mlp.shared_experts.gate_up_proj": "FP8_PB_WO",
+        "1.mlp.experts": "NVFP4",
+        "1.self_attn.kv_b_proj": None,
+        "1.self_attn.indexer.wk_weights_proj": None,
+    }
+
+
 def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
     from vllm.model_executor.layers.linear import LinearBase
 

@@ -49,6 +49,7 @@ def _make_impl(dcp_world_size: int = 1) -> TritonMLAImpl:
     impl.scale = HEAD_SIZE**-0.5
     impl._sm_count = 304
     impl.dcp_world_size = dcp_world_size
+    impl.decode_sliding_window = None
     return impl
 
 

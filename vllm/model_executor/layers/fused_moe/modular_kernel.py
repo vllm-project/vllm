@@ -449,6 +449,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> PrepareMonolithicResultType:
         """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
@@ -458,6 +459,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
             defer input quantization to the FusedMoEExpertsModular
+        - a1_scale: The scales of `a1` when the caller already quantized it.
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -1610,10 +1612,12 @@ class FusedMoEKernelMonolithicImpl:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
+        `a1q_scale` is given when the caller already quantized `hidden_states`.
         """
         # Only experts with _supports_hash_routing() accept these.
         hash_kwargs: dict[str, Any] = {}
@@ -1627,6 +1631,7 @@ class FusedMoEKernelMonolithicImpl:
             router_logits=router_logits,
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+            a1_scale=a1q_scale,
         )
 
         routing_replay_out = None
@@ -1774,6 +1779,7 @@ class FusedMoEKernel:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1792,6 +1798,7 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            a1q_scale=a1q_scale,
         )
 
     def apply(
