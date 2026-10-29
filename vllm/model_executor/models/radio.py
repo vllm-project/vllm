@@ -475,9 +475,7 @@ class RadioLayerScale(nn.Module):
 
 
 @support_torch_compile(
-    # RADIO packs NaViT tokens in dim 1, and cu_seqlens grows with the number of packed
-    # images, so both have to be dynamic or the compiled encoder bakes the shapes it
-    # was profiled with.
+    # Tokens pack into dim 1 and cu_seqlens grows with the image count.
     dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
     enable_if=should_torch_compile_mm_encoder,
     is_encoder=True,
@@ -656,6 +654,11 @@ class RadioModel(nn.Module):
         )
 
         # summary_idxs selects which class tokens to gather: None (no teachers)
+        # Only a compiled layer needs this; TORCH_SDPA pays one call per item for it.
+        self.pack_uniform_batches = bool(self.encoder.layer) and not (
+            self.encoder.layer[0].do_not_compile
+        )
+
         # keeps all class tokens; a list (possibly empty) gathers those indices.
         if config.summary_idxs is not None:
             self.register_buffer(
@@ -675,8 +678,7 @@ class RadioModel(nn.Module):
 
         packed_batch_size = None  # Original batch size before packing.
 
-        # Every call packs the tokens and carries varlen metadata: a compiled encoder
-        # layer keeps whichever cu_seqlens form it traced and drops the other silently.
+        # A compiled layer bakes the traced cu_seqlens form and ignores the others.
         if num_frames is not None and T > 1:
             # Conv3d video: all tubelets have the same sequence length.
             hidden_states = self.embeddings.forward_video(pixel_values)
@@ -686,15 +688,16 @@ class RadioModel(nn.Module):
         else:
             hidden_states = self.embeddings(pixel_values, imgs_sizes=imgs_sizes)
             if imgs_sizes is not None:
-                # Dynamic resolution already packs the images; one image gives
-                # cu_seqlens [0, n], which is unmasked attention over one sequence.
+                # Already packed; one image gives cu_seqlens [0, n], i.e. unmasked.
                 mask_meta = self._inter_image_mask_metadata(
                     imgs_sizes, device=hidden_states.device
                 )
-            else:
+            elif self.pack_uniform_batches:
                 hidden_states, mask_meta, packed_batch_size, seq_len = (
                     self._pack_uniform_batch(hidden_states)
                 )
+            else:
+                mask_meta = None
 
         encoder_outputs = self.encoder(hidden_states, mask_meta=mask_meta)
 
@@ -771,13 +774,11 @@ class RadioModel(nn.Module):
     ) -> tuple[torch.Tensor, MaskMetadata, int, int]:
         """Pack [B, n, hidden] into [1, B*n, hidden] plus its varlen metadata.
 
-        Equivalent to the unpacked call: the attention wrappers flatten the batch and
-        synthesise the very same cu_seqlens when it is left out.
+        FA/Triton synthesise this cu_seqlens anyway; TORCH_SDPA splits it per item.
         """
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.reshape(1, -1, hidden_dim)
-        # arange on the device: building this from a Python list copies host memory on
-        # every encoder forward, which VLLM_GPU_SYNC_CHECK=error rightly rejects.
+        # A Python list here would be a blocking host copy on every encoder forward.
         cu_seqlens = torch.arange(
             0,
             (batch_size + 1) * seq_len,
@@ -808,8 +809,7 @@ class RadioModel(nn.Module):
         """Build mask metadata from sequence lengths (already including
         cls/register tokens, i.e. ``patch_count + num_skip`` per item)."""
         assert len(seq_lens) > 0
-        # Staged through pinned memory: a plain torch.tensor(list, device=cuda) is a
-        # blocking host copy on every encoder forward.
+        # torch.tensor(list, device=cuda) here is a blocking host copy per forward.
         cu_seqlens = async_tensor_h2d(
             list(accumulate(seq_lens, initial=0)), device=device, dtype=torch.int32
         )

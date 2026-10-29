@@ -616,8 +616,7 @@ class RadioWithNeck(nn.Module):
             torch.cat(positioned_pages, dim=1), imgs_sizes=image_sizes
         )
         hidden = embeddings.patch_normalizer(hidden)
-        # One image yields cu_seqlens [0, n], equivalent to unmasked attention over a
-        # single sequence, and keeps the compiled signature stable across batch sizes.
+        # One image gives cu_seqlens [0, n], i.e. unmasked attention over one sequence.
         mask_meta = backbone._inter_image_mask_metadata(
             image_sizes, device=hidden.device
         )
