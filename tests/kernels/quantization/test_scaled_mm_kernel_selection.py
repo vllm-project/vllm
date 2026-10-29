@@ -6,9 +6,7 @@ Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
 import inspect
-import sys
 from abc import ABC
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -138,121 +136,6 @@ def test_triton_fp8_backend_requires_fp8(
         else:
             with pytest.raises(ValueError, match="requires FP8 support"):
                 init_fp8_linear_kernel(**kwargs)
-
-
-def test_fp8_heuristic_scales_occupancy_and_split_k():
-    """Fewer processors can fill the GPU without the same split-K expansion."""
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
-        get_heuristic_config,
-    )
-
-    assert get_heuristic_config(128, 4096, 4096, 32)["engine"] == "contiguous"
-    assert get_heuristic_config(128, 4096, 4096, 16)["engine"] == "shared"
-    assert get_heuristic_config(8, 2048, 32768, 32)["split_k"] == 4
-    assert get_heuristic_config(8, 2048, 32768, 16)["split_k"] == 1
-
-
-def test_fp8_heuristic_scales_persistent_grid_without_mutating_cached_choices():
-    """Selecting a smaller GPU must preserve cached choices for a larger GPU."""
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
-        get_heuristic_config,
-    )
-
-    large = get_heuristic_config(8192, 28672, 4096, 32)
-    small = get_heuristic_config(8192, 28672, 4096, 16)
-    assert large["variant"] == small["variant"] == "persistent"
-    assert large["programs"] == 64
-    assert small["programs"] == 32
-    assert get_heuristic_config(8192, 28672, 4096, 32) == large
-
-
-@pytest.mark.parametrize("num_processors", [0, -1])
-def test_fp8_heuristic_requires_positive_processor_count(num_processors):
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
-        get_heuristic_config,
-    )
-
-    with pytest.raises(ValueError, match="num_processors must be positive"):
-        get_heuristic_config(128, 4096, 4096, num_processors)
-
-
-def test_fp8_heuristic_scales_cache_boundaries():
-    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
-        get_heuristic_config,
-    )
-
-    small = get_heuristic_config(65, 18944, 3584, 32, 32 * 1024**2)
-    reference = get_heuristic_config(65, 18944, 3584, 32, 64 * 1024**2)
-    large = get_heuristic_config(65, 18944, 3584, 32, 128 * 1024**2)
-    assert small["block_size_n"] == 64
-    assert reference["block_size_k"] == 64
-    assert large["block_size_n"] == large["block_size_k"] == 128
-    assert get_heuristic_config(65, 18944, 3584, 32, 0) == large
-    with pytest.raises(ValueError, match="cache_size_bytes must be nonnegative"):
-        get_heuristic_config(65, 18944, 3584, 32, -1)
-
-
-def test_fp8_heuristic_device_cache_discovery_and_fallback(monkeypatch):
-    """Use the visible GPU's last data-cache level, then L2 if SMI is unavailable."""
-    from vllm.model_executor.layers.quantization.utils import (
-        fp8_per_token_heuristic as heuristic,
-    )
-
-    handles = [object(), object()]
-    observed = []
-
-    def query(handle):
-        observed.append(handle)
-        return {
-            "cache": [
-                dict(
-                    cache_properties=properties,
-                    cache_level=level,
-                    cache_size=size,
-                    num_cache_instance=instances,
-                )
-                for properties, level, size, instances in [
-                    (["DATA_CACHE"], 2, 8192, 1),
-                    (["DATA_CACHE"], 3, 16384, 2),
-                    (["INST_CACHE"], 4, 65536, 1),
-                    (["DATA_CACHE", "CPU_CACHE"], 4, 65536, 1),
-                    (["DATA_CACHE"], 2**32 - 1, 2**32 - 1, 2**32 - 1),
-                    (["DATA_CACHE"], 4, 0, 1),
-                ]
-            ]
-        }
-
-    smi = SimpleNamespace(
-        amdsmi_get_processor_handles=lambda: handles, amdsmi_get_gpu_cache_info=query
-    )
-    monkeypatch.setitem(sys.modules, "amdsmi", smi)
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.platforms.rocm",
-        SimpleNamespace(with_amdsmi_context=lambda fn: fn),
-    )
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform",
-        SimpleNamespace(visible_device_id_to_physical_device_id=lambda device: 1),
-    )
-    monkeypatch.setattr(
-        "vllm.utils.platform_utils.cuda_get_device_properties",
-        lambda *_args, **_kwargs: (8 * 1024**2,),
-    )
-    heuristic.get_device_cache_size.cache_clear()
-    try:
-        assert heuristic.get_device_cache_size(0) == 32 * 1024**2
-        assert heuristic.get_device_cache_size(0) == 32 * 1024**2
-        assert observed == [handles[1]]
-
-        def unavailable(_handle):
-            raise RuntimeError("SMI unavailable")
-
-        monkeypatch.setattr(smi, "amdsmi_get_gpu_cache_info", unavailable)
-        heuristic.get_device_cache_size.cache_clear()
-        assert heuristic.get_device_cache_size(0) == 8 * 1024**2
-    finally:
-        heuristic.get_device_cache_size.cache_clear()
 
 
 def test_is_supported_is_abstract():

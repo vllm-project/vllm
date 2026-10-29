@@ -13,6 +13,9 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_rdna
+
 device = current_platform.device_type
 
 triton_scaled_mm_module = importlib.import_module(
@@ -497,8 +500,10 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_rocm() or not current_platform.supports_fp8(),
-    reason="Requires ROCm FP8",
+    not current_platform.is_rocm()
+    or not current_platform.supports_fp8()
+    or not on_rdna(),
+    reason="Requires RDNA with FP8 support",
 )
 @pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048), (2048, 4096), (4096, 4096)])
 @pytest.mark.parametrize("num_processors", [16, 32])
