@@ -1,6 +1,7 @@
 # GLM-5.3-Flash specialized decode
 
-`--monokernel` on MI355X/gfx950 runs each MoE decoder layer 3-43 of a decode
+`--monokernel` (or `--additional-config '{"decode_backend": "latency_specialized"}'`)
+on MI355X/gfx950 runs each MoE decoder layer 3-43 of a decode
 step as one persistent FlyDSL launch (256 CTAs, one per CU), inside vLLM's
 layer loop. There are two launch kinds (`mono/ffn/kernel.py`):
 

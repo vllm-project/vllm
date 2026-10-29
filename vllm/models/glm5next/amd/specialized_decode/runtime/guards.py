@@ -35,8 +35,6 @@ def model_refusals(backbone: nn.Module) -> list[str]:
             reasons.append(f"layer {idx}: KDA with speculative decoding")
         if is_dsa(layer) and getattr(layer.self_attn, "indexer", None) is None:
             reasons.append(f"layer {idx}: sparse attention without its indexer")
-    if not current_platform.is_rocm():
-        return reasons + ["needs ROCm"]
     try:
         import flydsl  # noqa: F401
         from aiter.ops.flydsl.kernels import buffer_ops  # noqa: F401

@@ -115,9 +115,11 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
 
 
 def _specialized_decode_config(vllm_config: VllmConfig):
-    """The AMD specialized decode's config (None without ``--monokernel``); its
-    runtime is imported only when the switch is on."""
-    if not vllm_config.kernel_config.monokernel:
+    """The AMD specialized decode's config (None unless requested); its runtime is
+    imported only when the switch is on."""
+    from vllm.models.glm5next.amd.specialized_decode import requested
+
+    if not requested(vllm_config):
         return None
     from vllm.models.glm5next.amd.specialized_decode.runtime import (
         specialized_decode_config,

@@ -57,6 +57,7 @@ def make_vllm_config(**overrides: Any) -> SimpleNamespace:
         compilation_config=SimpleNamespace(**compilation),
         aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
         kernel_config=SimpleNamespace(monokernel=True),
+        additional_config={},
         speculative_config=None,
         lora_config=None,
         kv_transfer_config=None,

@@ -85,6 +85,31 @@ def test_switch_off_is_none_and_on_raises_with_every_reason():
         spec.specialized_decode_config(cfg)
 
 
+@pytest.mark.parametrize(
+    ("monokernel", "backend", "on"),
+    [
+        (False, None, False),
+        (False, "auto", False),
+        (False, "latency_specialized", True),
+        (True, "auto", True),
+    ],
+)
+def test_either_switch_turns_it_on(monkeypatch, monokernel, backend, on):
+    monkeypatch.setattr(spec, "refusal_reasons", lambda cfg: [])
+    cfg = kit.make_vllm_config()
+    cfg.kernel_config.monokernel = monokernel
+    if backend is not None:
+        cfg.additional_config = {"decode_backend": backend}
+    assert (spec.specialized_decode_config(cfg) is not None) is on
+
+
+def test_unknown_decode_backend_raises():
+    cfg = kit.make_vllm_config()
+    cfg.additional_config = {"decode_backend": "fast"}
+    with pytest.raises(ValueError, match="decode_backend must be"):
+        spec.specialized_decode_config(cfg)
+
+
 def _decode(monkeypatch, log=None, rank=0, **fakes):
     log = [] if log is None else log
     kit.patch_layers(monkeypatch, log, rank=rank, **fakes)
