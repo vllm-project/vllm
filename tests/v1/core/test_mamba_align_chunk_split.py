@@ -8,6 +8,7 @@ the wrong offset, and a later chunk crossing that boundary publishes it anyway.
 Requests resuming from it then restore a truncated state (#43559).
 """
 
+import os
 import sys
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -91,10 +93,12 @@ def _make_hybrid_kv_cache_manager(
     num_prefill_checkpoint_blocks: int = 0,
     num_hash_lookahead_tokens: int = 0,
     use_eagle: bool = True,
+    retention_interval: int | None = None,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=10000,
         kv_cache_tensors=[],
+        prefix_cache_retention_interval=retention_interval,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["full_layer"],
@@ -295,13 +299,17 @@ def _count_cached_boundary_states(
 
 
 @pytest.mark.parametrize("mamba_block_size", [528, MAMBA_BLOCK_SIZE])
+@pytest.mark.parametrize("retention_interval", [None, 0])
 def test_incremental_multimodal_sibling_reuses_mamba_boundary(
     monkeypatch: pytest.MonkeyPatch,
     mamba_block_size: int,
+    retention_interval: int | None,
 ) -> None:
     """A sibling appending a new MM item reuses the producer's last item."""
     monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", mamba_block_size)
-    manager = _make_hybrid_kv_cache_manager(use_eagle=False)
+    manager = _make_hybrid_kv_cache_manager(
+        use_eagle=False, retention_interval=retention_interval
+    )
     scheduler = create_scheduler(
         block_size=mamba_block_size,
         enable_prefix_caching=True,
@@ -357,6 +365,111 @@ def test_incremental_multimodal_sibling_reuses_mamba_boundary(
     _, num_computed, shared_prefix_boundary = manager.get_computed_blocks(consumer)
     assert shared_prefix_boundary == last_mm_end // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
     assert num_computed == mamba_block_size
+
+
+@pytest.mark.parametrize("disable_chunked_mm_input", [False, True])
+def test_mamba_prefix_caching_requires_chunked_mm_input(disable_chunked_mm_input: bool):
+    """Align mode rejects atomic MM inputs before they can reach the scheduler."""
+    block_size = 528
+    scheduler = create_scheduler(
+        model=os.getenv("VLLM_HYBRID_MM_TEST_MODEL", "Qwen/Qwen3.5-4B"),
+        max_num_batched_tokens=32768,
+        max_model_len=32768,
+        block_size=block_size,
+        enable_prefix_caching=True,
+        disable_chunked_mm_input=disable_chunked_mm_input,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+    )
+    if disable_chunked_mm_input:
+        with pytest.raises(AssertionError, match="Chunked MM input is required"):
+            scheduler.vllm_config.validate_block_size()
+    else:
+        scheduler.vllm_config.validate_block_size()
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+@pytest.mark.parametrize("mm_tail", [0, 100])
+@pytest.mark.parametrize("lookahead_hashes", [False, True])
+def test_eagle_multimodal_sibling_retains_safe_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    retention_interval: int | None,
+    mm_tail: int,
+    lookahead_hashes: bool,
+):
+    """A first sibling can reuse the state below EAGLE's unshared proof block."""
+    block_size = 528
+    monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", block_size)
+    model = os.getenv("VLLM_HYBRID_MM_TEST_MODEL", "Qwen/Qwen3.5-4B")
+    scheduler = create_scheduler(
+        model=model,
+        max_num_batched_tokens=32768,
+        max_model_len=32768,
+        block_size=block_size,
+        enable_prefix_caching=True,
+        speculative_config=SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=NUM_SPEC,
+            disable_lookahead_block_hashes=not lookahead_hashes,
+            target_model_config=ModelConfig(model=model),
+            target_parallel_config=ParallelConfig(),
+        ),
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=NUM_SPEC,
+        ),
+    )
+    assert scheduler.use_eagle
+    assert scheduler.use_eagle_block_drop is not lookahead_hashes
+    lookahead = scheduler.num_hash_lookahead_tokens
+    manager = _make_hybrid_kv_cache_manager(
+        retention_interval=retention_interval, num_hash_lookahead_tokens=lookahead
+    )
+    mm_end = 3 * block_size + mm_tail
+    producer = create_requests(
+        1,
+        num_tokens=6 * block_size + 2,
+        block_size=ATTN_BLOCK_SIZE,
+        same_prompt=True,
+        mm_hashes_list=[["shared"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=mm_end)]],
+        req_ids=["producer"],
+        num_hash_lookahead_tokens=lookahead,
+    )[0]
+    while producer.num_computed_tokens < producer.num_tokens:
+        count = scheduler._mamba_block_aligned_split(
+            producer, producer.num_tokens - producer.num_computed_tokens
+        )
+        assert count > 0
+        assert manager.allocate_slots(producer, count, num_lookahead_tokens=NUM_SPEC)
+        producer.num_computed_tokens += count
+        manager.cache_blocks(producer, producer.num_computed_tokens)
+        manager.new_step_starts()
+    manager.free(producer)
+    consumer = create_requests(
+        1,
+        num_tokens=7 * block_size + 2,
+        block_size=ATTN_BLOCK_SIZE,
+        same_prompt=True,
+        mm_hashes_list=[["shared", "appended"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=mm_end),
+                PlaceholderRange(offset=mm_end, length=block_size),
+            ]
+        ],
+        req_ids=["consumer"],
+        num_hash_lookahead_tokens=lookahead,
+    )[0]
+    _, hit, _ = manager.get_computed_blocks(consumer)
+    assert hit == (2 if mm_tail == 0 else 3) * block_size
 
 
 @pytest.mark.parametrize("skip_cache", [False, True])

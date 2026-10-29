@@ -36,9 +36,9 @@ Choose a value that divides the block size of every prefix-cacheable KV cache gr
 
 ### Incremental multimodal requests
 
-With APC enabled, hybrid Mamba models also retain a checkpoint at the final multimodal feature boundary, rounded down to the Mamba block grid. A follow-up request that appends another image can reuse this state even when the producer has a long text tail. No additional checkpoint flag is required.
+With APC enabled, hybrid Mamba models also retain a checkpoint at the final multimodal feature boundary, rounded down to the Mamba block grid. A follow-up request that appends another image can reuse this state even when the producer has a long text tail. No additional checkpoint flag is required. Mamba `align` mode requires multimodal input chunking (the default); combining it with `--disable-chunked-mm-input` is rejected at startup.
 
-Prefill stops at each distinct block-aligned multimodal feature boundary, so appending an item preserves the shared prefix's split points. The final multimodal boundary is added to the required retention points; other snapshots follow `prefix_cache_retention_interval`. These stops can add prefill work; they do not change decode arithmetic. A shared prefix shorter than one Mamba block still cannot reuse a state. This does not guarantee batch invariance across different batching or chunk-budget configurations.
+Prefill stops at each distinct block-aligned multimodal feature boundary, so appending an item preserves the shared prefix's split points. EAGLE/MTP also materializes a checkpoint one Mamba block lower, to leave room for the draft KV proof or lookahead hash. Both final-item checkpoints are required retention points, including with the default `prefix_cache_retention_interval=0`; other snapshots follow the configured retention policy. These stops can add prefill work; they do not change decode arithmetic. The shared prefix must contain a cacheable Mamba boundary (and, for EAGLE/MTP, its proof). This does not guarantee batch invariance across different batching or chunk-budget configurations.
 
 ## Example workloads
 

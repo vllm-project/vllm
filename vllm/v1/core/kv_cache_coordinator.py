@@ -372,7 +372,11 @@ class KVCacheCoordinator(ABC):
             use_eagle=bool(self.drop_eagle_group_ids),
         )
         if self._has_mamba_align_group and request.last_mm_feature_end:
-            boundaries = tuple(sorted({*boundaries, request.last_mm_feature_end}))
+            mm_end = request.last_mm_feature_end
+            mm_boundaries = {mm_end}
+            if self.drop_eagle_group_ids or self.block_pool.num_hash_lookahead_tokens:
+                mm_boundaries.add(max(0, mm_end - self.scheduler_block_size))
+            boundaries = tuple(sorted({*boundaries, *mm_boundaries}))
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue

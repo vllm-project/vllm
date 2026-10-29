@@ -635,6 +635,11 @@ class Scheduler(SchedulerInterface):
         for feature in request.mm_features:
             position = feature.mm_position
             boundary = (position.offset + position.length) // block_size * block_size
+            # Draft KV needs proof past the hit; materialize a lower state too.
+            if (
+                self.use_eagle_block_drop or self.num_hash_lookahead_tokens
+            ) and start < boundary - block_size:
+                boundary -= block_size
             if start < boundary < end:
                 mm_boundary_stop = boundary
                 break

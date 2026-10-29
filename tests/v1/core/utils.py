@@ -270,13 +270,16 @@ def create_requests(
     block_size: int = 16,
     req_ids: list[str] | None = None,
     sampling_params: SamplingParams | None = None,
+    num_hash_lookahead_tokens: int = 0,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, sha256)
+    block_hasher = get_request_block_hasher(
+        block_size, sha256, num_hash_lookahead_tokens=num_hash_lookahead_tokens
+    )
     if sampling_params is None:
         sampling_params = SamplingParams(
             ignore_eos=ignore_eos,
