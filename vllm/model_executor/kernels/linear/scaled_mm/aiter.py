@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import ClassVar
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -525,6 +527,9 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     """Aiter FP8 block-scaled GEMM using a pre-shuffled (bpreshuffle) weight."""
 
+    # gemm_a8w8_blockscale_bpreshuffle reads the activation scale column-major.
+    wants_transposed_act_scale: ClassVar[bool] = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -641,22 +646,32 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        if not self._reads_weight_directly(layer):
-            return super().apply_weights(layer, x, bias, **kwargs)
+        params = self._get_layer_params(layer)
+        Bs = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
 
         # Left unshuffled above; kv_b_proj still reaches here from MLA's
         # prefill-context path.
-        params = self._get_layer_params(layer)
+        plain = self._reads_weight_directly(layer)
+
         x_2d = x.view(-1, x.shape[-1])
-        A, As = self.quant_fp8(x_2d)
-        output = rocm_aiter_ops.gemm_a8w8_blockscale(
-            A,
-            params.weight,
-            As,
-            params.block_scale,
-            list(self.weight_group_shape),
-            output_dtype=self.config.out_dtype,
-        )
+        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=not plain)
+        if plain:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale(
+                A,
+                params.weight,
+                As,
+                Bs,
+                list(self.weight_group_shape),
+                output_dtype=self.config.out_dtype,
+            )
+        else:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A, params.weight, As, Bs, output_dtype=self.config.out_dtype
+            )
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], params.weight.shape[0])
@@ -668,12 +683,11 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        # gemm_a8w8_blockscale_bpreshuffle reads the activation scale
-        # column-major, while QuantFP8 and the fused norm+quant ops write it
-        # row-major. Copying here keeps those quant ops matchable by the
-        # fusion passes.
-        if As.dim() == 2 and As.size(-1) > 1 and As.stride(0) != 1:
-            As = As.t().contiguous().t()
+        """Block-scaled GEMM for callers that pre-quantize their activations.
+
+        ``As`` must be column-major; a row-major one will not raise, it just
+        returns wrong numbers for M > 1.
+        """
         return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             A, B, As, Bs, output_dtype=self.config.out_dtype
         )
