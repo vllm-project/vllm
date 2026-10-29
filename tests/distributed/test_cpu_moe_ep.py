@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU quantized MoE expert-parallel integration coverage."""
+"""CPU MoE expert-parallel integration coverage."""
 
 import math
 import os
@@ -26,8 +26,10 @@ if not current_platform.is_cpu():
 import vllm._custom_ops as ops  # noqa: E402
 from vllm.model_executor.models.utils import sequence_parallel_chunk  # noqa: E402
 
-if not hasattr(torch.ops._C, "fused_experts_cpu"):
-    pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
+requires_quantized_moe = pytest.mark.skipif(
+    not hasattr(torch.ops._C, "fused_experts_cpu"),
+    reason="fused_experts_cpu op not available",
+)
 
 BLOCK_SIZE = [128, 128]
 _FP8_INFO = torch.finfo(torch.float8_e4m3fn)
@@ -481,6 +483,7 @@ def _moe_prepare_finalize_compile_worker(
     dist.barrier()
 
 
+@requires_quantized_moe
 @pytest.mark.distributed
 @pytest.mark.parametrize(
     "tp_size,dp_size,is_sequence_parallel",
@@ -508,6 +511,7 @@ def test_cpu_moe_ep_matches_all_experts_reference(
     )
 
 
+@requires_quantized_moe
 @pytest.mark.distributed
 @pytest.mark.parametrize(
     "backend",
@@ -533,4 +537,176 @@ def test_cpu_moe_prepare_finalize_sequence_parallel_compile_tp2_dp3(
         tp_size=2,
         dp_size=3,
         params=(backend, quant_format),
+    )
+
+
+def _bf16_moe_prepare_finalize_worker(
+    rank, world_size, tp_size, dp_size, port, dp_port, apply_weight_on_input
+):
+    _init_tp_dp_environment(
+        rank, tp_size, dp_size, port, dp_port, enable_expert_parallel=True
+    )
+    from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+    from vllm.forward_context import get_forward_context
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        determine_expert_map,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUUnquantizedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+        MoEPrepareAndFinalizeNaiveDPEPModular,
+    )
+
+    torch.manual_seed(0)
+    hidden_size = intermediate_size = 128
+    num_experts = 5
+    topk = 1 if apply_weight_on_input else 2
+    activation = MoEActivation.SILU
+    all_hidden = torch.randn(4, hidden_size, dtype=torch.bfloat16) / (
+        0.5 * math.sqrt(hidden_size)
+    )
+    w1 = torch.randn(
+        num_experts, 2 * intermediate_size, hidden_size, dtype=all_hidden.dtype
+    ) / (0.5 * math.sqrt(hidden_size))
+    w2 = torch.randn(
+        num_experts, hidden_size, intermediate_size, dtype=all_hidden.dtype
+    ) / (0.5 * math.sqrt(intermediate_size))
+    ids = torch.tensor([[0, 4], [1, 3], [2, 4], [4, 0]], dtype=torch.int32)[
+        :, :topk
+    ].contiguous()
+    weights = torch.tensor([[0.5, 0.25], [0.75, 0.125], [0.5, 0.25], [0.25, 0.5]])[
+        :, :topk
+    ].contiguous()
+    local_count, expert_map, _ = determine_expert_map(
+        ep_size=world_size,
+        ep_rank=rank,
+        global_num_experts=num_experts,
+    )
+    assert expert_map is not None
+    local_experts = _get_local_expert_slice(expert_map, local_count)
+    parallel = FusedMoEParallelConfig(
+        tp_size=1,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=dp_size,
+        dp_rank=rank,
+        ep_size=world_size,
+        ep_rank=rank,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+    config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=local_count,
+        num_logical_experts=num_experts,
+        moe_parallel_config=parallel,
+        activation=activation,
+        in_dtype=all_hidden.dtype,
+        device="cpu",
+        routing_method=RoutingMethodType.Default,
+    )
+    experts = CPUUnquantizedExperts(config, FusedMoEQuantConfig.make())
+    w1_local = ops.cpu_prepack_moe_weight(w1[local_experts].contiguous(), experts.isa)
+    w2_local = ops.cpu_prepack_moe_weight(w2[local_experts].contiguous(), experts.isa)
+    kernel = FusedMoEKernel(
+        MoEPrepareAndFinalizeNaiveDPEPModular(
+            is_sequence_parallel=False,
+            num_dispatchers=world_size,
+        ),
+        experts,
+    )
+    reference = torch.empty_like(all_hidden)
+    reference_input = (
+        all_hidden * weights.to(all_hidden.dtype)
+        if apply_weight_on_input
+        else all_hidden
+    )
+    ops.cpu_fused_moe(
+        reference,
+        reference_input,
+        ops.cpu_prepack_moe_weight(w1, experts.isa),
+        ops.cpu_prepack_moe_weight(w2, experts.isa),
+        None,
+        None,
+        weights.clone(),
+        ids,
+        activation.value,
+        experts.isa,
+        skip_weighted=apply_weight_on_input,
+    )
+    splits = (
+        [[3, 1], [1, 3], [0, 4], [4, 0]]
+        if dp_size == 2
+        else [[3, 1, 0], [0, 2, 2], [1, 0, 3], [0, 0, 4]]
+    )
+    retained = []
+    for sizes in splits:
+        start, count = sum(sizes[:rank]), sizes[rank]
+        end = start + count
+        hidden = all_hidden[start:end].clone()
+        local_weights, local_ids = weights[start:end].clone(), ids[start:end].clone()
+        with _make_forward_context(rank, dp_size, count, sizes):
+            metadata = get_forward_context().dp_metadata
+            assert metadata is not None
+            with metadata.sp_local_sizes(
+                sequence_parallel_size=1, pcp_size=1, use_ep=True
+            ) as local_sizes:
+                output = kernel.apply(
+                    hidden_states=hidden,
+                    w1=w1_local,
+                    w2=w2_local,
+                    topk_weights=local_weights,
+                    topk_ids=local_ids,
+                    activation=activation,
+                    global_num_experts=num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_weight_on_input,
+                )
+                assert metadata.local_sizes is local_sizes
+        assert isinstance(output, torch.Tensor)
+        assert output.shape == (count, hidden_size)
+        torch.testing.assert_close(
+            output,
+            reference[start:end],
+            atol=get_default_atol(output),
+            rtol=get_default_rtol(output),
+        )
+        torch.testing.assert_close(hidden, all_hidden[start:end], atol=0, rtol=0)
+        torch.testing.assert_close(local_weights, weights[start:end], atol=0, rtol=0)
+        torch.testing.assert_close(local_ids, ids[start:end], atol=0, rtol=0)
+        retained.append((output, output.clone()))
+    for output, snapshot in retained:
+        torch.testing.assert_close(output, snapshot, atol=0, rtol=0)
+    dist.barrier()
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("dp_size", [2, 3])
+@pytest.mark.parametrize(
+    "apply_weight_on_input", [False, True], ids=["output-weight", "input-weight"]
+)
+def test_cpu_bf16_moe_prepare_finalize_ragged(dp_size, apply_weight_on_input):
+    """Real BF16 EP preserves mapped experts and the model's router weighting."""
+    _spawn_workers(
+        _bf16_moe_prepare_finalize_worker,
+        world_size=dp_size,
+        tp_size=1,
+        dp_size=dp_size,
+        params=apply_weight_on_input,
+        timeout=120,
     )

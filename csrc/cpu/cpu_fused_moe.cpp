@@ -81,7 +81,7 @@ template <typename scalar_t, typename w_t, typename gemm_t>
 void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                     w_t* __restrict__ w13, w_t* __restrict__ w2,
                     w_t* __restrict__ w13_bias, w_t* __restrict__ w2_bias,
-                    float* __restrict__ topk_weights,
+                    const float* __restrict__ topk_weights,
                     const int32_t* __restrict__ topk_id,
                     const int32_t* __restrict__ expert_map,
                     const int32_t global_num_experts, FusedMOEAct act_type,
@@ -597,14 +597,10 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
         int32_t token_id = task_id;
         int32_t* __restrict__ curr_expand_token_id_index_buffer =
             expand_token_id_index_buffer + token_id * topk_num;
-        float* __restrict__ curr_weight = topk_weights + token_id * topk_num;
+        const float* __restrict__ curr_weight =
+            topk_weights + token_id * topk_num;
         scalar_t* __restrict__ curr_output_buffer =
             output + token_id * output_size_2;
-
-        if (skip_weighted) {
-          // Only for topk_num == 1
-          *curr_weight = 1.0f;
-        }
 
         if (topk_num > 1) {
           {
@@ -670,7 +666,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
           float* __restrict__ w2_output_iter =
               w2_gemm_output_buffer + w2_output_idx * output_size_2;
           scalar_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
-          vec_op::FP32Vec16 weight_vec(curr_weight[0]);
+          vec_op::FP32Vec16 weight_vec(skip_weighted ? 1.0f : curr_weight[0]);
           for (int32_t i = 0; i < output_size_2; i += 16) {
             vec_op::FP32Vec16 vec(w2_output_iter);
             vec = vec * weight_vec;

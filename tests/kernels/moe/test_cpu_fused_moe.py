@@ -706,16 +706,21 @@ def test_cpu_experts_int8_unaligned_intermediate_size(
     torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
 
 
-def test_cpu_fused_moe_expert_map(default_vllm_config):
-    """EP rank outputs sum to the unsharded result for global expert IDs."""
+@pytest.mark.parametrize(
+    "local_expert_counts", [(2, 2), (3, 2)], ids=["even", "uneven"]
+)
+@pytest.mark.parametrize("topk_num", [1, 2])
+@pytest.mark.parametrize("batch_size", [0, 5])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("act", [MoEActivation.SILU, MoEActivation.GELU_TANH])
+def test_cpu_fused_moe_expert_map(
+    default_vllm_config, local_expert_counts, topk_num, batch_size, use_bias, act
+):
+    """Mapped rank partials preserve routing weights and zero remote contributions."""
     set_random_seed(0)
-    global_expert_num = 4
-    local_expert_num = 2
+    global_expert_num = sum(local_expert_counts)
     hidden_size = intermediate_size = 128
-    topk_num = 2
-    batch_size = 5
     dtype = torch.bfloat16
-    act = MoEActivation.SILU
 
     input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
         0.5 * hidden_size**0.5
@@ -726,15 +731,38 @@ def test_cpu_fused_moe_expert_map(default_vllm_config):
     w2 = torch.randn(
         (global_expert_num, hidden_size, intermediate_size), dtype=dtype
     ) / (0.5 * intermediate_size**0.5)
-    topk_ids = torch.tensor([[0, 2], [2, 3], [0, 1], [1, 3], [2, 0]], dtype=torch.int32)
-    topk_weights = torch.rand((batch_size, topk_num), dtype=torch.float32)
-    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    w13_bias = (
+        torch.randn((global_expert_num, 2 * intermediate_size), dtype=dtype)
+        / (0.5 * (2 * intermediate_size) ** 0.5)
+        if use_bias
+        else None
+    )
+    w2_bias = (
+        torch.randn((global_expert_num, hidden_size), dtype=dtype)
+        / (0.5 * hidden_size**0.5)
+        if use_bias
+        else None
+    )
+    boundary, last = local_expert_counts[0], global_expert_num - 1
+    topk_ids = torch.tensor(
+        [[0, boundary], [boundary, last], [0, 1], [boundary - 1, last], [last, 0]],
+        dtype=torch.int32,
+    )[:batch_size, :topk_num].contiguous()
+    topk_weights = torch.tensor(
+        [[0.25, 0.5], [0.5, 0.125], [0.125, 0.25], [0.25, 0.5], [0.5, 0.25]],
+        dtype=torch.float32,
+    )[:batch_size, :topk_num].contiguous()
+    original_ids, original_weights = topk_ids.clone(), topk_weights.clone()
 
-    ref_output = ref_fused_moe(input, w13, w2, None, None, topk_weights, topk_ids, act)
+    ref_output = (
+        ref_fused_moe(input, w13, w2, w13_bias, w2_bias, topk_weights, topk_ids, act)
+        if batch_size
+        else torch.empty_like(input)
+    )
     ep_output = torch.zeros_like(ref_output)
 
-    for ep_rank in range(2):
-        local_start = ep_rank * local_expert_num
+    for ep_rank, local_expert_num in enumerate(local_expert_counts):
+        local_start = sum(local_expert_counts[:ep_rank])
         local_end = local_start + local_expert_num
         expert_map = torch.full((global_expert_num,), -1, dtype=torch.int32)
         expert_map[local_start:local_end] = torch.arange(
@@ -766,14 +794,24 @@ def test_cpu_fused_moe_expert_map(default_vllm_config):
             in_dtype=dtype,
             device="cpu",
             routing_method=RoutingMethodType.Default,
+            has_bias=use_bias,
         )
         layer = _StubMoELayer(
-            w13[local_start:local_end], w2[local_start:local_end], act
+            w13[local_start:local_end].clone(),
+            w2[local_start:local_end].clone(),
+            act,
+            w13_bias[local_start:local_end] if w13_bias is not None else None,
+            w2_bias[local_start:local_end] if w2_bias is not None else None,
         )
-        experts = CPUUnquantizedExperts(moe_config, FusedMoEQuantConfig.make())
+        quant_config = (
+            biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
+            if use_bias
+            else FusedMoEQuantConfig.make()
+        )
+        experts = CPUUnquantizedExperts(moe_config, quant_config)
         experts.process_weights_after_loading(layer)
 
-        rank_output = torch.empty_like(input)
+        rank_output = torch.full_like(input, float("nan"))
         experts.apply(
             output=rank_output,
             hidden_states=input,
@@ -791,7 +829,75 @@ def test_cpu_fused_moe_expert_map(default_vllm_config):
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
         )
+        local_routes = expert_map[topk_ids] >= 0
+        assert torch.count_nonzero(rank_output[~local_routes.any(dim=1)]) == 0
+        rank_reference = (
+            ref_fused_moe(
+                input,
+                w13,
+                w2,
+                w13_bias,
+                w2_bias,
+                topk_weights * local_routes,
+                topk_ids,
+                act,
+            )
+            if batch_size
+            else torch.empty_like(input)
+        )
+        torch.testing.assert_close(
+            rank_output,
+            rank_reference,
+            atol=get_default_atol(rank_output),
+            rtol=get_default_rtol(rank_output),
+        )
         ep_output += rank_output
 
+    torch.testing.assert_close(topk_ids, original_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights, original_weights, atol=0, rtol=0)
     atol, rtol = get_default_atol(ep_output), get_default_rtol(ep_output)
     torch.testing.assert_close(ep_output, ref_output, atol=atol, rtol=rtol)
+
+
+def test_cpu_fused_moe_input_weighting_preserves_router_weights(default_vllm_config):
+    """Preweighted top-k1 input must not change the caller's routing weights."""
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    hidden = torch.randn(2, 128, dtype=dtype) / (0.5 * 128**0.5)
+    w13 = torch.randn(2, 256, 128, dtype=dtype) / (0.5 * 128**0.5)
+    w2 = torch.randn(2, 128, 128, dtype=dtype) / (0.5 * 128**0.5)
+    weights = torch.tensor([[0.25], [0.75]], dtype=torch.float32)
+    original_weights = weights.clone()
+    ids = torch.tensor([[0], [1]], dtype=torch.int32)
+    weighted_input = hidden * weights.to(dtype)
+    reference = ref_fused_moe(
+        weighted_input,
+        w13,
+        w2,
+        None,
+        None,
+        torch.ones_like(weights),
+        ids,
+        MoEActivation.SILU,
+    )
+    output = torch.empty_like(hidden)
+    cpu_fused_moe(
+        output,
+        weighted_input,
+        cpu_prepack_moe_weight(w13, "vec"),
+        cpu_prepack_moe_weight(w2, "vec"),
+        None,
+        None,
+        weights,
+        ids,
+        MoEActivation.SILU.value,
+        "vec",
+        skip_weighted=True,
+    )
+    torch.testing.assert_close(
+        output,
+        reference,
+        atol=get_default_atol(output),
+        rtol=get_default_rtol(output),
+    )
+    torch.testing.assert_close(weights, original_weights, atol=0, rtol=0)
