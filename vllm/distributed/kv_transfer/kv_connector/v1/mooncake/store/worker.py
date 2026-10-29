@@ -1987,13 +1987,11 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        # A layer's cache is one tensor, or a list of state tensors that share
+        # one raw storage (Mamba).
+        def _layer_views(v: torch.Tensor | list[torch.Tensor]) -> list[torch.Tensor]:
             assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
+            return [v] if isinstance(v, torch.Tensor) else v
 
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
@@ -2007,11 +2005,16 @@ class MooncakeStoreWorker:
             }
             seen_storage_ptrs: set[int] = set()
             cache_by_layer = {
-                layer_name: group_kernel_blocks(_repr_tensor(cache), self.num_blocks)
+                layer_name: [
+                    group_kernel_blocks(view, self.num_blocks)
+                    for view in _layer_views(cache)
+                ]
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
             }
-            cache_tensors = list(cache_by_layer.values())
+            cache_tensors = [
+                cache for views in cache_by_layer.values() for cache in views
+            ]
             for cache in cache_tensors:
                 cache_storage = cache.untyped_storage()
                 base_addr = cache_storage.data_ptr()
@@ -2030,19 +2033,23 @@ class MooncakeStoreWorker:
             for group_id, (group, db) in enumerate(
                 zip(self._kv_cache_groups, self.token_dbs, strict=True)
             ):
-                group_tensors = cache_tensors
+                group_views = [
+                    cache_by_layer[name]
+                    for name in group.layer_names
+                    if name in cache_by_layer
+                ]
                 if self.store_tp_size is not None:
-                    group_tensors = [
-                        cache_by_layer[name]
-                        for name in group.layer_names
-                        if name in cache_by_layer
-                    ]
-                    if len(group_tensors) != len(group.layer_names):
+                    if len(group_views) != len(group.layer_names):
                         raise ValueError(
                             "Missing KV cache tensors for TP-shared cache group "
                             f"{group_id}"
                         )
-                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
+                    group_tensors = [views[0] for views in group_views]
+                else:
+                    group_tensors = [cache for views in group_views for cache in views]
+                db.store_layout.register_kv_caches(
+                    group_tensors or cache_tensors, self.num_blocks
+                )
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -2068,7 +2075,7 @@ class MooncakeStoreWorker:
             addrs: list[int] = []
             block_lens: list[int] = []
             for layer_name, value in group_caches:
-                cache = _repr_tensor(value)
+                cache = _layer_views(value)[0]
                 is_host_resident = group.host_resident
                 if is_host_resident:
                     num_blocks = self._kv_cache_config.hisparse_host_num_blocks
