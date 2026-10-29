@@ -209,6 +209,30 @@ def flat_namespace_tool_name(namespace: str, name: str) -> str:
     return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
 
 
+def is_string_schema(schema: Any) -> bool:
+    """Return True when *schema* accepts a plain string.
+
+    Matches ``{"type": "string"}`` directly and also resolves the common
+    nullable-string spellings that JSON Schema produces for ``Optional[str]``:
+
+    * ``{"anyOf": [{"type": "string"}, {"type": "null"}]}``
+    * ``{"oneOf": [{"type": "string"}, {"type": "null"}]}``
+    * ``{"type": ["string", "null"]}``
+    """
+    if not isinstance(schema, dict):
+        return False
+    t = schema.get("type")
+    if t == "string":
+        return True
+    if isinstance(t, list) and "string" in t:
+        return True
+    for key in ("anyOf", "oneOf"):
+        for variant in schema.get(key, []):
+            if is_string_schema(variant):
+                return True
+    return False
+
+
 def get_function_tools(
     tools: Sequence[Tool],
 ) -> list[ChatCompletionToolsParam | FunctionTool]:

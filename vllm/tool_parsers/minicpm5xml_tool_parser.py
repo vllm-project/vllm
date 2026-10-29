@@ -27,7 +27,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap, safe_literal_eval
+from vllm.tool_parsers.utils import is_string_schema, partial_tag_overlap, safe_literal_eval
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -141,8 +141,11 @@ def _coerce_argument_value(
     value: Any,
     name_to_tool: dict[str, ChatCompletionToolsParam],
 ) -> Any:
-    arg_type = _get_argument_type(func_name, arg_key, name_to_tool)
-    if arg_type == "string":
+    tool = name_to_tool.get(func_name)
+    schema = {}
+    if tool is not None and tool.function.parameters is not None:
+        schema = tool.function.parameters.get("properties", {}).get(arg_key, {})
+    if is_string_schema(schema):
         return (
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         )

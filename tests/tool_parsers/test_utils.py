@@ -773,3 +773,49 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class TestIsStringSchema:
+    """is_string_schema must recognise nullable-string spellings (#64517)."""
+
+    def test_plain_string_type(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        assert is_string_schema({"type": "string"})
+
+    def test_optional_str_anyof(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        assert is_string_schema(schema)
+
+    def test_optional_str_oneof(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        schema = {"oneOf": [{"type": "string"}, {"type": "null"}]}
+        assert is_string_schema(schema)
+
+    def test_type_list_includes_string(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        assert is_string_schema({"type": ["string", "null"]})
+
+    def test_non_string_type_rejected(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        assert not is_string_schema({"type": "integer"})
+        assert not is_string_schema({"type": "number"})
+        assert not is_string_schema({"anyOf": [{"type": "integer"}, {"type": "null"}]})
+
+    def test_non_dict_rejected(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        assert not is_string_schema(None)
+        assert not is_string_schema("string")
+        assert not is_string_schema(["string"])
+
+    def test_nested_anyof_with_string(self):
+        from vllm.tool_parsers.utils import is_string_schema
+
+        schema = {"anyOf": [{"type": "null"}, {"anyOf": [{"type": "string"}]}]}
+        assert is_string_schema(schema)

@@ -62,6 +62,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import is_string_schema
 
 logger = init_logger(__name__)
 
@@ -333,7 +334,7 @@ class MuseToolParser(ToolParser):
                 strings[name] = {
                     key
                     for key, schema in parameters.get("properties", {}).items()
-                    if isinstance(schema, dict) and schema.get("type") == "string"
+                    if is_string_schema(schema)
                 }
         return strings
 

@@ -41,7 +41,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import safe_literal_eval
+from vllm.tool_parsers.utils import is_string_schema, safe_literal_eval
 
 logger = init_logger(__name__)
 
@@ -143,8 +143,8 @@ class PoolsideV1ToolParser(ToolParser):
             params = getattr(fn, "parameters", None)
             if params is None:
                 return False
-            arg_type = params.get("properties", {}).get(arg_name, {}).get("type", None)
-            return arg_type == "string"
+            schema = params.get("properties", {}).get(arg_name, {})
+            return is_string_schema(schema)
         logger.debug("No tool named '%s'.", tool_name)
         return False
 
