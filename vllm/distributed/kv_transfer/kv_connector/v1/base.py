@@ -228,6 +228,11 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_checkpoint(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether a process checkpoint of the engine can be restored."""
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -251,6 +256,15 @@ class KVConnectorBase_V1(ABC):
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    def checkpoint_prepare(self) -> None:
+        """Release transports and peer state before a process checkpoint. The
+        KV cache is already released."""
+        return
+
+    def checkpoint_restore(self) -> None:
+        """Bring back what `checkpoint_prepare` released."""
+        return
 
     # ==============================
     # Worker-side methods
