@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import contextlib
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -38,6 +40,43 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
+
+# An NVFP4 per-token quantization of one MoE input, computed ahead of the MoE
+# call (e.g. on a side stream overlapping the router GEMM), as
+# (input tensor, (values, block scales, per-token scales)). See
+# prequantized_nvfp4_per_token_input.
+_prequantized_input: tuple[torch.Tensor, tuple[torch.Tensor, ...]] | None = None
+
+
+@contextlib.contextmanager
+def prequantized_nvfp4_per_token_input(
+    hidden_states: torch.Tensor, quantized: tuple[torch.Tensor, ...]
+):
+    """Within the block, a TRTLLM-Gen NVFP4 MoE whose input is
+    ``hidden_states`` (the same storage and shape) uses ``quantized``, the
+    result of ``quantize_nvfp4_per_token_input(hidden_states)``, instead of
+    quantizing the input itself. The caller orders the producing stream before
+    the MoE call."""
+    global _prequantized_input
+    _prequantized_input = (hidden_states, quantized)
+    try:
+        yield
+    finally:
+        _prequantized_input = None
+
+
+def _quantize_per_token_input(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pre = _prequantized_input
+    if (
+        pre is not None
+        and pre[0].data_ptr() == hidden_states.data_ptr()
+        and pre[0].shape == hidden_states.shape
+        and pre[0].dtype == hidden_states.dtype
+    ):
+        return pre[1]
+    return quantize_nvfp4_per_token_input(hidden_states)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -375,8 +414,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
         if self.expects_unquantized_inputs:
-            hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+            hidden_states, block_scale, per_token_scale = _quantize_per_token_input(
+                hidden_states
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -581,8 +620,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
         if self.expects_unquantized_inputs:
-            hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+            hidden_states, block_scale, per_token_scale = _quantize_per_token_input(
+                hidden_states
             )
         else:
             block_scale, per_token_scale = a1q_scale, None

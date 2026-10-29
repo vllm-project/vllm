@@ -12,6 +12,8 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
+import contextlib
+import functools
 from collections.abc import Iterable
 from functools import partial
 from typing import TYPE_CHECKING
@@ -52,6 +54,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
     TrtLlmNvFp4ExpertsMonolithic,
+    prequantized_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -74,6 +77,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    quantize_nvfp4_per_token_input,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
@@ -525,6 +531,8 @@ class MiniMaxM3MoE(nn.Module):
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
+        # Side stream for the routed experts' input quantization (see _gate).
+        self._input_quant_stream: torch.cuda.Stream | None = None
 
         self.shared_experts: MiniMaxM3MLP | None = None
         if self.use_mega_moe:
@@ -657,13 +665,57 @@ class MiniMaxM3MoE(nn.Module):
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
 
+    @functools.cached_property
+    def _prequantizes_input(self) -> bool:
+        """Whether the routed experts quantize their own input to NVFP4 per
+        token (TRTLLM-Gen, no all-to-all dispatch), so that quantization can
+        run ahead of the MoE call."""
+        if self.use_mega_moe or not current_platform.is_cuda():
+            return False
+        quant_method = self.experts.routed_experts.quant_method
+        experts_cls = getattr(quant_method, "experts_cls", None)
+        parallel_config = self.experts.moe_config.moe_parallel_config
+        return (
+            experts_cls in (TrtLlmNvFp4ExpertsMonolithic, TrtLlmNvFp4ExpertsModular)
+            and not parallel_config.use_all2all_kernels
+            and getattr(quant_method, "moe_kernel", None) is not None
+            and quant_method.moe_kernel.fused_experts.expects_unquantized_inputs
+        )
+
+    def _gate(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, contextlib.AbstractContextManager]:
+        """Router logits, and a context for the MoE call.
+
+        The router GEMM and the routed experts' NVFP4 input quantization both
+        read only ``hidden_states``, yet the experts quantize after routing. So
+        quantize on a side stream while the router GEMM runs and hand the
+        result to the experts. Every use of the side stream first waits for
+        the current stream, so the caching allocator never reuses a block that
+        the MoE call still reads.
+        """
+        if not self._prequantizes_input or hidden_states.dtype != torch.bfloat16:
+            return self.gate(hidden_states)[0], contextlib.nullcontext()
+        if self._input_quant_stream is None:
+            self._input_quant_stream = torch.cuda.Stream()
+        stream = self._input_quant_stream
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            quantized = quantize_nvfp4_per_token_input(hidden_states)
+        router_logits, _ = self.gate(hidden_states)
+        torch.cuda.current_stream().wait_stream(stream)
+        return router_logits, prequantized_nvfp4_per_token_input(
+            hidden_states, quantized
+        )
+
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """`forward` with the routed top-k reduction and all-reduce left open."""
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, prequantized = self._gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
-        shared_output, routed = _unpack(
-            self.experts._forward_impl(hidden_states, router_logits, hidden_states)
-        )
+        with prequantized:
+            shared_output, routed = _unpack(
+                self.experts._forward_impl(hidden_states, router_logits, hidden_states)
+            )
         assert shared_output is not None
         assert isinstance(routed, UnfinalizedMoEOutput)
         return MoEOutput(routed=routed, shared_output=shared_output)
@@ -675,10 +727,11 @@ class MiniMaxM3MoE(nn.Module):
             return self._forward_mega_moe(hidden_states)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        router_logits, prequantized = self._gate(hidden_states)
+        with prequantized:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
