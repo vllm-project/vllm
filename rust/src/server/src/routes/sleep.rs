@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, RawQuery, State};
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::protocol::utility::PauseMode;
+use vllm_engine_core_client::protocol::utility::{PauseMode, SleepLevel};
 use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
@@ -22,7 +22,7 @@ pub(crate) struct IsSleepingResponse {
 #[derive(Serialize)]
 pub struct SleepResponse {
     status: &'static str,
-    level: u32,
+    level: SleepLevel,
 }
 
 #[derive(Serialize)]
@@ -40,13 +40,13 @@ pub struct WakeUpResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SleepParams {
     #[serde(default = "default_sleep_level")]
-    level: u32,
+    level: SleepLevel,
     #[serde(default)]
     mode: PauseMode,
 }
 
-const fn default_sleep_level() -> u32 {
-    1
+const fn default_sleep_level() -> SleepLevel {
+    SleepLevel::OffloadWeights
 }
 
 fn invalid_query(error: QueryRejection) -> ApiError {
@@ -59,12 +59,6 @@ pub async fn sleep(
     params: Result<Query<SleepParams>, QueryRejection>,
 ) -> Result<Json<SleepResponse>, ApiError> {
     let Query(SleepParams { level, mode }) = params.map_err(invalid_query)?;
-    if level > 2 {
-        return Err(ApiError::invalid_request(
-            "level must be between 0 and 2",
-            Some("level"),
-        ));
-    }
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state

@@ -12,7 +12,7 @@ use vllm_engine_core_client::protocol::OpaqueValue;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_engine_core_client::protocol::utility::PauseMode;
+use vllm_engine_core_client::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use vllm_llm::{GenerateOutput, GenerateRequest, Llm, Result};
 
 pub type TokenStream = BoxStream<'static, Result<GenerateOutput>>;
@@ -90,7 +90,7 @@ pub trait EngineClient: Send + Sync {
 
     fn remove_lora<'a>(&'a self, lora_id: u64) -> BoxFuture<'a, Result<bool>>;
 
-    fn sleep<'a>(&'a self, level: u32, mode: PauseMode) -> BoxFuture<'a, Result<()>>;
+    fn sleep<'a>(&'a self, level: SleepLevel, mode: PauseMode) -> BoxFuture<'a, Result<()>>;
 
     fn release_kv_cache_memory<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
@@ -104,6 +104,12 @@ pub trait EngineClient: Send + Sync {
 
     fn resume_scheduler<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 
+    fn checkpoint_prepare<'a>(&'a self, mode: PauseMode) -> BoxFuture<'a, Result<Option<String>>>;
+
+    fn checkpoint_restore<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
+
+    fn checkpoint_state<'a>(&'a self) -> BoxFuture<'a, Result<(CheckpointState, Option<String>)>>;
+
     fn is_scheduler_paused<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
 
     fn start_profile<'a>(
@@ -111,6 +117,7 @@ pub trait EngineClient: Send + Sync {
         profile_prefix: Option<&'a str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&'a serde_json::Map<String, JsonValue>>,
     ) -> BoxFuture<'a, Result<()>>;
 
     fn stop_profile<'a>(&'a self, profile_prefix: Option<&'a str>) -> BoxFuture<'a, Result<()>>;
@@ -271,7 +278,7 @@ impl EngineClient for Llm {
         Box::pin(async move { Ok(self.engine_core_client().remove_lora(lora_id).await?) })
     }
 
-    fn sleep<'a>(&'a self, level: u32, mode: PauseMode) -> BoxFuture<'a, Result<()>> {
+    fn sleep<'a>(&'a self, level: SleepLevel, mode: PauseMode) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move { Ok(self.engine_core_client().sleep(level, mode).await?) })
     }
 
@@ -297,6 +304,18 @@ impl EngineClient for Llm {
         Box::pin(async move { Ok(self.engine_core_client().resume_scheduler().await?) })
     }
 
+    fn checkpoint_prepare<'a>(&'a self, mode: PauseMode) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(async move { Ok(self.engine_core_client().checkpoint_prepare(mode).await?) })
+    }
+
+    fn checkpoint_restore<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { Ok(self.engine_core_client().checkpoint_restore().await?) })
+    }
+
+    fn checkpoint_state<'a>(&'a self) -> BoxFuture<'a, Result<(CheckpointState, Option<String>)>> {
+        Box::pin(async move { Ok(self.engine_core_client().checkpoint_state().await?) })
+    }
+
     fn is_scheduler_paused<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move { Ok(self.engine_core_client().is_scheduler_paused().await?) })
     }
@@ -306,11 +325,17 @@ impl EngineClient for Llm {
         profile_prefix: Option<&'a str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&'a serde_json::Map<String, JsonValue>>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             Ok(self
                 .engine_core_client()
-                .start_profile(profile_prefix, delay_iterations, max_iterations)
+                .start_profile(
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                    profiler_kwargs,
+                )
                 .await?)
         })
     }

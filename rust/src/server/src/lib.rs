@@ -29,7 +29,8 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
+    OutputLogging, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -37,6 +38,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
+pub use routes::openai::utils::types::ReasoningEffort;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -64,7 +66,6 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -130,6 +131,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    let server_info = ServerInfoSnapshot::new(config, &client);
 
     let llm = Llm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -143,13 +145,20 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone())
         .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
