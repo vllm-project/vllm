@@ -807,16 +807,20 @@ def test_tiering_spec_rejects_secondary_tiers_across_nodes(
         return [True, group != spanning_group]
 
     monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
+    region_ctor = MagicMock()
     worker_ctor = MagicMock()
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
 
     if rejected:
         with pytest.raises(NotImplementedError, match="span several nodes"):
             spec.create_worker(MagicMock())
+        # Rejected before any CPU memory is allocated.
+        region_ctor.assert_not_called()
         worker_ctor.assert_not_called()
     else:
         spec.create_worker(MagicMock())
+        region_ctor.assert_called_once()
         worker_ctor.assert_called_once()
     # Without secondary tiers each node's region serves its own workers. With
     # them every group is queried, even after one spans nodes, since each
