@@ -11,7 +11,7 @@ and no padding: request by request, each rank's rows of the chunk in turn.
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -128,19 +128,24 @@ def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, out_dtype
 
 
 @pytest.mark.parametrize(
-    "cache_dtype, workspace_dtype",
+    "cache_dtype, variants",
     [
-        ("auto", torch.float16),
-        ("fp8", torch.float16),
-        ("fp8_ds_mla", torch.bfloat16),
+        ("auto", [(torch.float16, None)]),
+        # A plain fp8 cache may also take the fp8 path, which dequantizes the
+        # rows into the model dtype in the row gather.
+        (
+            "fp8",
+            [(torch.float16, None), (current_platform.fp8_dtype(), torch.float16)],
+        ),
+        ("fp8_ds_mla", [(torch.bfloat16, None)]),
     ],
 )
 def test_dcp_manager_registers_the_context_row_gather_warmup(
-    cache_dtype, workspace_dtype, monkeypatch
+    cache_dtype, variants, monkeypatch
 ):
     """Every MLA layer under DCP, model-specific ones included, builds an
     MLADCPManager while the model is built, so the manager registers the row
-    gather of the chunked-context loop with the JIT warmup."""
+    gather variants the chunked-context loop may launch with the JIT warmup."""
     from vllm.v1.attention.ops import dcp
 
     register = MagicMock()
@@ -168,9 +173,13 @@ def test_dcp_manager_registers_the_context_row_gather_warmup(
         use_pcp=False,
     )
 
-    register.assert_called_once_with(
-        dtype=workspace_dtype, kv_lora_rank=_KV_LORA_RANK, rope_dim=_QK_ROPE
-    )
+    dims = dict(kv_lora_rank=_KV_LORA_RANK, rope_dim=_QK_ROPE)
+    assert register.call_args_list == [
+        call(dtype=dtype, **dims)
+        if out_dtype is None
+        else call(dtype=dtype, out_dtype=out_dtype, **dims)
+        for dtype, out_dtype in variants
+    ]
 
 
 class _RecordingKVBProj:

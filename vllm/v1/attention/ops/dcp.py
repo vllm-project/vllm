@@ -26,6 +26,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
@@ -1498,11 +1499,22 @@ class MLADCPManager:
             # The row gather of the chunked-context loop, for every MLA layer
             # under DCP. The query head holds the latent and rope parts and the
             # output head the latent part.
-            _gather_context_rows.register_warmup(
-                dtype=get_dcp_context_workspace_dtype(vllm_config),
+            dims = dict(
                 kv_lora_rank=output_head_dim,
                 rope_dim=query_head_dim - output_head_dim,
             )
+            _gather_context_rows.register_warmup(
+                dtype=get_dcp_context_workspace_dtype(vllm_config), **dims
+            )
+            if vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3"):
+                # The backend may keep the rows of a plain fp8 cache fp8 and
+                # dequantize them in the row gather instead (see
+                # MLACommonMetadataBuilder.use_fp8_dcp_context).
+                _gather_context_rows.register_warmup(
+                    dtype=current_platform.fp8_dtype(),
+                    out_dtype=vllm_config.model_config.dtype,
+                    **dims,
+                )
         self.query_gather = (
             None
             if use_pcp

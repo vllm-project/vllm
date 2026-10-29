@@ -202,7 +202,7 @@ import functools
 import itertools
 import math
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
@@ -1679,6 +1679,10 @@ class MLACommonPrefillMetadata:
         context_lens_list: list[int]
         empty_token_slices: list[slice]
         dcp_manager: MLADCPManager | None = None
+        # Set when the DCP context rows stay fp8 as stored through the local
+        # gather and the all-gather: the dtype the row gather dequantizes them
+        # into, which is the dtype of the default path's workspace.
+        fp8_context_dtype: torch.dtype | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -2339,6 +2343,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether can support non-causal multi-token decode with DCP KV cache.
     supports_non_causal_multi_token_dcp: ClassVar[bool] = False
 
+    # Whether the DCP context loop may keep the context rows in fp8 (see
+    # use_fp8_dcp_context) for this backend's layers.
+    supports_fp8_dcp_context: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
@@ -2441,6 +2449,48 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         return model_dtype
 
+    @classmethod
+    def use_fp8_dcp_context(
+        cls,
+        dcp_world_size: int,
+        q_data_type: torch.dtype,
+        model_dtype: torch.dtype,
+        kv_cache_dtypes: Iterable[str],
+    ) -> bool:
+        """Whether a KV-cache group gathers its DCP context rows in fp8.
+
+        The fp8 path copies and all-gathers the rows as stored, then
+        ``gather_dcp_context_rows`` dequantizes them with the layer's k_scale
+        into the model dtype. With a plain fp8 cache the default path's
+        dequantizing gather writes the same values into its model-dtype
+        workspace, and its row gather only copies rows, so both paths give the
+        prefill attention the same K/V. Every DCP rank holds the same k_scale,
+        so dequantizing after the all-gather equals dequantizing each rank's
+        rows before it.
+
+        Args:
+            dcp_world_size: Decode context parallel world size.
+            q_data_type: Data type of the prefill query.
+            model_dtype: Model dtype, the dtype of the default DCP workspace.
+            kv_cache_dtypes: KV cache dtype of every layer of the group.
+
+        Returns:
+            True when the backend opts in, DCP is on, the prefill query is fp8,
+            the model dtype is bf16 or fp16 and every layer has a plain fp8
+            (e4m3) cache.
+
+        """
+        return (
+            cls.supports_fp8_dcp_context
+            and dcp_world_size > 1
+            and q_data_type == _FP8_DTYPE
+            and model_dtype in (torch.bfloat16, torch.float16)
+            and all(
+                kv_cache_dtype in ("fp8", "fp8_e4m3")
+                for kv_cache_dtype in kv_cache_dtypes
+            )
+        )
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -2507,6 +2557,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         self.dcp_manager: MLADCPManager | None = None
+        # Gather and all-gather the DCP context rows in fp8 as stored when that
+        # gives the prefill attention the same K/V as the default path.
+        self.fp8_dcp_context = self.use_fp8_dcp_context(
+            self.dcp_world_size,
+            self.q_data_type,
+            self.model_config.dtype,
+            (ctx[name].impl.kv_cache_dtype for name in layer_names),
+        )
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
@@ -2519,7 +2577,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                dtype=get_dcp_context_workspace_dtype(vllm_config),
+                dtype=_FP8_DTYPE
+                if self.fp8_dcp_context
+                else get_dcp_context_workspace_dtype(vllm_config),
                 device=device,
             )
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
@@ -2528,6 +2588,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 self.chunked_prefill_workspace,
                 self.chunked_prefill_workspace_size,
             )
+            if self.fp8_dcp_context:
+                logger.info_once("Gathering the MLA DCP chunked context in fp8.")
         else:
             self.chunked_prefill_workspace = torch.empty(
                 (
@@ -2708,6 +2770,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_manager=self.dcp_manager,
                 align_indptr=align_indptr,
             )
+            if self.fp8_dcp_context and chunked_context_metadata is not None:
+                chunked_context_metadata.fp8_context_dtype = self.model_config.dtype
 
             prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
@@ -3076,6 +3140,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output = None
         output_lse = None
         workspace = chunked_context.workspace
+        # Set when the rows stay fp8 as stored until the row gather.
+        fp8_context_dtype = chunked_context.fp8_context_dtype
+        if fp8_context_dtype is not None:
+            assert workspace.dtype == current_platform.fp8_dtype(), workspace.dtype
+            assert self.kv_cache_dtype in ("fp8", "fp8_e4m3"), self.kv_cache_dtype
+            assert k_scale is not None
 
         for chunk in chunked_context.chunks:
             assert chunk.padded_local_cu_seq_lens is not None
@@ -3094,7 +3164,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
-            elif is_quantized_kv_cache(self.kv_cache_dtype):
+            elif (
+                is_quantized_kv_cache(self.kv_cache_dtype) and fp8_context_dtype is None
+            ):
                 assert k_scale is not None
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -3108,6 +3180,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     seq_starts=chunk.starts,
                 )
             else:
+                # Unquantized rows, or fp8 rows kept as stored and dequantized
+                # by the row gather after the all-gather.
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
@@ -3134,9 +3208,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
             )
-            # Drop the DCP padding and order the rows by the chunk's row indices.
+            # Drop the DCP padding and order the rows by the chunk's row indices;
+            # on the fp8 path, also dequantize them into the default path's
+            # workspace dtype.
             kv_c_normed, k_pe = gather_dcp_context_rows(
-                cur_allgather_kvcache, chunk.context_row_indices, self.kv_lora_rank
+                cur_allgather_kvcache,
+                chunk.context_row_indices,
+                self.kv_lora_rank,
+                k_scale=k_scale if fp8_context_dtype is not None else None,
+                out_dtype=fp8_context_dtype,
             )
             if kv_b_proj_input_dtype is not None:
                 kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
