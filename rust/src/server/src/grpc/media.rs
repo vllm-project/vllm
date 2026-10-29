@@ -9,7 +9,7 @@ use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
-use vllm_chat::multimodal::MultimodalInput;
+use vllm_chat::multimodal::{MediaPart, MultimodalInput};
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmModality, PlaceholderRange};
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
@@ -153,7 +153,7 @@ fn mixed_media_error() -> Status {
 fn raw_parts_from_proto(
     media: Vec<pb::MediaItem>,
     video_fps: Option<f64>,
-) -> Result<Vec<MediaContentPart>, Status> {
+) -> Result<Vec<MediaPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
         let modality = item.modality();
@@ -230,7 +230,7 @@ fn raw_parts_from_proto(
             (_, pb::media_item::Source::Features(_)) => return Err(mixed_media_error()),
             (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
         };
-        parts.push(part);
+        parts.push(MediaPart::Content(part));
     }
     Ok(parts)
 }
@@ -319,14 +319,16 @@ mod tests {
         };
         expect_test::expect![[r#"
             [
-                VideoUrl {
-                    url: "https://example.com/clip.mp4",
-                    uuid: None,
-                    fps: Some(
-                        1.0,
-                    ),
-                    max_long_side_pixel: None,
-                },
+                Content(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: None,
+                        fps: Some(
+                            1.0,
+                        ),
+                        max_long_side_pixel: None,
+                    },
+                ),
             ]
         "#]]
         .assert_debug_eq(&parts);
