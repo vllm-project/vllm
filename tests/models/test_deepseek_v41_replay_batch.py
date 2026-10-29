@@ -11,6 +11,8 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.config.engram import EngramConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
@@ -19,9 +21,11 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.models.deepseek_v41.common.engram import _validate_remote_graph_mode
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -73,6 +77,8 @@ def state(monkeypatch, request):
     cfg.aux_output_config.enable_return_routed_experts = False
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    cfg.engram_config = None
+    cfg.kv_transfer_config = None
     layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
@@ -216,6 +222,62 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, 1, 2, 3, *range(304 - WINDOW, 304)]
     assert build.batch.query_start_loc.tolist() == [0, 1, 4, 4 + WINDOW]
+
+
+@pytest.mark.parametrize(
+    "eager,mode,breakable,allowed",
+    [
+        (True, CUDAGraphMode.NONE, False, True),
+        (False, CUDAGraphMode.PIECEWISE, True, True),
+        (False, CUDAGraphMode.PIECEWISE, False, False),
+        (False, CUDAGraphMode.FULL, True, False),
+        (False, CUDAGraphMode.FULL_AND_PIECEWISE, True, False),
+        (False, CUDAGraphMode.NONE, True, False),
+    ],
+)
+def test_remote_graph_requires_breakable_piecewise(eager, mode, breakable, allowed):
+    if allowed:
+        _validate_remote_graph_mode(eager, mode, breakable)
+    else:
+        with pytest.raises(ValueError, match="breakable PIECEWISE"):
+            _validate_remote_graph_mode(eager, mode, breakable)
+
+
+@pytest.mark.parametrize(
+    "remote,role,keep_all",
+    [
+        (False, "kv_producer", False),
+        (True, "kv_consumer", False),
+        (True, "kv_producer", True),
+        (True, "kv_both", True),
+    ],
+)
+def test_remote_producer_keeps_prefill_rows(state, remote, role, keep_all):
+    """Remote P/D producer retains full context; other paths still trim."""
+    state.vllm_config.engram_config = EngramConfig(
+        rdma_provider="test_provider" if remote else None, dp_shared_memory=False
+    )
+    state.vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="test_connector", kv_role=role
+    )
+    request = NewRequestData(
+        req_id="test",
+        prompt_token_ids=[1] * 300,
+        mm_features=[],
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        block_ids=([],),
+        num_computed_tokens=0,
+        lora_request=None,
+    )
+    state.add_request(0, request)
+    batch = _input_batch([300], [300], [True])
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    if keep_all:
+        assert replay is None
+    else:
+        assert replay is not None
+        assert replay.rows.tolist() == list(range(300 - WINDOW, 300))
 
 
 def test_prompt_logprobs_requests_keep_their_rows(state):

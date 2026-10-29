@@ -46,8 +46,12 @@ import numpy as np
 import torch
 from torch import nn
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
@@ -79,6 +83,16 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def _validate_remote_graph_mode(
+    enforce_eager: bool, mode: CUDAGraphMode, breakable: bool
+) -> None:
+    if not enforce_eager and (mode != CUDAGraphMode.PIECEWISE or not breakable):
+        raise ValueError(
+            "rdma_provider requires enforce_eager or breakable PIECEWISE CUDA graphs"
+        )
+
 
 # Per-rank token slot from which the Engram DP exchange switches from peer
 # reads to all-to-all.
@@ -1686,8 +1700,11 @@ class Engram(nn.Module):
         assert engram_config is not None
         if engram_config.rdma_provider:
             load_config = vllm_config.load_config
-            if not vllm_config.model_config.enforce_eager:
-                raise ValueError("rdma_provider currently requires enforce_eager")
+            _validate_remote_graph_mode(
+                vllm_config.model_config.enforce_eager,
+                vllm_config.compilation_config.cudagraph_mode,
+                is_breakable_cudagraph_enabled(),
+            )
             if (
                 load_config.safetensors_load_strategy != "lazy"
                 or load_config.load_format != "safetensors"

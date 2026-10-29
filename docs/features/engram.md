@@ -109,8 +109,11 @@ illustrates the contract and documents its experimental research dependencies.
 The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
 size 1.
 It requires `--load-format safetensors --safetensors-load-strategy lazy` and
-single-threaded loading. The current research provider also requires
-`--enforce-eager`; CUDA graph capture is not validated. DP table sharing,
+single-threaded loading. The research provider accepts `--enforce-eager` or
+breakable `PIECEWISE` CUDA graphs; `FULL` capture is not supported. In an
+opt-in remote KV-producer process, decoder replay retains all prefill rows
+until bounded replay equivalence has been established. Prefill batches whose
+token counts would be padded for a graph run eagerly. DP table sharing,
 `embedding_across_dp`, and `use_thp` cannot be combined with it. The provider is
 responsible for checkpoint identity, remote memory registration, completion
 visibility and safe lifetime.

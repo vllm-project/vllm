@@ -283,13 +283,27 @@ class DeepseekV41ModelState(DefaultModelState):
         self._replay_start_np[req_index] = new_req_data.replay_start
         if self.decoder_replay_layers is not None:
             params = new_req_data.sampling_params
+            engram_config = self.vllm_config.engram_config
+            kv_config = self.vllm_config.kv_transfer_config
+            # Preserve the full producer-side context until bounded replay is
+            # proven equivalent for disaggregated remote-table requests.
+            remote_producer = bool(
+                engram_config
+                and engram_config.rdma_provider
+                and kv_config
+                and kv_config.is_kv_producer
+            )
             self._keeps_rows_np[req_index] = (
-                params is not None
-                and (
-                    params.prompt_logprobs is not None
-                    or params.prompt_logprob_token_ids is not None
+                (
+                    params is not None
+                    and (
+                        params.prompt_logprobs is not None
+                        or params.prompt_logprob_token_ids is not None
+                    )
                 )
-            ) or self.vllm_config.aux_output_config.enable_return_routed_experts
+                or self.vllm_config.aux_output_config.enable_return_routed_experts
+                or remote_producer
+            )
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
