@@ -20,12 +20,12 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
-    _build_decode_scatter_indices,
+    _build_decode_gather_indices,
     _decode_topk_seq_lens,
     _fill_causal_indices,
     _fill_short_decode_causal_indices,
+    _gather_decode_tokens_by_request,
     _gather_workspace_shapes,
-    _scatter_decode_tokens_by_request,
     kv_cache_as_quant_view,
 )
 from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
@@ -475,36 +475,24 @@ def sparse_attn_indexer_kpool(
                 lmax = int(decode_metadata.decode_lens.max().item())
             if not use_uniform:
                 # Non-uniform decode_lens (mixed plain-decode + spec-verify, or
-                # a variable MTP-verify batch): scatter actual tokens into a
+                # a variable MTP-verify batch): gather actual tokens into a
                 # padded [B, lmax] layout. int32 tensors can't go through
-                # pack_seq_triton (float/uint8 only). The scatter indices are
-                # shared by all five scatters below (and the tail slot one).
-                scatter_idx = _build_decode_scatter_indices(
-                    group_lens, num_requests, num_decode_tokens
+                # pack_seq_triton (float/uint8 only). Reuse gather indices
+                # across keys, gates, slots, and positions.
+                gather_idx = _build_decode_gather_indices(
+                    group_lens, lmax, num_decode_tokens
                 )
-                dec_k = _scatter_decode_tokens_by_request(
-                    k[:num_decode_tokens], 0, num_requests, lmax, scatter_idx
+                dec_k = _gather_decode_tokens_by_request(
+                    k[:num_decode_tokens], 0, gather_idx
                 )
-                dec_gate = _scatter_decode_tokens_by_request(
-                    gate_score[:num_decode_tokens],
-                    0,
-                    num_requests,
-                    lmax,
-                    scatter_idx,
+                dec_gate = _gather_decode_tokens_by_request(
+                    gate_score[:num_decode_tokens], 0, gather_idx
                 )
-                dec_slot = _scatter_decode_tokens_by_request(
-                    slot_mapping[:num_decode_tokens],
-                    -1,
-                    num_requests,
-                    lmax,
-                    scatter_idx,
+                dec_slot = _gather_decode_tokens_by_request(
+                    slot_mapping[:num_decode_tokens], -1, gather_idx
                 )
-                dec_pos = _scatter_decode_tokens_by_request(
-                    positions[:num_decode_tokens].to(torch.int32),
-                    -1,
-                    num_requests,
-                    lmax,
-                    scatter_idx,
+                dec_pos = _gather_decode_tokens_by_request(
+                    positions[:num_decode_tokens].to(torch.int32), -1, gather_idx
                 )
             else:
                 next_n = num_decode_tokens // num_requests
@@ -527,12 +515,8 @@ def sparse_attn_indexer_kpool(
             if tail_meta is None or tail_kv_cache is None:
                 dec_tail_slot = None
             elif not use_uniform:
-                dec_tail_slot = _scatter_decode_tokens_by_request(
-                    tail_meta.slot_mapping[:num_decode_tokens],
-                    -1,
-                    num_requests,
-                    lmax,
-                    scatter_idx,
+                dec_tail_slot = _gather_decode_tokens_by_request(
+                    tail_meta.slot_mapping[:num_decode_tokens], -1, gather_idx
                 )
             else:
                 dec_tail_slot = tail_meta.slot_mapping[:num_decode_tokens].view(shape2)
@@ -544,7 +528,7 @@ def sparse_attn_indexer_kpool(
                 # tokens in position order internally, preserving the
                 # pool-completion read-after-stash dependency that the loop
                 # provided. Inputs are already grouped per request (uniform:
-                # view; non-uniform: _scatter_decode_tokens_by_request padded to
+                # view; non-uniform: _gather_decode_tokens_by_request padded to
                 # [B, lmax]) — no per-token .contiguous() copies needed.
                 kpool_ops.kpool_decode_update_and_maybe_write_cache_batched(
                     kv_cache_raw,
