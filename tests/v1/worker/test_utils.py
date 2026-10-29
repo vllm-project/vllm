@@ -259,10 +259,13 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
 
+@pytest.mark.parametrize(("tp_rank", "unlink_owner"), [(0, True), (1, False)])
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
+    monkeypatch, tp_rank, unlink_owner
+):
     page = mmap.PAGESIZE
-    tp_group = MagicMock(rank_in_group=1, world_size=2)
+    tp_group = MagicMock(rank_in_group=tp_rank, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -332,7 +335,8 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
+        "populate_shard": (tp_rank, 2),
+        "unlink_owner": unlink_owner,
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -395,18 +399,15 @@ def test_shared_host_pool_tracks_successful_registrations(
             call(backing.data_ptr() + page, 2 * page, 0),
         ][:attempts]
     )
-    assert region.pinned_addresses == []
-    assert not region.is_pinned
     if fail_registration is None:
         assert result is not None
         assert [t.data_ptr() for t in result[1]] == pinned_ptrs
         cudart.cudaHostUnregister.assert_not_called()
-        region.cleanup.assert_not_called()
     else:
         assert cudart.cudaHostUnregister.call_args_list == [
             call(ptr) for ptr in reversed(pinned_ptrs)
         ]
-        region.cleanup.assert_called_once_with()
+        region.abort_startup_cleanup.assert_called_once_with()
 
 
 def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):

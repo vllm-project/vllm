@@ -406,6 +406,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        unlink_owner=tp_group.rank_in_group == 0,
     )
     pinned: list[torch.Tensor] = []
     try:
@@ -419,7 +420,7 @@ def allocate_hisparse_host_pools(
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        release_pinned_state([], pinned, region)
+        release_pinned_state([], pinned, region, abort_startup=True)
         raise
     return pools, pinned, region
 
@@ -428,6 +429,8 @@ def release_pinned_state(
     runtimes: list[HiSparseRuntime],
     pinned_host_pools: list[torch.Tensor],
     shared_host_region: SharedOffloadRegion | None = None,
+    *,
+    abort_startup: bool = False,
 ) -> None:
     """Synchronize and release registered host KV pools."""
     if pinned_host_pools or shared_host_region is not None:
@@ -473,7 +476,10 @@ def release_pinned_state(
         del runtime.registered_host_pool
         del runtime.hot_backing
     if shared_host_region is not None:
-        shared_host_region.cleanup()
+        if abort_startup:
+            shared_host_region.abort_startup_cleanup()
+        else:
+            shared_host_region.cleanup()
 
 
 def hisparse_prefill_staging_remap(

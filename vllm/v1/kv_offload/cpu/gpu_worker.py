@@ -205,6 +205,7 @@ def pin_mmap_region(
 ) -> None:
     """Register row-aligned chunks or this worker's slots, rolling back on failure."""
     rank = region.rank
+    assert region._base is not None
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
