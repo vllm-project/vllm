@@ -264,6 +264,38 @@ def test_step_damping_scales_with_the_evidence():
     assert refit_with(0.0) == (0.0, 0.0)
 
 
+@pytest.mark.parametrize("complement_mass", [1e-3, 1e-6, 1e-12])
+def test_feature_resolves_a_tiny_complement_mass(complement_mass: float):
+    """A confident row's whole signal lives below an fp32 ulp of 1.0.
+
+    The feature is -log of the mass on every token but the top one. Summing all
+    of it, including the top token's own unit term, and subtracting 1 afterwards
+    cancels that mass away entirely once it drops under ~6e-8 -- and a drafter
+    on an easy continuation is far more confident than that. Spread the mass
+    over the tail so no single competitor is close to the top token.
+    """
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+
+    # Top logit at 0; the rest share `complement_mass` of relative mass.
+    logits = torch.full(
+        (1, VOCAB_SIZE), float(torch.tensor(complement_mass / (VOCAB_SIZE - 1)).log())
+    ).to(device)
+    logits[0, 0] = 0.0
+    idx_mapping = torch.zeros(1, device=device, dtype=torch.int32)
+    draft_step = torch.tensor(0, device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
+
+    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+
+    # fp64 reference, computed without ever forming 1 + mass.
+    expected = -torch.tensor(complement_mass, dtype=torch.float64).log()
+    torch.testing.assert_close(
+        estimator.features[0, 0].double(), expected, rtol=1e-5, atol=0
+    )
+
+
 def test_feature_ignores_which_token_was_drawn():
     """The score must depend on the draft distribution, not on the draw.
 
