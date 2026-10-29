@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
-    WeightVersionSpan,
+    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
+    GenerateRequest, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -199,7 +199,7 @@ async fn connect_async_llm_with_ipc(
     client_index: u32,
     model_name: &str,
     ipc: &IpcNamespace,
-) -> Llm {
+) -> EngineCoreLlm {
     let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name(model_name)
@@ -211,7 +211,7 @@ async fn connect_async_llm_with_ipc(
     )
     .await
     .unwrap();
-    Llm::new(client)
+    EngineCoreLlm::new(client)
 }
 
 fn request_metrics_model_name(prefix: &str) -> String {
@@ -1280,7 +1280,7 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
     )
     .await
     .unwrap();
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let mut request = sample_generate_request("req-no-log-stats", 8);
     request.arrival_time = None;
     request.lora_request = Some(LoraRequest {

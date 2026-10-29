@@ -49,7 +49,7 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -282,8 +282,8 @@ fn engine_outputs_for_request(
     .into()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
+fn test_llm(client: EngineCoreClient) -> EngineCoreLlm {
+    EngineCoreLlm::new(client).with_request_id_randomization(false)
 }
 
 fn sample_logprobs_for_token(token_id: u32, alternate_token_id: u32) -> Logprobs {
@@ -1542,7 +1542,7 @@ where
 }
 
 async fn test_app_with_chat_and_engine_request_check<F>(
-    build_chat: impl FnOnce(Llm) -> ChatLlm,
+    build_chat: impl FnOnce(EngineCoreLlm) -> ChatLlm,
     check_request: F,
 ) -> (axum::Router, MockEngineTask)
 where
@@ -6227,7 +6227,8 @@ async fn chat_completions_header_request_id_takes_precedence() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new(
         vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
         chat,
@@ -6323,7 +6324,8 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -6453,7 +6455,8 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],

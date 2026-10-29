@@ -14,7 +14,7 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use crate::error::{Error, Result};
 use crate::request_metrics::current_unix_timestamp_secs;
 
-/// Tokenized decoder-only generate request accepted by [`crate::Llm`].
+/// Tokenized decoder-only generate request accepted by [`crate::EngineCoreLlm`].
 ///
 /// This is the first-stage Rust subset of the inputs that eventually flow into
 /// Python `AsyncLLM.generate()`. The boundary is intentionally above
