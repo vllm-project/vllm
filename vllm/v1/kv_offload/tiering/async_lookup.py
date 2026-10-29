@@ -230,13 +230,15 @@ class AsyncLookupManager(ABC):
                 state.result = False
 
     def invalidate(self, keys: Collection[OffloadKey]) -> None:
-        """Drop cached absent verdicts for ``keys`` after a successful store, so
-        the scheduler re-probes instead of serving a stale negative. Only
-        resolved-absent entries (result is False) are dropped; present,
-        in-flight, and unknown keys are left alone."""
+        """Drop absent or unresolved verdicts for keys stored to this tier.
+
+        A probe that started before the store may still return a stale miss, so
+        pending and in-flight entries must be dropped along with resolved
+        misses. Present and unknown keys are left alone.
+        """
         for key in keys:
             state = self._lookup_state.get(key)
-            if state is not None and state.result is False:
+            if state is not None and state.result is not True:
                 del self._lookup_state[key]
 
     def cleanup(self, req_id: str) -> None:

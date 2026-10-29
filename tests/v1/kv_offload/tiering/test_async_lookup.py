@@ -434,9 +434,7 @@ class TestAsyncLookupManager:
         mgr.shutdown()
 
     def test_invalidate_is_noop_for_present_and_unknown_keys(self):
-        """invalidate() is conservative: it drops only resolved-absent (False)
-        entries. A present (True) entry is left alone, and an unknown key is a
-        no-op (no entry is planted)."""
+        """invalidate() preserves present entries and ignores unknown keys."""
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         ctx = _ctx("reqA")
         assert mgr.lookup(_key(1), ctx) is None
@@ -478,3 +476,49 @@ class TestAsyncLookupManager:
         assert key not in mgr._lookup_state
         assert "reqA" not in mgr._req_keys
         mgr.shutdown()
+
+    def test_invalidate_discards_stale_in_flight_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A probe started before a successful store must not restore its miss."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+        calls = 0
+
+        def blocking_lookup(keys, req_context):
+            nonlocal calls
+            calls += 1
+            results = list(batch_lookup(keys, req_context))
+            if calls == 1:
+                probe_started.set()
+                if not release_probe.wait(timeout=5):
+                    raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key, _ctx("req_a")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+
+            # The first probe observed absence before the store completed.
+            mgr._existing.add(key)
+            mgr.invalidate([key])
+            assert key not in mgr._lookup_state
+
+            # A fresh generation observes the successful store. The older
+            # in-flight result must be ignored when it arrives first.
+            assert mgr.lookup(key, _ctx("req_b")) is None
+            mgr.flush()
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        assert calls == 2
+        assert mgr.lookup(key, _ctx("req_b")) is True
+        mgr.cleanup("req_a")
+        mgr.cleanup("req_b")

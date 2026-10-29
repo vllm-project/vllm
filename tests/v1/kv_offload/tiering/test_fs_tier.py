@@ -231,6 +231,18 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert os.path.exists(dest), f"Expected file at {dest}"
 
 
+def test_store_invalidates_a_cached_miss(fs_tier):
+    tier, _ = fs_tier
+    block_key = key(1)
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.MISS]
+
+    tier.submit_store(make_job(1, [block_key], [0]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.HIT]
+
+
 def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
     """Losing the race to publish a block must not fail the store job.
 

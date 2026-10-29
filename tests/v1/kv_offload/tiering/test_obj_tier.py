@@ -321,6 +321,16 @@ class TestMockObjTierBasic:
         assert results[0].success
         assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.HIT]
 
+    def test_store_invalidates_a_cached_miss(self):
+        block_key = key(1)
+        assert lookup_and_wait(self.tier, [block_key]) == [LookupResult.MISS]
+
+        self.tier.submit_store(make_job(1, [block_key], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert lookup_and_wait(self.tier, [block_key]) == [LookupResult.HIT]
+
     def test_lookup_unrelated_key_returns_false(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
