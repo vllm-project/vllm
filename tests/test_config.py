@@ -1727,17 +1727,54 @@ def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "dp_size, across_dp, expected",
-    [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
+    "tp_size,dp_size,across_dp,pcp_size,pcp_shared,expected",
+    [
+        (4, 1, False, 1, False, 4),
+        (4, 1, True, 1, False, 4),
+        (4, 2, False, 1, False, 4),
+        (4, 2, True, 1, False, 8),
+        (1, 1, False, 4, True, 1),
+        (2, 1, False, 2, True, 2),
+    ],
 )
-def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: int):
+def test_engram_tensor_parallel_size(
+    tp_size, dp_size, across_dp, pcp_size, pcp_shared, expected
+):
     parallel = ParallelConfig(
-        tensor_parallel_size=4,
+        tensor_parallel_size=tp_size,
         data_parallel_size=dp_size,
+        prefill_context_parallel_size=pcp_size,
         distributed_executor_backend="mp",
     )
-    config = EngramConfig(embedding_across_dp=across_dp)
+    config = EngramConfig(embedding_across_dp=across_dp, pcp_shared_memory=pcp_shared)
+    config.resolve_dp_shared_memory(parallel)
+    config.verify_parallel_config(parallel)
     assert config.get_parallel_size(parallel) == expected
+    if pcp_shared:
+        assert config.dp_shared_memory is False
+
+
+@pytest.mark.parametrize("pcp_size,dp_size,pp_size", [(1, 1, 1), (2, 2, 1), (2, 1, 2)])
+def test_engram_pcp_sharing_rejects_unsupported_topology(pcp_size, dp_size, pp_size):
+    parallel = ParallelConfig(
+        prefill_context_parallel_size=pcp_size,
+        data_parallel_size=dp_size,
+        pipeline_parallel_size=pp_size,
+        distributed_executor_backend="mp",
+    )
+    config = EngramConfig(pcp_shared_memory=True)
+    config.resolve_dp_shared_memory(parallel)
+    with pytest.raises(ValueError, match="PCP>1 and DP=PP=1"):
+        config.verify_parallel_config(parallel)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"cpu_offload": False}, {"dp_shared_memory": True}, {"use_thp": True}],
+)
+def test_engram_pcp_sharing_requires_compatible_host_storage(options):
+    with pytest.raises(ValueError, match="pcp_shared_memory requires cpu_offload"):
+        EngramConfig(pcp_shared_memory=True, **options)
 
 
 @pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])

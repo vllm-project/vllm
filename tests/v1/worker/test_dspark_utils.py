@@ -104,6 +104,7 @@ def test_draft_context_parallelism_without_changing_target(
     )
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
+        engram_config=None,
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(use_mla=use_mla)
         ),

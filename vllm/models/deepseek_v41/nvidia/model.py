@@ -812,6 +812,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ):
             engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
 
+        if (
+            self.engram_layout is not None
+            and engram_config
+            and engram_config.pcp_shared_memory
+        ):
+            can_share_engram_tables(self.engram_layout, pcp=True)
+
         if self.engram_layout is not None and engram_config and engram_config.use_thp:
             # Release old checkpoint cache before allocating the Engram host tables.
             model_config = vllm_config.model_config

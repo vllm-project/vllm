@@ -52,8 +52,10 @@ from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
     get_engram_dp_size,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_gather,
 )
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -882,18 +884,26 @@ class DPSharedEngramStorage:
         return self._views
 
 
-def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
-    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
-    if get_engram_dp_size() == 1:
+def can_share_engram_tables(
+    layout: EngramLayout, block_size: int = 32, *, pcp: bool = False
+) -> bool:
+    """Whether replicas are co-located and /dev/shm can hold the full tables."""
+    group: GroupCoordinator | None
+    if pcp:
+        group = get_pcp_group()
+        if group.world_size <= 1:
+            raise ValueError("Engram PCP sharing requires PCP size > 1.")
+    elif get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
             "storing the offloaded tables per rank instead of sharing them."
         )
         return False
+    else:
+        group = get_engram_dp_group()
     num_bytes = sum(layout.num_embeddings) * (
         layout.head_dim + layout.head_dim // block_size
     )
-    group = get_engram_dp_group()
     assert group is not None
     # Only the leader allocates, so every replica follows its check.
     error = None
@@ -906,6 +916,22 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
     error = group.broadcast_object(error)
+    if pcp:
+        # Check capacity before the IPC probe writes its shared-memory page.
+        # All TP shards must finish checking before any starts allocating.
+        tp_group = get_tp_group()
+        errors: list[str | None] = [None] * tp_group.world_size
+        torch.distributed.all_gather_object(errors, error, group=tp_group.cpu_group)
+        failures = "; ".join(item for item in errors if item is not None)
+        if failures:
+            raise RuntimeError("Insufficient shared memory for Engram PCP: " + failures)
+        same_host = all(in_the_same_node_as(group.cpu_group, 0))
+        same_host_by_tp = [False] * tp_group.world_size
+        torch.distributed.all_gather_object(
+            same_host_by_tp, same_host, group=tp_group.cpu_group
+        )
+        if not all(same_host_by_tp):
+            raise ValueError("Engram PCP sharing requires same-host PCP replicas.")
     if error is not None:
         logger.warning_once(
             "Sharding the offloaded Engram tables across DP replicas: %s", error
@@ -970,14 +996,20 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        pcp_shared_memory: bool = False,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
+        self.pcp_shared_memory = pcp_shared_memory
         self.use_thp = use_thp
         self.dp_size = get_engram_dp_size()
+        if pcp_shared_memory and (
+            not cpu_offload or dp_shared_memory or use_thp or self.dp_size != 1
+        ):
+            raise ValueError("PCP shared storage requires private-DP CPU tables.")
         if dp_shared_memory:
             if not cpu_offload:
                 raise ValueError("dp_shared_memory requires cpu_offload=True")
@@ -1069,7 +1101,11 @@ class ParallelEngramEmbedding(nn.Module):
                 self.part_num_embeddings,
                 dim,
                 self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
-                "shared across DP replicas" if dp_shared_memory else "per rank",
+                "shared across PCP replicas"
+                if pcp_shared_memory
+                else "shared across DP replicas"
+                if dp_shared_memory
+                else "per rank",
             )
 
     def _get_shard_info(self) -> tuple[int, int]:
@@ -1110,8 +1146,8 @@ class ParallelEngramEmbedding(nn.Module):
                 buffer[: rows * self.dim].view(torch.float8_e4m3fn).view(rows, -1),
                 buffer[values : values + rows * scale_dim].view(rows, scale_dim),
             )
-        if self.dp_shared_memory:
-            group = get_engram_dp_group()
+        if self.dp_shared_memory or self.pcp_shared_memory:
+            group = get_pcp_group() if self.pcp_shared_memory else get_engram_dp_group()
             assert group is not None
             storage = DPSharedEngramStorage(
                 self.part_num_embeddings, self.dim, self.block_size, group
@@ -1659,6 +1695,7 @@ class Engram(nn.Module):
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
+            pcp_shared_memory=engram_config.pcp_shared_memory,
             use_thp=engram_config.use_thp,
         )
 

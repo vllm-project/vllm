@@ -55,8 +55,20 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    pcp_shared_memory: bool = False
+    """Share each TP shard of CPU-offloaded V4.1 tables across same-host PCP
+    replicas. Requires DP=PP=1 and sufficient shared /dev/shm capacity.
+    This changes storage ownership only, not token or hash-head sharding."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.pcp_shared_memory and (
+            not self.cpu_offload or self.dp_shared_memory or self.use_thp
+        ):
+            raise ValueError(
+                "pcp_shared_memory requires cpu_offload without "
+                "dp_shared_memory or use_thp."
+            )
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -72,6 +84,11 @@ class EngramConfig:
             if model_config is not None
             else None
         )
+        if self.pcp_shared_memory and (
+            model_config is None
+            or model_config.architecture != "DeepseekV41ForCausalLM"
+        ):
+            raise ValueError("pcp_shared_memory currently requires DeepSeek-V4.1.")
         if (
             model_config is None
             or field is None
@@ -94,6 +111,12 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.pcp_shared_memory and (
+            parallel_config.prefill_context_parallel_size <= 1
+            or parallel_config.data_parallel_size != 1
+            or parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("pcp_shared_memory requires PCP>1 and DP=PP=1.")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
