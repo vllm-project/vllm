@@ -90,13 +90,16 @@ def _view_in_place(
         return None  # e.g. a transposed view of the same storage: rebind keeps it
     itemsize = new_tensor.element_size()
     offset = old_param.storage_offset() * old_param.element_size()
-    if offset % itemsize or offset + _extent(new_tensor) * itemsize > storage.nbytes():
+    if (
+        offset % itemsize
+        or offset + storage_extent(new_tensor) * itemsize > storage.nbytes()
+    ):
         return None
     view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
     return view.set_(storage, offset // itemsize, shape, stride)
 
 
-def _extent(t: torch.Tensor) -> int:
+def storage_extent(t: torch.Tensor) -> int:
     """Number of elements spanned by ``t`` in its storage."""
     if t.numel() == 0:
         return 0
@@ -114,10 +117,10 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
         new.numel() == 0
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
-        or _extent(new) != new.numel()  # overlapping or with gaps
-        or _extent(old) != old.numel()  # its gaps may hold another tensor's data
+        or storage_extent(new) != new.numel()  # overlapping or with gaps
+        or storage_extent(old) != old.numel()  # its gaps may hold another tensor's data
         or offset % size
-        or new.numel() * size > _extent(old) * old.element_size()
+        or new.numel() * size > storage_extent(old) * old.element_size()
     ):
         return new
     view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())

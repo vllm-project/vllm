@@ -39,6 +39,8 @@ Selected with ``VLLM_RELOAD_MODE=direct``; `start_reload` and `finish_reload`
 """
 
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 
@@ -46,7 +48,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.utils import _extent, is_weights_pre_processed
+from vllm.model_executor.utils import is_weights_pre_processed, storage_extent
 
 logger = init_logger(__name__)
 
@@ -56,6 +58,7 @@ __all__ = [
     "direct_reload_pending",
     "finish_direct_reload",
     "keep_addresses",
+    "keeping_addresses",
     "record_checkpoint_layout",
 ]
 
@@ -64,13 +67,24 @@ def direct_reload_enabled() -> bool:
     return envs.VLLM_RELOAD_MODE == "direct"
 
 
-_finishing = False  # a direct finish is rerunning post-load processing
+_keep_addresses: ContextVar[bool | None] = ContextVar("keep_addresses", default=None)
+
+
+@contextmanager
+def keeping_addresses(keep: bool):
+    """Fix `keep_addresses` for a finish, whatever the env says by then."""
+    token = _keep_addresses.set(keep)
+    try:
+        yield
+    finally:
+        _keep_addresses.reset(token)
 
 
 def keep_addresses() -> bool:
     """Whether `replace_parameter` writes into existing storage: at a direct
-    cold start, or during a direct finish whatever the env says by then."""
-    return _finishing or direct_reload_enabled()
+    cold start and during a direct finish, never during a layerwise finish."""
+    keep = _keep_addresses.get()
+    return direct_reload_enabled() if keep is None else keep
 
 
 def direct_reload_pending(model: torch.nn.Module) -> bool:
@@ -105,8 +119,22 @@ def _check_supported(model: torch.nn.Module) -> None:
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
+    from vllm.model_executor.offloader import NoopOffloader, get_offloader
 
+    offloader = get_offloader()
+    if not isinstance(offloader, NoopOffloader):
+        # CPU/UVA offload gives parameters new storage on every post-load
+        # processing; prefetch offload shares one buffer between layers
+        raise RuntimeError(
+            f"direct reload: weight offloading is not supported "
+            f"({type(offloader).__name__})"
+        )
     config = get_current_vllm_config_or_none()
+    model_config = config.model_config if config is not None else None
+    if model_config is not None and model_config.quantization == "torchao":
+        # its load_weights runs a layerwise reload, and its post-load
+        # processing replaces the weight parameter
+        raise RuntimeError("direct reload: torchao quantization is not supported")
     spec = config.speculative_config if config is not None else None
     if spec is not None and spec.draft_lm_head_quantization is not None:
         # after `begin` the draft's quantized lm_head is a view of the target
@@ -179,7 +207,7 @@ def _checkpoint_views(
             continue
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
-        span = _extent(torch.empty_strided(shape, stride, device="meta"))
+        span = storage_extent(torch.empty_strided(shape, stride, device="meta"))
         need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
             raise RuntimeError(
@@ -230,10 +258,6 @@ def finish_direct_reload(
         if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
-    global _finishing
-    _finishing = True
-    try:
+    with keeping_addresses(True):
         process_weights_after_loading(model, model_config, device)
-    finally:
-        _finishing = False
     model._direct_reload_pending = False

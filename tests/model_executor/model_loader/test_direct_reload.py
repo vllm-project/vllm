@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.model_loader.reload import (
     direct,
     finish_reload,
+    lifecycle,
     start_reload,
 )
 from vllm.model_executor.model_loader.reload.direct import (
@@ -38,6 +39,7 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.offloader import UVAOffloader
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
@@ -302,9 +304,26 @@ class TestRefusals:
     def test_draft_lm_head_quantization_refused(self, monkeypatch):
         # the quantized draft lm_head would be written into the target's
         spec = SimpleNamespace(draft_lm_head_quantization="fp8")
-        config = SimpleNamespace(speculative_config=spec)
+        config = SimpleNamespace(model_config=None, speculative_config=spec)
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
+            _cold_start(_checkpoint())
+
+    def test_torchao_refused(self, monkeypatch):
+        # its load_weights runs a layerwise reload
+        model_config = SimpleNamespace(quantization="torchao")
+        config = SimpleNamespace(model_config=model_config, speculative_config=None)
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+        with pytest.raises(RuntimeError, match="torchao"):
+            _cold_start(_checkpoint())
+
+    def test_weight_offloading_refused(self, monkeypatch):
+        # offloaded parameters get new storage on every post-load processing
+        offloader = object.__new__(UVAOffloader)
+        monkeypatch.setattr(
+            "vllm.model_executor.offloader.get_offloader", lambda: offloader
+        )
+        with pytest.raises(RuntimeError, match="weight offloading"):
             _cold_start(_checkpoint())
 
     def test_online_quantization_refused(self, monkeypatch):
@@ -355,6 +374,23 @@ def test_finish_reload_uses_the_mode_start_reload_began(monkeypatch):
     model.load_weights(_checkpoint().items())
     finish_reload(model, _MODEL_CONFIG, _DEVICE)
     _assert_same(_state(model), before, addresses=True)
+
+
+def test_layerwise_finish_does_not_keep_addresses(monkeypatch):
+    # a layerwise update finishes layerwise even if the env says direct by then
+    model = _cold_start(_checkpoint())
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    monkeypatch.setattr(lifecycle, "initialize_layerwise_reload", lambda model: None)
+    kept = []
+    monkeypatch.setattr(
+        lifecycle,
+        "finalize_layerwise_reload",
+        lambda *args: kept.append(direct.keep_addresses()),
+    )
+    start_reload(model)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    assert kept == [False]
 
 
 def test_finish_keeps_guards_of_modules_without_quant_method():
