@@ -259,6 +259,10 @@ def test_mm_device_do_normalize():
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
     assert isinstance(raw_values, list)
+    assert all(
+        isinstance(value, torch.Tensor) and value.dtype == torch.uint8
+        for value in raw_values
+    )
 
     input_norm = build_mm_input_norm(ctx.model_config)
     patch_size = processor.info.get_hf_config().vision_config.patch_size
@@ -277,7 +281,6 @@ def test_mm_device_do_normalize():
     for raw, normalized in zip(raw_values, normalized_values):
         assert isinstance(raw, torch.Tensor)
         assert isinstance(normalized, torch.Tensor)
-        assert raw.dtype == torch.uint8
         output = input_norm(pack_patches(raw), normalized.dtype)
         torch.testing.assert_close(
             output, pack_patches(normalized), rtol=1e-5, atol=1e-6

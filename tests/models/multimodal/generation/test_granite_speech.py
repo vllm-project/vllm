@@ -169,7 +169,7 @@ def test_models(
         hf_runner,
         vllm_runner,
         [
-            ([HF_AUDIO_PROMPT], [(audio, int(sr))]),
+            ([HF_AUDIO_PROMPT], [audio]),
         ],
         model,
         dtype=dtype,
