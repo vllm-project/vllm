@@ -18,8 +18,8 @@ class MambaAwareLRUCachePolicy(LRUCachePolicy):
 
     A hybrid model offloads one state per Mamba group at the deepest boundary
     a request stores, its tip. Once a later request on the same block-hash
-    chain stores a deeper state, the old tip can only serve a request that
-    resumes exactly there, yet LRU refreshes it whenever a request loads it.
+    chain stores a deeper state, the old tip only serves requests that branch
+    off between the two, yet LRU refreshes it whenever a request loads it.
 
     When a request finishes, each cached Mamba chunk on its chain that lies
     below the deepest cached state and was stored as its writer's tip moves to
