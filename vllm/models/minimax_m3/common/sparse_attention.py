@@ -73,6 +73,12 @@ logger = init_logger(__name__)
 
 
 def _minimax_m3_aiter_sparse_pa_requested() -> bool:
+    """Whether to use the ROCm AITER page-16 sparse PA prototype.
+
+    Any per-rank KV head count is served: the attend folds the head axis into
+    the batch axis, and both the indexer's emitted page table and the Triton
+    builders it otherwise falls back to address every head's cache.
+    """
     return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
 
 
@@ -117,16 +123,6 @@ def minimax_m3_query_token_positions(
         torch.int32
     )
     return query_req_id, query_abs_pos
-
-
-def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype.
-
-    Any per-rank KV head count is served: the attend folds the head axis into
-    the batch axis, and both the indexer's emitted page table and the Triton
-    builders it otherwise falls back to address every head's cache.
-    """
-    return _minimax_m3_aiter_sparse_pa_requested()
 
 
 class MiniMaxM3SparseBackend(AttentionBackend):
@@ -523,7 +519,6 @@ def select_main_backend_and_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
-    num_kv_heads: int,
 ) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
     """Pick the main attention backend and implementation.
 
@@ -533,7 +528,7 @@ def select_main_backend_and_impl_cls(
     back to Triton. NVFP4 is MSA-only. The MSA modules are imported lazily to
     avoid import errors on unsupported platforms.
     """
-    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
+    use_aiter_sparse_pa = _minimax_m3_aiter_sparse_pa_requested()
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -597,11 +592,9 @@ def select_main_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
-    num_kv_heads: int,
 ) -> type[MiniMaxM3SparseImpl]:
     """Backward-compatible implementation-only selector."""
     return select_main_backend_and_impl_cls(
         topk_blocks=topk_blocks,
         kv_cache_dtype=kv_cache_dtype,
-        num_kv_heads=num_kv_heads,
     )[1]

@@ -2389,9 +2389,8 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
         assert v_view.shape == (40, 1, 1, 128, 16)
 
 
-@pytest.mark.parametrize("num_kv_heads", [1, 2])
-def test_aiter_sparse_pa_serves_every_kv_head_count(monkeypatch, num_kv_heads):
-    """AITER sparse PA is selected whatever the per-rank KV head count is."""
+def test_aiter_sparse_pa_selected_when_requested(monkeypatch):
+    """AITER sparse PA is selected whenever AITER shuffled KV cache is on."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -2401,14 +2400,12 @@ def test_aiter_sparse_pa_serves_every_kv_head_count(monkeypatch, num_kv_heads):
         lambda: True,
     )
 
-    assert sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(num_kv_heads)
     # The AITER path carries its own backend: its builder is what rebases the
     # block table the indexer's top-k resolves through, so selecting the impl
     # without it would leave that field unset.
     backend, impl_cls = sparse_attn_mod.select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="fp8_e4m3",
-        num_kv_heads=num_kv_heads,
     )
     assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
     assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"

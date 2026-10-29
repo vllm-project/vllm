@@ -141,8 +141,8 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
+    _minimax_m3_aiter_sparse_pa_requested,
     minimax_m3_rebase_slots_to_page16,
-    minimax_m3_use_aiter_sparse_pa,
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -803,7 +803,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.attn_backend, main_impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
-            num_kv_heads=self.num_kv_heads,
         )
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
         self.impl: MiniMaxM3SparseImpl = main_impl_cls(  # type: ignore[assignment]
@@ -815,8 +814,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
-        self.use_aiter_sparse_pa = not self.use_nvfp4_kv and (
-            minimax_m3_use_aiter_sparse_pa(self.num_kv_heads)
+        self.use_aiter_sparse_pa = (
+            not self.use_nvfp4_kv and _minimax_m3_aiter_sparse_pa_requested()
         )
         self.kv_cache_k = torch.tensor([])
         self.kv_cache_v = torch.tensor([])
@@ -1670,7 +1669,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     score_type=sparse_cfg.get("sparse_score_type", "max"),
                 )
             )
-            if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(num_kv_heads):
+            if impl_cls is not None and _minimax_m3_aiter_sparse_pa_requested():
                 # One row per (token, kv head): the table addresses the attend's
                 # cache, not the index cache. Allocated here with the selection
                 # that needs them, and only here -- one allocation serves every
