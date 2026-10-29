@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
-from vllm.config.quantization import _UNSET
 from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
@@ -194,11 +193,15 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
-    default_activation_quant_key = _UNSET
+    default_activation_quant_key = (
+        kFp8DynamicTokenSym
+        if cutlass_fp8_supported() or current_platform.is_xpu()
+        else kFp8DynamicTensorSym
+    )
 
     def __init__(
         self,
-        activation_quant_key: "QuantKey | None" = _UNSET,
+        activation_quant_key: "QuantKey | None" = default_activation_quant_key,
     ):
         super().__init__(activation_quant_key)
 
@@ -207,12 +210,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.use_marlin = False
         self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
-        if self.activation_quant_key is _UNSET:
-            if cutlass_fp8_supported() or current_platform.is_xpu():
-                self.activation_quant_key = kFp8DynamicTokenSym
-            else:
-                self.activation_quant_key = kFp8DynamicTensorSym
-        elif self.activation_quant_key is None:
+        if self.activation_quant_key is None:
             # TODO: Remove once `init_fp8_linear_kernel` supports `None`
             # activation quant key.
             raise NotImplementedError(
@@ -527,7 +525,6 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     weight_scale_name: str
     weight_block_size: list[int] | None
-    per_act_token_quant: bool = False
     per_out_ch_quant: bool = False
 
     def __init__(
@@ -539,6 +536,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
         allow_vllm_cutlass: bool = False,
     ):
         super().__init__(moe, activation_quant_key=activation_key)
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
         self.weight_block_size = weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = (
@@ -643,7 +641,6 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         # requests it is batched with.
         if envs.VLLM_BATCH_INVARIANT and activation_quant_key == kFp8DynamicTensorSym:
             activation_quant_key = kFp8DynamicTokenSym
-        self.per_act_token_quant = activation_quant_key == kFp8DynamicTokenSym
         super().__init__(
             weight_block_size=None,
             moe=moe,
@@ -812,7 +809,6 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
     Activations are quantized dynamically per token at runtime.
     """
 
-    per_act_token_quant: bool = True
     per_out_ch_quant: bool = True
     default_activation_quant_key = kFp8DynamicTokenSym
 

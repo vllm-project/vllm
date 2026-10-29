@@ -16,7 +16,7 @@ from transformers import Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
@@ -2013,31 +2013,54 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
     )
 
 
-def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> None:
-    """Weight-only routed experts keep BF16 activations, unlike an MXFP4 target."""
+@pytest.mark.parametrize("routed_weight_only", [False, True])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "mxfp4",
+        {"weight": "mxfp4"},
+        {"weight": "mxfp4", "activation": "mxfp4"},
+        {"weight": "mxfp4", "activation": None},
+    ],
+)
+def test_online_mxfp4_shared_expert_fse_compares_resolved_keys(
+    routed_weight_only: bool, target: str | dict
+) -> None:
+    """FSE requires the shared expert's resolved (weight, activation) keys to
+    match the routed experts': an omitted activation resolves to the online
+    method default (MXFP4), `null` to BF16."""
     shared_prefix = "model.layers.0.mlp.shared_expert"
+    global_quant_config = dict(_QUARK_FSE_CONFIG["global_quant_config"])
+    if routed_weight_only:
+        global_quant_config["input_tensors"] = None
     quant_config = QuarkConfig(
         {
             **_QUARK_FSE_CONFIG,
             "exclude": [],
-            "global_quant_config": {
-                **_QUARK_FSE_CONFIG["global_quant_config"],
-                "input_tensors": None,
-            },
+            "global_quant_config": global_quant_config,
         }
     )
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(targets={f"{shared_prefix}*": "mxfp4"})
+        QuantizationConfigArgs(
+            targets={
+                f"{shared_prefix}*": target
+                if isinstance(target, str)
+                else QuantSpec(**target)
+            }
+        )
     )
+    shared_bf16_act = isinstance(target, dict) and target.get("activation", 0) is None
 
-    assert is_shared_expert_quant_fse_compatible(
+    compatible, reason = is_shared_expert_quant_fse_compatible(
         quant_config,
         "model.layers.0.mlp.experts",
         shared_prefix,
-    ) == (
-        False,
-        "online shared-expert quantization keys do not match the routed expert keys",
     )
+    assert compatible is (shared_bf16_act == routed_weight_only)
+    if not compatible:
+        assert reason == (
+            "online shared-expert quantization keys do not match the routed expert keys"
+        )
 
 
 @pytest.mark.parametrize(

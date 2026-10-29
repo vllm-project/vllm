@@ -11,9 +11,9 @@ import torch
 
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
-    QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
+    quant_key_name,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -138,7 +138,12 @@ def _find_matching_targets(
         )
 
     matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
-    target_values = [targets[pattern] for pattern in matched_patterns]
+    # `QuantSpec` equality ignores `fields_set`, but an omitted activation
+    # (method default) differs from an explicit one (e.g. `null`).
+    target_values = [
+        (targets[pattern], getattr(targets[pattern], "fields_set", None))
+        for pattern in matched_patterns
+    ]
     if any(target != target_values[0] for target in target_values[1:]):
         raise ValueError(
             f"Found different quantization_config.targets values for the "
@@ -384,29 +389,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
             shorthand = _ONLINE_SHORTHANDS[target]
             quant_key_str = target
             quant_spec = (
-                shorthand.linear
-                if issubclass(layer_cls, LinearBase)
-                else shorthand.moe
+                shorthand.linear if issubclass(layer_cls, LinearBase) else shorthand.moe
             )
         else:
             quant_spec = target
             target_config: dict[str, str | None] = {"weight": str(quant_spec)}
-
-            # TODO: QuantKey itself should define `__str__`,
-            # instead of having this logic.
             if "activation" in quant_spec.fields_set:
-                target_config["activation"] = (
-                    next(
-                        (
-                            name
-                            for name, known_quant_key in QUANT_KEY_NAMES.items()
-                            if known_quant_key == quant_spec.activation
-                        ),
-                        str(quant_spec.activation),
-                    )
-                    if quant_spec.activation is not None
-                    else None
-                )
+                target_config["activation"] = quant_key_name(quant_spec.activation)
             quant_key_str = json.dumps(target_config, separators=(",", ":"))
         if issubclass(layer_cls, LinearBase):
             table = _ONLINE_LINEAR_METHODS

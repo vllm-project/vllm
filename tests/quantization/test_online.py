@@ -221,6 +221,13 @@ MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
             False,
             False,
         ),
+        (
+            Fp8PerTensorOnlineLinearMethod,
+            kFp8StaticTensorSym,
+            Fp8PerTensorOnlineLinearMethod.default_activation_quant_key,
+            False,
+            False,
+        ),
         (Fp8PerTensorOnlineLinearMethod, kFp8StaticTensorSym, None, True, True),
         (Fp8PerBlockOnlineLinearMethod, kFp8Static128BlockSym, None, True, True),
         (Fp8PtpcOnlineLinearMethod, kFp8StaticChannelSym, None, True, True),
@@ -252,10 +259,14 @@ def test_online_linear_methods_resolve_activation_quant_key(
         with pytest.raises(NotImplementedError, match="activation=null"):
             OnlineQuantizationConfig(args).get_quant_method(TestLinear(), "linear")
     else:
-        method = OnlineQuantizationConfig(args).get_quant_method(TestLinear(), "linear")
+        config = OnlineQuantizationConfig(args)
+        method = config.get_quant_method(TestLinear(), "linear")
         assert method is not None
         assert isinstance(method, method_cls)
         assert method.activation_quant_key == activation_quant_key
+        # The resolver must return the resolved key, not a placeholder.
+        resolved = config.resolve_quant_method_cls(TestLinear, "linear")
+        assert resolved is not None and resolved[5] == activation_quant_key
 
 
 @pytest.mark.parametrize(
@@ -282,6 +293,7 @@ def test_online_linear_methods_resolve_activation_quant_key(
         (Fp8PerTensorOnlineMoEMethod, kFp8StaticTensorSym, kFp8DynamicTensorSym, False),
         (Fp8PerBlockOnlineMoEMethod, kFp8Static128BlockSym, kFp8Dynamic128Sym, False),
         (Fp8PtpcOnlineMoEMethod, kFp8StaticChannelSym, kFp8DynamicTokenSym, False),
+        (Fp8PerTensorOnlineMoEMethod, kFp8StaticTensorSym, kFp8DynamicTokenSym, True),
     ],
 )
 def test_online_moe_methods_resolve_activation_quant_key(
@@ -323,6 +335,7 @@ def test_online_moe_methods_resolve_activation_quant_key(
     assert method is not None
     assert isinstance(method, method_cls)
     assert method.activation_quant_key == activation_quant_key
+    assert method.per_act_token_quant == (activation_quant_key == kFp8DynamicTokenSym)
 
 
 def test_online_mxfp8_moe_rejects_explicit_null_activation() -> None:
@@ -1987,9 +2000,7 @@ def test_online_quantization(
         quant_scheme == "mxfp4"
         or uses_mxfp4_targets
         or expected_moe_cls is Mxfp4OnlineMoEMethod
-    ) and not (
-        on_gfx950() or on_gfx942()
-    ):
+    ) and not (on_gfx950() or on_gfx942()):
         pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
 
     if current_platform.is_rocm():

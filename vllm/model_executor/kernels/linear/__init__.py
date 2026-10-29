@@ -969,7 +969,7 @@ def init_mxfp8_linear_kernel(
     current platform and `(N, K)` weight shape."""
     if activation_quant_key not in (None, kMxfp8Dynamic):
         raise NotImplementedError(
-            "MXFP8 linear oracle supports does not implement activation key override "
+            "MXFP8 linear oracle does not implement activation key override "
             f"yet, got activation_quant_key={activation_quant_key}. "
             "Please open an issue."
         )

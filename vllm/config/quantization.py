@@ -91,6 +91,15 @@ QuantKeyField = Annotated[
 _UNSET = cast(QuantKey | None, object())
 
 
+def quant_key_name(quant_key: QuantKey | None) -> str | None:
+    """User-facing name of `quant_key`, falling back to `str(quant_key)`."""
+    # TODO: QuantKey itself should define `__str__`, instead of having this logic.
+    if quant_key is None:
+        return None
+    names = (*QUANT_KEY_NAMES.items(), *_WEIGHT_QUANT_KEY_NAMES.items())
+    return next((name for name, key in names if key == quant_key), str(quant_key))
+
+
 @config
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
@@ -107,7 +116,7 @@ class QuantSpec:
     activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
-    _fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
     """Names explicitly provided when constructing this spec."""
 
     @field_validator("weight", mode="before")
@@ -118,8 +127,7 @@ class QuantSpec:
         return v
 
     def __post_init__(self) -> None:
-        """
-        We need a way to distinguish cases where `activation` is set by the
+        """We need a way to distinguish cases where `activation` is set by the
         user or is a default `None`, as `_ONLINE_SHORTHANDS` do not hold the
         default activation quant key, but may be overridden by users, including
         to `null`.
@@ -130,31 +138,10 @@ class QuantSpec:
                 setattr(self, field_name, None)
             else:
                 fields_set.add(field_name)
-        self._fields_set = frozenset(fields_set)
-
-    @property
-    def fields_set(self) -> frozenset[str]:
-        """Names explicitly provided when constructing this spec."""
-        return self._fields_set
+        self.fields_set = frozenset(fields_set)
 
     def __str__(self) -> str:
-        def quant_key_str(quant_key: QuantKey | None) -> str:
-            if quant_key is None:
-                return "None"
-            return next(
-                (
-                    name
-                    for name, known_quant_key in (
-                        *QUANT_KEY_NAMES.items(),
-                        *_WEIGHT_QUANT_KEY_NAMES.items(),
-                    )
-                    if known_quant_key == quant_key
-                ),
-                str(quant_key),
-            )
-
-        # TODO: QuantKey itself should define `__str__`, instead of having this logic.
-        return quant_key_str(self.weight)
+        return str(quant_key_name(self.weight))
 
 
 @config
