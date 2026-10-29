@@ -32,7 +32,7 @@ EXPECTED_OUT = {
 def _classify_logits(
     llm: LLM,
     prompts: list[str],
-    requests: LoRARequest | list[LoRARequest],
+    requests: LoRARequest | list[LoRARequest | None],
 ) -> torch.Tensor:
     params = [PoolingParams(task="classify", use_activation=False) for _ in prompts]
     outputs = llm.classify(
