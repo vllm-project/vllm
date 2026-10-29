@@ -59,11 +59,12 @@ class MiniMaxVLPatchEmbed(nn.Module):
             stride=(temporal_patch_size, patch_size, patch_size),
             bias=False,
         )
+        # The checkpoint stores this weight in fp32 (the vision tower's only
+        # fp32 tensor); keep it that way so the conv runs at full precision.
+        self.patch_embedding.to(torch.float32)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # pixel_values: (N, C * temporal_patch_size * patch_size²)
-        if self.patch_embedding.weight.dtype != pixel_values.dtype:
-            self.patch_embedding = self.patch_embedding.to(pixel_values.dtype)
         x = pixel_values.reshape(
             pixel_values.shape[0],
             self.num_channels,
@@ -71,7 +72,8 @@ class MiniMaxVLPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        return self.patch_embedding(x).reshape(x.shape[0], -1)
+        out = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        return out.reshape(x.shape[0], -1).to(pixel_values.dtype)
 
 
 class MiniMaxVLAttention(nn.Module):
@@ -657,7 +659,9 @@ class MiniMaxVLVisionModel(nn.Module):
             prefix=maybe_prefix(prefix, "patch_merge_mlp"),
         )
 
-        self.dtype = self.vision_model.embeddings.patch_embedding.weight.dtype
+        # Tower compute dtype; the patch embedding weight stays fp32 (see
+        # MiniMaxVLPatchEmbed), so take it from the projector instead.
+        self.dtype = self.multi_modal_projector.linear_1.weight.dtype
         self.out_hidden_size = text_hidden_size
 
     def forward(

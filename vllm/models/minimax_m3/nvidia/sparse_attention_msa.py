@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MSA (SM100/Blackwell) block-sparse attention for MiniMax M3.
+"""MSA (SM100 family) block-sparse attention for MiniMax M3.
 
-Prefill attends with ``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``).
-Decode uses Triton split-K by default, with an opt-in CUTLASS ``fmha_sm100``
-path for regular decode and speculative verification. NVFP4 KV caches read the
-vLLM packed pages directly in both prefill and CUTLASS decode.
+``MiniMaxM3SparseMSAImpl`` serves BF16 and FP8 KV caches: prefill attends with
+``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``), and decode uses the
+CUTLASS ``fmha_sm100`` path by default for regular decode and speculative
+verification, with Triton split-K as the fallback.
+
+``MiniMaxM3SparseMSANvfp4Impl`` serves NVFP4 KV caches, reading vLLM's packed
+pages directly with only the E4M3 query: decode and prefill both run the CUTLASS
+Q8KV4 kernels.
 """
 
+import functools
 import os
-from dataclasses import dataclass, replace
-from typing import ClassVar
+from dataclasses import dataclass, fields, replace
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -29,8 +34,10 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
     MiniMaxM3SparseMetadataBuilder,
+    MiniMaxM3SparsePrefillMetadata,
 )
 from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
+    NVFP4_BLOCK_SCALE_SHIFT,
     MSACutlassDecodeMetadata,
     MSACutlassDecodePlanCache,
     is_nvfp4_kv_cache,
@@ -39,7 +46,9 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     prepare_decode_metadata,
     should_prepare_decode_metadata,
     supports_cutlass_sparse_decode,
+    uses_q8kv4_decode,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backend import (
     AttentionLayer,
@@ -47,7 +56,28 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
+if TYPE_CHECKING:
+    from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
+
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _q8kv4_prefill_blocker(
+    num_q_heads: int, num_kv_heads: int, page_size: int, topk_blocks: int
+) -> str | None:
+    """Why the Q8KV4 kernel cannot prefill this layout on this device, or None."""
+    from vllm.third_party.fmha_sm100.q8kv4_prefill_adapter import _plan_blocker
+
+    return _plan_blocker(
+        num_qo_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        page_size=page_size,
+        kv_block_num=topk_blocks,
+        causal=True,
+        output_maxscore=False,
+        device=None,
+    )
 
 
 def _get_msa_cutlass_min_batch_size() -> int | None:
@@ -56,10 +86,10 @@ def _get_msa_cutlass_min_batch_size() -> int | None:
 
 
 def _dequantize_query(
-    query_fp8: torch.Tensor, q_scale: float, out: torch.Tensor
+    query_fp8: torch.Tensor, q_scale: float, dtype: torch.dtype
 ) -> torch.Tensor:
-    """Write ``query_fp8 * q_scale`` into ``out`` (E4M3 is exact in BF16)."""
-    out.copy_(query_fp8)
+    """``query_fp8 * q_scale`` in ``dtype`` (E4M3 is exact in BF16)."""
+    out = query_fp8.to(dtype)
     if q_scale != 1.0:
         out.mul_(q_scale)
     return out
@@ -118,6 +148,12 @@ class MiniMaxM3SparseMSADecodeMetadata(MiniMaxM3SparseDecodeMetadata):
     msa_cutlass: MSACutlassDecodeMetadata | None = None
 
 
+@dataclass
+class MiniMaxM3SparseMSAPrefillMetadata(MiniMaxM3SparsePrefillMetadata):
+    # The builder's Q8KV4 prefill split workspace; None off Rubin.
+    workspace: "PrefillWorkspace | None" = None
+
+
 class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
     """Prepare MSA plans only for decode shapes supported by ``fmha_sm100``."""
 
@@ -138,8 +174,29 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         # format to distinguish E4M3 (supported) from E5M2 before planning.
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.decode_backend = vllm_config.attention_config.minimax_m3_msa_decode_backend
+        self.q8kv4_decode = uses_q8kv4_decode(
+            kv_cache_dtype=self.kv_cache_dtype,
+            num_q_heads=self.num_q_heads,
+            num_kv_heads=self.num_kv_heads,
+        )
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
         self.msa_cutlass_min_batch_size = _get_msa_cutlass_min_batch_size()
+        # Rubin only: Q8KV4 prefill split partials striped over the memory
+        # locality domains, reserved for the largest batch.
+        self.prefill_workspace: "PrefillWorkspace | None" = None  # noqa: UP037
+        if is_nvfp4_kv_cache(
+            self.kv_cache_dtype
+        ) and current_platform.is_device_capability(107):
+            from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
+
+            self.prefill_workspace = PrefillWorkspace(
+                device, block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT
+            )
+            self.prefill_workspace.split_buffers(
+                self.topk_blocks,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.num_q_heads,
+            )
 
     def build(
         self,
@@ -152,6 +209,12 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             common_attn_metadata,
             fast_build,
         )
+        prefill = metadata.prefill
+        if prefill is not None and self.prefill_workspace is not None:
+            metadata.prefill = MiniMaxM3SparseMSAPrefillMetadata(
+                **{f.name: getattr(prefill, f.name) for f in fields(prefill)},
+                workspace=self.prefill_workspace,
+            )
         decode = metadata.decode
         if decode is None:
             return metadata
@@ -179,6 +242,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
                 num_kv_heads=self.num_kv_heads,
                 page_size=SPARSE_BLOCK_SIZE,
                 topk_blocks=self.topk_blocks,
+                q8kv4=self.q8kv4_decode,
                 plan_cache=self.msa_cutlass_plan_cache,
             )
         metadata.decode = MiniMaxM3SparseMSADecodeMetadata(
@@ -190,49 +254,12 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         return metadata
 
 
-class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
-    """MSA block-sparse attention with guarded CUTLASS sparse decode."""
+class MiniMaxM3SparseMSABaseImpl(MiniMaxM3SparseImpl):
+    """What the MSA impls share: CUTLASS decode plans and the prefill CSR."""
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int | None = None,
-        kv_cache_dtype: str = "auto",
-        *,
-        topk_blocks: int,
-        sparse_block_size: int,
-        msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton",
-    ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            kv_cache_dtype,
-            topk_blocks=topk_blocks,
-            sparse_block_size=sparse_block_size,
-        )
-        self.use_nvfp4_kv = is_nvfp4_kv_cache(kv_cache_dtype)
-        self.use_cutlass_decode = supports_cutlass_sparse_decode(
-            decode_backend=msa_decode_backend,
-            num_q_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            kv_cache_dtype=self.kv_cache_dtype,
-            page_size=self.block_size,
-            topk_blocks=self.topk_blocks,
-        )
-        if self.use_nvfp4_kv and not self.use_cutlass_decode:
-            raise ValueError(
-                "MiniMax M3 NVFP4 KV cache requires CUTLASS MSA sparse decode "
-                f"(num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, "
-                f"block_size={self.block_size}, topk_blocks={self.topk_blocks})"
-            )
-        logger.info_once(
-            "MiniMax M3 MSA sparse decode selected %s",
-            "CUTLASS" if self.use_cutlass_decode else "Triton",
-        )
+    use_cutlass_decode: bool
+    # The prefill kernels ``fmha_sm100.warmup`` prebuilds for this impl.
+    prefill_backend: str
 
     def should_use_msa_decode(self, layer_name: str) -> bool:
         if not self.use_cutlass_decode:
@@ -249,14 +276,85 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             and decode.msa_cutlass is not None
         )
 
+    def _build_prefill_csr(
+        self,
+        topk: torch.Tensor,
+        nd: int,
+        num_tokens: int,
+        p: MiniMaxM3SparsePrefillMetadata,
+    ):
+        from vllm.third_party.fmha_sm100.sparse import build_k2q_csr
+
+        # [H, prefill, MK] transposed view; build_k2q_csr consumes the strided
+        # view directly (topK stays innermost-contiguous).
+        return build_k2q_csr(
+            topk[nd:num_tokens].transpose(0, 1),
+            p.cu_seqlens_q,
+            p.cu_seqlens_k,
+            SPARSE_BLOCK_SIZE,
+            total_k=0,
+            max_seqlen_k=p.max_seq_len,
+            max_seqlen_q=p.max_query_len,
+            total_rows=p.total_kv_blocks,
+            qhead_per_kv=self.num_heads // self.num_kv_heads,
+            return_schedule=True,
+        )
+
+
+class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseMSABaseImpl):
+    """MSA block-sparse attention over a BF16 or FP8 KV cache, with guarded
+    CUTLASS sparse decode."""
+
+    prefill_backend = "cute_dsl"
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int | None = None,
+        kv_cache_dtype: str = "auto",
+        *,
+        topk_blocks: int,
+        sparse_block_size: int,
+        msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass",
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            kv_cache_dtype,
+            topk_blocks=topk_blocks,
+            sparse_block_size=sparse_block_size,
+        )
+        self.use_cutlass_decode = supports_cutlass_sparse_decode(
+            decode_backend=msa_decode_backend,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            page_size=self.block_size,
+            topk_blocks=self.topk_blocks,
+        )
+        logger.info_once(
+            "MiniMax M3 MSA sparse decode selected %s",
+            "CUTLASS" if self.use_cutlass_decode else "Triton",
+        )
+
+    def _bf16_query(
+        self, q: torch.Tensor, q_scale: float, dtype: torch.dtype
+    ) -> torch.Tensor:
+        # With CUTLASS decode the query is E4M3; the other kernels read BF16.
+        if not self.use_cutlass_decode:
+            return q
+        return _dequantize_query(q, q_scale, dtype)
+
     def forward(
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
-        *,
-        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -273,16 +371,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
-        # Given query_fp8, it is the only q the fused insert wrote: CUTLASS
-        # decode and prefill read it directly, and Triton decode reads it
-        # dequantized into ``query``.
-        q_fp8 = (
-            None
-            if query_fp8 is None
-            else query_fp8[:num_tokens].view(-1, self.num_heads, hd)
-        )
         q_scale_float = getattr(layer, "_q_scale_float", 1.0)
-        if self.use_fp8_kv and not self.use_nvfp4_kv:
+        if self.use_fp8_kv:
             kv_cache = kv_cache.view(self.kv_cache_fp8_dtype)
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
@@ -290,16 +380,11 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         # Decode [:nd]: CUTLASS for planned shapes, otherwise Triton.
         if main_md.num_decodes > 0:
             d = main_md.decode
-            assert d is not None
-            msa_metadata = (
-                d.msa_cutlass
-                if isinstance(d, MiniMaxM3SparseMSADecodeMetadata)
-                else None
-            )
+            assert isinstance(d, MiniMaxM3SparseMSADecodeMetadata)
+            msa_metadata = d.msa_cutlass
             if self.use_cutlass_decode and msa_metadata is not None:
-                assert q_fp8 is not None
                 msa_cutlass_sparse_decode(
-                    q_fp8[:nd],
+                    q[:nd],
                     kv_cache,
                     topk[:nd],
                     out[:nd],
@@ -308,20 +393,10 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                     q_scale_float=q_scale_float,
                     k_scale_float=getattr(layer, "_k_scale_float", 1.0),
                     v_scale_float=getattr(layer, "_v_scale_float", 1.0),
-                    k_scale=k_scale if self.use_nvfp4_kv else None,
-                    v_scale=v_scale if self.use_nvfp4_kv else None,
-                )
-            elif self.use_nvfp4_kv:
-                raise RuntimeError(
-                    "MiniMax M3 NVFP4 KV cache has no Triton decode fallback; "
-                    f"CUTLASS decode was not planned for {main_md.num_decodes} "
-                    f"requests with query length {d.decode_query_len}"
                 )
             else:
                 minimax_m3_sparse_attn_decode(
-                    q[:nd]
-                    if q_fp8 is None
-                    else _dequantize_query(q_fp8[:nd], q_scale_float, q[:nd]),
+                    self._bf16_query(q[:nd], q_scale_float, output.dtype),
                     kv_cache,
                     topk[:nd].transpose(0, 1),
                     d.block_table,
@@ -336,61 +411,18 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
         if main_md.num_prefills > 0:
-            from vllm.third_party.fmha_sm100.sparse import (
-                build_k2q_csr,
-                sparse_atten_func,
-                sparse_atten_nvfp4_kv_func,
-            )
+            from vllm.third_party.fmha_sm100.sparse import sparse_atten_func
 
             p = main_md.prefill
             assert p is not None
-            # [H, prefill, MK] transposed view; build_k2q_csr consumes the
-            # strided view directly (topK stays innermost-contiguous).
-            prefill_topk = topk[nd:num_tokens].transpose(0, 1)
-            # An E4M3 query attends as is, its scale folded into softmax_scale.
-            if q_fp8 is None:
-                qp, softmax_scale = q[nd:], self.scale
-            else:
-                qp, softmax_scale = q_fp8[nd:], self.scale * q_scale_float
-            k2q_row_ptr, k2q_q_indices, schedule = build_k2q_csr(
-                prefill_topk,
-                p.cu_seqlens_q,
-                p.cu_seqlens_k,
-                SPARSE_BLOCK_SIZE,
-                total_k=0,
-                max_seqlen_k=p.max_seq_len,
-                max_seqlen_q=p.max_query_len,
-                total_rows=p.total_kv_blocks,
-                qhead_per_kv=qp.shape[1] // self.num_kv_heads,
-                return_schedule=True,
+            k2q_row_ptr, k2q_q_indices, schedule = self._build_prefill_csr(
+                topk, nd, num_tokens, p
             )
-            if self.use_nvfp4_kv:
-                k_data, k_sf, v_data, v_sf = nvfp4_kv_cache_views(kv_cache)
-                sparse_atten_nvfp4_kv_func(
-                    qp,
-                    k_data,
-                    v_data,
-                    k_sf,
-                    v_sf,
-                    k_scale,
-                    v_scale,
-                    k2q_row_ptr,
-                    k2q_q_indices,
-                    self.topk_blocks,
-                    cu_seqlens_q=p.cu_seqlens_q,
-                    cu_seqlens_k=p.cu_seqlens_k,
-                    max_seqlen_q=p.max_query_len,
-                    max_seqlen_k=p.max_seq_len,
-                    blk_kv=SPARSE_BLOCK_SIZE,
-                    causal=True,
-                    softmax_scale=softmax_scale,
-                    page_table=p.block_table,
-                    seqused_k=p.seq_lens,
-                    schedule=schedule,
-                    out=out[nd:],
-                    kv_layout="vllm",
-                )
-                return output
+            # An E4M3 query attends as is, its scale folded into softmax_scale.
+            qp = q[nd:]
+            softmax_scale = (
+                self.scale * q_scale_float if self.use_cutlass_decode else self.scale
+            )
             k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             sparse_atten_func(
                 qp,
@@ -410,5 +442,160 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 seqused_k=p.seq_lens,
                 schedule=schedule,
                 out=out[nd:],
+            )
+        return output
+
+
+class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
+    """MSA block-sparse attention over an NVFP4 KV cache, SM100 family only.
+
+    Decode and prefill run the CUTLASS Q8KV4 kernels, which read the E4M3
+    query; there is no BF16-query kernel and no Triton fallback.
+    """
+
+    use_cutlass_decode = True
+    prefill_backend = "q8kv4"
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int | None = None,
+        kv_cache_dtype: str = "nvfp4",
+        *,
+        topk_blocks: int,
+        sparse_block_size: int,
+        msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass",
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            kv_cache_dtype,
+            topk_blocks=topk_blocks,
+            sparse_block_size=sparse_block_size,
+        )
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            raise ValueError("MiniMax M3 NVFP4 KV cache requires an SM100-family GPU")
+        # NVFP4 decodes only on CUTLASS, whatever msa_decode_backend says.
+        if not supports_cutlass_sparse_decode(
+            decode_backend="cutlass",
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            page_size=self.block_size,
+            topk_blocks=self.topk_blocks,
+        ):
+            raise ValueError(
+                "MiniMax M3 NVFP4 KV cache requires CUTLASS MSA sparse decode "
+                f"(num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, "
+                f"block_size={self.block_size}, topk_blocks={self.topk_blocks})"
+            )
+        blocker = _q8kv4_prefill_blocker(
+            self.num_heads, self.num_kv_heads, self.block_size, self.topk_blocks
+        )
+        if blocker is not None:
+            raise ValueError(
+                "MiniMax M3 NVFP4 KV cache requires the CUTLASS Q8KV4 prefill, "
+                f"which cannot serve this layout or device: {blocker}"
+            )
+        logger.info_once("MiniMax M3 NVFP4 MSA: CUTLASS Q8KV4 decode and prefill")
+        # NVFP4_BLOCK_SCALE_SHIFT assumes unit global scales; checked on the
+        # first forward, once the checkpoint's KV scales are loaded.
+        self._check_global_scales = True
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        assert query.dtype == torch.float8_e4m3fn
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return output  # profiling run; caches unbound
+        main_md = attn_metadata[layer.layer_name]  # type: ignore[attr-defined]
+        assert isinstance(main_md, MiniMaxM3SparseMetadata)
+
+        nd = main_md.num_decode_tokens
+        num_tokens = main_md.num_actual_tokens
+        topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
+        assert topk is not None
+        hd = self.head_size
+        q_fp8 = query[:num_tokens].view(-1, self.num_heads, hd)
+        out = output[:num_tokens].view(-1, self.num_heads, hd)
+        q_scale_float = getattr(layer, "_q_scale_float", 1.0)
+        k_scale = getattr(layer, "_k_scale", None)
+        v_scale = getattr(layer, "_v_scale", None)
+        if self._check_global_scales:
+            k_global = getattr(layer, "_k_scale_float", 1.0)
+            v_global = getattr(layer, "_v_scale_float", 1.0)
+            if k_global != 1.0 or v_global != 1.0:
+                raise ValueError(
+                    "MiniMax M3 reads its NVFP4 KV cache on the Q8KV4 kernels with "
+                    f"block_scale_shift={NVFP4_BLOCK_SCALE_SHIFT}, which needs unit "
+                    f"global scales; got k_scale={k_global}, v_scale={v_global}"
+                )
+            self._check_global_scales = False
+
+        if main_md.num_decodes > 0:
+            d = main_md.decode
+            assert isinstance(d, MiniMaxM3SparseMSADecodeMetadata)
+            msa_metadata = d.msa_cutlass
+            if msa_metadata is None:
+                raise RuntimeError(
+                    "MiniMax M3 NVFP4 KV cache has no Triton decode fallback; "
+                    f"CUTLASS decode was not planned for {main_md.num_decodes} "
+                    f"requests with query length {d.decode_query_len}"
+                )
+            msa_cutlass_sparse_decode(
+                q_fp8[:nd],
+                kv_cache,
+                topk[:nd],
+                out[:nd],
+                msa_metadata,
+                scale=self.scale,
+                q_scale_float=q_scale_float,
+                k_scale_float=getattr(layer, "_k_scale_float", 1.0),
+                v_scale_float=getattr(layer, "_v_scale_float", 1.0),
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+
+        if main_md.num_prefills > 0:
+            from vllm.third_party.fmha_sm100.prefill_q8kv4 import run_prefill
+
+            p = main_md.prefill
+            assert p is not None
+            k2q_row_ptr, _, schedule = self._build_prefill_csr(topk, nd, num_tokens, p)
+            k_data, k_sf, v_data, v_sf = nvfp4_kv_cache_views(kv_cache)
+            run_prefill(
+                q_fp8[nd:],
+                (k_data, v_data),
+                (k_sf, v_sf),
+                kv_indices=p.block_table,
+                kv_indptr=None,
+                cu_seqlens_q=p.cu_seqlens_q,
+                cu_seqlens_k=p.cu_seqlens_k,
+                k2q_row_ptr=k2q_row_ptr,
+                schedule=schedule,
+                sm_scale=self.scale * q_scale_float,
+                topk=self.topk_blocks,
+                seqused_k=p.seq_lens,
+                k_global_scale=k_scale,
+                v_global_scale=v_scale,
+                block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT,
+                out=out[nd:],
+                workspace=(
+                    p.workspace
+                    if isinstance(p, MiniMaxM3SparseMSAPrefillMetadata)
+                    else None
+                ),
             )
         return output

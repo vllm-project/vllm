@@ -101,10 +101,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
 )
-from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
-
-from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
-from ...ops.cute_dsl.primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     VEC_BF16,
     _asm,
     current_cu_stream,
@@ -113,6 +110,9 @@ from ...ops.cute_dsl.primitives import (
     shuffle_sync_idx_u32,
     stmc_bf16x8,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
+
+from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
 from .. import LOW_BATCH_MAX_ROWS
 from ..attention.mxfp8 import Tactic, mxfp8_eligible
 from .all_reduce import BoundaryAllReduce

@@ -262,6 +262,30 @@ steps:
       - tests/kernels/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (B200) MiniMax M3 MegaMoE"
+  key: minimax-m3-mega-moe-test-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
+  - vllm/models/minimax_m3/nvidia/
+  - vllm/utils/deep_gemm.py
+  - tests/models/test_minimax_m3_mega_moe.py
+  commands:
+    - pytest -v -s models/test_minimax_m3_mega_moe.py
+
+- label: ":nvidia: (B200) MiniMax-M3 Model Tests"
+  key: minimax-m3-model-tests-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/cute_utils/
+  - vllm/utils/flashinfer.py
+  - tests/models/minimax_m3/
+  commands:
+    - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
+
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore

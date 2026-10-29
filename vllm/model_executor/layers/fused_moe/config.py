@@ -16,7 +16,10 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
@@ -1339,6 +1342,12 @@ class FusedMoEConfig:
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     is_fused_shared_expert_requested: bool = False
+    # Activation scheme the routed experts were trained (QAT) against, when the
+    # checkpoint does not record it. Quant methods use it in place of their
+    # default: MiniMax-M3.1 quantizes the FC1 input per token and ships a 1.0
+    # ``input_global_scale`` placeholder, which is indistinguishable from a
+    # calibrated per-tensor scale of 1.0.
+    qat_activation_key: QuantKey | None = None
     # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
     # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
     # for any other model type. Resolved here, not in the forward path,
