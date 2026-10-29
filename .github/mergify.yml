@@ -14,6 +14,19 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: label-recipe
+  description: Automatically apply recipe label
+  conditions:
+    - label != stale
+    - -closed
+    - files~=^recipes/
+  actions:
+    label:
+      add:
+        - recipe
+    comment:
+      message: "Recipe preview: https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
+
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
@@ -738,6 +751,28 @@ pull_request_rules:
       users:
         - "stmatengss"
         - "LCAIZJ"
+
+- name: label-nixl
+  description: Automatically apply nixl label
+  conditions:
+    - label != stale
+    - or:
+      # Any NIXL-named file: KV connector and shared utils, NIXL EP
+      # dispatch, EC-transfer NIXL data, the offload p2p data layer,
+      # tests, docs, examples.
+      - files~=(?i)nixl
+      # KV offloading paths (multi-tiered KVCR tiering and simple), plus
+      # their tests and docs.
+      - files~=kv_offload
+      - title~=(?i)nixl
+  actions:
+    label:
+      add:
+        - nixl
+    assign:
+      users:
+        - "ovidiusm"
+        - "iyastreb"
 
 - name: label-scheduler
   description: Automatically apply scheduler label

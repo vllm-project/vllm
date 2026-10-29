@@ -60,7 +60,7 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
-# pip runs with a cache mount in the stages that ship, so its downloads (several GB of SDK
+# pip runs with a cache mount, so its downloads (several GB of SDK
 # and torch wheels) never land in an image layer.
 RUN --mount=type=cache,target=/root/.cache/pip \
     apt-get update -y \
@@ -168,7 +168,7 @@ FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
 RUN git clone ${MORI_REPO}
-RUN cd mori \
+RUN --mount=type=cache,target=/root/.cache/pip cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
@@ -198,12 +198,12 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
-RUN cd aiter \
+RUN --mount=type=cache,target=/root/.cache/pip cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 # AITER_USE_SYSTEM_TRITON keeps setup.py from resolving its own triton, which would
 # displace the pinned one already installed in base.
-RUN pip install pyyaml && cd aiter \
+RUN --mount=type=cache,target=/root/.cache/pip pip install pyyaml && cd aiter \
     && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
@@ -302,7 +302,8 @@ ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
 # regex and pybase64 aren't installed here; fall back to the stdlib modules.
-RUN sed -i -e 's/import regex as re/import re/' \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -i -e 's/import regex as re/import re/' \
         -e 's/import pybase64 as base64/import base64/' /tmp/therock_wheels.py \
     && pip download --no-deps --dest /tmp/torch-dl \
         --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \

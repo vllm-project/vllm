@@ -371,6 +371,7 @@ The images can be used to run OpenAI compatible server and are available on Dock
 - `vllm/vllm-openai-rocm:latest` — stable release, built on ROCm 10.0 (also tagged `latest-rocm100`)
 - `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch on ROCm 10.0 (also tagged `nightly-rocm100`), use this if you want the latest features and fixes
 - `vllm/vllm-openai-rocm:latest-rocm72` / `nightly-rocm72` — earlier builds on the legacy ROCm 7.2 stack, no longer updated
+- `vllm/vllm-openai-rocm:base-nightly` / `latest-base` (and their `-rocm100` forms) — the same image without vLLM itself: the ROCm stack plus all of vLLM's dependencies. Earlier builds of these tags held only the ROCm stack ([docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base))
 
 ROCm 10.0 images use zstd-compressed layers; pulling them needs Docker 23 or newer (or containerd 1.5 or newer).
 

@@ -300,6 +300,80 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134" release-images'
 
+
+      # ---- AWS EFA variants: docker/Dockerfile.efa on the images built above ----
+      - label: "Build release image - x86_64 - CUDA 13.0 - EFA"
+        depends_on:
+          - build-release-image-x86
+        id: build-release-image-x86-efa
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh efa) \
+              --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) \
+              --progress plain \
+              -f docker/Dockerfile.efa docker/
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa"
+          # re-tag to default image tag and push, just in case arm64 build fails
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 13.0 - EFA"
+        depends_on:
+          - build-release-image-arm64
+        id: build-release-image-arm64-efa
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh efa) \
+              --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) \
+              --progress plain \
+              -f docker/Dockerfile.efa docker/
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa" release-images'
+
+      - label: "Build release image - x86_64 - Rubin CUDA 13.4 - EFA"
+        depends_on:
+          - build-release-image-x86-rubin-cuda-13-4
+        id: build-release-image-x86-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-efa) \
+              --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134 \
+              --progress plain \
+              -f docker/Dockerfile.efa docker/
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa" release-images'
+
+      - label: "Build release image - aarch64 - Rubin CUDA 13.4 - EFA"
+        depends_on:
+          - build-release-image-arm64-rubin-cuda-13-4
+        id: build-release-image-arm64-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-efa) \
+              --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134 \
+              --progress plain \
+              -f docker/Dockerfile.efa docker/
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa" release-images'
       - label: ":docker: Build release image - x86_64 - XPU"
         depends_on: ~
         id: build-xpu-release-image
@@ -394,6 +468,35 @@ steps:
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: Rubin CUDA 13.4" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134" release-manifests'
 
+
+
+      # ---- AWS EFA variant manifests ----
+      - label: "Create multi-arch manifest - CUDA 13.0 - EFA"
+        depends_on:
+          - build-release-image-x86-efa
+          - build-release-image-arm64-efa
+        id: create-multi-arch-manifest-efa
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.0 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa" release-manifests'
+
+      - label: "Create multi-arch manifest - Rubin CUDA 13.4 - EFA"
+        depends_on:
+          - build-release-image-x86-rubin-cuda-13-4-efa
+          - build-release-image-arm64-rubin-cuda-13-4-efa
+        id: create-multi-arch-manifest-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu134-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu134-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: Rubin CUDA 13.4 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa" release-manifests'
       - label: "Create manifest - XPU"
         depends_on:
           - build-xpu-release-image
@@ -494,10 +597,11 @@ steps:
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
   # =============================================================================
-  # One group per ROCm stack, on this pipeline's own agents. The build step reuses the CI-tested
-  # stack and runtime images from rocm/vllm-ci by digest, compiles csrc for all release arches and
-  # pushes <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the
-  # steps after it only copy those (.buildkite/scripts/rocm/publish.sh).
+  # One group per ROCm stack, on this pipeline's own agents. A serialized step builds the stack and
+  # runtime from source into ECR (once per content key, with only its own ECR build cache; it never
+  # reads rocm/vllm-ci); the build step compiles csrc for all release arches and pushes
+  # <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the steps
+  # after it only copy those (.buildkite/scripts/rocm/publish.sh).
   # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
   #   the root wheel index.
   # =============================================================================
@@ -506,26 +610,41 @@ steps:
     key: build-rocm100
     depends_on: ~
     steps:
-      - label: ":rocm: Build ROCm 10.0 release image + wheels"
-        key: build-rocm100-release
+      - label: ":rocm: Ensure ROCm 10.0 release stack + runtime"
+        key: build-rocm100-release-base
         depends_on: ~
         agents: {queue: cpu_queue_release}
-        timeout_in_minutes: 720   # a csrc change since the last release recompiles all release arches (~3h); a stack key CI has not built, hours more
-        env: {ROCM_CI_REPO: public.ecr.aws/q9t5s3a7/vllm-release-repo}
+        timeout_in_minutes: 720   # a new stack key (release never uses the CI cache) takes hours
+        concurrency_group: vllm/rocm/release/stack-rocm   # one run builds a new key; the others then reuse it
+        concurrency: 1
+        env: &rocm_release_env {ROCM_CI_REPO: &rocm_ecr public.ecr.aws/q9t5s3a7/vllm-release-repo, SCCACHE_BUCKET_NAME: vllm-build-sccache}
         commands:
-          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin public.ecr.aws/q9t5s3a7
-          - bash .buildkite/scripts/rocm/build.sh rocm release
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release-base
+        retry: &rocm_release_retry {automatic: [{exit_status: 75, limit: 1}]}   # registry error (build.sh)
         plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
           - docker-login#v3.0.0:
               username: vllmbot
               password-env: DOCKERHUB_TOKEN
+
+      - label: ":rocm: Build ROCm 10.0 release image + wheels"
+        key: build-rocm100-release
+        depends_on: build-rocm100-release-base
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 720   # an all-arch csrc compile without sccache hits takes ~3h
+        env: *rocm_release_env
+        commands:
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release
+        retry: *rocm_release_retry
+        plugins: *rocm_hub_login
 
       - label: ":s3: Upload ROCm 10.0 wheels"
         key: upload-rocm100-wheels
         depends_on: build-rocm100-release
         agents: {queue: cpu_queue_release}
         timeout_in_minutes: 60
-        env: {S3_BUCKET: vllm-wheels}
+        env: {S3_BUCKET: vllm-wheels, ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
         plugins: *rocm_hub_login
 
@@ -536,6 +655,7 @@ steps:
             allow_failure: true
           - build-rocm100-release
         agents: {queue: small_cpu_queue_release}
+        env: {ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
         plugins: *rocm_hub_login
 
@@ -587,6 +707,10 @@ steps:
         allow_failure: true
       - step: build-cpu-release-image-arm64
         allow_failure: true
+      # Wait for the EFA images, but don't let an EFA failure block publishing
+      # the others; the cuda-13-0-efa publish job fails on a partial build.
+      - step: create-multi-arch-manifest-efa
+        allow_failure: true
 
   - label: "Publish {{matrix}} release images to DockerHub"
     depends_on:
@@ -598,6 +722,8 @@ steps:
       - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
     matrix:
       - "cuda-13-0"
+      # AWS EFA variant; skipped if no EFA image was built, fails on a partial build.
+      - "cuda-13-0-efa"
       - "rocm"
       - "xpu"
       - "cpu"

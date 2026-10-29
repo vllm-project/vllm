@@ -2,7 +2,8 @@ group: Hardware - AMD Build
 
 # ROCm images: .buildkite/scripts/rocm/build.sh + docker/docker-bake-rocm.hcl. ci-infra's AMD CI pipeline
 # (test-template-amd.j2) renders these same steps and sets ROCM_CI_REPO (trusted rocm/vllm-ci, else rocm/vllm-dev).
-# Base groups are per stack/repo/PR/branch.
+# The base step ensures the content-keyed stack (+ -wheels), runtime and test-deps images; the build
+# step adds the per-commit test image. Base groups are per stack/repo/PR/branch.
 steps:
   - label: ":docker: Ensure ROCm stack + runtime"
     key: refresh-rocm-base-amd
@@ -16,6 +17,8 @@ steps:
     concurrency_group: "vllm/rocm/base/rocm/$ROCM_CI_REPO/$BUILDKITE_PULL_REQUEST/$BUILDKITE_BRANCH"
     retry:
       automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
