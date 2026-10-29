@@ -230,6 +230,25 @@ def test_visible_memory_node_sim_multi_numa_ignores_assigned_ids(
     assert cru.get_visible_memory_node([2]) == [0, 1, 2, 3, 4, 5]
 
 
+def test_visible_memory_node_no_matching_id_falls_back_to_allowed(
+    six_numa_nodes, monkeypatch
+):
+    # DP=2 x TP=2 on a 2-NUMA host: DP rank 1 gets device ids [2, 3], which
+    # name no NUMA node. Returning an empty list crashes the caller's
+    # allowed_memory_nodes[0] fallback (#64497).
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    assert cru.get_visible_memory_node([2, 3]) == [0, 1]
+
+
+def test_visible_memory_node_partial_match_keeps_only_matches(
+    six_numa_nodes, monkeypatch
+):
+    # A partial overlap still narrows to the matching nodes; only a complete
+    # miss falls back to the full allowed list.
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    assert cru.get_visible_memory_node([1, 2, 3]) == [1]
+
+
 def test_omp_manager_binds_each_dp_rank_to_its_assigned_node(monkeypatch):
     """DP ranks with different assigned NUMA nodes get disjoint cores (#47328)."""
     # 2 nodes x 4 physical cores x 2 logical CPUs

@@ -255,6 +255,12 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
     assigned_node_ids is the per-DP-rank list of NUMA node ids from
     parallel_config.assigned_physical_gpu_ids. It takes priority over the
     CPU_VISIBLE_MEMORY_NODES env var, which still applies when it is None.
+
+    On CPU the ids are logical device indices, which coincide with NUMA
+    node ids only when the host has at least as many nodes as devices. When
+    none of the ids names an existing node (e.g. DP=2 x TP=2 on a 2-node
+    host, where the second DP rank gets device ids [2, 3]), fall back to
+    the full allowed list instead of returning an empty one (#64497).
     """
     if sys.platform == "darwin":
         return [0]
@@ -265,7 +271,10 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
         return allowed_memory_node_list
 
     if assigned_node_ids is not None:
-        return [node for node in assigned_node_ids if node in allowed_memory_node_list]
+        filtered = [
+            node for node in assigned_node_ids if node in allowed_memory_node_list
+        ]
+        return filtered if filtered else allowed_memory_node_list
 
     env_key = DEVICE_CONTROL_ENV_VAR
     if env_key in os.environ and os.environ[env_key] != "":
