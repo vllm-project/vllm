@@ -229,7 +229,7 @@ so narrowing it lets more streams fit in KV:
 
 ```bash
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
-  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
+  --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 ```
 
@@ -254,11 +254,13 @@ so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_strea
     measure on your audio.
 
 !!! warning
-    Keep the decoder (text) window at 1024 or more if punctuation and casing matter.
-    On long read speech, a 256 or 512 text window can drop punctuation and capitals
-    for minutes at a time (up to ~3 min in our tests); from 1024 up the model recovers
-    within ~50 s, as with the default window. Word accuracy barely changes, and the
-    audio window has no effect on this.
+    Keep the decoder (text) window at 1024 or more. On long read speech, a 256 or 512
+    text window can drop punctuation and capitals for minutes at a time (up to ~3 min
+    in our tests); from 1024 up the model recovers within ~50 s, as with the default
+    window. A 256 window also lets the model lock into emitting only blanks over real
+    speech for minutes ([#47614](https://github.com/vllm-project/vllm/issues/47614)):
+    20 min of text lost over 8 streams in 90 min, none at 1024. Word accuracy barely
+    changes otherwise, and the audio window has no effect on either.
 
 !!! note
     Narrowing the window also shrinks the encoder cache budget, so a server configured
@@ -289,14 +291,14 @@ captures large batch graphs you will never use and can OOM at startup. Set `--ma
 your real concurrency (for example 16). `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also
 helps: it switches the allocator to growable segments, cuts fragmentation, and frees roughly
 1 GiB on a 16 GiB card, with no effect on results. A working unbounded config on a 16 GiB
-RTX 4090 Laptop, validated at 4 concurrent real-time streams (wall/audio 1.00, flat VRAM
-~14.3 GiB, transcripts complete and identical across streams):
+RTX 4090 Laptop, validated with 8 concurrent real-time streams (ramped in one every 10 min,
+90 min, no stream fell behind):
 
 ```bash
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
-  --tokenizer-mode mistral \
-  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
-  --max-model-len 4096 --no-enable-prefix-caching --max-num-seqs 16 \
-  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 2048 \
+vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
+  --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
+  --max-model-len 8192 --no-enable-prefix-caching --max-num-seqs 12 \
+  --max-num-batched-tokens 256 --gpu-memory-utilization 0.82 \
+  --enable-realtime-unbounded \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 ```
