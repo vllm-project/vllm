@@ -3015,6 +3015,14 @@ def _peer_hit(
     _annotate_req_context(ctx)
     consumer.on_new_request(ctx)
     deadline = time.monotonic() + 5.0
+    # A probe before the handshake ack falls back to local prefill (MISS).
+    while not consumer._sessions["B:2"].ready:
+        assert time.monotonic() < deadline, "peer handshake did not complete"
+        list(consumer.get_finished_jobs())
+        if step_producer:
+            with tiering.lock:
+                tiering.on_schedule_end(step_end)
+        time.sleep(0.001)
     while time.monotonic() < deadline:
         list(consumer.get_finished_jobs())
         if step_producer:
