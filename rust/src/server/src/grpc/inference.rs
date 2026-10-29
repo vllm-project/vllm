@@ -151,7 +151,11 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = super::media::from_proto(media, media_io_kwargs.as_ref())?;
+            let media = super::media::from_proto(
+                media,
+                media_io_kwargs.as_ref(),
+                self.state.api_server_options.enable_grpc_nixl_media,
+            )?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
@@ -163,6 +167,8 @@ impl InferenceServiceImpl {
                         |error| {
                             if error.is_request_validation_error() {
                                 Status::invalid_argument(error.to_report_string())
+                            } else if matches!(error, vllm_chat::Error::MediaUnavailable(_)) {
+                                Status::unavailable(error.to_report_string())
                             } else {
                                 Status::internal(error.to_report_string())
                             }

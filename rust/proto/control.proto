@@ -89,6 +89,8 @@ message ModelInfo {
   bool supports_multimodal = 23;
   string reasoning_parser = 24;
   string tool_call_parser = 25;
+  // Whether GenerateRequest accepts MediaItem.nixl_ref for images.
+  bool supports_nixl_ref = 26;
 }
 
 message ShutdownRequest {}
