@@ -55,6 +55,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
+    triton_weight,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
@@ -124,7 +125,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    replace_parameter,
+    retire_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -1239,16 +1244,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             layer.w13_bias, layer.w2_bias = None, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Discard zero points (INT8 fused MoE kernel uses symmetric quant)
-        for attr in (
-            "w13_input_zero_point",
-            "w2_input_zero_point",
-            "w13_weight_zero_point",
-            "w2_weight_zero_point",
-        ):
-            if hasattr(layer, attr):
-                delattr(layer, attr)
-
+        # Loaded zero points stay registered; the INT8 fused MoE kernel ignores them.
         # For static input scales, collapse the per-expert scales to a single
         # value (the legacy fused_experts path expects one scale per layer).
         if self.static_input_scales:
@@ -1849,8 +1845,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
         else:
@@ -1970,8 +1966,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -1992,8 +1988,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -2204,6 +2200,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         super().__init__(moe, kNvfp4Static, activation_quant_key)
         self.quant_config = quant_config
         self.group_size = 16
+        # Whether the selected backend reads the activation input scales.
+        self.uses_input_scales = True
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -2374,12 +2372,19 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-        replace_parameter(layer, "w13_input_scale_2", a13_scale)
 
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        replace_parameter(layer, "w2_input_scale_2", a2_scale)
+        # Weight-only backends (Marlin, Humming) return no input scales: the
+        # loaded ones keep their data, retired, and the kernel config gets None.
+        self.uses_input_scales = a13_scale is not None
+        if self.uses_input_scales:
+            replace_parameter(layer, "w13_input_scale_2", a13_scale)
+            replace_parameter(layer, "w2_input_scale_2", a2_scale)
+        else:
+            retire_parameter(layer, "w13_input_scale_2")
+            retire_parameter(layer, "w2_input_scale_2")
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -2402,8 +2407,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
-            a13_scale=layer.w13_input_scale_2,
-            a2_scale=layer.w2_input_scale_2,
+            a13_scale=layer.w13_input_scale_2 if self.uses_input_scales else None,
+            a2_scale=layer.w2_input_scale_2 if self.uses_input_scales else None,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),

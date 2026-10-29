@@ -31,6 +31,7 @@ Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from vllm.platforms import current_platform
 
@@ -46,6 +47,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     mxfp8_e4m3_quantize,
 )
 from vllm.models.minimax_m3.amd.model import (  # noqa: E402
+    MiniMAXGemmaRMSNorm,
+    MiniMaxM3SparseAttention,
+    _build_rotary_emb,
     _can_fuse_input_norm_mxfp8,
     _kv_insert_operand,
 )
@@ -57,6 +61,7 @@ from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
+from vllm.platforms.rocm import on_gfx942  # noqa: E402
 
 DEVICE = "cuda"
 EPS = 1e-6
@@ -843,3 +848,149 @@ def test_kv_insert_operand_copies_unsupported_layouts():
 
     flat = k.reshape(32, -1)
     assert _kv_insert_operand(flat).is_contiguous()
+
+
+@pytest.mark.skipif(not on_gfx942(), reason="Requires gfx942.")
+@torch.inference_mode()
+def test_gfx942_native_qknorm_rope_writes_main_and_index_caches():
+    """The gfx942 fallback writes both caches and ignores padded slots."""
+    from types import SimpleNamespace
+
+    torch.manual_seed(0)
+    num_tokens = 3
+    num_heads = 2
+    num_kv_heads = num_idx_heads = 1
+    head_dim = idx_head_dim = 16
+    block_size = 4
+
+    attention = object.__new__(MiniMaxM3SparseAttention)
+    torch.nn.Module.__init__(attention)
+    attention.num_heads = num_heads
+    attention.num_kv_heads = num_kv_heads
+    attention.num_idx_heads = num_idx_heads
+    attention.head_dim = head_dim
+    attention.idx_head_dim = idx_head_dim
+    attention.q_size = num_heads * head_dim
+    attention.kv_size = num_kv_heads * head_dim
+    attention.index_q_size = num_idx_heads * idx_head_dim
+    attention.layer_name = "model.layers.0.self_attn"
+    attention.skip_index_topk = False
+    attention.kv_cache_dtype = "fp8"
+
+    attention.q_norm = MiniMAXGemmaRMSNorm(head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.k_norm = MiniMAXGemmaRMSNorm(head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.index_q_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.index_k_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    config = PreTrainedConfig(
+        rope_theta=10000.0,
+        partial_rotary_factor=0.5,
+        max_position_embeddings=32,
+    )
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        attention.rotary_emb = _build_rotary_emb(config, head_dim).to(DEVICE)
+    attention.index_rotary_emb = attention.rotary_emb
+
+    fp8_dtype = current_platform.fp8_dtype()
+    attention.kv_cache = torch.zeros(
+        2,
+        num_kv_heads,
+        block_size,
+        2 * head_dim,
+        device=DEVICE,
+        dtype=fp8_dtype,
+    )
+    attention._k_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
+    attention._v_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
+    index_cache = torch.zeros(
+        2, block_size, idx_head_dim, device=DEVICE, dtype=torch.bfloat16
+    )
+    index_prefix = "model.layers.0.self_attn.indexer"
+    attention.indexer = SimpleNamespace(
+        index_cache=SimpleNamespace(
+            dtype=torch.bfloat16,
+            kv_cache=index_cache,
+            prefix=index_prefix,
+        )
+    )
+
+    width = (
+        attention.q_size
+        + 2 * attention.kv_size
+        + attention.index_q_size
+        + attention.idx_head_dim
+    )
+    qkv = torch.randn(num_tokens, width, device=DEVICE, dtype=torch.bfloat16).mul_(0.25)
+    positions = torch.tensor([0, 1, 2], device=DEVICE, dtype=torch.long)
+    main_slots = torch.tensor([0, -1, 5], device=DEVICE, dtype=torch.long)
+    index_slots = torch.tensor([2, -1, 6], device=DEVICE, dtype=torch.long)
+
+    q_raw, k_raw, v_raw, index_q_raw, index_k_raw = qkv.clone().split(
+        [
+            attention.q_size,
+            attention.kv_size,
+            attention.kv_size,
+            attention.index_q_size,
+            attention.idx_head_dim,
+        ],
+        dim=-1,
+    )
+    expected_q = attention.q_norm(q_raw.view(num_tokens, num_heads, head_dim))
+    expected_k = attention.k_norm(k_raw.view(num_tokens, num_kv_heads, head_dim))
+    expected_q, expected_k = attention.rotary_emb.forward_native(
+        positions, expected_q, expected_k
+    )
+    expected_index_q = attention.index_q_norm(
+        index_q_raw.view(num_tokens, num_idx_heads, idx_head_dim)
+    )
+    expected_index_k = attention.index_k_norm(
+        index_k_raw.view(num_tokens, idx_head_dim)
+    )
+    expected_index_q, expected_index_k = attention.index_rotary_emb.forward_native(
+        positions, expected_index_q, expected_index_k
+    )
+    assert expected_k is not None
+    assert expected_index_k is not None
+
+    q, index_q = attention._native_gfx942_qknorm_rope_cache(
+        qkv,
+        positions,
+        {
+            attention.layer_name: main_slots,
+            index_prefix: index_slots,
+        },
+    )
+
+    torch.testing.assert_close(q, expected_q.reshape(num_tokens, -1))
+    assert index_q is not None
+    torch.testing.assert_close(index_q, expected_index_q.reshape(num_tokens, -1))
+
+    expected_v = v_raw.view(num_tokens, num_kv_heads, head_dim)
+    for token, slot in ((0, 0), (2, 5)):
+        block, offset = divmod(slot, block_size)
+        assert torch.equal(
+            attention.kv_cache[block, 0, offset, :head_dim],
+            expected_k[token, 0].to(fp8_dtype),
+        )
+        assert torch.equal(
+            attention.kv_cache[block, 0, offset, head_dim:],
+            expected_v[token, 0].to(fp8_dtype),
+        )
+    assert torch.count_nonzero(attention.kv_cache[0, 0, 1]) == 0
+
+    for token, slot in ((0, 2), (2, 6)):
+        block, offset = divmod(slot, block_size)
+        assert torch.equal(
+            index_cache[block, offset],
+            expected_index_k[token].to(index_cache.dtype),
+        )
+    assert torch.count_nonzero(index_cache[0, 1]) == 0
