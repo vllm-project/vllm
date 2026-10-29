@@ -352,6 +352,7 @@ def test_speculator_config_selection(method, declared, multi_module, expected):
         ("MuseSparkDSparkModel", "DSparkSpeculatorConfig"),
         ("DFlash2DraftModel", "DFlash2SpeculatorConfig"),
         ("Qwen3OmniDSparkModel", "DSparkSpeculatorConfig"),
+        ("DSparkMiniMaxDraftModel", "DSparkSpeculatorConfig"),
         ("Gemma4MTPModel", "Gemma4MTPSpeculatorConfig"),
         ("DeepSeekMTPModel", None),
     ],

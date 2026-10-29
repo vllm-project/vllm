@@ -51,10 +51,10 @@ def test_none_overrides_fall_back_to_arch_mapping():
     assert hf_config.architectures == ["DeepSeekMTPModel"]
 
 
+_DSPARK_CONFIG = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
 _SELF_CONTAINED_DRAFT_SPECULATORS = {
-    "Gemma4DSparkModel": (
-        "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
-    ),
+    "Gemma4DSparkModel": _DSPARK_CONFIG,
+    "DSparkMiniMaxDraftModel": _DSPARK_CONFIG,
 }
 
 
