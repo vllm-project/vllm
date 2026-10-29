@@ -112,8 +112,13 @@ class SnapshotSubcommand(CLISubcommand):
         )
         actions = parser.add_subparsers(required=True, dest="snapshot_action")
 
+        # No abbreviations: create strips its own options from the raw argv
+        # before handing it to the engine, and a prefix-match rule for that
+        # would have to re-derive which spellings argparse accepts.
         create_parser = actions.add_parser(
-            "create", help="Create a snapshot from an initialized TP1 engine."
+            "create",
+            help="Create a snapshot from an initialized TP1 engine.",
+            allow_abbrev=False,
         )
         if self.create_requested:
             from vllm.entrypoints.common.cli_args import make_arg_parser
