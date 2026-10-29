@@ -353,9 +353,7 @@ FROM runtime AS test-deps
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
-# DeepEP and the rdma-core its rocshmem needs: CI only, as before (see build_rdma_core). So RDMA
-# tests (NIXL, MoRI, UCX, DeepEP) run on rdma-core 62 and its upstream providers here, but the
-# shipped image on the distro's 39 and the vendor AINIC/bnxt_re ones; the pip check below misses it.
+# DeepEP and the rdma-core its rocshmem needs: CI only, as before (see build_rdma_core).
 COPY --from=build_rdma_core /out /
 RUN --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deepep \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
@@ -549,7 +547,8 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     if [ -n "$spec" ]; then \
         pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
         # The nightlies are built on Ubuntu 24.04: drop the JIT modules that need a newer glibc or
-        # libstdc++ than this image so aiter rebuilds them from the wheel's sources on first use.
+        # libstdc++ than this image so aiter rebuilds them from the wheel's sources on first use, in
+        # every test job: nothing keeps them across jobs, so this lane runs slower.
         # Importing aiter rebuilds module_aiter_core, but older nightlies then need a GPU to finish
         # the import, so check that the rebuilt module loads on its own instead. Any other .so
         # the image cannot load still fails the build.
