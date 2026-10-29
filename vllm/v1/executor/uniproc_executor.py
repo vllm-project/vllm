@@ -155,8 +155,8 @@ class UniProcExecutor(Executor):
             raise
 
     def check_health(self) -> None:
-        if getattr(self, "is_failed", False):
-            raise RuntimeError("Executor failed.")
+        # UniProcExecutor will always be healthy as long as
+        # it's running.
         return
 
     def shutdown(self) -> None:

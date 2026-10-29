@@ -416,12 +416,7 @@ class KVConnectorBase_V1(ABC):
     def get_transfer_results(
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
-        """Return completed sends, receives, and receive failures together.
-
-        Each worker must report a receive at most once per load, across this
-        method and `poll_finished_recving()`. Only the connector selected to
-        load the request may report its receive completion.
-        """
+        """Return completed sends, receives, and receive failures together."""
         finished_sending, finished_recving = self.get_finished(finished_req_ids)
         return KVConnectorTransferResults(
             finished_sending=set(finished_sending or ()),
@@ -437,8 +432,9 @@ class KVConnectorBase_V1(ABC):
 
         Called on the worker thread before scheduling, including between RPCs
         with mp. Returned requests must have KV in place and post-processing
-        queued on the current stream. Do not report them again through
-        `get_transfer_results()`. Failed receives stay on the regular path.
+        queued on the current stream. Report each load at most once, never
+        again through `get_transfer_results()`. Failed receives stay on the
+        regular path.
         """
         return set()
 

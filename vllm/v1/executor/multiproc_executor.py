@@ -1211,15 +1211,13 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
+        early_kv_recv = self.early_kv_recv
         while True:
-            if (early_kv_recv := self.early_kv_recv) is not None:
-                while True:
-                    with get_watch_dog().disable():
-                        poll_due = early_kv_recv.wait_for_poll(self.rpc_broadcast_mq)
-                    if not poll_due:
-                        break
-                    get_watch_dog().feed()
-                    early_kv_recv.poll()
+            while early_kv_recv is not None and early_kv_recv.wait_for_poll(
+                self.rpc_broadcast_mq
+            ):
+                get_watch_dog().feed()
+                early_kv_recv.poll()
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
             self._execute_worker_rpc(rpc_request)

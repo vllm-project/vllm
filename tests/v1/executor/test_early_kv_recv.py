@@ -9,7 +9,7 @@ from vllm.v1.executor.early_kv_recv import EarlyKVOutputAggregator
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
-def test_poll_failure_terminates_worker_without_engine_drain():
+def test_poll_failure_exits_worker():
     # No KV group: polling fails. An ordinary exception must not count as exit(1).
     code = """
 from contextlib import suppress
