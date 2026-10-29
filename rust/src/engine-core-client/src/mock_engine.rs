@@ -175,17 +175,35 @@ pub async fn connect_to_frontend(
     engine_id: impl Into<EngineId>,
     config: MockEngineConfig,
 ) -> Result<MockEngineSockets> {
-    let engine_handshake = engine_handshake.as_ref();
+    let peer_identity = peer_identity(engine_id)?;
+    let (mut handshake, init) =
+        start_handshake(engine_handshake.as_ref(), &peer_identity, &config).await?;
+    let data_sockets = connect_data_sockets(&init, &peer_identity, &config).await?;
+    let coordinator = connect_coordinator(&init).await?;
+    send_handshake_ready(&mut handshake, &config).await?;
+
+    Ok(MockEngineSockets {
+        init,
+        data_sockets,
+        coordinator,
+    })
+}
+
+/// Send HELLO to one frontend handshake endpoint and receive its INIT.
+async fn start_handshake(
+    engine_handshake: &str,
+    peer_identity: &PeerIdentity,
+    config: &MockEngineConfig,
+) -> Result<(DealerSocket, HandshakeInitMessage)> {
     wait_for_endpoint(engine_handshake, config.connect_timeout).await?;
 
-    let peer_identity = peer_identity(engine_id)?;
     let mut options = SocketOptions::default();
     options.peer_identity(peer_identity.clone());
     let mut handshake = DealerSocket::with_options(options);
     handshake.connect(engine_handshake).await?;
     handshake
         .send(ZmqMessage::from(encode_msgpack(&ready_message(
-            "HELLO", &config,
+            "HELLO", config,
         ))?))
         .await?;
 
@@ -197,7 +215,15 @@ pub async fn connect_to_frontend(
         );
     }
     let init: HandshakeInitMessage = decode_msgpack(init_frames[0].as_ref())?;
+    Ok((handshake, init))
+}
 
+/// Register on every input/output socket pair named in INIT.
+async fn connect_data_sockets(
+    init: &HandshakeInitMessage,
+    peer_identity: &PeerIdentity,
+    config: &MockEngineConfig,
+) -> Result<Vec<MockEngineDataSockets>> {
     if init.addresses.inputs.is_empty() {
         return Err(Error::UnexpectedHandshakeMessage {
             message: "frontend INIT did not include an input address".to_string(),
@@ -224,15 +250,21 @@ pub async fn connect_to_frontend(
         input_options.peer_identity(peer_identity.clone());
         let mut dealer = DealerSocket::with_options(input_options);
         dealer.connect(input_address).await?;
-        dealer.send(ZmqMessage::from(ready_response_payload(&config)?)).await?;
+        dealer.send(ZmqMessage::from(ready_response_payload(config)?)).await?;
 
         let mut push = PushSocket::new();
         push.connect(output_address).await?;
 
         data_sockets.push(MockEngineDataSockets { dealer, push });
     }
+    Ok(data_sockets)
+}
 
-    let coordinator = match (
+/// Join the coordinator named in INIT, if any, and wait for its READY marker.
+async fn connect_coordinator(
+    init: &HandshakeInitMessage,
+) -> Result<Option<MockCoordinatorSockets>> {
+    match (
         init.addresses.coordinator_input.as_deref(),
         init.addresses.coordinator_output.as_deref(),
     ) {
@@ -252,28 +284,29 @@ pub async fn connect_to_frontend(
                 );
             }
 
-            Some(MockCoordinatorSockets {
+            Ok(Some(MockCoordinatorSockets {
                 input_sub,
                 output_push,
-            })
+            }))
         }
-        (None, None) => None,
+        (None, None) => Ok(None),
         _ => bail_unexpected_handshake_message!(
             "coordinator handshake addresses must be both present or both absent"
         ),
-    };
+    }
+}
 
+/// Send the handshake READY status.
+async fn send_handshake_ready(
+    handshake: &mut DealerSocket,
+    config: &MockEngineConfig,
+) -> Result<()> {
     handshake
         .send(ZmqMessage::from(encode_msgpack(&ready_message(
-            "READY", &config,
+            "READY", config,
         ))?))
         .await?;
-
-    Ok(MockEngineSockets {
-        init,
-        data_sockets,
-        coordinator,
-    })
+    Ok(())
 }
 
 /// Join already-bootstrapped frontend input/output sockets directly.
