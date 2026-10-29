@@ -7,6 +7,7 @@ Run `pytest tests/kernels/test_moe.py`.
 
 import functools
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
@@ -69,12 +70,12 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE_TYPE = current_platform.device_type
 
 
-@pytest.fixture
-def xpu_qwen3_5_moe(tmp_path, request):
+@contextmanager
+def _xpu_qwen3_5_moe(tmp_path, dtype, quantized, rank=0, tp=1, reduce_results=True):
     """Construct and quantize the model's real MoE block and shared linears."""
     from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, ParallelConfig
     from vllm.distributed import (
         cleanup_dist_env_and_memory,
         init_distributed_environment,
@@ -85,7 +86,6 @@ def xpu_qwen3_5_moe(tmp_path, request):
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
-    dtype, quantized = request.param
     text_config = Qwen3_5MoeTextConfig(
         hidden_size=128,
         moe_intermediate_size=128,
@@ -99,31 +99,36 @@ def xpu_qwen3_5_moe(tmp_path, request):
         vocab_size=128,
         layer_types=["full_attention"],
     )
-    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
+    model_path = tmp_path / str(rank)
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(model_path)
     config = VllmConfig(
         model_config=ModelConfig(
-            model=str(tmp_path),
+            model=str(model_path),
             skip_tokenizer_init=True,
             dtype=dtype,
             max_model_len=128,
         ),
+        parallel_config=ParallelConfig(tensor_parallel_size=tp),
         quant_config=Fp8Config(is_checkpoint_fp8_serialized=True)
         if quantized
         else None,
     )
     try:
         with set_current_vllm_config(config), set_default_torch_dtype(dtype):
+            torch.xpu.set_device(rank)
             init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
+                world_size=tp,
+                rank=rank,
+                local_rank=rank,
                 backend=current_platform.dist_backend,
                 distributed_init_method=f"file://{tmp_path / 'distributed'}",
             )
-            initialize_model_parallel(1, 1)
+            initialize_model_parallel(tp, 1)
             init_workspace_manager(torch.device(DEVICE_TYPE))
             with torch.device(DEVICE_TYPE):
-                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
+                block = Qwen3_5SparseMoeBlock(
+                    config, prefix="model.layers.0.mlp", reduce_results=reduce_results
+                )
                 torch.manual_seed(7)
                 with torch.no_grad():
                     for name, param in block.named_parameters():
@@ -144,19 +149,17 @@ def xpu_qwen3_5_moe(tmp_path, request):
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize(
-    "xpu_qwen3_5_moe",
-    [(torch.float16, True), (torch.bfloat16, True), (torch.float16, False)],
-    indirect=True,
-)
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 9])
-def test_xpu_qwen3_5_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
-    """Fuse B1-8 and preserve existing model semantics for unsupported calls."""
+@pytest.fixture
+def xpu_qwen3_5_moe(tmp_path, request):
+    with _xpu_qwen3_5_moe(tmp_path, *request.param) as state:
+        yield state
+
+
+def _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse):
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 
-    block, config, quantized = xpu_qwen3_5_moe
+    block, config, _ = state
     torch.manual_seed(17)
     x = torch.randn(
         num_tokens, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE
@@ -172,15 +175,47 @@ def test_xpu_qwen3_5_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
         for event in p.key_averages()
         if event.key == "_xpu_C::moe_shared_fused_decode_interface"
     )
-    fused_available = hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
-    should_fuse = quantized and num_tokens <= 8 and fused_available
     assert native_calls == int(should_fuse)
     if should_fuse:
         # The fused and base kernels round projections/activations differently.
-        # Use the native kernel suite's FP16/BF16 tolerance.
         torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
     else:
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize(
+    "xpu_qwen3_5_moe",
+    [(torch.float16, True), (torch.bfloat16, True)],
+    indirect=True,
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8])
+def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
+    """Missing kernels must fail native coverage rather than test fallback."""
+    assert hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
+    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=True)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize(
+    "xpu_qwen3_5_moe,num_tokens",
+    [
+        ((torch.float16, True), 9),
+        ((torch.bfloat16, True), 9),
+        *(((torch.float16, False), m) for m in (1, 2, 4, 8, 9)),
+    ],
+    indirect=["xpu_qwen3_5_moe"],
+)
+def test_xpu_qwen3_5_unsupported_fallback(xpu_qwen3_5_moe, num_tokens):
+    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=False)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe):
+    """Run separately in the stock-wheel CI environment without #670."""
+    assert not hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
+    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
@@ -203,6 +238,42 @@ def test_xpu_qwen3_5_shared_expert_preserves_sequence_parallel_input(xpu_qwen3_5
         for event in p.key_averages()
     )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def _check_xpu_qwen3_5_tp2(rank, tmp_path, reduce_results):
+    from vllm.forward_context import set_forward_context
+
+    with _xpu_qwen3_5_moe(
+        tmp_path, torch.float16, True, rank, 2, reduce_results
+    ) as state:
+        _check_xpu_qwen3_5_decode(state, 2, should_fuse=True)
+        block, config, _ = state
+        x = torch.ones(2, 128, dtype=torch.float16, device=DEVICE_TYPE)
+        with torch.inference_mode(), set_forward_context(None, config):
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as p:
+                block(x)
+            reductions = sum(
+                event.count
+                for event in p.key_averages()
+                if event.key == "c10d::allreduce_"
+            )
+            assert reductions == int(reduce_results)
+            plan = block._xpu_moe_shared_fused_plan
+            workspace = plan.workspace(2)
+            block(x)
+            assert block._xpu_moe_shared_fused_plan is plan
+            assert plan.workspace(2) is workspace
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("reduce_results", [True, False])
+def test_xpu_qwen3_5_shared_expert_tp2(tmp_path, reduce_results):
+    """The combined rank-local partial is reduced exactly once when requested."""
+    torch.multiprocessing.spawn(
+        _check_xpu_qwen3_5_tp2, args=(tmp_path, reduce_results), nprocs=2
+    )
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
