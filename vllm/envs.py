@@ -335,6 +335,7 @@ if TYPE_CHECKING:
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_LORA_SHRINK_USE_MULTICTA: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
@@ -2281,6 +2282,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # overlap the base layer compute with the LoRA fast path).
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
+    ),
+    # Experimental deterministic LoRA shrink with an in-cluster split-K
+    # reduction. Requires NVIDIA cluster launch support (CC >= 9.0),
+    # cuda-python and Triton >= 3.8.0; unsupported systems use the original
+    # implementation. Defaults to disabled and does not enable batch invariance
+    # for other operators. Its rounding can differ from the two-stage kernel.
+    "VLLM_LORA_SHRINK_USE_MULTICTA": lambda: bool(
+        int(os.getenv("VLLM_LORA_SHRINK_USE_MULTICTA", "0"))
     ),
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.

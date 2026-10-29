@@ -6,9 +6,13 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+from functools import lru_cache
+
 import torch
+from packaging.version import Version
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
@@ -16,11 +20,32 @@ from vllm.lora.ops.triton_ops.utils import (
     is_batch_invariant,
     supports_pdl,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # Batch-invariant shrink splits K into this many fixed partials (no atomics).
 _BI_SPLIT_K = 8
+logger = init_logger(__name__)
+
+
+@lru_cache
+def _supports_multicta_shrink(device: torch.device) -> bool:
+    if (
+        not current_platform.is_cuda()
+        or torch.cuda.get_device_capability(device)[0] < 9
+    ):
+        return False
+    if Version(triton.__version__) < Version("3.8.0"):
+        return False
+    try:
+        from cuda.bindings import driver
+    except ImportError:
+        return False
+    status, supported = driver.cuDeviceGetAttribute(
+        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH, device.index
+    )
+    return status == driver.CUresult.CUDA_SUCCESS and bool(supported)
 
 
 @triton.jit
@@ -259,8 +284,17 @@ def _lora_shrink(
     if inputs.size(0) == 0:
         # An empty first call has no work to do.
         return
+    use_multicta = False
+    if envs.VLLM_LORA_SHRINK_USE_MULTICTA:
+        use_multicta = _supports_multicta_shrink(inputs.device)
+        if not use_multicta:
+            logger.warning_once(
+                "Multi-CTA LoRA shrink requires NVIDIA cluster launch support, "
+                "compute capability >= 9.0, cuda-python and Triton >= 3.8.0; "
+                "using the original LoRA shrink implementation."
+            )
     partials: torch.Tensor | None = None
-    if is_batch_invariant:
+    if is_batch_invariant and not use_multicta:
         # Allocated before the no-LoRA return so profiling sees the scratch.
         # Per-call allocation keeps each CUDA graph's scratch in its own pool.
         partials = torch.empty(
@@ -301,6 +335,25 @@ def _lora_shrink(
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
+
+    if use_multicta:
+        from vllm.lora.ops.triton_ops.lora_shrink_multicta import (
+            launch_lora_shrink_multicta,
+        )
+
+        launch_lora_shrink_multicta(
+            inputs,
+            lora_ptr_tensor,
+            output_tensor,
+            token_indices_sorted_by_lora_ids,
+            num_tokens_per_lora,
+            lora_token_start_loc,
+            lora_ids,
+            num_active_loras.item(),
+            scaling,
+            (lora_strides_d0, lora_strides_d1, lora_strides_d2),
+        )
+        return
 
     # Triton kernel configs
     kernel_config = get_lora_op_configs(
