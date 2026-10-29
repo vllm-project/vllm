@@ -15,11 +15,18 @@ preserved exactly. Checked for both styles used by Voxtral realtime: the NeoX
 decoder (rotary_dim=128) and the GPT-J audio encoder (rotary_dim=64), base=1e6.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 # Import the PRODUCTION op so the test guards the real function, not a copy.
-from vllm.v1.worker.reanchor_rotary import apply_inverse_rotary
+from vllm.v1.worker.reanchor_rotary import (
+    ROPE_THETA,
+    apply_inverse_rotary,
+    audio_position_factor,
+    rerotate_cached_keys,
+)
 
 
 def _inv_freq(rotary_dim: int, base: float) -> torch.Tensor:
@@ -94,3 +101,66 @@ def test_reanchor_preserves_relative_score(rotary_dim, base, is_neox, p, D):
     )
     s_re = (_forward_rotary(q, i - D, rotary_dim, base, is_neox) * kj_re).sum(-1)
     assert (s_orig - s_re).abs().max().item() < 1e-3
+
+
+def _layer(head_size: int, num_blocks: int = 6, dtype=torch.float32):
+    # Standardized KV view: (blocks, heads, block_size, 2 * head_size).
+    kv = torch.randn(num_blocks, 2, 4, 2 * head_size, dtype=dtype)
+    return SimpleNamespace(head_size=head_size, kv_cache=kv)
+
+
+def test_rerotate_cached_keys_touches_only_row_keys():
+    """Only the keys of the listed blocks move: decoder by d, encoder by
+    audio_factor * d. Values and other blocks are untouched."""
+    torch.manual_seed(0)
+    decoder, encoder = _layer(128), _layer(64)
+    ctx = {"dec": decoder, "enc": encoder}
+    groups = [
+        SimpleNamespace(layer_names=["dec"]),
+        SimpleNamespace(layer_names=["enc"]),
+    ]
+    before = {name: layer.kv_cache.clone() for name, layer in ctx.items()}
+    rows = [torch.tensor([1, 3]), torch.tensor([2])]
+    d, audio_factor = 2048, 4
+
+    rerotate_cached_keys(ctx, groups, rows, d, audio_factor)
+
+    for name, row, head_size, shift, is_neox in (
+        ("dec", rows[0], 128, d, True),
+        ("enc", rows[1], 64, audio_factor * d, False),
+    ):
+        kv, old = ctx[name].kv_cache, before[name]
+        expected = apply_inverse_rotary(
+            old[row, ..., :head_size], shift, head_size, ROPE_THETA, is_neox
+        )
+        assert torch.allclose(kv[row, ..., :head_size], expected, atol=1e-5)
+        assert torch.equal(kv[..., head_size:], old[..., head_size:])
+        others = [b for b in range(kv.shape[0]) if b not in row.tolist()]
+        assert torch.equal(kv[others], old[others])
+
+
+def test_rerotate_cached_keys_skips_empty_rows():
+    layer = _layer(128)
+    before = layer.kv_cache.clone()
+    group = SimpleNamespace(layer_names=["dec"])
+    rerotate_cached_keys(
+        {"dec": layer}, [group], [torch.tensor([], dtype=torch.long)], 2048, 4
+    )
+    assert torch.equal(layer.kv_cache, before)
+
+
+def test_rerotate_cached_keys_rejects_quantized_kv():
+    layer = _layer(128)
+    layer.kv_cache = layer.kv_cache.to(torch.float8_e4m3fn)
+    group = SimpleNamespace(layer_names=["dec"])
+    with pytest.raises(AssertionError, match="non-quantized"):
+        rerotate_cached_keys({"dec": layer}, [group], [torch.tensor([1])], 2048, 4)
+
+
+def test_audio_position_factor():
+    def config(**audio):
+        return SimpleNamespace(audio_config=SimpleNamespace(**audio))
+
+    assert audio_position_factor(config(block_pool_size=4)) == 4
+    assert audio_position_factor(config(downsample_factor=4)) == 4
+    assert audio_position_factor(SimpleNamespace()) == 1

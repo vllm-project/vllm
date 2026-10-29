@@ -1737,14 +1737,6 @@ class VllmConfig:
         if self.scheduler_config.enable_realtime_unbounded:
             from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
-            # Without the worker re-rotation, the scheduler would shift positions
-            # while cached keys keep their old rotation: silent corruption.
-            if envs.VLLM_USE_V2_MODEL_RUNNER:
-                raise ValueError(
-                    "enable_realtime_unbounded is only implemented in the V1 "
-                    "model runner; unset VLLM_USE_V2_MODEL_RUNNER."
-                )
-
             # Re-anchoring re-rotates cached keys in place; a quantized KV cache
             # cannot be rotated. Reject at startup, not hours into a stream.
             if self.cache_config is not None and is_quantized_kv_cache(
@@ -3242,10 +3234,6 @@ class VllmConfig:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
         speculative_config = self.speculative_config
-
-        if self.scheduler_config.enable_realtime_unbounded:
-            # The worker-side key re-rotation lives in the V1 model runner.
-            unsupported.append("realtime re-anchoring (enable_realtime_unbounded)")
 
         # V2 does not implement the external_launcher (torchrun) PP-output
         # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).

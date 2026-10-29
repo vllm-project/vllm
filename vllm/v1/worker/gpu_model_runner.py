@@ -153,7 +153,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpecKind,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
@@ -212,8 +211,8 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.reanchor_rotary import (
-    apply_inverse_rotary_cos_sin,
-    inverse_rotary_cos_sin,
+    audio_position_factor,
+    rerotate_cached_keys,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -1162,28 +1161,10 @@ class GPUModelRunner(
         benchmarks/voxtral_realtime/test_reanchor_math.py).
 
         Runs at the between-steps barrier (after _update_states, before the
-        forward writes this step's keys). Invalid under fp8 KV.
+        forward writes this step's keys).
         """
-        if not reanchor_reqs:
-            return
-        assert not is_quantized_kv_cache(self.cache_config.cache_dtype), (
-            "realtime re-anchoring requires a non-fp8 KV cache"
-        )
         ib = self.input_batch
-        fctx = self.compilation_config.static_forward_context
-        groups = self.kv_cache_config.kv_cache_groups
-        # The audio encoder's RoPE positions run at block_pool_size x the decoder
-        # (whisper positions are expanded by this factor), so its constant shift
-        # is pool * D; the decoder (text) group shifts by D.
-        audio_cfg = getattr(self.model_config.hf_config, "audio_config", None)
-        # downsample_factor lives on audio_config (the Mistral adapter writes it
-        # there, not top-level). Startup validation rejects a non-derivable pool
-        # for the re-anchor path, so the trailing `or 1` is unreachable there.
-        pool = (
-            getattr(audio_cfg, "block_pool_size", None)
-            or getattr(audio_cfg, "downsample_factor", None)
-            or 1
-        )
+        audio_factor = audio_position_factor(self.model_config.hf_config)
         for req_id, D in reanchor_reqs.items():
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
@@ -1202,70 +1183,26 @@ class GPUModelRunner(
                     D,
                 )
                 continue
+            group_block_ids = [
+                torch.from_numpy(
+                    bt.block_table.np[idx, : bt.num_blocks_per_row[idx]].copy()
+                ).to(self.device, torch.long)
+                for bt in ib.block_table.block_tables
+            ]
+            rerotate_cached_keys(
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config.kv_cache_groups,
+                group_block_ids,
+                D,
+                audio_factor,
+            )
             # The persistent-batch row already carries the rebased (small) clock
-            # from full re-add; logged below for observability.
-            clock = int(ib.num_computed_tokens_cpu[idx])
-            # Voxtral/Ministral rope_theta, hardcoded here for the experimental
-            # realtime path. Startup validation (VllmConfig) rejects any model
-            # whose text/audio rope_theta != 1e6, that carries a real RoPE
-            # scaling, or whose decoder/encoder head_dim is not the validated
-            # 128-NeoX / 64-GPT-J pairing this dispatch keys off. The head_size
-            # assert below only rejects a dim outside {64, 128}; by itself it
-            # does NOT catch a 64-dim NeoX or 128-dim GPT-J head, which is why
-            # the geometry is validated up front.
-            base = 1.0e6
-            # At most two distinct rotations per re-anchor (decoder 128-dim
-            # NeoX shifted by D, audio encoder 64-dim GPT-J shifted by pool*D);
-            # compute each cos/sin table once instead of per layer (~60x).
-            cos_sin: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
-            for gid, group in enumerate(groups):
-                bt = ib.block_table.block_tables[gid]
-                n = int(bt.num_blocks_per_row[idx])
-                if n <= 0:
-                    continue
-                # Whole rebased row: leading evicted/null blocks were dropped
-                # scheduler-side; trailing freshly-allocated blocks (this step's
-                # new tokens) are zeroed by _update_states and overwritten by the
-                # forward pass, so re-rotating them is a harmless no-op. R(-d_grp)
-                # is position-independent, so a uniform rotation of every key in
-                # the row is exactly right.
-                live = bt.block_table.np[idx, :n].copy()
-                live_t = torch.from_numpy(live).to(self.device, torch.long)
-                for layer_name in group.layer_names:
-                    layer = fctx[layer_name]
-                    kv = layer.kv_cache
-                    if isinstance(kv, (list, tuple)):
-                        kv = kv[0]
-                    # Standardized layer view (B, H, N, 2 * head_size): K is the
-                    # first head_size channels, V the rest. head_size comes from
-                    # the layer, not the tensor, and per layer: equal text/audio
-                    # windows merge the decoder (128-dim NeoX, shift D) and the
-                    # audio encoder (64-dim GPT-J, shift pool*D) into one group.
-                    head_size = layer.head_size
-                    assert head_size in (64, 128), (
-                        f"re-anchor: unexpected rotary head_size {head_size}"
-                    )
-                    assert kv.dim() == 4 and kv.shape[-1] == 2 * head_size, (
-                        "re-anchor: unexpected KV cache view "
-                        f"{tuple(kv.shape)} for head_size {head_size}"
-                    )
-                    is_neox = head_size == 128
-                    d_grp = D if is_neox else pool * D
-                    cs = cos_sin.get((d_grp, head_size))
-                    if cs is None:
-                        cs = inverse_rotary_cos_sin(
-                            d_grp, head_size, base, kv.dtype, kv.device
-                        )
-                        cos_sin[(d_grp, head_size)] = cs
-                    key = kv[live_t, ..., :head_size]
-                    kv[live_t, ..., :head_size] = apply_inverse_rotary_cos_sin(
-                        key, cs[0], cs[1], head_size, is_neox
-                    )
+            # from full re-add.
             logger.info(
                 "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
                 req_id,
                 D,
-                clock,
+                int(ib.num_computed_tokens_cpu[idx]),
             )
 
     # Note: used for model runner override.
