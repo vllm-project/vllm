@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -35,8 +36,9 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
-    _LOAD_TIMEOUT_S,
     _LOOKUP_TIMEOUT_S,
+    _P2P_LOAD_TIMEOUT_S,
+    _PD_LOAD_TIMEOUT_S,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
@@ -57,6 +59,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _MAX_CONSECUTIVE_DISPATCH_ERRORS,
+    _PEER_FAULT_DRAIN_S,
 )
 
 # ---------------------------------------------------------------------------
@@ -96,6 +99,8 @@ class FakeDataTransport:
         self._poll_failed: list[int] = []
         self._cancel_still_inflight: set[int] = set()
         self._cancel_calls: list[tuple[list[int], str]] = []
+        # peer_id → cause, reported by scoped poll() like NixlTransport.
+        self._peer_faults: dict[str, str] = {}
 
     @property
     def base_addr(self) -> int:
@@ -160,6 +165,7 @@ class FakeDataTransport:
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
+        self._peer_faults.pop(peer_id, None)
 
     def write_blocks(self, peer_id, local_idxs, remote_idxs) -> int | None:
         if peer_id not in self._remote_peers:
@@ -172,7 +178,11 @@ class FakeDataTransport:
     def poll(self, peer_id=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
-        result = PollResult(done=list(self._poll_done), failed=list(self._poll_failed))
+        result = PollResult(
+            done=list(self._poll_done),
+            failed=list(self._poll_failed),
+            peer_fault=self._peer_faults.get(peer_id) if peer_id else None,
+        )
         self._poll_done.clear()
         self._poll_failed.clear()
         return result
@@ -483,6 +493,19 @@ class TestConnectHandshake:
         assert not conn.alive
         assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
 
+    def test_failed_ack_send_marks_connection_dead(self):
+        """A ConnectAckMsg send that raises marks the connection dead."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        transport.complete_registrations()
+        conn.fail_send = True
+        session.poll()
+
+        assert not conn.alive
+
     def test_duplicate_connect_during_registration_is_rejected(self):
         """A second ConnectMsg mid-registration is a protocol violation."""
         transport = FakeDataTransport(defer_registration=True)
@@ -505,7 +528,7 @@ class TestConnectHandshake:
         """Outgoing messages sent before ConnectAck are flushed after."""
         session, conn, _ = _make_session()
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         # Before ack: only our ConnectMsg was sent.
         assert len(conn._sent) == 1
@@ -584,7 +607,10 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k1", b"k2"], block_ids=[0, 1]
+            job_id=1,
+            kv_request_id="req-1",
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
+            block_ids=[0, 1],
         )
         lookup = conn._sent[-1]
         assert lookup[TYPE_KEY] == FetchMsg.TYPE
@@ -596,7 +622,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         conn.enqueue(
             {
@@ -613,7 +639,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         conn.enqueue(
             {
@@ -630,7 +656,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
         abort = conn._sent[-1]
@@ -641,7 +667,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=7, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=7, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
 
         session.finish_request("req-1")
@@ -661,7 +687,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=8, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=8, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
 
@@ -682,7 +708,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=9, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=9, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
         _client_load(session, "req-1").aborted_at = (
@@ -699,7 +725,7 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=10, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=10, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
 
@@ -741,7 +767,7 @@ class TestClientFlows:
 
         # Issuing a fetch arms the work-list.
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         assert client._active_loads == {"req-1"}
         assert client.has_active_loads is True
@@ -763,12 +789,38 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         _client_load(session, "req-1").submitted_at = time.monotonic() - 60.0
         session.poll()
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
+
+    def test_load_timeout_depends_on_mode(self):
+        """A symmetric-P2P fetch (probed first) aborts after the short P2P
+        load timeout; a PD fetch (no probe) still gets the full PD one."""
+        assert _P2P_LOAD_TIMEOUT_S < _PD_LOAD_TIMEOUT_S
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-p2p", b"k")
+        session._client.on_lookup_resp("req-p2p", [b"k"], [True])
+        session.request_blocks(
+            job_id=1, kv_request_id="req-p2p", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-pd", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        assert _client_load(session, "req-p2p").timeout_s == _P2P_LOAD_TIMEOUT_S
+        assert _client_load(session, "req-pd").timeout_s == _PD_LOAD_TIMEOUT_S
+
+        # Past the P2P timeout but short of the PD one: only P2P aborts.
+        backdated = time.monotonic() - _P2P_LOAD_TIMEOUT_S - 1.0
+        _client_load(session, "req-p2p").submitted_at = backdated
+        _client_load(session, "req-pd").submitted_at = backdated
+        session.poll()
+        assert _client_load(session, "req-p2p").aborted_at is not None
+        assert _client_load(session, "req-pd").aborted_at is None
 
     def test_load_abort_ack_timeout_surfaces_failure(self):
         """After load timeout sends AbortFetch, if no AbortAck arrives within
@@ -779,11 +831,11 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=7, kv_request_id="req-7", keys=[b"k"], block_ids=[0]
+            job_id=7, kv_request_id="req-7", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
         _client_load(session, "req-7").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
         assert loads == []
@@ -810,10 +862,10 @@ class TestClientFlows:
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
-            job_id=8, kv_request_id="req-8", keys=[b"k"], block_ids=[0]
+            job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         _client_load(session, "req-8").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
         # First poll: AbortFetch goes out.
         session.poll()
@@ -888,6 +940,7 @@ class TestLookupFlow:
         lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
         session.poll()
         assert not session.alive
+        assert session.death_reason == "lookup response timed out"
         assert session.close().failed_req_ids == ["req-1"]
 
     def test_lookup_progress_keeps_overlapping_batches_alive(self, lookup_clock):
@@ -969,10 +1022,10 @@ class TestLookupFlow:
         session.register_lookup("stalled", b"key")
         session.flush_pending_lookups()
         lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
-        session.request_blocks(1, "load", [b"key"], [0])
-        session.add_stored_blocks("store", [b"key"], [1], 2)
+        session.request_blocks(1, "load", [OffloadKey(b"key")], [0])
+        session.add_stored_blocks("store", [OffloadKey(b"key")], [1], 2)
         if partial_fetch:
-            session.add_stored_blocks("store", [b"unused"], [2], 3)
+            session.add_stored_blocks("store", [OffloadKey(b"unused")], [2], 3)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1035,7 +1088,7 @@ class TestLookupFlow:
         elif action == "finish":
             session.finish_request("req-1")
         else:
-            session.request_blocks(1, "req-1", [b"hA"], [0])
+            session.request_blocks(1, "req-1", [OffloadKey(b"hA")], [0])
 
         lookup_clock.now += 2
         session.poll()
@@ -1125,7 +1178,7 @@ class TestLookupFlow:
 
         # Fetch consumes the probe.
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[0]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
         )
         assert b"hA" not in session._client._requests["req-1"].probes
 
@@ -1317,7 +1370,7 @@ class TestLookupFlow:
         )
         session.poll()
         session.request_blocks(
-            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[7]
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[7]
         )
         sent_before = len(conn._sent)
 
@@ -1391,7 +1444,9 @@ class TestServerLookupHandling:
         """All-HIT batch: one create_store_job call with all keys, one
         LookupRespMsg with hits=[True]*N, on_request_finished fires at the
         end of serve, and `available` is populated for the eventual fetch."""
-        cb = FakeParent(stored={b"hA": 1, b"hB": 2, b"hC": 3})
+        cb = FakeParent(
+            stored={OffloadKey(b"hA"): 1, OffloadKey(b"hB"): 2, OffloadKey(b"hC"): 3}
+        )
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1442,9 +1497,9 @@ class TestServerLookupHandling:
         key has settled (or the deadline fires), then one
         LookupRespMsg carries all keys in wire order."""
         cb = FakeParent(
-            stored={b"hA": 1},
-            pending={b"hB"},
-            retry={b"hD"},
+            stored={OffloadKey(b"hA"): 1},
+            pending={OffloadKey(b"hB")},
+            retry={OffloadKey(b"hD")},
         )
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1470,7 +1525,7 @@ class TestServerLookupHandling:
         both keys in wire order, and one create_store_job call per
         HIT (the second HIT is pinned when it resolves, not when the
         response goes out)."""
-        cb = FakeParent(stored={b"hA": 1}, pending={b"hB"})
+        cb = FakeParent(stored={OffloadKey(b"hA"): 1}, pending={OffloadKey(b"hB")})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1482,8 +1537,8 @@ class TestServerLookupHandling:
         assert _lookup_resps(conn, sent_before) == []
 
         # Promote hB.
-        cb.pending.discard(b"hB")
-        cb.stored[b"hB"] = 2
+        cb.pending.discard(OffloadKey(b"hB"))
+        cb.stored[OffloadKey(b"hB")] = 2
 
         # Drive resolver via a second serve_external_requests.
         _serve(session, cb)
@@ -1506,7 +1561,7 @@ class TestServerLookupHandling:
         """A HIT_PENDING key that stays pending past the batch
         ``deadline`` is force-MISS and never pinned; the deferred
         aggregate response fires with hits=[False]."""
-        cb = FakeParent(pending={b"hA"})
+        cb = FakeParent(pending={OffloadKey(b"hA")})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1533,7 +1588,7 @@ class TestServerLookupHandling:
     def test_finish_request_called_per_lookup_msg_not_per_kv_request_id(self):
         """Two LookupMsgs for the same kv_request_id get distinct ctxs
         and two on_request_finished calls (one per batch)."""
-        cb = FakeParent(stored={b"hA": 1, b"hB": 2})
+        cb = FakeParent(stored={OffloadKey(b"hA"): 1, OffloadKey(b"hB"): 2})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1557,7 +1612,7 @@ class TestServerLookupHandling:
         synthetic ctx as a failed serve (no parent handle at teardown) so
         the manager can release the TieringManager's state on its next
         serve."""
-        cb = FakeParent(pending={b"hA"})
+        cb = FakeParent(pending={OffloadKey(b"hA")})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1578,7 +1633,7 @@ class TestServerLookupHandling:
         """``ServerRole.finish(kv_request_id)`` drops every parked batch
         whose kv_request_id matches and queues its ctx for the next
         serve's on_request_finished."""
-        cb = FakeParent(pending={b"hA", b"hB"})
+        cb = FakeParent(pending={OffloadKey(b"hA"), OffloadKey(b"hB")})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1609,7 +1664,7 @@ class TestServerLookupHandling:
         """A peer FetchMsg terminates the lookup phase for its id: parked
         lookups with matching kv_request_id are dropped and their
         ctx queued for on_request_finished; other kv_request_ids untouched."""
-        cb = FakeParent(pending={b"hA", b"hB"})
+        cb = FakeParent(pending={OffloadKey(b"hA"), OffloadKey(b"hB")})
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1651,7 +1706,7 @@ class TestServerLookupHandling:
         """End-to-end: lookup pins primary slots → fetch matches them →
         NIXL transfer completes → StoreResult surfaces with the
         create_store_job's job_id (the engine releases the pin)."""
-        cb = FakeParent(stored={b"hA": 7, b"hB": 8})
+        cb = FakeParent(stored={OffloadKey(b"hA"): 7, OffloadKey(b"hB"): 8})
         session, conn, transport = _make_session()
         _activate(session, conn)
 
@@ -1700,7 +1755,9 @@ class TestServerFlows:
         """Blocks stored before fetch demand are matched on demand arrival."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1", b"k2"], [0, 1], job_id=1)
+        session.add_stored_blocks(
+            "req-1", [OffloadKey(b"k1"), OffloadKey(b"k2")], [0, 1], job_id=1
+        )
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1731,14 +1788,14 @@ class TestServerFlows:
         )
         session.poll()
         assert len(transport._transfers) == 0
-        session.add_stored_blocks("req-1", [b"k1"], [3], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [3], job_id=1)
         assert len(transport._transfers) == 1
 
     def test_transfer_completion_emits_store_result_and_done(self):
         """Completed transfer reports StoreResult and sends TransferDoneMsg."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1946,7 +2003,7 @@ class TestServerFlows:
     def test_store_timeout(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         # Backdate.
         session._server._store_jobs[1] = time.monotonic() - 60.0
         stores = session.poll().stores
@@ -1960,7 +2017,7 @@ class TestServerFlows:
         monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1995,8 +2052,8 @@ class TestServerFlows:
     def test_store_timeout_keeps_pins_until_cancel_or_late_terminal(self, success):
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2043,8 +2100,8 @@ class TestServerFlows:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         first, second = list(transport._transfers)
         session._server._store_jobs[1] = time.monotonic() - 60.0
         transport._cancel_still_inflight.add(second)
@@ -2054,7 +2111,7 @@ class TestServerFlows:
         assert 2 in session._server._store_jobs
         assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
         # Additional supply must not restart the timed-out round.
-        session.add_stored_blocks("req-1", [b"k3"], [2], job_id=3)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k3")], [2], job_id=3)
         assert session.poll().stores == [StoreResult(job_id=3, success=False)]
         assert set(session._server._inflight) == {second}
         if success is None:
@@ -2085,8 +2142,8 @@ class TestServerFlows:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         first, second = list(transport._transfers)
         transport._cancel_still_inflight.add(second)
 
@@ -2111,7 +2168,7 @@ class TestServerFlows:
         monkeypatch.setattr(server_mod, "_CANCEL_RETRY_INTERVAL_S", 0.0)
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2156,7 +2213,7 @@ class TestServerFlows:
     @staticmethod
     def _submit_unconfirmed_transfer(session, conn, transport) -> int:
         """Start one transfer for job 1 whose wait-cancel never confirms."""
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2287,7 +2344,7 @@ class TestServerFlows:
         _activate(session, conn)
         tid = self._submit_unconfirmed_transfer(session, conn, transport)
         # Job 2 supplies a block nobody demanded: no transfer reads it.
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=2)
         conn.enqueue(
             {
                 TYPE_KEY: AbortFetchMsg.TYPE,
@@ -2341,7 +2398,7 @@ class TestServerFlows:
         """A lookup pin whose store job timed out has been reported failed,
         so the engine unpinned the primary slot. A late FetchMsg must not
         read that slot: the round fails fast instead."""
-        parent = FakeParent(stored={b"hA": 7})
+        parent = FakeParent(stored={OffloadKey(b"hA"): 7})
         session, conn, transport = _make_session()
         _activate(session, conn)
         _send_lookup(conn, "req-1", [b"hA"])
@@ -2422,7 +2479,7 @@ class TestFinishRequestServerSide:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         assert len(transport._transfers) == 1
 
         # finish_request while inflight: no early-fail yet.
@@ -2458,7 +2515,7 @@ class TestFinishRequestServerSide:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         # Mark finishing (e.g., on_request_finished racing with the last
         # store) — but all demand is satisfied.
         session.finish_request("req-1")
@@ -2478,7 +2535,7 @@ class TestFinishRequestServerSide:
         # Case A: all demand satisfied by available blocks.
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         # finish_request first — no demand received yet -> defer.
         session.finish_request("req-1")
         assert _srv_outbound(session, "req-1") is not None
@@ -2503,7 +2560,7 @@ class TestFinishRequestServerSide:
         # Case B: demand exceeds available -> early-fail fires from fetch.
         session, conn, transport = _make_session()
         _activate(session, conn)
-        session.add_stored_blocks("req-2", [b"k1"], [0], job_id=2)
+        session.add_stored_blocks("req-2", [OffloadKey(b"k1")], [0], job_id=2)
         session.finish_request("req-2")
         conn.enqueue(
             {
@@ -2552,7 +2609,7 @@ class TestFinishRequestServerSide:
         # We did submit_store a different block — goes to available, never
         # matches demand. Without the shortcut, job 42 sits in _store_jobs
         # for _STORE_TIMEOUT_S.
-        session.add_stored_blocks("req-1", [b"unrelated"], [0], job_id=42)
+        session.add_stored_blocks("req-1", [OffloadKey(b"unrelated")], [0], job_id=42)
         assert _srv_outbound(session, "req-1").pending_job_ids == {42}
 
         session.finish_request("req-1")
@@ -2584,7 +2641,7 @@ class TestFinishRequestServerSide:
             }
         )
         session.poll()
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=7)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=7)
         # finish_request races with the inflight transfer.
         session.finish_request("req-1")
         assert _srv_outbound(session, "req-1") is not None  # deferred
@@ -2600,18 +2657,22 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
-    def test_write_blocks_failure_finalizes_with_failure(self):
-        """write_blocks returning None must not leave the request hanging.
-
-        The matched blocks are gone from req.demanded but no inflight
-        will satisfy them, so remaining > 0 forever. Setting finishing
-        and calling _finalize_outbound(success=False) immediately (no
-        other inflight) tells the peer + emits StoreResult(success=False)
-        without waiting on _STORE_TIMEOUT_S or _LOAD_TIMEOUT_S.
-        """
+    @pytest.mark.parametrize(
+        "store_first,finish_before_fetch",
+        [(False, False), (True, False), (True, True)],
+        ids=["fetch-first", "store-first", "finish-before-fetch"],
+    )
+    def test_write_blocks_failure_finalizes_with_failure(
+        self, store_first, finish_before_fetch
+    ):
+        """Submission failure finalizes once in either store/fetch ordering."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        # Decoder demands b"k1".
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        if store_first:
+            session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
+            if finish_before_fetch:
+                session.finish_request("req-1")
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2621,21 +2682,22 @@ class TestFinishRequestServerSide:
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
-        session.poll()
-        # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
-
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+        stores = session.poll().stores
+        if not store_first:
+            session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
+        stores.extend(session.poll().stores)
 
         # Outbound was finalized immediately (no other inflight).
         assert _srv_outbound(session, "req-1") is None
+        assert session._dispatch_error_count == 0
+        assert stores == [StoreResult(job_id=42, success=False)]
+        assert session.poll().stores == []
         # Peer notified with success=False.
-        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(done) == 1
+        msg = done[0]
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        # Local store job surfaces on the next poll.
-        stores = session.poll().stores
-        assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
 
     def test_partial_match_completes_in_two_rounds(self):
@@ -2664,7 +2726,7 @@ class TestFinishRequestServerSide:
         assert set(outbound.demanded.keys()) == {b"k1", b"k2", b"k3"}
 
         # Round 1: only k1 is stored locally.
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=100)
         # One inflight transfer for k1.
         assert len(session._server._inflight) == 1
         tid_1 = next(iter(session._server._inflight))
@@ -2683,7 +2745,9 @@ class TestFinishRequestServerSide:
         assert _srv_outbound(session, "req-1") is not None
 
         # Round 2: k2 and k3 arrive together.
-        session.add_stored_blocks("req-1", [b"k2", b"k3"], [1, 2], job_id=200)
+        session.add_stored_blocks(
+            "req-1", [OffloadKey(b"k2"), OffloadKey(b"k3")], [1, 2], job_id=200
+        )
         assert len(session._server._inflight) == 1
         tid_2 = next(iter(session._server._inflight))
         assert tid_2 != tid_1
@@ -2699,7 +2763,9 @@ class TestFinishRequestServerSide:
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
 
-    def test_write_blocks_failure_finalizes_after_last_inflight_completes(self):
+    def test_write_blocks_failure_finalizes_after_last_inflight_completes(
+        self, monkeypatch
+    ):
         """write_blocks returns None on a SECOND match while a first transfer
         is still inflight. The request should NOT finalize until the inflight
         completes, then the elif branch in collect_results
@@ -2721,7 +2787,7 @@ class TestFinishRequestServerSide:
         session.poll()
 
         # Round 1: k1 transfers cleanly.
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=100)
         assert len(session._server._inflight) == 1
         tid_1 = next(iter(session._server._inflight))
         outbound = _srv_outbound(session, "req-1")
@@ -2729,8 +2795,8 @@ class TestFinishRequestServerSide:
         assert outbound.finishing is False
 
         # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
-        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=200)
+        monkeypatch.setattr(transport, "write_blocks", lambda *a, **kw: None)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k2")], [1], job_id=200)
         # No new transfer was registered.
         assert list(session._server._inflight.keys()) == [tid_1]
         # Marked finishing, but NOT finalized yet (transfer_1 still inflight).
@@ -2774,7 +2840,7 @@ class TestBidirectional:
         _activate(session, conn)
 
         # Server role: the peer fetches a block from us.
-        session.add_stored_blocks("req-srv", [b"served"], [0], job_id=100)
+        session.add_stored_blocks("req-srv", [OffloadKey(b"served")], [0], job_id=100)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2787,7 +2853,10 @@ class TestBidirectional:
 
         # Client role: we ask the peer for a different block.
         session.request_blocks(
-            job_id=200, kv_request_id="req-cli", keys=[b"loaded"], block_ids=[3]
+            job_id=200,
+            kv_request_id="req-cli",
+            keys=[OffloadKey(b"loaded")],
+            block_ids=[3],
         )
 
         # Both flows progress in the same poll.
@@ -2839,7 +2908,7 @@ class TestPendingSession:
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         result_ = session.poll()
         loads = result_.loads
         stores = result_.stores
@@ -2881,8 +2950,8 @@ class TestPendingSession:
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
         result = session.close()
         assert result.failed_jobs == []
         assert result.failed_req_ids == []
@@ -2906,14 +2975,51 @@ class TestDisconnect:
     def test_close_returns_pending_loads_and_stores(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
-        session.request_blocks(1, "req-1", [b"k"], [0])
-        session.request_blocks(2, "req-2", [b"k"], [0])
-        session.add_stored_blocks("req-srv", [b"k"], [0], job_id=10)
+        session.request_blocks(1, "req-1", [OffloadKey(b"k")], [0])
+        session.request_blocks(2, "req-2", [OffloadKey(b"k")], [0])
+        session.add_stored_blocks("req-srv", [OffloadKey(b"k")], [0], job_id=10)
         result = session.close()
         assert set(result.failed_jobs) == {1, 2}
         assert set(result.failed_req_ids) == {"req-1", "req-2"}
         assert set(result.failed_stores) == {10}
         assert result.failed_serves == []
+
+    def test_close_retains_running_transfer(self):
+        """close() must not release a WRITE that may still be landing.
+
+        It cancels in wait mode; a transfer still running is reported as
+        retained with its store job, which stays pinned, and only the jobs
+        no transfer reads are returned as failed.
+        """
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        session.add_stored_blocks("idle", [OffloadKey(b"other")], [1], job_id=2)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+        (tid,) = data._transfers
+        data._cancel_still_inflight.add(tid)
+
+        result = session.close()
+
+        assert data._cancel_calls == [([tid], "wait")]
+        assert tid in data._transfers
+        assert result.retained == {tid: frozenset({1})}
+        assert result.failed_stores == [2]
+
+    def test_close_releases_stopped_transfer(self):
+        """A transfer that has already stopped is released, not retained."""
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+
+        result = session.close()
+
+        assert data._transfers == {}
+        assert result.retained == {}
+        assert result.failed_stores == [1]
 
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
@@ -2925,7 +3031,7 @@ class TestDisconnect:
 
         conn.fail_send = True
         # request_blocks flushes a FetchMsg synchronously via _do_send.
-        session.request_blocks(1, "req-1", [b"k"], [0])
+        session.request_blocks(1, "req-1", [OffloadKey(b"k")], [0])
 
         assert not session.alive
 
@@ -3064,7 +3170,7 @@ class TestDispatchErrorHandling:
         session.poll()
         assert not session.alive
 
-    def test_internal_error_does_not_disconnect_once(self):
+    def test_internal_error_does_not_disconnect_once(self, monkeypatch):
         """A non-ValueError raised by a handler is treated as an internal
         bug: counter increments, session stays alive on a single hit."""
         session, conn, _ = _make_session()
@@ -3073,7 +3179,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom
+        monkeypatch.setattr(session._server, "on_fetch", _boom)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -3087,7 +3193,7 @@ class TestDispatchErrorHandling:
         assert session.alive
         assert session._dispatch_error_count == 1
 
-    def test_internal_error_threshold_disconnects(self):
+    def test_internal_error_threshold_disconnects(self, monkeypatch):
         """Once consecutive non-protocol errors hit the threshold, the
         session tears down via _protocol_error."""
         session, conn, _ = _make_session()
@@ -3096,7 +3202,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom
+        monkeypatch.setattr(session._server, "on_fetch", _boom)
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
             conn.enqueue(
                 {
@@ -3117,26 +3223,23 @@ class TestDispatchErrorHandling:
         session, conn, _ = _make_session()
         _activate(session, conn)
 
-        original_on_fetch = session._server.on_fetch
-
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
         # Alternate (boom, success) (_MAX-1) times: counter rises to 1
         # then resets to 0 each cycle, never reaching the threshold.
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
-            session._server.on_fetch = _boom
-            conn.enqueue(
-                {
-                    TYPE_KEY: FetchMsg.TYPE,
-                    FetchMsg.ROUND_SEQ: 0,
-                    FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.KEYS: [b"k1"],
-                    FetchMsg.BLOCK_INDEXES: [0],
-                }
-            )
-            session.poll()
-            session._server.on_fetch = original_on_fetch
+            with patch.object(session._server, "on_fetch", _boom):
+                conn.enqueue(
+                    {
+                        TYPE_KEY: FetchMsg.TYPE,
+                        FetchMsg.ROUND_SEQ: 0,
+                        FetchMsg.KV_REQUEST_ID: "req-1",
+                        FetchMsg.KEYS: [b"k1"],
+                        FetchMsg.BLOCK_INDEXES: [0],
+                    }
+                )
+                session.poll()
             # A benign no-op message (unknown type) dispatches cleanly
             # and resets the consecutive-error counter.
             conn.enqueue({TYPE_KEY: "unknown_for_test"})
@@ -3166,8 +3269,12 @@ class TestInflightPerReqInvariant:
         assert _invariant_holds()
 
         # Two requests, two blocks each, all dispatched in one batch.
-        session.add_stored_blocks("req-A", [b"a1", b"a2"], [0, 1], job_id=10)
-        session.add_stored_blocks("req-B", [b"b1", b"b2"], [2, 3], job_id=11)
+        session.add_stored_blocks(
+            "req-A", [OffloadKey(b"a1"), OffloadKey(b"a2")], [0, 1], job_id=10
+        )
+        session.add_stored_blocks(
+            "req-B", [OffloadKey(b"b1"), OffloadKey(b"b2")], [2, 3], job_id=11
+        )
         for kv_id, keys, indexes in (
             ("req-A", [b"a1", b"a2"], [100, 101]),
             ("req-B", [b"b1", b"b2"], [102, 103]),
@@ -3507,3 +3614,98 @@ class TestHandshakeDeadline:
         ]
         session.poll()
         assert session._last_activity_at >= before
+
+
+# ---------------------------------------------------------------------------
+# Data-plane peer fault → connection death
+# ---------------------------------------------------------------------------
+
+
+def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.ROUND_SEQ: 0,
+            FetchMsg.KV_REQUEST_ID: kv_request_id,
+            FetchMsg.KEYS: keys,
+            FetchMsg.BLOCK_INDEXES: idxs,
+        }
+    )
+
+
+class TestPeerFaultEscalation:
+    """A transport peer fault ends the session through the normal reap
+    path (see "Failure model" in data/base.py): no new WRITE is submitted,
+    inflight ones drain, then DisconnectMsg and a dead connection."""
+
+    def test_fault_with_nothing_inflight_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        transport._peer_faults["peer:8000"] = "NIXL_ERR_REMOTE_DISCONNECT"
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason == "data plane: NIXL_ERR_REMOTE_DISCONNECT"
+        assert session.data_plane_fault == "NIXL_ERR_REMOTE_DISCONNECT"
+
+    def test_fault_waits_for_inflight_then_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+
+        transport._peer_faults["peer:8000"] = "3 consecutive transfer failures"
+        session.poll()
+        assert session.alive
+
+        # A new round while draining is failed fast, without a WRITE.
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        stores = session.poll().stores
+        assert len(transport._transfers) == 1
+        assert StoreResult(job_id=2, success=False) in stores
+        assert any(
+            m[TYPE_KEY] == TransferDoneMsg.TYPE
+            and m[TransferDoneMsg.KV_REQUEST_ID] == "req-2"
+            and m[TransferDoneMsg.SUCCESS] is False
+            for m in conn._sent
+        )
+        assert session.alive
+
+        # The last inflight WRITE drains; only now does the session go.
+        transport._poll_done.append(tid)
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason.startswith("data plane: 3 consecutive")
+
+    def test_fault_disconnects_after_drain_deadline(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        transport._peer_faults["peer:8000"] = "stuck"
+        session.poll()
+        assert session.alive
+        session._peer_fault_at = time.monotonic() - _PEER_FAULT_DRAIN_S - 1.0
+        session.poll()
+        assert not session.alive
+
+    def test_death_reasons(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        assert session.death_reason == "control connection lost"
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        session.poll()
+        assert session.death_reason == "peer disconnected"
+
+    def test_first_death_reason_wins(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        transport._peer_faults["peer:8000"] = "late"
+        session.poll()
+        assert session.death_reason == "peer disconnected"
