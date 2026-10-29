@@ -46,7 +46,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
+from vllm.utils.torch_utils import LayerNameType, weak_ref_tensor, weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -62,6 +62,32 @@ def _weak_ref_capture_arg(arg: Any) -> Any:
     if isinstance(arg, QuantizedActivation):
         return arg.weak_ref()
     return weak_ref_tensor(arg)
+
+
+def _sparse_mla_capture_gate(args: tuple, kwargs: dict) -> bool:
+    """Whether this MLA call runs the sparse path (capture-safe).
+
+    Sparse MLA attention derives its token split from tensor shapes, so it
+    replays correctly for any batch composition. Dense or unknown paths must
+    not be recorded into breakable PIECEWISE segments; anything we cannot
+    positively identify as sparse is refused.
+    """
+    layer_name = kwargs.get("layer_name")
+    if layer_name is None and len(args) > 4:
+        layer_name = args[4]
+    if not isinstance(layer_name, (str, LayerNameType)):
+        return False
+    try:
+        # Deferred import: mla_attention imports this module at load time.
+        from vllm.model_executor.layers.attention.attention import (
+            get_attention_context,
+        )
+        from vllm.utils.torch_utils import _resolve_layer_name
+
+        _, attn_layer, _, _ = get_attention_context(_resolve_layer_name(layer_name))
+        return bool(getattr(attn_layer.impl, "is_sparse", False))
+    except Exception:
+        return False
 
 
 def eager_break_during_capture(fn: F) -> F:
@@ -102,6 +128,29 @@ def eager_break_during_capture(fn: F) -> F:
         if capture is None:
             return fn(*args, **kwargs)
         if not capture._capturing:
+            return fn(*args, **kwargs)
+        # Opt-in: capture attention-family ops into the segment instead of
+        # running them as eager breaks. Executing cuBLAS GEMMs between
+        # capture segments faults on some stacks (nvJet TMA kernels on
+        # SM120, CUDA 13); capturing them (as FULL mode already does) is
+        # safe for the sparse MLA path only: its forward derives the
+        # decode/prefill split from ``q.size(0)`` (traced), so graph
+        # replays stay correct for any batch composition. The dense
+        # unified path reads ``attn_metadata.num_decode_tokens`` -- a
+        # Python int taken from a ``for_capture=False`` dummy batch under
+        # PIECEWISE -- and would freeze that split into the graph,
+        # silently mis-replaying mixed prefill+decode batches. Refuse
+        # loudly instead (fail at startup, not at serving time).
+        if envs.VLLM_BREAKABLE_CAPTURE_ATTN and "mla" in getattr(fn, "__name__", ""):
+            if not _sparse_mla_capture_gate(args, kwargs):
+                raise RuntimeError(
+                    "VLLM_BREAKABLE_CAPTURE_ATTN=1 only supports sparse MLA "
+                    "backends, whose attention metadata is safe to capture "
+                    "into breakable PIECEWISE segments. The dense unified "
+                    "MLA forward would freeze the dummy batch's "
+                    "decode/prefill split into the graph and mis-replay "
+                    "mixed batches. Re-run without the flag."
+                )
             return fn(*args, **kwargs)
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
