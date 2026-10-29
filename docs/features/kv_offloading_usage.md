@@ -95,6 +95,8 @@ vllm serve <model> \
   }'
 ```
 
+Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
