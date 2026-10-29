@@ -162,8 +162,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             # expert not owned by this rank so they are skipped.
             sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
             topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
-        if a1q_scale is not None and a1q_scale.ndim == 0:
-            a1q_scale = a1q_scale.reshape(1)
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
