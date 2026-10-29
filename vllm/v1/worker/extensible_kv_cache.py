@@ -89,8 +89,8 @@ class ExtensibleKVCache:
         # Memory to keep free while committing before the final sizing, e.g.
         # the profiled activation peak the warmup steps are about to hit.
         self.reserved_headroom_bytes = 0
-        # Blocks warmup may commit: `committable_blocks()` when the cache is
-        # created, lowered to the minimum over ranks by the engine.
+        # Blocks warmup may commit: the minimum of `committable_blocks()` over
+        # ranks when the cache is created.
         self.warmup_committable_blocks = 0
         self.buffer = ExtensibleTensor(
             self.size,

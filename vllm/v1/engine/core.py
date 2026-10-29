@@ -31,7 +31,6 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
-from vllm.distributed.utils import all_reduce_int
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -266,12 +265,8 @@ class EngineCore:
         reason = self.model_executor.extensible_kv_cache_unsupported_reason(
             kv_cache_specs
         )
-        # DP engines step in lockstep, warmup included, so they decide together.
-        dp_group = getattr(self, "dp_group", None)
-        if not all_reduce_int(dp_group, int(reason is None)):
-            self.model_executor.disable_extensible_kv_cache(
-                reason or "another data-parallel engine cannot use it"
-            )
+        if reason is not None:
+            self.model_executor.disable_extensible_kv_cache(reason)
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -409,19 +404,10 @@ class EngineCore:
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
-        committable_blocks = self.model_executor.initialize_from_config(
-            kv_cache_configs
-        )
-        if committable_blocks is not None:
-            # DP engines must warm up the same steps.
-            committable_blocks = all_reduce_int(
-                getattr(self, "dp_group", None), committable_blocks
-            )
+        self.model_executor.initialize_from_config(kv_cache_configs)
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            compilation_times = self.model_executor.compile_or_warm_up_model(
-                committable_blocks
-            )
+            compilation_times = self.model_executor.compile_or_warm_up_model()
         if extensible:
             num_blocks = finalize_extensible_kv_cache(
                 vllm_config,

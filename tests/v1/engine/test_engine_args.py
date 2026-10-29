@@ -366,91 +366,9 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert not vllm_config.cache_config.enable_extensible_kv_cache
 
 
-@requires_cuda
-def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
-    """Under torchrun each rank probes only its own driver; a rank whose probe
-    passes must still follow one whose probe fails, or it hangs waiting for
-    the others in the block-count all-reduce."""
-    import torch.distributed as dist
-
-    import vllm.v1.executor.uniproc_executor as uniproc_executor
-    from vllm.v1.engine.core import EngineCore
-    from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
-
-    class FakeExecutor(ExecutorWithExternalLauncher):
-        def __init__(self, vllm_config, collective_rpc):
-            self.vllm_config = vllm_config
-            self.collective_rpc = collective_rpc
-
-    calls: list[str] = []
-
-    def collective_rpc(method: str):
-        calls.append(method)
-        return [None]
-
-    reduced: list[tuple[int, object]] = []
-
-    def all_reduce(value: int, op):
-        reduced.append((value, op))
-        return 1  # Some other rank reported "unsupported".
-
-    monkeypatch.setattr(uniproc_executor, "_all_reduce_world", all_reduce)
-    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
-    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    EngineCore._resolve_extensible_kv_cache(
-        _fake_engine(FakeExecutor(vllm_config, collective_rpc)),
-        [{"layer": object()}],
-    )
-    assert reduced == [(0, dist.ReduceOp.MAX)]
-    assert not vllm_config.cache_config.enable_extensible_kv_cache
-    assert calls == [
-        "extensible_kv_cache_unsupported_reason",
-        "disable_extensible_kv_cache",
-    ]
-
-
-@requires_cuda
-@pytest.mark.parametrize("local_reason", [None, "no VMM support"])
-def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_reason):
-    """DP engines step in lockstep, warmup included, and the extensible cache
-    adds warmup steps: an engine that could keep it follows a peer that
-    cannot, and one that cannot reports its own reason."""
-    import vllm.v1.engine.core as engine_core
-    from vllm.v1.engine.core import EngineCore
-
-    calls: list[str] = []
-
-    def collective_rpc(method: str):
-        calls.append(method)
-        if method == "extensible_kv_cache_unsupported_reason":
-            return [local_reason]
-        return [None]
-
-    dp_group = object()
-    reduced: list[tuple[object, int]] = []
-
-    def all_reduce_int(group, value: int) -> int:
-        reduced.append((group, value))
-        return 0  # Some peer engine cannot use it.
-
-    monkeypatch.setattr(engine_core, "all_reduce_int", all_reduce_int)
-    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
-    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    engine = _fake_engine(
-        _fake_executor(vllm_config, collective_rpc), dp_group=dp_group
-    )
-    EngineCore._resolve_extensible_kv_cache(engine, [{"layer": object()}])
-    assert reduced == [(dp_group, int(local_reason is None))]
-    assert not vllm_config.cache_config.enable_extensible_kv_cache
-    assert calls == [
-        "extensible_kv_cache_unsupported_reason",
-        "disable_extensible_kv_cache",
-    ]
-
-
 def test_all_reduce_int(monkeypatch):
-    """A MIN all-reduce by default; without a group (no DP, or dense models'
-    independent DP engines) or with a single rank, the value stands."""
+    """A MIN all-reduce by default; without a group or with a single rank, the
+    value stands."""
     from types import SimpleNamespace
 
     import torch.distributed as dist
@@ -471,37 +389,6 @@ def test_all_reduce_int(monkeypatch):
     assert all_reduce_int(group, 7) == 3
     assert all_reduce_int(group, 7, dist.ReduceOp.MAX) == 3
     assert seen == [(dist.ReduceOp.MIN, group), (dist.ReduceOp.MAX, group)]
-
-
-def test_executor_agrees_committable_blocks_across_workers():
-    """Workers report what warmup may commit from `initialize_from_config`;
-    the executor passes the minimum to `compile_or_warm_up_model`. Workers
-    without an extensible cache report None and get no argument."""
-    from types import SimpleNamespace
-
-    from vllm.v1.executor.abstract import Executor
-
-    calls: list[tuple[str, tuple]] = []
-    reported: list[int | None] = [120, 96]
-
-    def collective_rpc(method: str, args=()):
-        calls.append((method, args))
-        return reported if method == "initialize_from_config" else []
-
-    fake = SimpleNamespace(collective_rpc=collective_rpc)
-    Executor.compile_or_warm_up_model(
-        fake, Executor.initialize_from_config(fake, ["cfg"])
-    )
-    reported = [None, None]
-    Executor.compile_or_warm_up_model(
-        fake, Executor.initialize_from_config(fake, ["cfg"])
-    )
-    assert calls == [
-        ("initialize_from_config", (["cfg"],)),
-        ("compile_or_warm_up_model", (96,)),
-        ("initialize_from_config", (["cfg"],)),
-        ("compile_or_warm_up_model", ()),
-    ]
 
 
 @pytest.mark.parametrize("requested", [None, True])

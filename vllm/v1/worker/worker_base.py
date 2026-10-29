@@ -369,11 +369,11 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
             self._worker_extension_cls = worker_extension_cls
 
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> int | None:
+    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
-            return self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         # The KV connector created here reads the current config.
