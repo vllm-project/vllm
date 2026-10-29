@@ -516,41 +516,48 @@ class BlockPool:
         kv_cache_group_id: int,
     ) -> None:
         assert len(cached_blocks) == (num_cached_tokens + block_size - 1) // block_size
-        assert num_cached_tokens % self.hash_block_size == 0
-        assert num_cached_tokens <= len(request.block_hashes) * self.hash_block_size
 
         for block_idx, block in enumerate(cached_blocks):
             if block.is_null:
                 continue
-            start_token_idx = block_idx * block_size
-            end_token_idx = min(start_token_idx + block_size, num_cached_tokens)
-            block_hash = request.block_hashes[end_token_idx // self.hash_block_size - 1]
-            assert self.cached_block_hash_to_block.contain(
+            block_start = block_idx * block_size
+            block_end = min(block_start + block_size, num_cached_tokens)
+            block_hash = self._get_partial_block_hash(request, block_end)
+            if not self.cached_block_hash_to_block.contain(
                 make_block_hash_with_group_id(block_hash, kv_cache_group_id),
                 block.block_id,
+            ):
+                # EAGLE may shorten the hit to an unregistered hash boundary.
+                continue
+            parent_hash = (
+                request.block_hashes[block_start // self.hash_block_size - 1]
+                if block_start > 0
+                else None
             )
-            parent_block_hash = (
-                maybe_convert_block_hash(
-                    request.block_hashes[start_token_idx // self.hash_block_size - 1]
+            if block_end % block_size:
+                parent_hash, block_start = (
+                    self._get_partial_block_parent_hash_and_start(request, block_end)
                 )
-                if start_token_idx > 0
+            parent_block_hash = (
+                maybe_convert_block_hash(parent_hash)
+                if parent_hash is not None
                 else None
             )
             extra_keys, _ = self._generate_event_extra_keys(
-                request, start_token_idx, end_token_idx, 0
+                request, block_start, block_end, 0
             )
             self.kv_event_queue.append(
                 self._build_block_stored_event(
                     request,
                     block_hashes=[maybe_convert_block_hash(block_hash)],
                     parent_block_hash=parent_block_hash,
-                    start_token_idx=start_token_idx,
-                    end_token_idx=end_token_idx,
-                    block_size=end_token_idx - start_token_idx,
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
+                    block_size=block_end - block_start,
                     kv_cache_group_id=kv_cache_group_id,
                     extra_keys_list=[extra_keys],
                     lookahead_token_ids=(
-                        [self._lookahead_token_ids(request, end_token_idx)]
+                        [self._lookahead_token_ids(request, block_end)]
                         if self.num_hash_lookahead_tokens
                         else None
                     ),
