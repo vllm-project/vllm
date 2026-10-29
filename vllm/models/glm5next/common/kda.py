@@ -817,28 +817,60 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if _aiter_flashkda_runs_prefill(
             self.kda_prefill_backend, attn_metadata_narrowed
         ):
-            assert q_ns is not None
+            assert q_ns is not None and k_ns is not None and v_ns is not None
+            assert g1_ns is not None and beta_ns is not None
+            assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
-            assert has_initial_state is not None
+            prefill_query_start_loc = attn_metadata_narrowed.prefill_query_start_loc
+            prefill_state_indices = attn_metadata_narrowed.prefill_state_indices
+            prefill_has_initial_state = attn_metadata_narrowed.prefill_has_initial_state
+            assert prefill_query_start_loc is not None
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            # Decodes lead the batch. FlashKDA counts each one as a sequence when it
+            # sizes its segments, so they take the recurrent kernel instead.
+            nd_tok = attn_metadata_narrowed.num_decode_tokens
+            if nd_tok > 0:
+                fused_recurrent_kda(
+                    q=_rearr(q_ns[:nd_tok]),
+                    k=_rearr(k_ns[:nd_tok]),
+                    v=_rearr(v_ns[:nd_tok]),
+                    g=g1_ns[:, :nd_tok],
+                    beta=beta_ns[:, :nd_tok],
+                    initial_state=recurrent_state,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=non_spec_query_start_loc[
+                        : attn_metadata_narrowed.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor[
+                        : attn_metadata_narrowed.num_decodes
+                    ],
+                    out=core_attn_out[:, :nd_tok],
+                    sigmoid_beta=True,
+                    a_log=self.A_log,
+                    g_bias=self.dt_bias,
+                    compute_gate=True,
+                    lower_bound=lower_bound,
+                )
             # AITER reads and updates the paged recurrent state in place, so
             # there is no gather or scatter, and writes straight into the layer
-            # output: without spec tokens the prefill tokens are its leading
-            # slice.
+            # output: without spec tokens the prefill tokens follow the decodes.
             ns_out = core_attn_out[:, :num_actual_tokens]
-            core_attn_out_non_spec = rocm_aiter_ops.kda_flashkda_prefill(
-                q=_rearr(q_ns),
-                k=_rearr(k_ns),
-                v=_rearr(v_ns),
-                g=g1_ns,
-                beta=beta_ns,
+            core_attn_out_non_spec = ns_out
+            rocm_aiter_ops.kda_flashkda_prefill(
+                q=_rearr(q_ns[nd_tok:]),
+                k=_rearr(k_ns[nd_tok:]),
+                v=_rearr(v_ns[nd_tok:]),
+                g=g1_ns[:, nd_tok:],
+                beta=beta_ns[:, nd_tok:],
                 A_log=self.A_log.view(-1),
                 dt_bias=self.dt_bias,
                 lower_bound=lower_bound,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=prefill_query_start_loc,
                 state_cache=recurrent_state,
-                state_indices=non_spec_state_indices_tensor,
-                has_initial_state=has_initial_state,
-                out=ns_out,
+                state_indices=prefill_state_indices,
+                has_initial_state=prefill_has_initial_state,
+                out=core_attn_out[:, nd_tok:num_actual_tokens],
             )
         elif attn_metadata_narrowed.num_prefills > 0:
             assert q_ns is not None

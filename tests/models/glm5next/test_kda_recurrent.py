@@ -637,11 +637,13 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
 
 
+@pytest.mark.parametrize("num_decodes", [0, 3])
 @torch.inference_mode()
-def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
+def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes):
     """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
-    to bf16 precision (chunk size 32 vs 64)."""
+    to bf16 precision (chunk size 32 vs 64). Decodes in the same step take
+    the recurrent kernel, so FlashKDA sees the prefills only."""
     from types import SimpleNamespace
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -655,8 +657,9 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
     torch.manual_seed(7)
     device = torch.device("cuda")
     # 32 local heads: the default 64 KDA heads at tensor parallel size 2.
-    heads, lengths = 32, [37, 100]
-    num_tokens, num_slots = sum(lengths), 4
+    heads, prefill_lengths = 32, [37, 100]
+    lengths = [1] * num_decodes + prefill_lengths
+    num_tokens, num_slots = sum(lengths), 4 + num_decodes
     width, state_len, slot_size = 3 * heads * D, 3, heads * D * D
     layer = object.__new__(kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
@@ -683,23 +686,29 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
     raw_qkv, beta = projected[:, :width], projected[:, width:].unsqueeze(0)
     gate = torch.randn(1, num_tokens, heads, D, device=device, dtype=torch.bfloat16)
 
-    cu_cpu = torch.tensor([0, lengths[0], num_tokens], dtype=torch.int32)
+    cu_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
     nums, batch_ptr, chunk_offsets = compute_causal_conv1d_metadata(
         cu_cpu, device=device
     )
+    # Decode-first, with the prefill-only views the metadata builder adds.
+    slots = torch.tensor(
+        [*range(3, 3 + num_decodes), 1, 2], dtype=torch.int32, device=device
+    )
+    has_initial_state = torch.arange(num_decodes + 2, device=device) <= num_decodes
     metadata = GDNAttentionMetadata(
-        num_prefills=len(lengths),
-        num_prefill_tokens=num_tokens,
-        num_decodes=0,
-        num_decode_tokens=0,
+        num_prefills=len(prefill_lengths),
+        num_prefill_tokens=sum(prefill_lengths),
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
         num_spec_decodes=0,
         num_spec_decode_tokens=0,
         num_actual_tokens=num_tokens,
-        has_initial_state=torch.tensor([True, False], device=device),
+        has_initial_state=has_initial_state,
         non_spec_query_start_loc=cu_cpu.to(device),
-        non_spec_state_indices_tensor=torch.tensor(
-            [1, 2], dtype=torch.int32, device=device
-        ),
+        non_spec_state_indices_tensor=slots,
+        prefill_query_start_loc=(cu_cpu[num_decodes:] - num_decodes).to(device),
+        prefill_state_indices=slots[num_decodes:],
+        prefill_has_initial_state=has_initial_state[num_decodes:],
         nums_dict=nums,
         batch_ptr=batch_ptr,
         token_chunk_offset_ptr=chunk_offsets,
@@ -735,10 +744,12 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
     assert not prefill_calls
     out, recurrent = run("aiter_flashkda")
     assert len(prefill_calls) == 1
+    assert prefill_calls[0]["q"].shape[1] == sum(prefill_lengths)
+    assert prefill_calls[0]["cu_seqlens"].tolist() == [0, 37, 137]
 
     torch.testing.assert_close(out, triton_out, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(recurrent, triton_recurrent, rtol=2e-2, atol=2e-2)
-    written = slice(1, 3)
+    written = slots.tolist()
     for actual, expected in (
         (out, triton_out),
         (recurrent[written], triton_recurrent[written]),
