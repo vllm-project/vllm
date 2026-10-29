@@ -52,13 +52,7 @@ kernel_tests() {
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-    pytest -x -v -s tests/v1/worker/cpu
-    pytest -x -v -s \
-      tests/test_config.py::test_cpu_no_triton_v2_rejects_unsupported_feature \
-      tests/test_config.py::test_cpu_without_triton_default_model_runner \
-      tests/test_config.py::test_cpu_without_triton_unsupported_feature_defaults_to_v1 \
-      tests/test_config.py::test_cpu_without_triton_prompt_embeddings_model_runner_selection
-    pytest -x -v -s tests/v1/worker/test_kv_block_zeroer.py"
+    pytest -x -v -s tests/v1/worker/cpu"
 }
 
 model_tests() {

@@ -3413,22 +3413,18 @@ class VllmConfig:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
-
-        if not HAS_TRITON:
-            from vllm.platforms import current_platform
-
-            if (
-                current_platform.is_cpu()
-                and current_platform.get_cpu_architecture() != CpuArchEnum.X86
-            ):
-                unsupported = self._get_cpu_no_triton_v2_unsupported_features()
-                if unsupported:
-                    raise ValueError(
-                        "CPU Model Runner V2 without Triton does not yet support: "
-                        f"{', '.join(unsupported)}"
-                    )
-                return
-            raise ValueError("Model Runner V2 requires Triton.")
+        # non-x86CPUs supporting MRv2 without triton have more unsupported features.
+        if (
+            not HAS_TRITON
+            and current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() != CpuArchEnum.X86
+        ):
+            unsupported = self._get_cpu_no_triton_v2_unsupported_features()
+            if unsupported:
+                raise ValueError(
+                    "CPU Model Runner V2 without Triton does not yet support: "
+                    f"{', '.join(unsupported)}"
+                )
 
     def _validate_v1_model_runner(self) -> None:
         unsupported = self._get_v1_model_runner_unsupported_features()
