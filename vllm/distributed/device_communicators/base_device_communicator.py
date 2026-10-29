@@ -13,6 +13,25 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_rocm_expandable_segments_steady_state_disabled = False
+
+
+def set_rocm_expandable_segments_steady_state_disabled() -> None:
+    global _rocm_expandable_segments_steady_state_disabled
+    _rocm_expandable_segments_steady_state_disabled = True
+
+
+@contextmanager
+def _rocm_expandable_segments_collective_guard() -> Iterator[None]:
+    if not _rocm_expandable_segments_steady_state_disabled:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        torch.accelerator.synchronize()
+
 
 class Cache:
     def __init__(self):
@@ -247,7 +266,8 @@ class DeviceCommunicatorBase:
         self.all2all_manager: All2AllManagerBase | None = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        dist.all_reduce(input_, group=self.device_group)
+        with _rocm_expandable_segments_collective_guard():
+            dist.all_reduce(input_, group=self.device_group)
         return input_
 
     def checkpoint_prepare(self) -> None:
@@ -271,12 +291,13 @@ class DeviceCommunicatorBase:
         # stack-style all-gather has compatibility issues with
         # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
         output_size = (input_size[0] * self.world_size,) + input_size[1:]
-        # Allocate output tensor.
-        output_tensor = torch.empty(
-            output_size, dtype=input_.dtype, device=input_.device
-        )
-        # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        with _rocm_expandable_segments_collective_guard():
+            # Allocate output tensor.
+            output_tensor = torch.empty(
+                output_size, dtype=input_.dtype, device=input_.device
+            )
+            # All-gather.
+            dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
@@ -316,14 +337,15 @@ class DeviceCommunicatorBase:
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        output_tensor = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
+        with _rocm_expandable_segments_collective_guard():
+            output_tensor = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
 
-        # Perform reduce-scatter operation
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_tensor, group=self.device_group
-        )
+            # Perform reduce-scatter operation
+            torch.distributed.reduce_scatter_tensor(
+                output_tensor, input_tensor, group=self.device_group
+            )
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
@@ -367,15 +389,16 @@ class DeviceCommunicatorBase:
             # Convert negative dim to positive.
             dim += input_.dim()
 
-        # Allocate output tensor.
-        if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-        else:
-            gather_list = None
-        # Gather.
-        torch.distributed.gather(
-            input_, gather_list, dst=self.ranks[dst], group=self.device_group
-        )
+        with _rocm_expandable_segments_collective_guard():
+            # Allocate output tensor.
+            if self.rank_in_group == dst:
+                gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+            else:
+                gather_list = None
+            # Gather.
+            torch.distributed.gather(
+                input_, gather_list, dst=self.ranks[dst], group=self.device_group
+            )
         if self.rank_in_group == dst:
             output_tensor = torch.cat(gather_list, dim=dim)
         else:
