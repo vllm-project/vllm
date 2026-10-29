@@ -415,6 +415,23 @@ An attacker who can reach the gRPC port can:
 - Use firewall rules to block external access to the gRPC port
 - Consider deploying the gRPC interface on a dedicated internal network interface
 
+### Decoded images over NIXL
+
+A Rust frontend built with the `nixl-media` cargo feature can accept `MediaItem.nixl_ref` images when it is started with `--enable-grpc-nixl-media` (off by default). A `nixl_ref` names the NIXL agent of the process that holds the decoded pixels and the address of the pixels, and the server reads that memory over NIXL. With this option on, a caller that can reach the gRPC port can also:
+
+1. **Make the server read the memory of another process** that runs a NIXL agent with the UCX backend, by naming its worker address and an address range. On one host, and over TCP, UCX does not check a memory key, so any readable address of that process qualifies.
+2. **Stop the server**, because UCX aborts the process on some malformed connection data.
+
+The pixels travel over UCX, outside gRPC TLS. Only enable `--enable-grpc-nixl-media` when every client that can reach the gRPC port is trusted, such as a co-located router that decodes images itself.
+
+The `vllm-rs` binary in the vLLM wheel does not include the `nixl-media` feature. Build `vllm-rs` from source and select it with `VLLM_RUST_FRONTEND_PATH`. The build needs `libclang`. The server needs NIXL and its UCX plugin on the library path.
+
+```bash
+cargo build --release --manifest-path rust/Cargo.toml -p vllm-cmd --features nixl-media
+VLLM_USE_RUST_FRONTEND=1 VLLM_RUST_FRONTEND_PATH=$PWD/rust/target/release/vllm-rs \
+    vllm serve <model> --grpc-port 50051 --enable-grpc-nixl-media
+```
+
 ## Cache Directory Security
 
 vLLM assumes that its cache directories are **private and trusted**. Cache contents are loaded without cryptographic integrity verification, including formats that support arbitrary code execution. If an untrusted user or process can write to vLLM's cache directories, they may be able to crash vLLM or cause it to execute arbitrary code.

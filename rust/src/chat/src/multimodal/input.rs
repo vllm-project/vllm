@@ -4,11 +4,13 @@
 use llm_multimodal::MediaContentPart;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 
+use super::DeferredImage;
+
 /// Media preparation stage supplied by a frontend handler.
 #[derive(Debug)]
 pub enum MultimodalInput {
     /// Raw media to fetch and preprocess, expanding prompt placeholders as needed.
-    Raw(Vec<MediaContentPart>),
+    Raw(Vec<MediaPart>),
     /// Preprocessed features to validate against storage, batching, model, and prompt constraints.
     Preprocessed(MmFeatures),
 }
@@ -24,6 +26,22 @@ impl MultimodalInput {
 
 impl From<Vec<MediaContentPart>> for MultimodalInput {
     fn from(parts: Vec<MediaContentPart>) -> Self {
-        Self::Raw(parts)
+        Self::Raw(parts.into_iter().map(MediaPart::Content).collect())
+    }
+}
+
+/// One raw media input, in request order.
+#[derive(Debug)]
+pub enum MediaPart {
+    /// Media that the `llm-multimodal` connector fetches and decodes.
+    Content(MediaContentPart),
+    /// An image that the caller decoded. It loads after the request passes
+    /// validation.
+    DecodedImage(DeferredImage),
+}
+
+impl From<MediaContentPart> for MediaPart {
+    fn from(part: MediaContentPart) -> Self {
+        Self::Content(part)
     }
 }

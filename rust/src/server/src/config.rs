@@ -80,6 +80,9 @@ pub struct ApiServerOptions {
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
     pub enable_tokenizer_info_endpoint: bool,
+    /// When `true`, the gRPC server reads `MediaItem.nixl_ref` images over
+    /// NIXL (`--enable-grpc-nixl-media`).
+    pub enable_grpc_nixl_media: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
@@ -404,6 +407,12 @@ impl Config {
             );
         }
         self.transport_mode.validate()?;
+        if self.api_server_options.enable_grpc_nixl_media && self.grpc_listener_mode.is_none() {
+            bail!("--enable-grpc-nixl-media needs a gRPC listener; set --grpc-port");
+        }
+        if cfg!(not(feature = "nixl-media")) && self.api_server_options.enable_grpc_nixl_media {
+            bail!("--enable-grpc-nixl-media needs a build with the `nixl-media` cargo feature");
+        }
 
         Ok(())
     }
