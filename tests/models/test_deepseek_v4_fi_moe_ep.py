@@ -387,11 +387,10 @@ def test_megakernel_moe_backend_binds_the_all2all_backend():
 def test_mxfp4_cutedsl_moe_block_startup_registers_megakernel_scales(
     monkeypatch: pytest.MonkeyPatch, default_vllm_config
 ):
-    """Model MoE startup re-registers scales after CuTeDSL conversion.
+    """Verify absent MXFP4 scales are rebound to adapter buffers.
 
-    CuTeDSL dequantizes MXFP4 weights before creating the megakernel, so its
-    source scale parameters are None when ``process_weights_after_loading``
-    binds the megakernel's resident weights to the model layer.
+    Uses a real FusedMoE layer with a fake adapter; does not cover real adapter
+    initialization, checkpoint loading, or LLM startup.
     """
     default_vllm_config.kernel_config.moe_backend = FLASHINFER_MOE_EP_CUTEDSL
     default_vllm_config.parallel_config.enable_expert_parallel = True
