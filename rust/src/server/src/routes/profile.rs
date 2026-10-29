@@ -65,10 +65,7 @@ pub async fn start_profile(
         )
         .await
     {
-        if matches!(
-            error,
-            vllm_llm::Error::EngineCoreClient(EngineCoreClientError::ProfileAlreadyActive)
-        ) {
+        if matches!(error, EngineCoreClientError::ProfileAlreadyActive) {
             return Err(ApiError::conflict(
                 "A profiling session is already active. Call /stop_profile before \
                  starting another session."

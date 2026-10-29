@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_text::EngineClient;
 
 use crate::config::LoraModulePath;
 
@@ -155,7 +155,7 @@ pub(crate) enum LoadLoraError {
     Engine {
         lora_name: String,
         #[source]
-        source: vllm_llm::Error,
+        source: vllm_engine_core_client::Error,
     },
     #[error("one or more engine ranks rejected LoRA adapter `{lora_name}`")]
     NotLoaded { lora_name: String },
@@ -179,7 +179,7 @@ pub(crate) enum UnloadLoraError {
     Engine {
         lora_name: String,
         #[source]
-        source: vllm_llm::Error,
+        source: vllm_engine_core_client::Error,
     },
     #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
     NotRemoved { lora_name: String, lora_int_id: u64 },

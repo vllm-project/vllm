@@ -10,8 +10,8 @@ use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
-use vllm_text::EngineClient;
 
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{

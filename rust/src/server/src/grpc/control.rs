@@ -8,9 +8,9 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
-use vllm_text::EngineClient;
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
@@ -112,7 +112,7 @@ impl ControlServiceImpl {
 
 const GRPC_API_VERSION: &str = "vllm";
 
-fn utility_status(method: &'static str, error: vllm_llm::Error) -> Status {
+fn utility_status(method: &'static str, error: vllm_engine_core_client::Error) -> Status {
     Status::internal(format!("{method} failed: {}", error.to_report_string()))
 }
 

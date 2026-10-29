@@ -65,11 +65,12 @@ mod stream;
 use std::collections::HashMap;
 
 use tracing::warn;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_text::{EngineClient, Prompt, TextLlm, TextRequest, TextRequestProcessor};
+use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -411,7 +412,8 @@ impl ChatLlm {
         self.text.model_id()
     }
 
-    /// Return the generation client shared by native and HTTP frontends.
+    /// Expose the underlying engine-core client for low-level utility/admin
+    /// calls.
     pub fn engine_client(&self) -> &dyn EngineClient {
         self.text.engine_client()
     }

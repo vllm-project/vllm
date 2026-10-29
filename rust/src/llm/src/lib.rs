@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::Span;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 use vllm_metrics::METRICS;
 
 mod error;
@@ -32,7 +32,7 @@ use crate::request_metrics::{
     RequestMetricHandles, RequestMetricsTracker, resolve_request_metric_handles,
 };
 
-/// Thin generate-and-abort facade over [`EngineCoreClient`].
+/// Thin generate-and-abort facade over [`EngineClient`].
 ///
 /// This mirrors the narrow public shape of Python `AsyncLLM.generate()` and
 /// `abort()`, but keeps the boundary close to raw engine-core requests and
@@ -40,7 +40,7 @@ use crate::request_metrics::{
 /// [`InflightRequests`]) so that aborts issued against external (user-supplied)
 /// ids can be resolved to the internal engine ids that engine-core understands.
 pub struct Llm {
-    client: EngineCoreClient,
+    client: Box<dyn EngineClient>,
     randomize_request_id: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
@@ -54,7 +54,7 @@ pub struct Llm {
 impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
-    pub fn new(client: EngineCoreClient) -> Self {
+    pub fn new(client: impl EngineClient + 'static) -> Self {
         METRICS.request.set_max_model_len(client.max_model_len());
         let request_metric_handles = (client.engine_indices().into_iter())
             .map(|engine| {
@@ -67,7 +67,7 @@ impl Llm {
             })
             .collect();
         Self {
-            client,
+            client: Box::new(client),
             randomize_request_id: true,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
@@ -106,8 +106,8 @@ impl Llm {
 
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        &self.client
+    pub fn engine_client(&self) -> &dyn EngineClient {
+        self.client.as_ref()
     }
 
     /// Submit one tokenized generate request and return a per-request output
