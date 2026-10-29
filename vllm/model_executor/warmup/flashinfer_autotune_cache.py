@@ -38,24 +38,42 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     return hashlib.sha256(config_hash.encode()).hexdigest()
 
 
-def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+def flashinfer_autotune_root() -> Path:
+    """Root directory of the FlashInfer autotune cache (no runner needed)."""
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     if override_dir:
-        root = Path(override_dir).expanduser()
-    else:
-        from flashinfer.jit import env as flashinfer_jit_env
+        return Path(override_dir).expanduser()
+    from flashinfer.jit import env as flashinfer_jit_env
 
-        flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
-        root = (
-            Path(envs.VLLM_CACHE_ROOT)
-            / "flashinfer_autotune_cache"
-            / flashinfer_workspace.parent.name
-            / flashinfer_workspace.name
-        )
+    flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    return (
+        Path(envs.VLLM_CACHE_ROOT)
+        / "flashinfer_autotune_cache"
+        / flashinfer_workspace.parent.name
+        / flashinfer_workspace.name
+    )
 
-    output_dir = root / flashinfer_autotune_cache_hash(runner)
+
+def flashinfer_autotune_filename(dp_rank: int, rank: int) -> str:
+    """Per-rank cache filename, shared by the engine reader and D2D exchange."""
+    return f"autotune_configs_dp{dp_rank}_rank{rank}.json"
+
+
+def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    output_dir = flashinfer_autotune_root() / flashinfer_autotune_cache_hash(runner)
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / "autotune_configs.json"
+
+
+def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    """The per-rank variant of :func:`resolve_flashinfer_autotune_file`."""
+    from vllm.distributed.parallel_state import get_world_group
+
+    path = resolve_flashinfer_autotune_file(runner)
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    return path.with_name(
+        flashinfer_autotune_filename(dp_rank, get_world_group().rank_in_group)
+    )
 
 
 def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:

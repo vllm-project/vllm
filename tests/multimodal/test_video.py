@@ -49,7 +49,9 @@ from vllm.transformers_utils.processor import get_video_processor_cls_name_from_
 
 from .utils import (
     create_edit_list_trimmed_video,
+    create_live_webm_video,
     create_long_gop_video,
+    create_raw_h264_video,
     create_video_from_image,
 )
 
@@ -1261,8 +1263,8 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
     the metadata carries the fps HF assumes, which the frame timestamps use."""
     get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
 
-    def unknown_fps(cap) -> VideoSourceMetadata:
-        return get_video_metadata(cap)._replace(original_fps=0.0, duration=0.0)
+    def unknown_fps(data) -> VideoSourceMetadata:
+        return get_video_metadata(data)._replace(original_fps=0.0, duration=0.0)
 
     monkeypatch.setattr(
         OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
@@ -1285,12 +1287,13 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
 
 
 @pytest.mark.parametrize(
-    "model_repo, expected_loader_cls, hf_sample_kwargs",
+    "model_repo, expected_loader_cls, hf_sample_kwargs, appends_last_frame",
     [
         pytest.param(
             "allenai/Molmo2-4B",
             Molmo2VideoBackend,
             None,
+            False,
             marks=pytest.mark.skip(
                 reason="Video processor not aligned, investigate later.",
             ),
@@ -1300,18 +1303,21 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
             "zai-org/GLM-4.1V-9B-Thinking",
             DynamicVideoBackend,
             None,
+            False,
             id="glm4v",
         ),
         pytest.param(
             "zai-org/GLM-4.6V-Flash",
             GLM46VVideoBackend,
             None,
+            False,
             id="glm46v",
         ),
         pytest.param(
             "Qwen/Qwen3-VL-4B-Instruct",
             Qwen3VLVideoBackend,
             None,
+            False,
             id="qwen3vl",
         ),
         # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
@@ -1323,18 +1329,23 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
             "Qwen/Qwen2-VL-7B-Instruct",
             Qwen2VLVideoBackend,
             {"fps": 2},
+            False,
             id="qwen2vl",
         ),
         pytest.param(
             "Qwen/Qwen2.5-VL-7B-Instruct",
             Qwen2VLVideoBackend,
             {"fps": 2},
+            False,
             id="qwen2_5_vl",
         ),
         pytest.param(
             "MiniMaxAI/MiniMax-M3",
             MiniMaxM3VideoBackend,
             None,
+            # The MiniMax-M3 sampler also keeps the final frame, which the
+            # Hub ``sample_frames`` drops.
+            True,
             id="minimax_m3_vl",
         ),
     ],
@@ -1343,6 +1354,7 @@ def test_video_processor_from_model_repo(
     model_repo: str,
     expected_loader_cls: type,
     hf_sample_kwargs: dict[str, int | float] | None,
+    appends_last_frame: bool,
 ):
     """Test that a model repo resolves to the correct video loader backend.
 
@@ -1388,6 +1400,9 @@ def test_video_processor_from_model_repo(
             duration=vllm_meta["duration"],
         )
         hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
+        last_frame = vllm_meta["total_num_frames"] - 1
+        if appends_last_frame and hf_indices[-1] != last_frame:
+            hf_indices = np.append(hf_indices, last_frame)
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,
@@ -1473,6 +1488,36 @@ def test_video_backend_handles_edit_list_trimmed_video(
         # The Qwen samplers used to degenerate to a single frame here.
         qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(video_data)
         assert qwen_metadata["total_num_frames"] == num_visible
+        assert qwen_frames.shape[0] >= 4
+
+
+def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Streamed WebM and raw H.264 carry no frame count/duration in their
+    headers, so OpenCV reports a bogus negative ``CAP_PROP_FRAME_COUNT``.
+    The loader must count the frames via a demux-only pass, without
+    decoding.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+        webm_data = create_live_webm_video(num_frames=20, fps=10)
+        frames, metadata = loader.load_bytes(webm_data, backend="opencv")
+        assert frames.shape[0] == 20
+        assert metadata["total_num_frames"] == 20
+        assert metadata["duration"] == pytest.approx(2.0)
+
+        h264_data = create_raw_h264_video(num_frames=20, fps=25)
+        frames, metadata = loader.load_bytes(h264_data, backend="opencv")
+        assert frames.shape[0] == 20
+        assert metadata["total_num_frames"] == 20
+        assert metadata["duration"] == pytest.approx(0.8)
+
+        # The Qwen samplers used to raise on the bogus negative frame count.
+        qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(webm_data)
+        assert qwen_metadata["total_num_frames"] == 20
         assert qwen_frames.shape[0] >= 4
 
 

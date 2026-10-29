@@ -28,7 +28,7 @@ import gc
 import logging
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any, ClassVar, TypeVar
 
 import torch
@@ -95,8 +95,6 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -277,6 +275,7 @@ class BreakableCUDAGraphWrapper:
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode | None = None,
+        key_fn: Callable[..., Hashable] | None = None,
     ) -> None:
         # runtime_mode=None matches any non-NONE dispatch mode; entries
         # are keyed by BatchDescriptor, which already encodes batch
@@ -284,11 +283,12 @@ class BreakableCUDAGraphWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
+        self.key_fn = key_fn
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
 
-        self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
+        self.entries: dict[Hashable, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
 
         logger.info_once("Breakable CUDA graph enabled")
@@ -333,10 +333,14 @@ class BreakableCUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
-        entry = self.entries.get(batch_descriptor)
+        # Python control flow (e.g. MTP module selection) must not share graphs.
+        key: Hashable = batch_descriptor
+        if self.key_fn is not None:
+            key = (batch_descriptor, self.key_fn(*args, **kwargs))
+        entry = self.entries.get(key)
         if entry is None:
             entry = _BreakableEntry(batch_descriptor=batch_descriptor)
-            self.entries[batch_descriptor] = entry
+            self.entries[key] = entry
 
         if entry.capture is None:
             return self._capture(entry, args, kwargs)

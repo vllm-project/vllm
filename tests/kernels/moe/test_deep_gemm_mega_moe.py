@@ -65,7 +65,7 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):
     experts = DeepGemmMegaMoEExperts.__new__(DeepGemmMegaMoEExperts)
     torch.nn.Module.__init__(experts)
-    experts._synchronize_first_launch = lambda: None
+    monkeypatch.setattr(experts, "_synchronize_first_launch", lambda: None)
     experts.prefix = "model.layers.3.ffn.experts"
     experts.max_num_tokens = 4
     experts.num_shared_experts = 0
@@ -668,8 +668,8 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
         shared_l1_acts_sf=torch.empty(128, 1),
         num_max_tokens_per_rank=4,
     )
-    experts.get_symm_buffer = lambda: symm_buffer
-    experts._synchronize_first_launch = lambda: None
+    monkeypatch.setattr(experts, "get_symm_buffer", lambda: symm_buffer)
+    monkeypatch.setattr(experts, "_synchronize_first_launch", lambda: None)
 
     def shared_experts(x):
         return torch.full_like(x, 2)
@@ -940,7 +940,7 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 
 @requires_sm100
 @pytest.mark.parametrize("shared", [None, "mxfp8", "bf16"])
-@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135])
+@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135, 600])
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""

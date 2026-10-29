@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_chat::ChatTokenUsage;
+use vllm_llm::TokenUsage;
+
 use super::types::Usage;
 
 /// Tracks cumulative token counts for OpenAI streaming chunks.
@@ -46,11 +49,14 @@ impl ContinuousUsage {
 
     /// Build a streaming usage snapshot without prompt cache details.
     pub(crate) fn to_usage(&self) -> Usage {
-        Usage::from_counts(
-            self.prompt_tokens,
-            self.output_tokens,
-            None,
-            self.reasoning_tokens,
-        )
+        let usage = ChatTokenUsage {
+            engine: TokenUsage {
+                prompt_token_count: self.prompt_tokens,
+                output_token_count: self.output_tokens,
+                prompt_cache_usage: Default::default(),
+            },
+            reasoning_tokens: self.reasoning_tokens,
+        };
+        Usage::from_token_usage(usage, false)
     }
 }

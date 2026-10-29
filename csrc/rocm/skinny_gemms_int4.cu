@@ -30,6 +30,9 @@
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
+// K must be a multiple of this; checked host-side in wvSplitK_int4_g.
+static constexpr int kInt4KAlign = 16;
+
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
 static bool on_gfx115x_int4() {
   static const bool result = [] {
@@ -226,7 +229,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     float f[A_CHUNK / 8];
   };
 
-  __shared__ scalar_t s[max_lds_len];
+  // k_ is a multiple of A_CHUNK and K of kInt4KAlign, so s[k_ + K * n] is
+  // aligned to the smaller of the two. Deep-K N = 1 tuples use A_CHUNK = 32.
+  static constexpr size_t kActLdsAlign =
+      sizeof(bigTypeA) < kInt4KAlign * sizeof(scalar_t)
+          ? sizeof(bigTypeA)
+          : kInt4KAlign * sizeof(scalar_t);
+  static_assert(kActLdsAlign >= 16, "LDS activation loads must stay b128");
+  __shared__ alignas(sizeof(bigTypeA)) scalar_t s[max_lds_len];
 
   // CHUNKED fills s[] per chunk instead, and needs the waves above _WvPrGrp
   // gone before the first barrier: s_barrier is untagged on gfx11, so a wave
@@ -339,7 +349,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             for (uint32_t p = 0; p < A_CHUNK / ACT_LDS_PIECE; p++)
               dst[p] = src[p * THRDS];
           } else {
-            bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+            bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+                &(s[k_ + K * n]), kActLdsAlign));
           }
         }
       }
@@ -605,7 +616,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     float f[A_CHUNK / 8];
   };
 
-  __shared__ scalar_t s[max_lds_len];
+  // k_ is a multiple of A_CHUNK and K of kInt4KAlign, so s[k_ + K * n] is
+  // aligned to the smaller of the two. Deep-K N = 1 tuples use A_CHUNK = 32.
+  static constexpr size_t kActLdsAlign =
+      sizeof(bigTypeA) < kInt4KAlign * sizeof(scalar_t)
+          ? sizeof(bigTypeA)
+          : kInt4KAlign * sizeof(scalar_t);
+  static_assert(kActLdsAlign >= 16, "LDS activation loads must stay b128");
+  __shared__ alignas(sizeof(bigTypeA)) scalar_t s[max_lds_len];
 
   uint32_t commitColumn[YTILE];
   for (uint32_t i = 0; i < YTILE; i++) {
@@ -671,7 +689,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
         for (int n = 0; n < N; n++) {
           if (k_ + K * n < max_lds_len)
-            bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+            bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+                &(s[k_ + K * n]), kActLdsAlign));
           else
             bigA[n][k2] = *((const bigTypeA*)(&(A[k_ + K * n])));
         }
@@ -953,7 +972,7 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                 num_groups, "] but got [", in_zero_points->size(0), ", ",
                 in_zero_points->size(1), "]");
   }
-  TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16");
+  TORCH_CHECK(K_in % kInt4KAlign == 0, "K must be divisible by ", kInt4KAlign);
 
   // Every kernel indexes A linearly, which a non-contiguous activation would
   // break.
