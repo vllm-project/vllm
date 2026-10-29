@@ -115,6 +115,19 @@ ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
 }
 
 
+def _resolved_target(target: str | QuantSpec) -> tuple:
+    """Comparable (linear, moe) specs of a target, where an omitted activation
+    (method default) differs from an explicit one (e.g. `null`)."""
+    if isinstance(target, str):
+        specs = (_ONLINE_SHORTHANDS[target].linear, _ONLINE_SHORTHANDS[target].moe)
+    else:
+        specs = (target, target)
+    return tuple(
+        None if s is None else (s.weight, s.activation, "activation" in s.fields_set)
+        for s in specs
+    )
+
+
 def _find_matching_targets(
     prefix: str,
     targets: Mapping[str, str | QuantSpec],
@@ -138,12 +151,7 @@ def _find_matching_targets(
         )
 
     matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
-    # `QuantSpec` equality ignores `fields_set`, but an omitted activation
-    # (method default) differs from an explicit one (e.g. `null`).
-    target_values = [
-        (targets[pattern], getattr(targets[pattern], "fields_set", None))
-        for pattern in matched_patterns
-    ]
+    target_values = [_resolved_target(targets[pattern]) for pattern in matched_patterns]
     if any(target != target_values[0] for target in target_values[1:]):
         raise ValueError(
             f"Found different quantization_config.targets values for the "
@@ -327,10 +335,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
             assert issubclass(layer_cls, LinearBase)
             assert issubclass(quant_method_cls, OnlineLinearBase)
 
-        if "activation" not in quant_spec.fields_set:
-            activation_quant_key = quant_method_cls.default_activation_quant_key
-        else:
-            activation_quant_key = quant_spec.activation
+        explicit = "activation" in quant_spec.fields_set
+        activation_quant_key = quant_method_cls.resolve_activation_quant_key(
+            quant_spec.activation
+            if explicit
+            else quant_method_cls.default_activation_quant_key,
+            explicit=explicit,
+        )
 
         return (
             source,
@@ -412,6 +423,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"targets pattern {target_pattern} = {target} does "
                 f"not define a QuantSpec for {layer_cls.__name__} layers "
                 f"(matched at {prefix})."
+            )
+        if quant_spec.weight is None:
+            raise ValueError(
+                f"targets pattern {target_pattern} = {target} does not set a "
+                "weight quantization key, which online quantization requires."
             )
         return (
             OnlineQuantizationSource.targets,

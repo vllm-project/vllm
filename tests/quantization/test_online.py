@@ -19,6 +19,7 @@ from tests.quantization.utils import (
     quant_config_args,
 )
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config.cache import CacheConfig
@@ -296,13 +297,18 @@ def test_online_linear_methods_resolve_activation_quant_key(
         (Fp8PerTensorOnlineMoEMethod, kFp8StaticTensorSym, kFp8DynamicTokenSym, True),
     ],
 )
+@pytest.mark.parametrize("batch_invariant", [False, True])
 def test_online_moe_methods_resolve_activation_quant_key(
     default_vllm_config,
+    monkeypatch,
     method_cls,
     weight_key,
     activation_quant_key,
     has_activation_override,
+    batch_invariant,
 ) -> None:
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant, raising=False)
+
     class TestRoutedExperts(RoutedExperts):
         def __init__(self):
             torch.nn.Module.__init__(self)
@@ -330,11 +336,16 @@ def test_online_moe_methods_resolve_activation_quant_key(
         hf_text_config=SimpleNamespace(model_type=None),
     )
     layer = TestRoutedExperts()
-    method = OnlineQuantizationConfig(args).get_quant_method(layer, "experts")
+    config = OnlineQuantizationConfig(args)
+    method = config.get_quant_method(layer, "experts")
+    if batch_invariant and activation_quant_key == kFp8DynamicTensorSym:
+        activation_quant_key = kFp8DynamicTokenSym
 
     assert method is not None
     assert isinstance(method, method_cls)
     assert method.activation_quant_key == activation_quant_key
+    resolved = config.resolve_quant_method_cls(TestRoutedExperts, "experts")
+    assert resolved is not None and resolved[5] == activation_quant_key
     assert method.per_act_token_quant == (activation_quant_key == kFp8DynamicTokenSym)
 
 
@@ -373,6 +384,27 @@ def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
     assert result.args == resolve_quantization_config("fp8_per_tensor", overrides)
     assert "--quantization fp8 is deprecated for online quantization" in caplog.text
     assert "--quantization fp8_per_tensor instead" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "quantization_config",
+    [
+        {"moe": {"activation": "mxfp8"}},
+        {"targets": {"*experts*": {"activation": "mxfp8"}}},
+    ],
+)
+def test_online_activation_only_spec_raises(tmp_path, quantization_config) -> None:
+    """Without a weight key, standalone online quantization would silently no-op."""
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="online",
+        quantization_config=resolve_quantization_config("online", quantization_config),
+    )
+    with pytest.raises(ValueError, match="does not set a weight quantization key"):
+        config = weight_utils.get_quant_config(model_config, LoadConfig())
+        assert isinstance(config, OnlineQuantizationConfig)
+        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
 
 
 @pytest.mark.parametrize(

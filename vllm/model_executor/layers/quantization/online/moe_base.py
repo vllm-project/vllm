@@ -31,6 +31,13 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     uses_meta_device: bool = True
     default_activation_quant_key: QuantKey | None
 
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        """Final activation key for a requested (or default) key."""
+        return activation_quant_key
+
     def __init__(
         self,
         moe: FusedMoEConfig,

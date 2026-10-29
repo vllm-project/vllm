@@ -3,7 +3,7 @@
 
 """Online MXFP4 (microscaling FP4, block-32) quantization methods."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -159,6 +159,9 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
+        # Set in `_setup_kernel` for Triton / AITER_MXFP4_FP8 backends.
+        self.w13_precision_config: Any = None
+        self.w2_precision_config: Any = None
 
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             config=self.moe, activation_key=self.activation_quant_key

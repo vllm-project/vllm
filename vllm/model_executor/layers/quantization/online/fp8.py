@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
@@ -69,6 +70,8 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+logger = init_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -129,6 +132,13 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
 
     uses_meta_device: bool = True
     default_activation_quant_key: QuantKey | None
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        """Final activation key for a requested (or default) key."""
+        return activation_quant_key
 
     def __init__(self, activation_quant_key: QuantKey | None):
         super().__init__()
@@ -631,16 +641,30 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
 
     default_activation_quant_key = kFp8DynamicTensorSym
 
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: "QuantKey | None", explicit: bool
+    ) -> "QuantKey | None":
+        # A per-tensor dynamic activation scale is the max over every token in
+        # the batch, so a request's quantized expert inputs would depend on the
+        # requests it is batched with.
+        if envs.VLLM_BATCH_INVARIANT and activation_quant_key == kFp8DynamicTensorSym:
+            if explicit:
+                logger.warning_once(
+                    "Using per-token instead of the requested per-tensor FP8 MoE "
+                    "activation quantization, as VLLM_BATCH_INVARIANT=1."
+                )
+            return kFp8DynamicTokenSym
+        return activation_quant_key
+
     def __init__(
         self,
         moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kFp8DynamicTensorSym,
     ):
-        # A per-tensor dynamic activation scale is the max over every token in
-        # the batch, so a request's quantized expert inputs would depend on the
-        # requests it is batched with.
-        if envs.VLLM_BATCH_INVARIANT and activation_quant_key == kFp8DynamicTensorSym:
-            activation_quant_key = kFp8DynamicTokenSym
+        activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=False
+        )
         super().__init__(
             weight_block_size=None,
             moe=moe,

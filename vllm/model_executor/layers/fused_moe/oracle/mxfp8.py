@@ -114,8 +114,8 @@ def select_mxfp8_moe_backend(
 
     Returns:
         A tuple of (fp8_backend, experts_cls).
-    """
 
+    """
     if activation_key not in (None, kMxfp8Dynamic):
         raise NotImplementedError(
             "MXFP8 MoE only supports MXFP8 dynamic activations, got "
