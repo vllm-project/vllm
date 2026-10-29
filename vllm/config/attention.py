@@ -4,17 +4,33 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-logger = init_logger(__name__)
-
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA KV offloading."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to one top-k per decode query plus one top-k of LRU slack. The
+    physical allocation is rounded up to the GPU cache block size selected
+    from the active backends.
+    """
+
+    eager_host_mirror: bool = True
+    """Mirror decode-written KV rows to the host pool during the forward so
+    page spills complete without moving data. When disabled, decode rows stay
+    resident-only and evicted pages are copied to host at spill time. Prefill
+    rows are always mirrored during the forward."""
 
 
 @config
@@ -24,8 +40,10 @@ class AttentionConfig:
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
 
-    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
-    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
+    back to Triton where the CUTLASS kernel does not support the platform, KV
+    cache dtype, or head layout."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -42,12 +60,13 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
-    use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for attention instead of
-    the unified triton kernel."""
-
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
+
+    tokenspeed_mla_min_split_kv: int = Field(default=1, ge=1, le=256)
+    """Minimum KV splits for TokenSpeed MLA decode. The default of 1 preserves
+    automatic scheduling. Larger values request a split floor and may increase
+    workspace memory. Only applies to the TokenSpeed MLA backend."""
 
     tq_max_kv_splits_for_cuda_graph: int = 32
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
@@ -68,15 +87,64 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    use_fp4_indexer_cache: bool | None = None
-    """Deprecated alias for `indexer_kv_dtype`; use that instead. True maps to
-    `mxfp4`, False is a no-op (it selected the model default already)."""
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
+    """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
+    CuTe DSL requires FP8 queries for head dimension 192 and does not support
+    head dimension 256. New-token prefill always uses TRTLLM."""
 
-    indexer_kv_dtype: IndexerKVDType = "auto"
+    indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
-    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend."""
+    indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
+    formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
+    backend; MiniMax M3 supports nvfp4 on SM100/SM103/SM107 with at most 8
+    decode queries per request."""
+
+    indexer_decode_cp: bool = False
+    """Split the sparse-attention indexer's decode scoring across the
+    tensor-parallel ranks by context instead of by index head: each rank scores
+    a 1/TP slice of the index-K pages for every head and the ranks exchange
+    their local top-k, so each reads 1/TP of the index-K cache per sparse
+    layer. The index-K cache stays replicated, so this is unrelated to
+    `--decode-context-parallel-size`, which shards the KV cache itself; the two
+    cannot be combined. Implemented for the MiniMax M3 NVFP4 indexer, which
+    needs `indexer_kv_dtype="nvfp4"` and TP 4 (one index head per rank); it is
+    ignored with a warning where it does not apply. It pays off from about 4
+    concurrent decodes at 128K context and grows with batch and context."""
+
+    indexer_sparse_logits: bool | None = None
+    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
+    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
+    the whole context and masking them. Requires an SM100-class GPU (FP8 or
+    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
+    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
+    parallelism. The sparse path costs O(candidate blocks) per query regardless
+    of context length. None (default) enables it wherever these requirements
+    hold; True forces it (and errors where they do not); False disables it.
+    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
+    candidate pool instead, with fp32 logits, and keeps the masked dense walk
+    for steps whose contexts are too short for the pool to pay; it is not
+    enabled by default there."""
+
+    indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
+    """Minimum total prefill rows for the sparse-attention indexer to split
+    them across TP ranks instead of scoring every row on each rank."""
+
+    minimax_m3_indexer_cp: bool = False
+    """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
+    indexer context-parallel at decode. Each rank reads 1/TP of the index
+    cache, scores every index head on it, and per-head top-k candidates are
+    exchanged and merged, so the selected blocks match the default path.
+    `indexer_kv_dtype` picks the kernels that do it: a bf16 index cache ("auto"
+    or "bf16") runs the Triton CP indexer, an fp8 e4m3 one the AITER MSA CP
+    indexer on gfx950. This shards indexer *work* and not the KV cache, so it
+    is not `decode_context_parallel_size` and requires that to be 1."""
+
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    with defaults when HiSparseConnector is configured (directly or via
+    MultiConnector); set it explicitly only to tune its fields."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
@@ -85,6 +153,15 @@ class AttentionConfig:
     """Force sparse MLA to use forward_mqa for all requests, including prefill.
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
+
+    sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
+    """Sparse MLA prefill workspace size, in multiples of `max_model_len`.
+    FlashMLA sparse gathers a prefill step's context KV into this workspace and
+    runs attention in more chunks when the step holds more. The sparse indexer's
+    prefill K buffer is sized to fit in the same memory. Lower values return
+    memory to the KV cache at long `max_model_len`; the minimum of 2 leaves room
+    for a full-length request's context-parallel shard. If None, 5 when
+    `max_model_len` is at most 256K tokens, else 2."""
 
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
@@ -119,30 +196,32 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
-
-        if self.use_fp4_indexer_cache is not None:
-            logger.warning(
-                "use_fp4_indexer_cache is deprecated and will be removed in "
-                "v0.19. Use indexer_kv_dtype instead (True -> 'mxfp4')."
+        # Checked here rather than at indexer selection, which the two CP
+        # backends reach separately: bf16 goes to the Triton indexer and fp8
+        # to the AITER MSA one, so neither ever sees the other's dtype and
+        # neither can speak for the dtypes that have no CP indexer at all.
+        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in (
+            "auto",
+            "bf16",
+            "fp8",
+            "fp8_e4m3",
+        ):
+            raise ValueError(
+                "minimax_m3_indexer_cp requires a bf16 or fp8 e4m3 index cache "
+                "(indexer_kv_dtype 'auto', 'bf16', 'fp8' or 'fp8_e4m3'), got "
+                f"{self.indexer_kv_dtype!r}"
             )
-            if self.use_fp4_indexer_cache:
-                if self.indexer_kv_dtype not in ("auto", "mxfp4"):
-                    raise ValueError(
-                        "use_fp4_indexer_cache=True conflicts with "
-                        f"indexer_kv_dtype={self.indexer_kv_dtype!r}. Set only "
-                        "indexer_kv_dtype."
-                    )
-                self.indexer_kv_dtype = "mxfp4"
 
-    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+    def resolve_indexer_kv_dtype(
+        self, default: IndexerKVDType | str
+    ) -> IndexerKVDType | str:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
         if self.indexer_kv_dtype == "auto":
             return default
         return self.indexer_kv_dtype
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -150,9 +229,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        # Folded into indexer_kv_dtype by __post_init__.
-        ignored_factors: set[str] = {"use_fp4_indexer_cache"}
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
     @field_validator("backend", mode="before")

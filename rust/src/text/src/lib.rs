@@ -19,11 +19,13 @@ pub use lower::{
 };
 pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
-    DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
+    DecodedText, DecodedTextEvent, DecodedTokenLogprob, Finished, SampledDelta, TextDecodeOptions,
+    TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
-pub use request::{Prompt, SamplingParams, TextRequest};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
@@ -33,6 +35,8 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
+mod truncation;
+pub use truncation::{PromptTruncation, PromptTruncationLimit, TruncationSide};
 pub use vllm_tokenizer as tokenizer;
 
 trait_set! {
@@ -50,6 +54,8 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Backend that compiles every structured-output constraint.
+    structured_outputs_backend: StructuredOutputBackend,
 }
 
 impl TextRequestProcessor {
@@ -59,6 +65,7 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            structured_outputs_backend: StructuredOutputBackend::default(),
         }
     }
 
@@ -68,6 +75,17 @@ impl TextRequestProcessor {
             self.max_logprobs = max_logprobs;
         }
         self
+    }
+
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.structured_outputs_backend = backend;
+        self
+    }
+
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_backend
     }
 
     /// Return the tokenizer used by this processor.
@@ -80,26 +98,52 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
-    fn tokenize_prompt(
-        tokenizer: &DynTokenizer,
+    fn prepare_prompt_tokens(
+        &self,
         prompt: Prompt,
         add_special_tokens: bool,
+        prompt_truncation: Option<PromptTruncation>,
     ) -> Result<Vec<u32>> {
-        match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens).map_err(Into::into),
+        let tokenizer = self.backend.tokenizer();
+        let mut prompt_token_ids = match prompt {
+            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => Ok(token_ids),
+            Prompt::TokenIds(token_ids) => token_ids,
+        };
+        if let Some(prompt_truncation) = prompt_truncation {
+            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+        }
+        Ok(prompt_token_ids)
+    }
+
+    /// Tokenize and truncate the prompt in place, so that later preparation
+    /// reuses the final token IDs instead of tokenizing again.
+    ///
+    /// Frontends that need the final prompt tokens before submission (for
+    /// example, to initialize a prompt-aware output parser) call this first
+    /// and then hand the same request to [`TextLlm::generate`].
+    pub fn tokenize_in_place<'r>(&self, request: &'r mut TextRequest) -> Result<&'r [u32]> {
+        request.validate()?;
+        let prompt_token_ids = self.prepare_prompt_tokens(
+            take(&mut request.prompt),
+            request.add_special_tokens,
+            request.prompt_truncation.take(),
+        )?;
+        request.prompt = Prompt::TokenIds(prompt_token_ids);
+        match &request.prompt {
+            Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
+            Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
         }
     }
 
-    /// Tokenize one request without generation-specific lowering.
+    /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        Self::tokenize_prompt(
-            &self.backend.tokenizer(),
+        self.prepare_prompt_tokens(
             request.prompt,
             request.add_special_tokens,
+            request.prompt_truncation,
         )
     }
 
@@ -111,12 +155,12 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let tokenizer = self.backend.tokenizer();
-        let prompt_token_ids = Self::tokenize_prompt(
-            &tokenizer,
+        let prompt_token_ids = self.prepare_prompt_tokens(
             take(&mut request.prompt),
             request.add_special_tokens,
+            request.prompt_truncation,
         )?;
+        let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
@@ -130,6 +174,7 @@ impl TextRequestProcessor {
             prompt_token_ids,
             sampling_hints,
             sampling_limits,
+            self.structured_outputs_backend,
             tokenizer.as_ref(),
         )
     }
@@ -163,6 +208,12 @@ impl TextLlm {
     /// Override the maximum accepted logprobs count.
     pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
         self.processor = self.processor.with_max_logprobs(max_logprobs);
+        self
+    }
+
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.processor = self.processor.with_structured_outputs_backend(backend);
         self
     }
 
@@ -245,5 +296,76 @@ impl TextLlm {
     pub async fn shutdown(self) -> Result<()> {
         self.llm.shutdown().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestTextBackend;
+
+    impl TextBackend for TestTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(TestTokenizer::new())
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+    }
+
+    #[test]
+    fn tokenize_and_prepare_apply_the_same_prompt_truncation() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        let request = TextRequest {
+            prompt: Prompt::TokenIds(vec![1, 2, 3, 4, 5]),
+            prompt_truncation: Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(3),
+                side: TruncationSide::Left,
+            }),
+            ..TextRequest::for_test()
+        };
+
+        assert_eq!(processor.tokenize(request.clone()).unwrap(), vec![3, 4, 5]);
+        assert_eq!(
+            processor.prepare(request).unwrap().generate_request.prompt_token_ids,
+            vec![3, 4, 5]
+        );
+    }
+
+    /// `truncate_prompt_tokens=-1` keeps `max_model_len - 1` prompt tokens
+    /// whether or not `max_tokens` is set, and generation gets the one token
+    /// left. Without `max_tokens`, truncating to the full context used to fail
+    /// the request as too long.
+    #[test]
+    fn auto_truncation_leaves_one_output_token() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        for max_tokens in [None, Some(5)] {
+            let request = TextRequest {
+                prompt: Prompt::TokenIds((0..15).collect()),
+                prompt_truncation: Some(PromptTruncation {
+                    limit: PromptTruncationLimit::InputBudget,
+                    side: TruncationSide::Left,
+                }),
+                sampling_params: SamplingParams {
+                    max_tokens,
+                    ..SamplingParams::default()
+                },
+                ..TextRequest::for_test()
+            };
+
+            let generate_request = processor.prepare(request).unwrap().generate_request;
+            assert_eq!(
+                generate_request.prompt_token_ids,
+                (6..15).collect::<Vec<_>>()
+            );
+            assert_eq!(generate_request.sampling_params.max_tokens, 1);
+        }
     }
 }

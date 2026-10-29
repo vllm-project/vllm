@@ -79,12 +79,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
 
-        self.draft_token_confidence_probs = torch.empty_like(
-            self.draft_tokens, dtype=torch.float32
-        )
-        self.enable_adaptive_verification = (
-            self.speculative_config.enable_adaptive_verification
-        )
+        self.use_confidence_head: bool = False
 
     def load_draft_model(
         self,
@@ -95,7 +90,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
-        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
+        if self.use_draft_logits and model.draft_id_to_target_id is not None:
             d2t = model.draft_id_to_target_id
             self._d2t_scatter_index = (
                 torch.arange(d2t.shape[0], device=d2t.device) + d2t
@@ -105,17 +100,22 @@ class DSparkSpeculator(DFlashSpeculator):
             self._draft_scatter_buf = torch.full(
                 (self.max_num_reqs, self.vocab_size),
                 float("-inf"),
-                dtype=self.draft_logits.dtype,
+                dtype=self.draft_logits_spec(self.vllm_config)[0],
                 device=self.device,
             )
-        if self.enable_adaptive_verification and model.model.confidence_head is None:
-            raise ValueError(
-                "Adaptive verification needs a DSpark checkpoint with a confidence "
-                "head, and this one has none. Pass "
-                "enable_adaptive_verification=false in the speculative config to verify"
-                " a fixed number of drafts instead."
-            )
+        self.use_confidence_head = (
+            self.enable_adaptive_verification
+            and model.model.confidence_head is not None
+        )
+        if self.use_confidence_head:
+            # The acceptance estimator is not needed when a trained confidence head
+            # is available.
+            self.use_acceptance_estimator = False
         return model
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # A model's own sample_sequential kernels write the full-size cache.
+        return not hasattr(self.model, "sample_sequential")
 
     def _sample_logits(
         self,
@@ -124,8 +124,10 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
+        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
-            return self.model.map_draft_to_target(logits.argmax(dim=-1))
+            draft_ids = logits.argmax(dim=-1)
+            return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
         # space. A reduced draft vocabulary is scattered into its target rows.
@@ -135,8 +137,21 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
-        # sample_pos is the predicted token's position Q; the target verifies
-        # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        if self.draft_watermarker is not None:
+            return self.draft_watermarker.sample(
+                logits,
+                idx_map,
+                self.temperature,
+                self.seeds,
+                sample_pos - 1,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=self.draft_logits.values,
+                logits_cache_col=self._step_cols[step],
+                use_fp64=self.use_fp64_gumbel,
+            )
         return gumbel_sample(
             logits,
             idx_map,
@@ -144,14 +159,24 @@ class DSparkSpeculator(DFlashSpeculator):
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
-            logits_cache=self.draft_logits,
+            is_drafting=True,
+            logits_cache=self.draft_logits.values,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
+            logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
+            return
+        # A draft model can run the Markov steps below with its own kernels.
+        # It returns False, having done nothing, for a step that the loop
+        # below must run.
+        sample_sequential = getattr(self.model, "sample_sequential", None)
+        if sample_sequential is not None and sample_sequential(
+            self, num_reqs, head_hidden
+        ):
             return
 
         # Sequential Markov sampling over the backbone's output hidden states.
@@ -175,17 +200,19 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
+            if hasattr(self.model, "apply_output_logit_transform"):
+                logits_i = self.model.apply_output_logit_transform(logits_i)
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
+        if self.use_confidence_head:
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
@@ -220,7 +247,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
@@ -234,7 +261,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
+        if self.use_confidence_head:
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),

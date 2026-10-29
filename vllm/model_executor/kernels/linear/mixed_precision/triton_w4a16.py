@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton-based W4A16 GEMM kernel for ROCm MI300.
+"""Triton-based W4A16 GEMM kernel for ROCm MI300.
 
 Implements fused int4-weight dequantization + fp16 GEMM in a single kernel,
 using GPTQ sequential packing (8 int4 values per int32, shifts [0,4,...,28]).
@@ -26,6 +25,7 @@ from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layou
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -66,8 +66,7 @@ def triton_w4a16_gemm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """
-    Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N]
+    """Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N].
 
     B is stored as [K, N//8] int32 using GPTQ sequential packing:
       each int32 packs 8 consecutive N-values at bit offsets [0,4,8,12,16,20,24,28].
@@ -125,10 +124,10 @@ def triton_w4a16_gemm_kernel(
         b = (b >> shifts) & 0xF
 
         # ---- Compute scale/zero group row index ----
-        g_idx = (k_start * BLOCK_K) // group_size
+        group_idx = (k_start * BLOCK_K) // group_size
 
         # ---- Load scales: [BLOCK_N] → broadcast to [BLOCK_K, BLOCK_N] ----
-        scale_offset = g_idx * N + offs_sn
+        scale_offset = group_idx * N + offs_sn
         scale_mask = offs_sn < N
         scales = tl.load(scales_ptr + scale_offset, mask=scale_mask, other=1.0)
         scales = tl.broadcast_to(scales[None, :], (BLOCK_K, BLOCK_N))
@@ -136,7 +135,7 @@ def triton_w4a16_gemm_kernel(
         # ---- Load / compute zeros ----
         if HAS_ZP:
             # Load packed zeros row: [BLOCK_N//8] int32
-            zero_offset = g_idx * (N // 8) + offs_bn
+            zero_offset = group_idx * (N // 8) + offs_bn
             zero_mask = offs_bn < N // 8
             z_packed = tl.load(zeros_ptr + zero_offset, mask=zero_mask, other=0)
             # Unpack to [BLOCK_N] using same interleave+shift pattern
@@ -161,7 +160,7 @@ def triton_w4a16_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-def triton_w4a16_gemm(
+def _triton_w4a16_gemm_impl(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [K, N//8] int32
     scales: torch.Tensor,  # [K//G, N] fp16/bf16
@@ -169,8 +168,7 @@ def triton_w4a16_gemm(
     group_size: int,
     zp_bias: int = 8,  # bias for uint4b8 when qzeros is None
 ) -> torch.Tensor:
-    """
-    Fused W4A16 GEMM using GPTQ-packed int4 weights.
+    """Fused W4A16 GEMM using GPTQ-packed int4 weights.
 
     Args:
         a:          Activation matrix [M, K], float16 or bfloat16.
@@ -183,6 +181,7 @@ def triton_w4a16_gemm(
 
     Returns:
         Output matrix [M, N], same dtype as a.
+
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
     assert b_q.is_contiguous(), "Weight matrix must be contiguous"
@@ -236,7 +235,7 @@ def triton_w4a16_gemm(
             BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
 
     # The kernel loads scales/zeros for a single group per BLOCK_K tile
-    # (one g_idx per iteration). If BLOCK_K > group_size, rows at the tail
+    # (one group index per iteration). If BLOCK_K > group_size, rows at the tail
     # of the tile dequantize with the wrong group's scales, silently
     # corrupting the output. Clamp BLOCK_K to group_size to keep one
     # scale group per tile.
@@ -270,9 +269,38 @@ def triton_w4a16_gemm(
     return c
 
 
+def _triton_w4a16_gemm_fake(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.empty((a.size(0), b_q.size(1) * 8), dtype=a.dtype, device=a.device)
+
+
+direct_register_custom_op(
+    op_name="triton_w4a16_gemm",
+    op_func=_triton_w4a16_gemm_impl,
+    mutates_args=[],
+    fake_impl=_triton_w4a16_gemm_fake,
+)
+
+
+def triton_w4a16_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.ops.vllm.triton_w4a16_gemm(a, b_q, scales, qzeros, group_size, zp_bias)
+
+
 class TritonW4A16LinearKernel(MPLinearKernel):
-    """
-    Triton-based W4A16 GEMM kernel for ROCm (MI300 and newer).
+    """Triton-based W4A16 GEMM kernel for ROCm (MI300 and newer).
 
     Supports GPTQ-format int4 weights (uint4b8 symmetric, uint4 asymmetric)
     with grouped quantization. Weight tensors are transposed from the
@@ -309,13 +337,6 @@ class TritonW4A16LinearKernel(MPLinearKernel):
                 "(8 int4 values packed per int32)",
             )
 
-        if c.has_g_idx:
-            return (
-                False,
-                "Activation reordering (g_idx) is not supported by "
-                "TritonW4A16LinearKernel",
-            )
-
         gs = c.group_size
         if (
             gs not in TRITON_W4A16_SUPPORTED_GROUP_SIZES
@@ -336,8 +357,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """
-        Convert compressed-tensors checkpoint layout to kernel layout.
+        """Convert compressed-tensors checkpoint layout to kernel layout.
 
         Checkpoint (from compressed_tensors_wNa16.create_weights):
           weight_packed:     [N, K//8]  int32   input_dim=1, output_dim=0, packed_dim=1
@@ -440,7 +460,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)

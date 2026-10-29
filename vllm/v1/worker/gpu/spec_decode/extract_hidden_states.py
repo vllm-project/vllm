@@ -10,8 +10,11 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
@@ -67,6 +70,9 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             return get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.draft_model_config,
+                load_config=get_pp_safe_draft_load_config(
+                    get_draft_load_config(self.vllm_config)
+                ),
             )
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -97,11 +103,12 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         del (
             last_hidden_states,
@@ -132,6 +139,10 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         num_tokens = stacked_hidden_states.shape[0]
         self.hidden_states[:num_tokens].copy_(stacked_hidden_states)
 
+        attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+            input_batch, attn_metadata, slot_mappings
+        )
+
         draft_attn_metadata = {
             name: attn_metadata[name] for name in self.draft_attn_layer_names
         }
@@ -143,7 +154,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             draft_attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
+            num_tokens_across_dp=dp_sync_state and dp_sync_state.num_tokens_across_dp,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             slot_mapping=draft_slot_mappings,
             is_padding=input_batch.is_padding[:num_tokens],

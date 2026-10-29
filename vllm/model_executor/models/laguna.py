@@ -14,17 +14,18 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle3,
@@ -54,8 +56,19 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
+def get_mlp_layer_types(config) -> list[str]:
+    """Return which layers are MoE, rejecting configs predating Transformers support."""
+    mlp_layer_types = getattr(config, "mlp_layer_types", None)
+    if mlp_layer_types is None:
+        raise ValueError(
+            "Laguna requires the `LagunaConfig` from Transformers, which is "
+            "available from v5.17.0. Please update Transformers to run this model."
+        )
+    return mlp_layer_types
+
+
 class LagunaMLP(nn.Module):
-    """Dense MLP for Laguna (used in mlp_only_layers)."""
+    """Dense MLP for Laguna."""
 
     def __init__(
         self,
@@ -160,11 +173,9 @@ class LagunaMoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         # Router gate
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -206,7 +217,7 @@ class LagunaMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
+            renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -293,13 +304,12 @@ class LagunaAttention(nn.Module):
         else:
             self.sliding_window = None
 
-        # QKV projection (no bias for Laguna)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=config.qkv_bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -317,6 +327,7 @@ class LagunaAttention(nn.Module):
         # config.gating may be:
         #   - True / "per-element": one gate per (head, head_dim) channel
         #   - "per-head":           one gate per head, broadcast across head_dim
+        self.g_proj: ColumnParallelLinear | None
         if self.gating:
             # v5 LagunaConfig uses ``gating=True`` for per-head; older configs
             # used ``"per-head"``. Accept both. ``"per-element"`` (or legacy
@@ -343,9 +354,7 @@ class LagunaAttention(nn.Module):
         # Attention sinks (learnable per-head bias for SWA layers)
         sinks = None
         if attention_sink:
-            self.sink = torch.nn.Parameter(
-                torch.empty(self.total_num_heads // tp_size, requires_grad=False)
-            )
+            self.sink = make_attention_sink(self.total_num_heads // tp_size)
             sinks = self.sink
 
         # Resolve rope params per-layer-type. ``config.rope_parameters`` is
@@ -505,14 +514,9 @@ class LagunaDecoderLayer(nn.Module):
             ),
         )
 
-        # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)
-        mlp_only_layers = (
-            [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
-        )
         self.is_moe_layer = (
-            (layer_idx not in mlp_only_layers)
-            and (config.num_experts > 0)
-            and ((layer_idx + 1) % config.decoder_sparse_step == 0)
+            get_mlp_layer_types(config)[layer_idx] == "sparse"
+            and config.num_experts > 0
         )
 
         if self.is_moe_layer:
@@ -671,22 +675,6 @@ class LagunaModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def _slice_sink(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for name, loaded_weight in weights:
-            # Handle attention sinks (distributed across ranks). Derive the
-            # per-rank slice from the parameter's own shape so per-layer
-            # variations in head count are handled correctly.
-            if "sink" in name:
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
@@ -703,9 +691,7 @@ class LagunaModel(nn.Module, EagleModelMixin):
                 "_input_scale",
             ],
         )
-        return loader.load_weights(
-            self._slice_sink(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):

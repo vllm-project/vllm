@@ -67,7 +67,7 @@ quantization_config:
   moe:
     weight: <name>
     activation: <name>
-  ignore: [<layer-name-or-regex>, ...]
+  ignore: [<layer-name-or-regex-or-fnmatch-pattern>, ...]
 ```
 
 `linear` and `moe` accept a full `{weight, activation}` dict, or a bare
@@ -98,6 +98,73 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 ```
 
 Combine with `--moe-backend` to pin a specific kernel family.
+
+For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
+the W4A8 int8-dot GEMV for decode (batches of up to 8 tokens); larger batches
+run weight-only. On W4A4 checkpoints this replaces the MXFP4 activation
+quantization:
+
+```bash
+vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
+```
+
+### Re-quantizing layers to a different precision
+
+An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
+
+vLLM uses the checkpoint method to load and dequantize the checkpoint weight, and then applies the online quantization method. This requires the checkpoint
+method to implement weight dequantization, unsupported source and target
+combinations raise an error.
+
+Currently supported combinations are:
+
+| Checkpoint layer | Online target | Requirements |
+| ---------------- | ------------- | ------------ |
+| Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+
+For example, serialized ModelOpt MXFP8 linears can be converted to
+per-channel-weight/per-token-activation FP8 at load time:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --linear-backend auto \
+  --quantization-config.linear fp8_per_channel
+```
+
+Similarly, for example, NVFP4 MoE checkpoints can be re-quantized to any online MoE method,
+for example compressed-tensors NVFP4 experts to online MXFP4:
+
+```bash
+vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
+  --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
+```
+
+!!! info
+
+    Re-quantization is available for both linear and MoE layers.
+
+    Checkpoint-exclusion policy is not enforced by online quantization/re-quantization. Only exclusion through `--quantization-config.targets`/`--quantization-config.ignore` is enforced. 
+
+### Online quantization on unquantized layers from partially-quantized checkpoints
+
+Online quantization can be used on already quantized checkpoints independently of their original `quant_method` (`modelopt`, `compressed-tensors`, `quark`, etc.), for layers that are left unquantized in the original checkpoint.
+
+The checkpoint `quant_method` remains responsible for its quantized layers, while the selected unquantized layers use the requested online method.
+
+For example:
+
+```bash
+vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
+  --quantization-config.linear mxfp8
+```
+
+adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
+
+!!! info
+    `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
 
 ### Separate Schemes for Dense and MoE Layers
 
@@ -133,7 +200,7 @@ llm = LLM(
 
 ### Excluding Layers from Quantization
 
-Use the `ignore` parameter to skip specific layers. It accepts exact layer names and regex patterns (prefixed with `re:`):
+Use the `ignore` parameter to skip specific layers. It accepts exact layer names, regex patterns (prefixed with `re:`), and patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch):
 
 ```python
 from vllm import LLM
@@ -147,10 +214,54 @@ llm = LLM(
             "model.layers.1.self_attn.o_proj",
             # regex: skip all QKV projections
             "re:.*[qkv]_proj",
+            # fnmatch: skip all MoE experts
+            "*mlp.experts*",
         ],
     },
 )
 ```
 
 !!! note
-    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), the ignore pattern must match the **unfused** shard names (`q_proj`, `k_proj`, `v_proj`), not the fused name.
+    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), patterns may match the fused name directly or all of its unfused shard names.
+
+### Fine-Grained Per-Layer Quantization Schemes
+
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
+
+Example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "Qwen/Qwen3.5-35B-A3B",
+    quantization="online",
+    quantization_config={
+        "targets": {
+            # exact layer name
+            "model.layers.0.self_attn.o_proj": "fp8_per_tensor",
+            # regex: quantize all QKV projections
+            r"re:.*self_attn\.qkv_proj.*": "mxfp8",
+            # fnmatch: quantize all MoE experts
+            "*mlp.experts*": "mxfp4",
+        },
+    },
+)
+```
+
+Or with the CLI:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+  --quantization online \
+  --quantization-config '{"targets":{"model.layers.0.self_attn.o_proj":"fp8_per_tensor","re:.*self_attn\\.qkv_proj.*":"mxfp8","*mlp.experts*":"mxfp4"}}'
+```
+
+!!! info
+
+    - `targets` is mutually exclusive with online `linear` and `moe`: set one or the other, not both.
+    - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
+    - A layer name may not match both `targets` and `ignore`, raising an error.
+    - A layer may not match more than one `targets` pattern, raising an error.
+    - fnmatch-style patterns are supported only by online quantization; they are
+      not applied to Quark or compressed-tensors configurations.

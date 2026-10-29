@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Weight transfer engines for syncing model weights from trainers
+"""Weight transfer engines for syncing model weights from trainers
 to inference workers.
 """
 
 from vllm.distributed.weight_transfer.base import (
     ModuleSource,
     ParamMeta,
+    Replicate,
+    Shard,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
@@ -31,6 +32,8 @@ __all__ = [
     "HTTPVLLMWeightSyncClient",
     "RayVLLMWeightSyncClient",
     "ParamMeta",
+    "Replicate",
+    "Shard",
     "WeightSource",
     "ModuleSource",
 ]

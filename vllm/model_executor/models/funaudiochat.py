@@ -26,7 +26,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -529,10 +529,10 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         return TokenizersBackend.from_pretrained(
             self.model_id,
             subfolder="speech_tokenizer",
-            revision=self.ctx.model_config.tokenizer_revision,
+            revision=self.ctx.model_config.revision,
         )
 
-    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.feature_extractor
 
     def get_speech_tokenizer(self) -> TokenizersBackend:
@@ -568,6 +568,26 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         audio_cfg = getattr(cfg, "audio_config", None)
         return int(getattr(audio_cfg, "group_size", 5))
 
+    def get_max_speech_frames(self) -> int:
+        """Maximum 25 Hz speech frames admitted for one audio item.
+
+        The discrete encoder emits ``max_source_positions`` replacement tokens
+        after grouping frames by ``group_size`` (1500 * 5 = 7500 frames, 300s).
+        """
+        cfg = self.get_hf_config()
+        audio_cfg = getattr(cfg, "audio_config", None)
+        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
+        return max(1, max_audio_tokens) * max(1, self.get_audio_group_size())
+
+    def get_max_audio_samples(self, sampling_rate: int) -> int:
+        """Waveform samples that fill the profiled per-item speech-frame budget."""
+        token_fps = int(self.token_fps)
+        target_num_frames = self.get_max_speech_frames()
+        return max(
+            1,
+            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
+        )
+
 
 class FunAudioChatDummyInputsBuilder(
     BaseDummyInputsBuilder[FunAudioChatProcessingInfo]
@@ -580,31 +600,20 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
 
         # Dummy inputs are used for profiling; construct the worst-case audio
         # length that maximizes the number of encoder tokens.
-        cfg = self.info.get_hf_config()
-        audio_cfg = getattr(cfg, "audio_config", None)
-        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
-        group_size = self.info.get_audio_group_size()
-        token_fps = int(getattr(self.info, "token_fps", 25))
-        target_num_frames = max(1, max_audio_tokens) * max(1, group_size)
-        audio_len = max(
-            1,
-            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
-        )
-        num_audios = int(mm_counts.get("audio", 0))
+        audio_len = self.info.get_max_audio_samples(sampling_rate)
 
-        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=int(mm_counts.get("audio", 0)),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -615,30 +624,33 @@ class FunAudioChatMultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         tokenizer = self.info.get_tokenizer()
         input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
-        audios = mm_data.get("audios", [])
+        audios = mm_data.get("audio", [])
         if not audios:
             processed_data = BatchFeature({"input_ids": input_ids})
-            processed_data.update(passthrough_data)
-            return processed_data
+            return self._finalize_hf_mm_data(
+                mm_data, hf_kwargs, passthrough_data, processed_data
+            )
+        assert isinstance(audios, Sequence)
 
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
+        max_samples = self.info.get_max_audio_samples(sr)
+        max_speech_frames = self.info.get_max_speech_frames()
 
         wavs: list[np.ndarray] = []
         speech_strs: list[str] = []
@@ -653,6 +665,15 @@ class FunAudioChatMultiModalProcessor(
             if min_samples > 0 and audio_np.shape[0] < min_samples:
                 audio_np = np.pad(
                     audio_np, (0, min_samples - audio_np.shape[0]), mode="constant"
+                )
+
+            if audio_np.shape[0] > max_samples:
+                duration_s = float(audio_np.shape[0]) / float(sr)
+                max_duration_s = float(max_samples) / float(sr)
+                raise ValueError(
+                    "Audio is too long for FunAudioChat: "
+                    f"{duration_s:.1f}s exceeds the profiled maximum of "
+                    f"{max_duration_s:.1f}s ({max_speech_frames} speech frames)."
                 )
 
             wavs.append(audio_np)
@@ -688,8 +709,9 @@ class FunAudioChatMultiModalProcessor(
         }
 
         processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -751,7 +773,7 @@ class FunAudioChatMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_funaudiochat,
             )
         ]

@@ -2,10 +2,49 @@ group: Models - Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (L4) [Nightly] Qwen4 Exp SP"
+  key: qwen4-exp-sp-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/config/parallel.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/models/qwen4_exp/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/models/qwen3_next.py
+  - tests/models/qwen4_exp/test_ple.py
+  - tests/models/qwen4_exp/test_tpsp.py
+  commands:
+  - pytest -v -s models/qwen4_exp/test_tpsp.py
+  mirror:
+    amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
+      label: ":amd: (MI355) Qwen4 Exp SP"
+      dind: false
+      device: mi355_4
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/parallel.py
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/models/qwen4_exp/
+      - vllm/model_executor/layers/vocab_parallel_embedding.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/platforms/rocm.py
+      - tests/models/qwen4_exp/test_ple.py
+      - tests/models/qwen4_exp/test_tpsp.py
+
 - label: ":nvidia: (L4) Distributed Models"
   key: distributed-model-tests-2-gpus
-  timeout_in_minutes: 60
+  automatic_shard: true
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
@@ -16,21 +55,27 @@ steps:
   commands:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Distributed Models"
       dind: false
       device: mi300_2
-      timeout_in_minutes: 75
+      timeout_in_minutes: 80
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/hy_v4/
+      - vllm/config/
+      - vllm/v1/worker/
+      - vllm/v1/attention/ops/
+      - vllm/v1/attention/backend.py
+      - tests/conftest.py
+      - tests/utils.py
       - vllm/model_executor/model_loader/sharded_state_loader.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
@@ -46,6 +91,6 @@ steps:
       - HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
       - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
       - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-      - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
-      - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
+      - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
       - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'

@@ -3,11 +3,14 @@
 """End-to-end save->lookup test for MooncakeStoreConnector on a hybrid
 (SWA + Full) attention config, using a dict-backed mock store."""
 
+import ctypes
 import sys
 import threading
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
@@ -18,25 +21,33 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BoundaryPut,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+    _partial_tail_non_mamba_puts,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.utils import allocate_kv_cache
 
 
 class _DictStore:
@@ -144,9 +155,35 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     return worker
 
 
+def _register_with_fake_threads(worker, kv_caches):
+    """Register kv_caches without starting the transfer threads."""
+
+    def _fake_thread_init(*args, **kwargs):
+        """Mock thread that sets all threading.Event args so waits don't block."""
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, threading.Event):
+                v.set()
+        m = MagicMock()
+        m.start = lambda: None
+        return m
+
+    with (
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreSendingThread",
+            side_effect=_fake_thread_init,
+        ),
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreRecvingThread",
+            side_effect=_fake_thread_init,
+        ),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -197,28 +234,13 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         "L1": dense_kv_cache_views(raw_swa, swa, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
-    def _fake_thread_init(*args, **kwargs):
-        """Mock thread that sets all threading.Event args so waits don't block."""
-        for v in list(args) + list(kwargs.values()):
-            if isinstance(v, threading.Event):
-                v.set()
-        m = MagicMock()
-        m.start = lambda: None
-        return m
+    _register_with_fake_threads(worker, kv_caches)
 
-    with (
-        patch.object(
-            mooncake_store_worker,
-            "KVCacheStoreSendingThread",
-            side_effect=_fake_thread_init,
-        ),
-        patch.object(
-            mooncake_store_worker,
-            "KVCacheStoreRecvingThread",
-            side_effect=_fake_thread_init,
-        ),
-    ):
-        worker.register_kv_caches(kv_caches)
+    # Each group's store values hold only its own layer.
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+        [raw_full.data_ptr()],
+        [raw_swa.data_ptr()],
+    ]
 
     # Now build a real sending thread (no .start()) over the worker's token_dbs
     # and the dict-backed store, so _handle_request runs synchronously.
@@ -236,6 +258,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    # 1-based: block 0 is the reserved null block and the save skips it.
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
@@ -254,10 +277,10 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     worker.store = store
 
     # Both groups stored all 4 blocks -> full hit.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt: the full hit is re-derived one block lower,
     # where both groups' stored blocks still cover the SWA window.
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 48
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 48
 
     # Evict SWA's first two blocks (outside its window of 32 tokens = 2 blocks).
     swa_keys_outside_window = [
@@ -270,12 +293,251 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # SWA window=32 -> only last 2 blocks must be present in SWA group.
     # Full has all 4. Coordinator should still return 64.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt after eviction: the boundary one block lower
     # needs SWA block 1, which is gone — no usable stored boundary remains
     # (the pre-fix arithmetic clamp would have returned 48 and livelocked
     # on load failure -> recompute -> same lookup).
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 0
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 0
+
+
+def test_hybrid_mamba_values_hold_only_group_states():
+    """Hybrid groups overlay one allocation. A Mamba group's values hold only
+    its own layers' states: not the layer slot only attention uses, and not
+    the padding of each state up to the attention page. Restoring the value
+    brings back the states."""
+    attn = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+    )
+    page = attn.page_size_bytes
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4, 8), (2, 8)),
+        dtypes=(torch.float32, torch.float16),
+        page_size_padded=page,
+        mamba_cache_mode="align",
+    )
+    assert mamba.state_content_size_bytes == 160 < page
+    num_layers, num_blocks = 3, 4
+
+    def tensor(layers):
+        return KVCacheTensor(
+            size=num_layers * num_blocks * page,
+            layers=layers,
+            layer_stride=num_blocks * page,
+            block_stride=page,
+        )
+
+    cfg = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[tensor(["A0", "A1", "A2"]), tensor(["M0", "M1"])],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["A0", "A1", "A2"], attn),
+            KVCacheGroupSpec(["M0", "M1"], mamba),
+        ],
+    )
+    worker = _build_worker_with_dict_store(
+        _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
+    )
+    kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), KVCacheLayout.LBNHC)
+    # Like a Mamba backend, view each layer's page as its two states, here
+    # with a gap between them.
+    for name in ("M0", "M1"):
+        page_view = kv_caches[name]
+        kv_caches[name] = [
+            page_view[..., :128].view(torch.float32),
+            page_view[..., 136:160].view(torch.float16),
+        ]
+    _register_with_fake_threads(worker, kv_caches)
+
+    states = [state for name in ("M0", "M1") for state in kv_caches[name]]
+    state_lens = [state[0].numel() * state.element_size() for state in states]
+    attn_db, mamba_db = worker.token_dbs
+    attn_layout, mamba_layout = attn_db.store_layout, mamba_db.store_layout
+    assert attn_layout.block_len == [page] * num_layers
+    assert mamba_layout.kv_caches_base_addr == [s.data_ptr() for s in states]
+    assert mamba_layout.block_len == state_lens
+
+    raw = torch.empty(0, dtype=torch.int8).set_(kv_caches["A0"].untyped_storage())
+    raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
+    before = raw.clone()
+    addrs, sizes = mamba_db.prepare_value_for_block(2)
+    saved = [ctypes.string_at(addr, size) for addr, size in zip(addrs, sizes)]
+    # The value is each state of block 2 in turn.
+    assert saved == [
+        state[2].contiguous().view(torch.int8).numpy().tobytes() for state in states
+    ]
+
+    # Clobber block 2 of every layer slot, then load the saved value: only the
+    # Mamba states come back; the gap, the padding and slot A2 keep the clobber.
+    def block_2(addr, length):
+        start = addr - raw.data_ptr() + 2 * page
+        return slice(start, start + length)
+
+    for name in ("A0", "A1", "A2"):
+        raw[block_2(kv_caches[name].data_ptr(), page)] = 7
+    expected = raw.clone()
+    for state, length in zip(states, state_lens):
+        expected[block_2(state.data_ptr(), length)] = before[
+            block_2(state.data_ptr(), length)
+        ]
+    for addr, data in zip(addrs, saved):
+        ctypes.memmove(addr, data, len(data))
+    assert torch.equal(raw, expected)
+
+
+_ATTN = FullAttentionSpec(
+    block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
+)
+_MAMBA = MambaSpec(
+    block_size=16,
+    shapes=((4, 8), (2, 8)),
+    dtypes=(torch.float32, torch.float16),
+    page_size_padded=_ATTN.page_size_bytes,
+    mamba_cache_mode="align",
+)
+# Model shapes as KV cache groups: each group is (layer names, spec).
+_MODELS = {
+    "dense": [(["A0", "A1", "A2"], _ATTN)],
+    "mla": [
+        (
+            ["A0", "A1", "A2"],
+            MLAAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=40, dtype=torch.float16
+            ),
+        )
+    ],
+    "full_swa": [
+        (["A0", "A1"], _ATTN),
+        (
+            ["S0", "S1"],
+            SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=16,
+                dtype=torch.float16,
+                sliding_window=32,
+            ),
+        ),
+    ],
+    # Like Kimi K3: Mamba groups with fewer layers, states padded to the page.
+    "attn_mamba": [
+        (["A0", "A1", "A2"], _ATTN),
+        (["M0", "M1"], _MAMBA),
+        (["M2", "M3"], _MAMBA),
+    ],
+    # Pages of different sizes are packed side by side within a block.
+    "mixed_pages": [
+        (["A0", "A1"], _ATTN),
+        (
+            ["B0", "B1", "B2"],
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+            ),
+        ),
+    ],
+}
+
+
+def _byte_mask(t: torch.Tensor, nbytes: int) -> torch.Tensor:
+    """The bytes of the backing storage that ``t`` covers."""
+    offsets = torch.tensor([t.storage_offset()])
+    for size, stride in zip(t.shape, t.stride()):
+        offsets = (offsets[:, None] + torch.arange(size) * stride).flatten()
+    elem = t.element_size()
+    mask = torch.zeros(nbytes, dtype=torch.bool)
+    mask[(offsets[:, None] * elem + torch.arange(elem)).flatten()] = True
+    return mask
+
+
+def _span_mask(spans, nbytes: int) -> torch.Tensor:
+    mask = torch.zeros(nbytes, dtype=torch.bool)
+    for start, length in spans:
+        mask[start : start + length] = True
+    return mask
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout), ids=lambda x: x.name)
+@pytest.mark.parametrize("model", list(_MODELS))
+def test_store_values_round_trip_every_layout(model, layout):
+    """Through the planner's real layout, each group's value for a block holds
+    every byte of its layers' views of that block, reads and writes only that
+    block, and restores it exactly. Without padding the value is the group's
+    whole block, as before; with Mamba padding it is exactly the states."""
+    num_blocks, block = 4, 2
+    groups = [KVCacheGroupSpec(names, spec) for names, spec in _MODELS[model]]
+    planner_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: layout,
+            num_gpu_blocks_override=num_blocks,
+            prefix_cache_retention_interval=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    try:
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+        kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
+    except (ValueError, AssertionError):
+        pytest.skip(f"{layout.name} cannot express {model}")
+    worker = _build_worker_with_dict_store(
+        _minimal_vllm_config(cache_block_size=16), cfg, _DictStore()
+    )
+    _register_with_fake_threads(worker, kv_caches)
+
+    first = next(iter(kv_caches.values()))
+    raw = torch.empty(0, dtype=torch.int8).set_(first.untyped_storage())
+    nbytes = raw.numel()
+    raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
+    before = raw.clone()
+    base = raw.data_ptr()
+
+    # The block of every byte that some layer's view uses (-1: none, e.g.
+    # padding). A value must not reach another block's bytes.
+    byte_block = torch.full((nbytes,), -1)
+    for views in kv_caches.values():
+        for view in views if isinstance(views, list) else [views]:
+            for b in range(num_blocks):
+                mask = _byte_mask(view[b], nbytes)
+                if ((byte_block[mask] != -1) & (byte_block[mask] != b)).any():
+                    pytest.skip(f"{layout.name} overlaps blocks of {model}")
+                byte_block[mask] = b
+    other_blocks = (byte_block != block) & (byte_block != -1)
+
+    for group, db in zip(groups, worker.token_dbs, strict=True):
+        store_layout = db.store_layout
+        addrs, sizes = store_layout.prepare_value_for_block(block)
+        chunk_addrs, chunk_sizes, _ = store_layout.prepare_values(
+            [(0, 16), (16, 32)], [block, block], [0, 0]
+        )
+        # Chunked saves and loads copy the same pieces as a single block.
+        assert chunk_addrs == [addrs, addrs] and chunk_sizes == [sizes, sizes]
+
+        value = _span_mask([(a - base, n) for a, n in zip(addrs, sizes)], nbytes)
+        owned = torch.zeros(nbytes, dtype=torch.bool)
+        for name in group.layer_names:
+            views = kv_caches[name]
+            for view in views if isinstance(views, list) else [views]:
+                owned |= _byte_mask(view[block], nbytes)
+        assert not (value & other_blocks).any(), "value reaches other blocks"
+        assert not (owned & ~value).any(), "value misses bytes of the group"
+        # Each piece ends at the last byte the group uses in it.
+        assert all(owned[a - base + n - 1] for a, n in zip(addrs, sizes))
+        if len(groups) == 1 and layout != KVCacheLayout.BHLNC:
+            # A single group stores whole blocks, as before. (A BHLNC head's
+            # block stride spans every head, so only the head's block is.)
+            assert store_layout.block_len == store_layout.block_stride
+        if not layout.is_block_outermost:
+            # Exactly the group's bytes: no padding, no other group's slots.
+            assert torch.equal(value, owned) and sum(sizes) == owned.sum()
+
+        # Clobber everything but the other blocks, then load the saved value.
+        saved = [ctypes.string_at(a, n) for a, n in zip(addrs, sizes)]
+        raw[~other_blocks] = 7
+        for addr, data in zip(addrs, saved):
+            ctypes.memmove(addr, data, len(data))
+        assert torch.equal(raw[owned], before[owned])
+        assert torch.equal(raw[other_blocks], before[other_blocks])
+        raw.copy_(before)
 
 
 def test_recv_skips_swa_blocks_before_window():
@@ -377,6 +639,15 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][2].hex() == fine_hashes[6].hex()
 
 
+def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+    """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+    req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+    req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
+        thread.coord, req, [db.block_size for db in thread.token_databases]
+    )
+    return req
+
+
 def test_sub_block_partial_tail_offload_reads_cow_block():
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
@@ -393,7 +664,12 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -440,11 +716,13 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=20,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        num_prompt_tokens=13,
+        prefill_end_tokens=20,
+        completed_token_len=20,
+        boundary_puts=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -472,7 +750,12 @@ def test_offload_syncs_event_before_put():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     event = MagicMock()
 
     class _FencedStore(_DictStore):
@@ -512,12 +795,13 @@ def test_offload_syncs_event_before_put():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, 7, 12)],
+        completed_token_len=12,
         store_job_id=1,
+        boundary_puts=[(1, 7, 8)],
     )
     req.current_event = event
 
-    send.add_request(req)
+    send.add_request(_resolve_partial_tail(send, req))
     send._handle_request(send.request_queue.get())
     assert send.request_queue.qsize() == 0
     assert store._data
@@ -531,7 +815,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target."""
+    reads the core-provided CoW target. Without EAGLE, the 12-token prompt's
+    resend-safe checkpoint is 8, leaving two attention blocks to save."""
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -543,7 +828,12 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         KVCacheGroupSpec(["L0"], full),
         KVCacheGroupSpec(["L1"], mamba),
     ]
-    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    coord = MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+    )
     assert coord.enable_partial_hash_hits
 
     class _RecordingStore(_DictStore):
@@ -589,18 +879,313 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        completed_token_len=12,
+        boundary_puts=[(1, mamba_cow_block, 8)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
 
-    # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
+    # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
         token_dbs[0].key_for(hs[0]): [1 * 512],
         token_dbs[0].key_for(hs[1]): [2 * 512],
-        token_dbs[0].key_for(hs[2]): [3 * 512],
-        token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
+        token_dbs[1].key_for(hs[1]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
+
+
+def test_worker_lookup_hits_sub_block_partial_tail():
+    """worker.lookup must query sub-block keys when partial hash hits are on.
+
+    Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
+    partial tail's sub-block keys were never probed and partial prefix hits
+    silently returned 0 while the store side kept writing them. Here the
+    mamba block (16) exceeds the hash unit (4), so ``enable_partial_hash_hits``
+    is on and the lookup must find the stored boundary at 8.
+    """
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * mamba.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * mamba.page_size_bytes,
+                block_stride=mamba.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], mamba),
+        ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=4,
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    # Hash unit 4 < mamba block 16 -> partial hash hits are enabled.
+    vllm_config.cache_config.prefix_match_unit = 4
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert worker.coord.enable_partial_hash_hits
+
+    for g_idx, db in enumerate(worker.token_dbs):
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+
+    # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=12,
+        completed_token_len=12,
+        boundary_puts=[(1, 7, 8)],
+    )
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+
+    worker.store = store
+
+    # A 13-token prompt sharing the prefix must hit the stored boundary at 8.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
+
+
+def test_worker_setup_tolerates_finer_scratch_group():
+    """Setup and lookup must tolerate a non-prefix-cacheable scratch group.
+
+    Regression: GLM-5.3-Flash carries a kpool-tail scratch group whose block
+    size (``index_kpool`` tokens) is finer than the hash unit, so the
+    coordinator's divisibility assert and the scratch group's
+    ``ChunkedTokenDatabase`` both rejected worker setup for any hash unit the
+    scratch block does not divide. Scratch groups never participate in
+    store/load/lookup, so setup must skip them and lookup must still hit
+    stored sub-block boundaries on the participating groups.
+    """
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    # Scratch block 4 is not divisible by the hash unit 8 below.
+    scratch = CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=64,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * mamba.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * mamba.page_size_bytes,
+                block_stride=mamba.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * scratch.page_size_bytes,
+                layers=["L2"],
+                layer_stride=4 * scratch.page_size_bytes,
+                block_stride=scratch.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], mamba),
+            KVCacheGroupSpec(["L2"], scratch),
+        ],
+        # The hit alignment the engine core resolves for this config.
+        cache_hit_alignment_tokens=8,
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    # Hash unit 8 divides the participating groups (16) but not the scratch
+    # group (4); mamba block 16 > 8 keeps partial hash hits on.
+    vllm_config.cache_config.prefix_match_unit = 8
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert worker.coord.enable_partial_hash_hits
+    # Only the participating full-attention and Mamba groups are registered.
+    assert len(worker.token_dbs) == 2
+    assert all(db.hash_block_size == 8 for db in worker.token_dbs)
+
+    for g_idx, db in enumerate(worker.token_dbs):
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+        group_participates=[True, True],
+    )
+
+    # Persist the sub-block partial tail at boundary 8 (keyed by hs[8//8-1]).
+    hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=12,
+        completed_token_len=12,
+        boundary_puts=[(1, 7, 8)],
+    )
+    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+
+    worker.store = store
+
+    # A 13-token prompt sharing the prefix must hit the first hash unit.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
+    # The scratch group's namespace never enters the store.
+    assert not any("@group:2" in key for key in store._data)
+
+
+def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
+    """A per-request ring group (CircularBufferSpec, capacity as block_size)
+    sits beside the paged group: worker setup tolerates its block size (the
+    DeepSeek-V4.1 compressor ring is 8 rows), saving a request stores paged
+    blocks only, and lookup hits on the paged group alone."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    ring = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=64, head_size_v=0, dtype=torch.uint8
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * ring.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * ring.page_size_bytes,
+                block_stride=ring.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], ring),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert len(worker.token_dbs) == 1
+    assert worker.token_dbs[0].hash_block_size == 16
+
+    raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
+    raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
+    kv_caches = {
+        "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_ring, ring, 4, 1, KVCacheLayout.LBNHC)[0],
+    }
+
+    def _fake_thread_init(*args, **kwargs):
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, threading.Event):
+                v.set()
+        m = MagicMock()
+        m.start = lambda: None
+        return m
+
+    with (
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreSendingThread",
+            side_effect=_fake_thread_init,
+        ),
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreRecvingThread",
+            side_effect=_fake_thread_init,
+        ),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=worker.tp_rank,
+        group_put_steps=worker._group_tp_replication_factors,
+        kv_role=worker.kv_role,
+        ready_event=threading.Event(),
+        enable_kv_event=False,
+        group_participates=[True],
+    )
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    save_req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=64,
+        # Scheduler metadata is projected to the participating store groups.
+        block_ids=([1, 2, 3, 4],),
+        block_hashes=hs,
+        can_save=True,
+        store_job_id=1,
+    )
+    send_thread.add_request(save_req)
+    send_thread._handle_request(send_thread.request_queue.get())
+    worker.store = store
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
+    assert not any("@group:1" in key for key in store._data)

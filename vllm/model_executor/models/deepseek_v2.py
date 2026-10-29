@@ -59,7 +59,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -97,16 +96,21 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
 
 from .interfaces import (
     MixtureOfExperts,
@@ -392,6 +396,7 @@ class DeepseekV2MoE(nn.Module):
             if self.is_fused_shared_expert_enabled
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -457,7 +462,7 @@ class DeepseekV2Attention(nn.Module):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: int,
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
@@ -495,7 +500,7 @@ class DeepseekV2Attention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
+                self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -536,9 +541,9 @@ class DeepseekV2Attention(nn.Module):
         )
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -654,11 +659,18 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            cache_role=SparseCacheRole.INDEXER,
         )  # Only has one vector instead of K + V
 
     def forward(self): ...
+
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        """Whether this cache's reader expects the shuffled value layout."""
+        return False
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV32IndexerBackend
@@ -705,7 +717,7 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -845,8 +857,7 @@ class Indexer(nn.Module):
 def _try_load_fp8_indexer_wk(
     name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
 ):
-    """
-    We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
+    """We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
     in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
     Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
     weights and scale, and when both are available, dequantizes to BF16 and stores into
@@ -874,12 +885,20 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
+    if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
+        scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
     if scale_inv.ndim == 1:
         # Per-channel scale: one scale per row of [out, in]
         group_shape = GroupShape(1, weight_fp8.shape[1])
     else:
-        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-        group_shape = GroupShape(block_size, block_size)
+        # Derive the block size independently per dim so that per-channel
+        # ([out, 1]), MX ([out, in / 32]) and 2D block ([out / 128, in / 128])
+        # scale layouts are all handled.
+        group_shape = GroupShape(
+            weight_fp8.shape[0] // scale_inv.shape[0],
+            weight_fp8.shape[1] // scale_inv.shape[1],
+        )
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
@@ -898,8 +917,7 @@ def _min_latency_fused_qkv_a_proj_impl(
     input_: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Dynamically run min-latency gemm if num_tokens <= 16.
+    """Dynamically run min-latency gemm if num_tokens <= 16.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
@@ -980,8 +998,7 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
 
 
 class DeepseekV2MLAAttention(nn.Module):
-    """
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    """Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
         For more info see MLACommonImpl in:
@@ -1004,6 +1021,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
         input_size: int | None = None,
         reduce_results: bool = True,
         non_causal_multi_token_decode: bool = False,
@@ -1096,9 +1114,9 @@ class DeepseekV2MLAAttention(nn.Module):
 
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -1191,6 +1209,7 @@ class DeepseekV2MLAAttention(nn.Module):
             indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -1234,6 +1253,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__()
 
@@ -1282,6 +1302,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
         )
+        attn_kwargs = (
+            {"index_group_builder": index_group_builder}
+            if attn_cls is DeepseekV2MLAAttention
+            else {}
+        )
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
             config=config,
@@ -1298,6 +1323,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
+            **attn_kwargs,
         )
 
         if is_moe_layer:
@@ -1421,6 +1447,14 @@ class DeepseekV2Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1437,14 +1471,15 @@ class DeepseekV2Model(nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                index_group_builder=index_group_builder,
             ),
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1594,12 +1629,9 @@ class DeepseekV2Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1624,8 +1656,11 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
             if _try_load_fp8_indexer_wk(

@@ -63,9 +63,15 @@ def resolve_revision(
     requested revision that also carries the commit hash, so downstream error
     messages stay readable and offline loads reuse the cached `refs/` entry.
 
+    A commit hash only means something for the repo it was resolved against, so
+    a repo that is not `repo_id` needs its own call. Passing a revision resolved
+    for another repo back in is safe: the revision initially requested is
+    resolved again, against `repo_id` this time.
+
     Returns:
         The resolved revision, or `revision` unchanged if it cannot be resolved
         (local path, ModelScope, or any Hub error).
+
     """
     if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
         return revision
@@ -106,6 +112,7 @@ def with_retry(
         retry_delay: Seconds to wait after the first failure, doubled each time.
         fatal_errors: Exceptions that are a definitive answer rather than a
             transient failure. These are raised immediately, without logging.
+
     """
     for attempt in range(max_retries):
         try:
@@ -297,6 +304,104 @@ def get_model_path(model: str | Path, revision: str | None = None):
     )
 
 
+def get_subfolder_path(
+    model: str,
+    subfolder: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> str:
+    """Return the local path of `subfolder` in a local or Hub checkpoint,
+    downloading only that subfolder from the Hub."""
+    if os.path.isdir(model):
+        return os.path.join(model, subfolder)
+    # Avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    with get_lock(model, cache_dir):
+        snapshot = hf_api().snapshot_download(
+            repo_id=model,
+            revision=revision,
+            cache_dir=cache_dir,
+            allow_patterns=f"{subfolder}/*",
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
+    return os.path.join(snapshot, subfolder)
+
+
+_WEIGHT_FILE_PATTERNS = [
+    "*.safetensors",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.onnx",
+    "*.onnx_data",
+    # Large non-weight assets that tokenizers and processors never read
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.mp3",
+    "*.mp4",
+    "*.wav",
+    "*.flac",
+    "*.parquet",
+    "*.arrow",
+    "*.ipynb",
+    "*.zip",
+    "*.tar*",
+]
+
+
+@cache
+def _snapshot_non_weight_files(
+    repo_id: str,
+    revision: str | None,
+    cache_dir: str | None,
+    token: str | bool | None,
+) -> str:
+    # Avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    with get_lock(repo_id, cache_dir):
+        return hf_api().snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            cache_dir=cache_dir,
+            token=token,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            ignore_patterns=_WEIGHT_FILE_PATTERNS,
+        )
+
+
+def get_non_weight_snapshot_path(
+    repo_id: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+    token: str | bool | None = None,
+) -> str:
+    """Download all non-weight files of a Hub repo and return the local snapshot.
+
+    Loading tokenizers and processors from a local directory stops Transformers
+    from making a Hub request per file (including the `additional_chat_templates`
+    listing). Returns `repo_id` unchanged if it is local or cannot be fetched, so
+    Transformers handles it as before. Failures are not cached, so they are retried.
+    """
+    if envs.VLLM_USE_MODELSCOPE or Path(repo_id).exists():
+        return repo_id
+    # Normalise so that `None` and "main" share a cache entry
+    revision = revision or huggingface_hub.constants.DEFAULT_REVISION
+    try:
+        return _snapshot_non_weight_files(repo_id, revision, cache_dir, token)
+    except (HfHubHTTPError, OSError, ValueError):
+        logger.debug("Failed to snapshot %s", repo_id, exc_info=True)
+        return repo_id
+
+
 def _try_download_from_hf_hub(
     model: str | Path, file_name: str, revision: str | None
 ) -> Path | None:
@@ -353,8 +458,7 @@ def get_hf_file_bytes(
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
 ) -> Path | Any | None:
-    """
-    Try to get a local file from the HuggingFace repository.
+    """Try to get a local file from the HuggingFace repository.
 
     The possible return values are:
 
@@ -385,20 +489,19 @@ def try_get_local_file(
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
 ):
-    """
-    Downloads a file from the Hugging Face Hub and returns
+    """Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
-    Parameters:
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
+    Args:
+        file_name (str): The name of the file to download.
+        model (str): The name of the model on the Hugging Face Hub.
+        revision (str): The specific version of the model.
 
     Returns:
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
-    """
 
+    """
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:

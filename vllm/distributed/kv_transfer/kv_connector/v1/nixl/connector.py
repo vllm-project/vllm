@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -57,6 +58,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -75,6 +77,8 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -107,10 +111,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "Consumers and kv_both require "
                 "prefill_context_parallel_size=1."
             )
-        if pcp_size > 1 and parallel_config.decode_context_parallel_size > 1:
+        dcp_size = parallel_config.decode_context_parallel_size
+        if (
+            pcp_size > 1
+            and dcp_size > 1
+            and (parallel_config.tensor_parallel_size != 1 or dcp_size != pcp_size)
+        ):
             raise NotImplementedError(
-                "NixlConnector PCP producers currently require "
-                "decode_context_parallel_size=1."
+                "NixlConnector PCP+DCP requires TP1 with DCP spanning "
+                "the full PCP group."
             )
         # TODO: Support PCP with bidirectional KV transfer by tracking separate
         # send and receive completion counts.
@@ -131,6 +140,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Class Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Push producers keep the decoder's KV cache registration across its sleep.
+        return False
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:
@@ -156,16 +170,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
 
     def get_finished_count(self) -> int | None:
-        parallel_config = self._vllm_config.parallel_config
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            return (
-                parallel_config.tensor_parallel_size
-                * parallel_config.pipeline_parallel_size
-            )
         return None
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -217,12 +225,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        """Set handshake metadata keyed by (pp_rank, tp_rank) so the side
         channel can serve every PP stage's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
@@ -241,13 +249,20 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished()
+        return self.connector_worker.get_finished()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        results = self.connector_worker.get_transfer_results()
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
+            and not self.connector_worker.pcp_dcp_sharded
         ):
-            done_sending.clear()
-        return done_sending, done_recving
+            results.finished_sending.clear()
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
@@ -313,19 +328,20 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler.shutdown()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata for this connector.
+        """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
         between P/D workers.
 
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+
         """
         assert self.connector_worker is not None
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
+            and not self.connector_worker.pcp_dcp_sharded
         ):
             return None
         return self.connector_worker.xfer_handshake_metadata
@@ -352,6 +368,19 @@ class NixlPullConnector(NixlBaseConnector):
                 vllm_config, self.engine_id, kv_cache_config
             )
 
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Sleep mode is only validated with the UCX backend.
+        return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self.connector_worker, NixlPullConnectorWorker)
@@ -369,6 +398,10 @@ class NixlPushConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            raise ValueError(
+                "NixlPushConnector does not support decode_context_parallel_size > 1."
+            )
         self.connector_scheduler: NixlPushConnectorScheduler | None = None
         self.connector_worker: NixlPushConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:

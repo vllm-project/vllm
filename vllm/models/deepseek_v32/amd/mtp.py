@@ -8,13 +8,11 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -32,8 +30,12 @@ from vllm.model_executor.models.deepseek_v2 import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     get_pp_missing_layer_names,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
@@ -128,6 +130,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
 
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            self_attn = getattr(layer.mtp_block, "self_attn", None)
+            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
+                topk_indices_buffer = self_attn.topk_indices_buffer
+                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -160,7 +171,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
-class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -169,10 +180,13 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.model.layers.values(),
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mtp_block.mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
     def set_moe_parameters(self):
@@ -192,7 +206,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
@@ -237,6 +251,12 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
         return name
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return (
+            get_spec_layer_idx_from_weight_name(self.config, name) is None
+            and "embed_tokens" not in name
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
@@ -246,31 +266,46 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fused_shared_expert_layers = self.fused_shared_expert_layers
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
+            if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
+                # A tied top-level embed_tokens has no spec layer to rewrite
+                # from; the draft needs its own copy under PP.
+                param = params_dict.get(name) if "embed_tokens" in name else None
+                if param is not None:
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in fused_shared_expert_layers
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 

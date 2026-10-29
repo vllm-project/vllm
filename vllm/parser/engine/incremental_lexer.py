@@ -5,6 +5,7 @@ tokens, with prefix-match buffering for ambiguous boundaries."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import regex as re
@@ -284,7 +285,9 @@ class IncrementalLexer:
         return n
 
 
-def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
+def terminals_from_literals(
+    literals: Mapping[str, str | tuple[str, ...]],
+) -> list[TerminalDef]:
     return [
         TerminalDef(
             name=name,
@@ -292,5 +295,6 @@ def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
             is_literal=True,
             literal=lit,
         )
-        for name, lit in literals.items()
+        for name, value in literals.items()
+        for lit in ((value,) if isinstance(value, str) else value)
     ]

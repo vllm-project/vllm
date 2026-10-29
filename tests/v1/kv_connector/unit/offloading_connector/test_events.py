@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
+    OffloadingConnectorScheduler,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -29,14 +31,18 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpecKind,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
+    LookupResult,
     Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CPU_MEDIUM = Medium.CPU
@@ -88,12 +94,22 @@ def _group_config(
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
+    kv_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
+    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=tokens_per_chunk,
         hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
+        kv_cache_spec=kv_spec,
+        manager_cls=manager_cls,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 
@@ -141,12 +157,16 @@ def _stored_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
+    removal_expected: bool = False,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=False,
         locality=locality,
+        ownership=ownership,
+        removal_expected=removal_expected,
     )
 
 
@@ -154,12 +174,14 @@ def _removed_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=True,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -211,6 +233,34 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
     assert events[0].locality == "REMOTE"
+
+
+@pytest.mark.parametrize(
+    "kind,window", [("mamba", None), ("sliding_window", 16), (None, None)]
+)
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_placeholder_group_classification_survives_reset(
+    kind, window, reset, self_describing
+):
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(True, self_describing),
+        {0: OffloadingEventGroupSpec(kind, window)},
+    )
+    if reset:
+        tracker.reset()
+    key = make_offload_key(_hash(0), 0)
+    # A removal can arrive before any store metadata is available.
+    removed, stored = tracker.take_events(
+        [_removed_event([key], ownership="kvcr"), _stored_event([key])]
+    )
+    assert (stored.block_size, stored.token_ids) == (0, [])
+    assert (stored.kv_cache_spec_kind, stored.kv_cache_spec_sliding_window) == (
+        (kind, window) if self_describing else (None, None)
+    )
+    # Removals stay group_idx + hash only; consumers classify from the store.
+    assert removed.ownership == "kvcr"
+    assert not hasattr(removed, "kv_cache_spec_kind")
 
 
 def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
@@ -489,6 +539,177 @@ def test_event_metadata_skips_non_full_attention_group(
     assert events[0].block_size == 0
 
 
+@pytest.mark.parametrize("secondary_removal_in_same_batch", [False, True])
+def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
+    secondary_removal_in_same_batch,
+):
+    """A removal must not drop the payload a later store in the same batch
+    still needs, and must still drop it once no residency is left."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=64, blocks_per_chunk=2)
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=256)
+    key = _record_chunks(tracker, req, group_config, num_chunks=2)[1]
+    secondary_removal = _removed_event([key], ownership="kvcr")
+
+    batch = [
+        _removed_event([key]),
+        _stored_event([key], ownership="kvcr", removal_expected=True),
+    ]
+    if secondary_removal_in_same_batch:
+        batch.append(secondary_removal)
+    events = list(tracker.take_events(batch))
+    if not secondary_removal_in_same_batch:
+        events += tracker.take_events([secondary_removal])
+    removed, stored, final_removal = events
+
+    hashes = [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == hashes
+    assert stored.block_size == 64
+    assert stored.token_ids == list(range(129, 257))
+    assert stored.parent_block_hash == _wire_hash(_hash(1))
+    assert stored.block_hashes == hashes
+    assert stored.ownership == "kvcr"
+    assert final_removal.block_hashes == hashes
+
+    # Nothing holds a residency now, so the payload is gone.
+    [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
+    assert after_eviction.block_size == 0
+
+
+@pytest.mark.parametrize(
+    "history", ["never_seen", "evicted", "retained", "secondary_only"]
+)
+@pytest.mark.parametrize("success", [False, True])
+def test_pending_promotion_captures_payload_before_inventory(history, success):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=1600)
+    group = _group_config(block_size=1600)
+    key = make_offload_key(_hash(0), 0)
+    if history != "never_seen":
+        tracker.record_store(req, group, 0, key)
+        if history == "evicted":
+            list(tracker.take_events([_removed_event([key])]))
+        elif history == "secondary_only":
+            list(
+                tracker.take_events(
+                    [
+                        _stored_event([key], ownership="kvcr", removal_expected=True),
+                        _removed_event([key]),
+                    ]
+                )
+            )
+
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="promotion")
+    primary.prepare_store([key], ctx)
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    assert (
+        OffloadingConnectorScheduler._maximal_prefix_lookup(
+            scheduler, [key], ctx, req, group, 0
+        )
+        is None
+    )
+    assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
+    assert list(tracker.take_events(primary.take_events())) == []
+
+    if history == "secondary_only":
+        list(tracker.take_events([_removed_event([key], ownership="kvcr")]))
+
+    if success:
+        [event] = tracker.take_events(
+            [_stored_event([key], ownership="kvcr", removal_expected=True)]
+        )
+        assert event.ownership == "kvcr"
+        assert event.block_size == 1600
+        assert event.token_ids == req.all_token_ids
+        assert event.block_hashes == [_wire_hash(_hash(0))]
+
+    primary.complete_store([key], ctx, success=success)
+    events = list(tracker.take_events(primary.take_events()))
+    if success:
+        assert primary.lookup(key, ctx) is LookupResult.HIT
+        assert len(events) == 1 and isinstance(events[0], BlockStored)
+        assert events[0].block_size == 1600
+        list(
+            tracker.take_events(
+                [_removed_event([key]), _removed_event([key], ownership="kvcr")]
+            )
+        )
+    else:
+        assert primary.lookup(key, ctx) is LookupResult.MISS
+        assert events == []
+    assert key not in tracker._pending_event_metadata
+
+
+def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
+    tracker = _tracker()
+    group = _group_config(block_size=1600, blocks_per_chunk=2)
+    ready_req = _request(block_hashes=[_hash(0), _hash(1)], token_count=3200)
+    failed_req = _request(block_hashes=[_hash(0), _hash(2)], token_count=3200)
+    ready_key, failed_key = [make_offload_key(_hash(i), 0) for i in (1, 2)]
+    primary = CPUOffloadingManager(num_chunks=2, enable_events=True)
+    ctx = ReqContext(req_id="shared-prefix")
+    primary.prepare_store([ready_key], ctx)
+    tracker.record_store(ready_req, group, 0, ready_key)
+    primary.complete_store([ready_key], ctx)
+    [stored] = tracker.take_events(primary.take_events())
+    assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+
+    primary.prepare_store([failed_key], ctx)
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    assert (
+        OffloadingConnectorScheduler._maximal_prefix_lookup(
+            scheduler, [failed_key], ctx, failed_req, group, 0
+        )
+        is None
+    )
+    primary.complete_store([failed_key], ctx, success=False)
+    assert list(tracker.take_events(primary.take_events())) == []
+    assert primary.lookup(ready_key, ctx) is LookupResult.HIT
+    assert ready_key in tracker._pending_event_metadata
+    assert failed_key not in tracker._pending_event_metadata
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_failed_pending_retry_preserves_replacement_metadata(success):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=1600)
+    group = _group_config(block_size=1600)
+    key = make_offload_key(_hash(0), 0)
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="retry")
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    for attempt in range(2):
+        primary.prepare_store([key], ctx)
+        assert (
+            OffloadingConnectorScheduler._maximal_prefix_lookup(
+                scheduler, [key], ctx, req, group, 0
+            )
+            is None
+        )
+        if attempt == 0:
+            primary.complete_store([key], ctx, success=False)
+    # Drain the old failure only after the retry captured its metadata.
+    old_cleanup = list(tracker.take_events(primary.take_events()))
+    [inventory] = tracker.take_events(
+        [_stored_event([key], ownership="kvcr", removal_expected=True)]
+    )
+    assert inventory.block_size == 1600
+    assert inventory.token_ids == req.all_token_ids
+    assert old_cleanup == []
+    assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
+    primary.complete_store([key], ctx, success=success)
+    events = list(tracker.take_events(primary.take_events()))
+    assert len(events) == int(success)
+    assert key in tracker._pending_event_metadata
+    removals = [_removed_event([key], ownership="kvcr")]
+    if success:
+        removals.append(_removed_event([key]))
+    list(tracker.take_events(removals))
+    assert key not in tracker._pending_event_metadata
+
+
 def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     tracker = _tracker()
     block_hashes = [_hash(0), _hash(1)]
@@ -510,6 +731,9 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     )
     assert tracker._pending_event_metadata[key] is confirmed_meta
 
+    list(
+        tracker.take_events([_stored_event([key], Medium.STORAGE, ownership="custom")])
+    )
     removed = list(tracker.take_events([_removed_event([key])]))
     assert len(removed) == 1
     assert removed[0].block_hashes == [
@@ -530,13 +754,36 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_secondary_stored_event_does_not_mutate_cpu_metadata():
-    tracker, _, _, key = _lookup_chunk()
-    expected_metadata = dict(tracker._pending_event_metadata)
+@pytest.mark.parametrize(
+    ("record_method", "position"),
+    [("record_store", 0), ("record_partial_store", 4)],
+)
+def test_reoffload_preserves_secondary_residency(record_method, position):
+    tracker, req, group_config, key = _lookup_chunk()
+    [stored] = tracker.take_events(
+        [
+            _stored_event(
+                [key],
+                Medium.STORAGE,
+                ownership="custom",
+                removal_expected=True,
+            )
+        ]
+    )
 
-    stored = list(tracker.take_events([_stored_event([key], Medium.STORAGE)]))
-    assert stored[0].token_ids == [1, 2, 3, 4]
-    assert tracker._pending_event_metadata == expected_metadata
+    getattr(tracker, record_method)(req, group_config, position, key)
+
+    assert tracker._pending_event_metadata[key].active_residencies == {
+        (Medium.CPU, None),
+        (Medium.STORAGE, "custom"),
+    }
+    [removed] = tracker.take_events(
+        [_removed_event([key], Medium.STORAGE, ownership="custom")]
+    )
+
+    assert stored.token_ids == [1, 2, 3, 4]
+    assert stored.ownership == removed.ownership == "custom"
+    assert key in tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
@@ -639,3 +886,92 @@ def test_tiering_accepts_self_describing_kv_events():
     assert spec.kv_events_config.enable_kv_cache_events
     assert spec.kv_events_config.self_describing_kv_events
     assert tracker.self_describing_enabled
+
+
+def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
+    vllm_config = create_vllm_config(
+        block_size=4,
+        max_num_batched_tokens=16,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    extra_config = {
+        "spec_name": "TieringOffloadingSpec",
+        "cpu_bytes_to_use": 1 << 20,
+        "secondary_tiers": secondary_tiers,
+    }
+    if top_level_backpressure is not None:
+        extra_config["backpressure"] = top_level_backpressure
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    return TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+
+def test_partial_tier_backpressure_inherits_top_level_defaults():
+    """A partial tier override still inherits missing fields.
+
+    Field-by-field merge means an override that sets only ``high_water_s``
+    keeps ``backpressure_cls`` (and any other field) from the top-level
+    default, so the resolved dict reaching the factory is complete.
+    """
+    spec = _build_tiering_spec(
+        [{"type": "example", "backpressure": {"high_water_s": 0.1}}],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the field it sets.
+    assert resolved["high_water_s"] == 0.1
+    # Missing fields fall back to the top-level default.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+    assert resolved["low_water_s"] == 0.05
+
+
+def test_tier_override_wins_over_top_level():
+    """Precedence is tier override > top-level default, field-by-field."""
+    spec = _build_tiering_spec(
+        [
+            {
+                "type": "example",
+                "backpressure": {"high_water_s": 0.1, "low_water_s": 0.02},
+            }
+        ],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the fields it sets.
+    assert resolved["high_water_s"] == 0.1
+    assert resolved["low_water_s"] == 0.02
+    # Fields only in top-level still fill in.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+
+
+def test_tier_without_backpressure_stays_unconfigured():
+    spec = _build_tiering_spec([{"type": "example"}])
+    assert "backpressure" not in spec.secondary_tier_configs[0]

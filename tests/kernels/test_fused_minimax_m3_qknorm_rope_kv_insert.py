@@ -156,6 +156,74 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 7, 513])
+@pytest.mark.parametrize("block_size", [16, 128])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_dense_insert_matches_reshape_and_cache_flash(
+    num_tokens, block_size, kv_cache_dtype
+):
+    """A dense layer's insert stores exactly what reshape_and_cache_flash
+    writes from the normed/roped k (unit scales), and leaves q/k/v as the
+    insert-free call does."""
+    torch.manual_seed(0)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    num_heads, num_kv_heads, max_pos = 8, 2, 4096
+    q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, 5_000_000.0, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    qkv = torch.randn(num_tokens, qsz + 2 * kvsz, dtype=dtype, device=device)
+    qkv_ref = qkv.clone()
+    num_blocks = (num_tokens + block_size - 1) // block_size + 2
+    slot_mapping = torch.randperm(num_blocks * block_size, device=device)[
+        :num_tokens
+    ].to(torch.int64)
+    slot_mapping[::4] = -1  # padding: no write
+    cache_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
+    kv_cache = torch.zeros(
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * HEAD_DIM,
+        dtype=cache_dtype,
+        device=device,
+    )
+    ref_cache = torch.zeros_like(kv_cache)
+
+    args = (qkv, q_w, k_w, cos_sin, positions, num_heads, num_kv_heads)
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        *args,
+        ROTARY_DIM,
+        eps,
+        slot_mapping=slot_mapping,
+        kv_cache=kv_cache,
+        block_size=block_size,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv_ref, *args[1:], ROTARY_DIM, eps, kv_cache_dtype="auto"
+    )
+    assert torch.equal(qkv, qkv_ref)
+
+    _, k, v = qkv_ref.split([qsz, kvsz, kvsz], dim=-1)
+    key_cache, value_cache = ref_cache.transpose(1, 2).split(HEAD_DIM, dim=-1)
+    one = torch.ones((), dtype=torch.float32, device=device)
+    ops.reshape_and_cache_flash(
+        k.reshape(num_tokens, num_kv_heads, HEAD_DIM),
+        v.reshape(num_tokens, num_kv_heads, HEAD_DIM),
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        one,
+        one,
+    )
+    assert torch.equal(kv_cache, ref_cache)
+
+
 # ── Test 2: sparse mode (full: index branch + cache inserts) ─────────────────
 
 
@@ -320,6 +388,39 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
     )
 
+    # Without q_out, q is emitted only in fp8: the same bytes, while qkv keeps
+    # its raw q and every other output matches the run above.
+    outputs = [qkv_orig.clone(), torch.empty_like(q_fp8), torch.empty_like(index_q)]
+    caches = [torch.zeros_like(kv_cache), torch.zeros_like(index_cache)]
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        outputs[0],
+        q_w,
+        k_w,
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        iq_w,
+        ik_w,
+        num_idx_heads,
+        slot_mapping,
+        index_slot_mapping,
+        caches[0],
+        caches[1],
+        block_size,
+        None,
+        outputs[2],
+        kv_cache_dtype,
+        q_fp8_out=outputs[1],
+        q_fp8_scale=0.5,
+    )
+    for actual, expected in zip(
+        outputs + caches, [qkv, q_fp8, index_q, kv_cache, index_cache]
+    ):
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
 
 @pytest.mark.parametrize("num_tokens", [1, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -441,8 +542,8 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
 # ── Test 4: fp8 (e4m3) index outputs ─────────────────────────────────────────
 # The fp8 score path stores index_q and the index-K cache as e4m3 while q/k/v +
 # q_out stay bf16. Asserts: (1) q/k/v/q_out are bit-identical to the bf16 run
-# (the index dtype must not perturb the main branch), and (2) the e4m3 index
-# outputs dequantize close to the bf16 reference.
+# (the index dtype must not perturb the main branch), and (2) index_q is the
+# e4m3 cast of the bf16 run's index_q, and the index-K cache is within fp8 ulp.
 
 
 @pytest.mark.skipif(
@@ -528,6 +629,444 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
     torch.testing.assert_close(qkv_fp, qkv_bf, rtol=0, atol=0)
     torch.testing.assert_close(kvc_fp, kvc_bf, rtol=0, atol=0)
 
-    # (2) Dequantized e4m3 index outputs match the bf16 reference within fp8 ulp.
-    torch.testing.assert_close(iq_fp.float(), iq_bf.float(), rtol=0.13, atol=0.05)
+    # (2) index_q is e4m3(bf16(q)); the index-K cache is within fp8 ulp.
+    assert torch.equal(
+        iq_fp.view(torch.uint8), iq_bf.to(torch.float8_e4m3fn).view(torch.uint8)
+    )
     torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
+
+
+# ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────
+# The NVFP4 inserts quantize x * sf_scale, where sf_scale = 1 / the global
+# scale: per 16-value block,
+# scale = min(448, max(E4M3(max(amax, 1e-12) / 6), 1/512)) and
+# code = sign | RNE E2M1 of min(|x / scale|, 6), with zero stored as +0.
+
+E2M1_MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
+def _div(a, b):
+    # Division by a Python scalar would become a reciprocal multiply.
+    return a / torch.as_tensor(b, dtype=a.dtype, device=a.device)
+
+
+def nvfp4_ref(x, sf_scale):
+    """Returns the E2M1 codes [..., 128] and E4M3 scale bytes [..., 8] of x."""
+    blocks = x.float().unflatten(-1, (-1, 16))
+    amax = blocks.abs().amax(-1, keepdim=True).clamp_min(1e-12)
+    scale = (sf_scale * _div(amax, 6.0)).clamp(max=448.0)
+    scale = scale.to(torch.float8_e4m3fn).float().clamp(min=2.0**-9)
+    q = _div(blocks * sf_scale, scale)
+    # Alternating > / >= rounds exact midpoints to the even code.
+    mag = sum(
+        (q.abs() >= m) if i % 2 else (q.abs() > m) for i, m in enumerate(E2M1_MIDPOINTS)
+    ).to(torch.uint8)
+    codes = torch.where(mag > 0, mag | (torch.signbit(q).to(torch.uint8) << 3), 0)
+    scale_bytes = scale.squeeze(-1).to(torch.float8_e4m3fn).view(torch.uint8)
+    return codes.flatten(-2), scale_bytes
+
+
+def nvfp4_pages(sides, slot_mapping, num_blocks, block_size):
+    """Expected NVFP4 pages [nb, len(sides) * nkv, bs, 72] for the K (then V)
+    side given as (x [N, nkv, 128], sf_scale). Slot h * len(sides) + side is
+    head h's packed E2M1 data [bs, 64] (low nibble = even element), then its
+    E4M3 scales [bs, 8]: linear for K, 4x4 token-quad swizzled for V."""
+    nkv, ns, device = sides[0][0].shape[1], HEAD_DIM // 16, slot_mapping.device
+    row_bytes, data_bytes = HEAD_DIM // 2 + ns, block_size * HEAD_DIM // 2
+    pages = torch.zeros(
+        num_blocks,
+        nkv,
+        len(sides),
+        block_size * row_bytes,
+        dtype=torch.uint8,
+        device=device,
+    )
+    valid = slot_mapping >= 0
+    blk, tok = slot_mapping[valid] // block_size, slot_mapping[valid] % block_size
+    g, t = torch.arange(ns, device=device), tok[:, None]
+    scale_offsets = (t * ns + g, ((t // 4) * 4 + g // 2) * ns + (g % 2) * 4 + t % 4)
+    for side, (x, sf_scale) in enumerate(sides):
+        codes, scales = nvfp4_ref(x[valid], sf_scale)
+        data = pages[:, :, side, :data_bytes].view(num_blocks, nkv, block_size, -1)
+        data[blk, :, tok] = codes[..., 0::2] | (codes[..., 1::2] << 4)
+        scale_region = pages[:, :, side, data_bytes:]
+        for h in range(nkv):
+            scale_region[blk[:, None], h, scale_offsets[side]] = scales[:, h]
+    return pages.view(num_blocks, -1, block_size, row_bytes)
+
+
+def nvfp4_edge_values(num_rows, global_scale):
+    """[num_rows, 128] bf16 whose 16-value blocks, divided by global_scale, hit
+    the quantizer's corner cases: exact E2M1 midpoints under non-power-of-2 scales
+    (blocks 0-1), amax under the 1/512 scale floor (2), all -0 (3), and
+    saturation with |x| > 4096 up to bf16 max (4) or with inf (5)."""
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(num_rows, 8, 16, generator=g)
+    sign = torch.where(torch.rand(x.shape, generator=g) < 0.5, -1.0, 1.0)
+    steps = torch.tensor(E2M1_MIDPOINTS + (0.5, 1.0, 3.0))
+    mant = 1 + torch.randint(1, 8, (num_rows, 2, 1), generator=g) / 8
+    scale = mant * 2.0 ** torch.randint(-6, 3, (num_rows, 2, 1), generator=g)
+    x[:, :2] = steps[torch.randint(len(steps), (num_rows, 2, 16), generator=g)] * scale
+    x[:, :2, :1] = 6 * scale  # amax = 6 * scale, so the block scale is `scale`
+    x[:, 2] = torch.rand(num_rows, 16, generator=g) * 2.0**-8
+    x[:, 4] *= 5000
+    x = x * sign * global_scale
+    x[:, 3] = -0.0
+    x[:, 4, 0] = sign[:, 4, 0] * torch.finfo(torch.bfloat16).max
+    x[:, 5, 0] = sign[:, 5, 0] * float("inf")
+    return x.flatten(1).to(torch.bfloat16)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="NVFP4 KV caches need SM100",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("block_size", [16, 128])
+@pytest.mark.parametrize("kv_scales", [(0.5, 2.0), (1.0, 1.0)])
+def test_sparse_full_nvfp4(num_tokens, num_kv_heads, block_size, kv_scales):
+    """The fused NVFP4 insert writes the reference quantizer's bytes (packed
+    E2M1, linear K / swizzled V E4M3 block scales) for the kernel's own
+    post-RoPE k and for a raw v that hits the quantizer's corner cases, and
+    skips padded slots. Unit global scales take the kernel's separate fast
+    path."""
+    kv_cache_dtype = "nvfp4"
+    torch.manual_seed(5)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_idx_heads = 4 * num_kv_heads, 1
+
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    qkv = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + HEAD_DIM, dtype=dtype, device=device
+    )
+    k_scale, v_scale = (
+        torch.tensor(s, dtype=torch.float32, device=device) for s in kv_scales
+    )
+    qkv[:, qsz + kvsz : qsz + 2 * kvsz] = nvfp4_edge_values(
+        num_tokens * num_kv_heads, v_scale.item()
+    ).view(num_tokens, kvsz)
+    qkv_orig = qkv.clone()
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    kv_cache = torch.zeros(
+        num_blocks,
+        2 * num_kv_heads,
+        block_size,
+        HEAD_DIM // 2 + HEAD_DIM // 16,
+        dtype=torch.uint8,
+        device=device,
+    )
+    index_cache = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
+    )
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    slot_mapping[::5] = -1  # padded / unscheduled tokens are not written
+    index_slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv,
+        weights[0],
+        weights[1],
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        weights[2],
+        weights[3],
+        num_idx_heads,
+        slot_mapping,
+        index_slot_mapping,
+        kv_cache,
+        index_cache,
+        block_size,
+        torch.empty(num_tokens, qsz, dtype=dtype, device=device),
+        torch.empty(num_tokens, iqsz, dtype=dtype, device=device),
+        kv_cache_dtype,
+        kv_k_scale=k_scale,
+        kv_v_scale=v_scale,
+    )
+
+    _, k_out, v_out, _, index_k = qkv.split([qsz, kvsz, kvsz, iqsz, HEAD_DIM], dim=-1)
+    torch.testing.assert_close(
+        v_out, qkv_orig.split([qsz, kvsz, kvsz, iqsz, HEAD_DIM], dim=-1)[2]
+    )
+    expected_kv_cache = nvfp4_pages(
+        [
+            (k_out.reshape(num_tokens, num_kv_heads, HEAD_DIM), 1 / k_scale),
+            (v_out.reshape(num_tokens, num_kv_heads, HEAD_DIM), 1 / v_scale),
+        ],
+        slot_mapping,
+        num_blocks,
+        block_size,
+    )
+    assert torch.equal(kv_cache, expected_kv_cache), (
+        f"{int((kv_cache != expected_kv_cache).sum())} NVFP4 cache bytes differ"
+    )
+
+    expected_index_cache = torch.zeros_like(index_cache).view(-1, HEAD_DIM)
+    expected_index_cache[index_slot_mapping] = index_k
+    torch.testing.assert_close(
+        index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="The NVFP4 reshape_and_cache_flash reference needs SM100",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 513])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "nvfp4"])
+@pytest.mark.parametrize("page_pad", [0, 48])
+def test_sparse_full_nvfp4_index(num_tokens, kv_cache_dtype, page_pad):
+    """The NVFP4 index-K insert writes MiniMax-M3.1 KV4 bytes as a single-head
+    NVFP4 K side with no global scale (E2M1 page, then linear E4M3 scales: the
+    MSA Q8KV4 page), honours a padded page stride and skips padded slots, while
+    index-Q and everything else match the fp8 index path exactly."""
+    torch.manual_seed(6)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_kv_heads, num_idx_heads, block_size = 16, 4, 4, 128
+    page_width = HEAD_DIM // 2 + HEAD_DIM // 16
+
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    qkv0 = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + HEAD_DIM, dtype=dtype, device=device
+    )
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping[::5] = -1  # padded / unscheduled tokens are not written
+    nvfp4_kwargs = {}
+    if kv_cache_dtype == "nvfp4":
+        nvfp4_kwargs = dict(
+            kv_k_scale=torch.tensor(0.5, dtype=torch.float32, device=device),
+            kv_v_scale=torch.tensor(2.0, dtype=torch.float32, device=device),
+        )
+
+    def run(index_cache):
+        qkv = qkv0.clone()
+        if kv_cache_dtype == "nvfp4":
+            kv_cache = torch.zeros(
+                num_blocks,
+                2 * num_kv_heads,
+                block_size,
+                page_width,
+                dtype=torch.uint8,
+                device=device,
+            )
+        else:
+            kv_cache = torch.zeros(
+                num_blocks,
+                num_kv_heads,
+                block_size,
+                2 * HEAD_DIM,
+                dtype=dtype,
+                device=device,
+            )
+        index_q = torch.empty(
+            num_tokens, iqsz, dtype=torch.float8_e4m3fn, device=device
+        )
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            weights[0],
+            weights[1],
+            cos_sin,
+            positions,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            eps,
+            weights[2],
+            weights[3],
+            num_idx_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            index_cache,
+            block_size,
+            torch.empty(num_tokens, qsz, dtype=dtype, device=device),
+            index_q,
+            kv_cache_dtype,
+            **nvfp4_kwargs,
+        )
+        return qkv, kv_cache, index_q
+
+    fp8_index_cache = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    qkv_fp8, kv_cache_fp8, index_q_fp8 = run(fp8_index_cache)
+    raw = torch.zeros(
+        num_blocks,
+        block_size * page_width + page_pad,
+        dtype=torch.uint8,
+        device=device,
+    )
+    index_cache = raw[:, : block_size * page_width].view(
+        num_blocks, block_size, page_width
+    )
+    qkv, kv_cache, index_q = run(index_cache)
+
+    assert torch.equal(qkv, qkv_fp8)
+    assert torch.equal(kv_cache, kv_cache_fp8)
+    assert torch.equal(index_q.view(torch.uint8), index_q_fp8.view(torch.uint8))
+
+    # A one-head NVFP4 page's K side is [bs, 64] E2M1 then [bs, 8] linear
+    # scales, which is exactly the index page.
+    index_k = qkv.split([qsz, kvsz, kvsz, iqsz, HEAD_DIM], dim=-1)[-1]
+    expected = nvfp4_pages(
+        [(index_k.reshape(num_tokens, 1, HEAD_DIM), 1.0)],
+        index_slot_mapping,
+        num_blocks,
+        block_size,
+    )
+    assert torch.equal(index_cache, expected[:, 0]), (
+        f"{int((index_cache != expected[:, 0]).sum())} NVFP4 index bytes differ"
+    )
+    assert not raw[:, block_size * page_width :].any()
+
+
+# ── Test 7: write_qkv=False, for callers that read only the FP8 q ────────────
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="NVFP4 KV caches need SM100",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 513])
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(64, 4), (32, 2), (16, 1)])
+@pytest.mark.parametrize("index_cache_dtype", ["nvfp4", "fp8"])
+@pytest.mark.parametrize("scales", [(1.0, 1.0, 1.0), (0.5, 2.0, 0.5)])
+def test_write_qkv_false(
+    num_tokens, num_heads, num_kv_heads, index_cache_dtype, scales
+):
+    """write_qkv=False without q_out writes the same q_fp8_out, index_q_out and
+    cache bytes as a default call, and leaves qkv either untouched or as the
+    default call rewrites it (k and index_k need not be rewritten)."""
+    torch.manual_seed(7)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_idx_heads, block_size = num_kv_heads, 128
+    page_width = HEAD_DIM // 2 + HEAD_DIM // 16
+    k_scale, v_scale, q_scale = scales
+
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    qkv0 = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + HEAD_DIM, dtype=dtype, device=device
+    )
+    qkv0[:, qsz + kvsz : qsz + 2 * kvsz] = nvfp4_edge_values(
+        num_tokens * num_kv_heads, v_scale
+    ).view(num_tokens, kvsz)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    slot_mapping[::5] = -1
+    index_slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    kv_cache0 = torch.randint(
+        0,
+        256,
+        (num_blocks, 2 * num_kv_heads, block_size, page_width),
+        dtype=torch.uint8,
+        device=device,
+    )
+    if index_cache_dtype == "nvfp4":
+        index_cache0 = torch.randint(
+            0,
+            256,
+            (num_blocks, block_size, page_width),
+            dtype=torch.uint8,
+            device=device,
+        )
+    else:
+        index_cache0 = torch.randn(num_blocks, block_size, HEAD_DIM, device=device).to(
+            torch.float8_e4m3fn
+        )
+
+    def run(write_qkv):
+        qkv = qkv0.clone()
+        kv_cache, index_cache = kv_cache0.clone(), index_cache0.clone()
+        q_fp8 = torch.empty(num_tokens, qsz, dtype=torch.float8_e4m3fn, device=device)
+        index_q = torch.empty(
+            num_tokens, iqsz, dtype=torch.float8_e4m3fn, device=device
+        )
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            weights[0],
+            weights[1],
+            cos_sin,
+            positions,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            eps,
+            weights[2],
+            weights[3],
+            num_idx_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            index_cache,
+            block_size,
+            torch.empty(num_tokens, qsz, dtype=dtype, device=device)
+            if write_qkv
+            else None,
+            index_q,
+            "nvfp4",
+            q_fp8_out=q_fp8,
+            q_fp8_scale=q_scale,
+            kv_k_scale=torch.tensor(k_scale, dtype=torch.float32, device=device),
+            kv_v_scale=torch.tensor(v_scale, dtype=torch.float32, device=device),
+            write_qkv=write_qkv,
+        )
+        return qkv, q_fp8, index_q, kv_cache, index_cache
+
+    expected = run(True)
+    qkv, *got = run(False)
+    assert torch.equal(qkv.view(torch.int16), qkv0.view(torch.int16)) or (
+        torch.equal(qkv.view(torch.int16), expected[0].view(torch.int16))
+    )
+    for name, g, e in zip(
+        ("q_fp8", "index_q", "kv_cache", "index_cache"), got, expected[1:]
+    ):
+        assert torch.equal(g.view(torch.uint8), e.view(torch.uint8)), (
+            f"{name}: {int((g.view(torch.uint8) != e.view(torch.uint8)).sum())} "
+            "bytes differ"
+        )

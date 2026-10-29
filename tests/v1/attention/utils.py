@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for attention-related v1 tests."""
 
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -19,7 +20,7 @@ from vllm.config import (
 )
 from vllm.config.model import ModelDType
 from vllm.v1.attention.backend import (
-    AttentionImpl,
+    AttentionImplBase,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -85,13 +86,6 @@ def create_common_attn_metadata(
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
 
-    # Create computed tokens (context length for each sequence)
-    context_lens = [
-        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
-        for i in range(batch_spec.batch_size)
-    ]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
-
     # Create block table and slot mapping
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     if arange_block_indices:
@@ -122,8 +116,6 @@ def create_common_attn_metadata(
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,
@@ -136,7 +128,7 @@ def create_common_attn_metadata(
 
 def try_get_attention_backend(
     backend: AttentionBackendEnum,
-) -> tuple[type[AttentionMetadataBuilder], type[AttentionImpl]]:
+) -> tuple[type[AttentionMetadataBuilder], type[AttentionImplBase]]:
     """Try to get the attention backend class, skipping test if not found."""
     try:
         backend_class = backend.get_class()
@@ -189,7 +181,7 @@ def create_standard_kv_cache_spec(
 
 
 def create_vllm_config(
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    model_name: str = "Qwen/Qwen3-0.6B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
     dtype: ModelDType | torch.dtype = "auto",
@@ -198,11 +190,9 @@ def create_vllm_config(
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
-    add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
-
     model_config = ModelConfig(
         model=model_name,
         tokenizer=model_name,
@@ -240,57 +230,28 @@ def create_vllm_config(
     load_config = LoadConfig()
     compilation_config = CompilationConfig()
 
-    if add_mock_model_methods:
-        # Add mock methods to satisfy backends that need them
-        # This is a workaround because tests don't build full, real models,
-        # but some backends expect to query the model for layer-specific
-        # parameters
-        import types
-
-        model_config.get_num_layers = types.MethodType(lambda self: 1, model_config)
-        model_config.get_sliding_window_for_layer = types.MethodType(
-            lambda self, i: None, model_config
-        )
-        model_config.get_logits_soft_cap_for_layer = types.MethodType(
-            lambda self, i: 0.0, model_config
-        )
-        model_config.get_sm_scale_for_layer = types.MethodType(
-            lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
-        )
-
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)
 
-    return VllmConfig(
-        model_config=model_config,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config,
-        device_config=device_config,
-        load_config=load_config,
-        compilation_config=compilation_config,
-    )
-
-
-def create_dummy_kv_cache(
-    block_size: int,
-    num_kv_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    num_blocks: int = 100,
-) -> torch.Tensor:
-    """Create a dummy KV cache tensor for testing."""
-    kv_cache = torch.randn(
-        num_blocks,
-        2,  # K and V
-        block_size,
-        num_kv_heads,
-        head_size,
-        dtype=dtype,
-        device=device,
-    )
-    return kv_cache
+    # VllmConfig() auto-enables breakable cudagraphs process-wide via
+    # VLLM_USE_BREAKABLE_CUDAGRAPH for breakable-by-default models; keep
+    # that from leaking into unrelated tests sharing this process.
+    breakable_env = os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    try:
+        return VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            load_config=load_config,
+            compilation_config=compilation_config,
+        )
+    finally:
+        if breakable_env is None:
+            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        else:
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = breakable_env
 
 
 @dataclass
@@ -387,7 +348,6 @@ full_cg_backend_configs = {
         name="RocmAttn",
         attention_config={
             "backend": "ROCM_ATTN",
-            "use_prefill_decode_attention": True,
         },
         comp_config={
             "cudagraph_mode": "FULL",
@@ -427,6 +387,26 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
         return builder.build(0, common_metadata)
 
 
+def dense_kv_cache_tensor(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    layer_names: list[str] | None = None,
+) -> KVCacheTensor:
+    """The ``KVCacheTensor`` for a dense allocation of ``num_layers`` layers."""
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, num_blocks, num_layers, layout
+    )
+    return KVCacheTensor(
+        size=raw.numel(),
+        layers=layer_names or [str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+
+
 def dense_kv_cache_views(
     raw: torch.Tensor,
     spec: KVCacheSpec,
@@ -436,15 +416,7 @@ def dense_kv_cache_views(
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
-    layer_stride, block_stride, _, _, _ = compute_layout_strides(
-        spec, num_blocks, num_layers, layout
-    )
-    tensor = KVCacheTensor(
-        size=raw.numel(),
-        layers=[str(i) for i in range(num_layers)],
-        layer_stride=layer_stride,
-        block_stride=block_stride,
-    )
+    tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
     return create_kv_cache_views(
         raw,
         spec,

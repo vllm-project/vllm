@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_packed_uint4b8_to_signed_int4_inplace,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -38,9 +39,6 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
 
         if c.act_type != torch.float8_e4m3fn:
             return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
-
-        if c.has_g_idx:
-            return False, "Act reordering not supported by CUTLASS W4A8"
 
         if c.zero_points:
             return False, "Zero points not supported by CUTLASS W4A8"
@@ -91,7 +89,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
 
         w_s = getattr(layer, self.w_s_name)
         fp8_scales, chan_scales = convert_bf16_scales_to_fp8(self.quant_fp8, w_s.data)
-        w_s.data = fp8_scales
+        replace_parameter(layer, self.w_s_name, fp8_scales)
 
         # register per-channel scales
         layer.register_parameter(
@@ -109,7 +107,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _ = self._get_weight_params(layer)
         w_ch_s = layer.weight_chan_scale
 
         x_2d = x.reshape(-1, x.shape[-1])

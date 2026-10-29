@@ -7,11 +7,13 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use trait_set::trait_set;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_llm::RequestTimestamps;
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
-use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
+use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatTokenUsage};
 
 /// Final structured assistant message plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +23,10 @@ pub struct CollectedAssistantMessage {
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
-    pub usage: vllm_llm::TokenUsage,
+    pub usage: ChatTokenUsage,
+    pub timestamps: RequestTimestamps,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
@@ -81,6 +86,8 @@ impl ChatEventStream {
                 ChatEvent::Done {
                     message: done,
                     usage,
+                    timestamps,
+                    spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
@@ -94,9 +101,11 @@ impl ChatEventStream {
                         }),
                         token_ids,
                         usage,
+                        timestamps,
+                        spec_decode_metrics,
                         finish_reason,
-                        kv_transfer_params,
-                        ec_transfer_params,
+                        kv_transfer_params: kv_transfer_params.map(|value| *value),
+                        ec_transfer_params: ec_transfer_params.map(|value| *value),
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -133,6 +142,7 @@ trait_set! {
 mod tests {
 
     use futures::stream;
+    use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
     use vllm_llm::FinishReason;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
@@ -140,7 +150,7 @@ mod tests {
 
     use super::{ChatEventStream, CollectedAssistantMessage};
     use crate::error::Error;
-    use crate::event::ChatEvent;
+    use crate::event::{ChatEvent, ChatTokenUsage};
 
     #[tokio::test]
     async fn collect_message_requires_terminal_done_event() {
@@ -195,11 +205,18 @@ mod tests {
                 }),
                 Ok(ChatEvent::Done {
                     message: Default::default(),
-                    usage: vllm_llm::TokenUsage {
+                    usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
-                    },
+                        prompt_cache_usage: Default::default(),
+                    }),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                        num_spec_tokens: 2,
+                        histogram: vec![0, 1, 0],
+                        num_draft_tokens: 2,
+                        ..Default::default()
+                    }),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
@@ -236,11 +253,18 @@ mod tests {
                     }],
                 }),
                 token_ids: vec![],
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 2,
                     output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                    prompt_cache_usage: Default::default(),
+                }),
+                timestamps: Default::default(),
+                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                    num_spec_tokens: 2,
+                    histogram: vec![0, 1, 0],
+                    num_draft_tokens: 2,
+                    ..Default::default()
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
@@ -56,7 +55,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     engine_args = EngineArgs(
         model=model_name,
-        tokenizer_mode="slow",
         trust_remote_code=True,
         dtype="bfloat16",
         limit_mm_per_prompt={"image": len(image_urls)},
@@ -365,53 +363,6 @@ def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_hyperclovax_seed_vision(
-    question: str, image_urls: list[str]
-) -> ModelRequestData:
-    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=16384,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    message = {"role": "user", "content": list()}
-    for _image_url in image_urls:
-        message["content"].append(
-            {
-                "type": "image",
-                "image": _image_url,
-                "ocr": "",
-                "lens_keywords": "",
-                "lens_local_keywords": "",
-            }
-        )
-    message["content"].append(
-        {
-            "type": "text",
-            "text": question,
-        }
-    )
-
-    prompt = tokenizer.apply_chat_template(
-        [
-            message,
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=None,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
@@ -500,80 +451,6 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
     )
 
 
@@ -960,11 +837,9 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process multi images inputs.
     """
-
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
@@ -1397,12 +1272,9 @@ model_example_map = {
     "granite4_vision": load_granite4_vision,
     "h2ovl_chat": load_h2ovl,
     "hunyuan_vl": load_hunyuan_vl,
-    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
     "internvl_chat": load_internvl,
-    "keye_vl": load_keye_vl,
-    "keye_vl1_5": load_keye_vl1_5,
     "kimi_vl": load_kimi_vl,
     "llama4": load_llama4,
     "llava": load_llava,
