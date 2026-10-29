@@ -240,6 +240,7 @@ if TYPE_CHECKING:
     VLLM_P2P_MAX_PEERS: int = 128
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
+    VLLM_P2P_TRANSFER_STALL_TIMEOUT_S: float = 20.0
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -1776,6 +1777,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
     # Default: 300. Set to 0 to disable.
     "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
+    # Seconds a P2P WRITE may stay in progress before the source treats its
+    # peer as faulted: no new WRITEs to it, and the session is torn down.
+    # The stalled transfer and its pins are held until it stops. Default:
+    # 20. Set to 0 to disable.
+    "VLLM_P2P_TRANSFER_STALL_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_P2P_TRANSFER_STALL_TIMEOUT_S", "20")
+    ),
     # IP address used for the EC connector's ZMQ side channel
     # (producer ROUTER bind, consumer DEALER dial).
     "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
