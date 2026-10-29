@@ -266,13 +266,13 @@ strategy_overrides:
         VLLM_SSM_CONV_STATE_LAYOUT: "DS"
 
 presets:
-  b200_agentic_tp2:
-    label: "Agentic TP2"
+  b200_tp2_kv_offload:
+    label: "TP2 + KV offload (multi-turn agentic)"
     hardware: b200
     strategy: single_node_tp
     variants: [nvfp4]
-    workload: "Agentic coding (multi-turn trace, ~64k mean input, mean ITL under 20 ms)"
-    description: "Two B200s serve the NVFP4 checkpoint as TP2 with expert parallelism: MTP with three draft tokens, FP8 KV cache, float16 Mamba SSM cache, async scheduling, 48 running sequences and 160 GiB of vLLM native CPU KV offload for multi-turn prefix reuse."
+    workload: "Multi-turn agentic coding, ~64k input, KV-reuse-bound (mean ITL under 20 ms)"
+    description: "One TP2 engine with expert parallelism on two of the node's eight B200 GPUs: MTP with three draft tokens, FP8 KV cache, float16 Mamba SSM cache, async scheduling, and a 160 GiB host KV tier so prefixes survive across turns; admission is capped at 48 sequences to hold mean ITL under 20 ms."
     source: { label: "vLLM #64607", href: "https://github.com/vllm-project/vllm/pull/64607" }
     image: "vllm/vllm-openai:v0.32.0"
     tp: 2
