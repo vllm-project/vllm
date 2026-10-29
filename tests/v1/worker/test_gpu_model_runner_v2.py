@@ -12,7 +12,15 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CacheConfig, LoadConfig, LoRAConfig, ParallelConfig
+from vllm.config import (
+    CacheConfig,
+    LoadConfig,
+    LoRAConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -24,7 +32,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
 
@@ -538,3 +548,41 @@ def test_standalone_draft_kv_dtype_override(
     assert target.cache_config.cache_dtype == "fp8_e4m3"
     assert draft_config.parallel_config.data_parallel_index == data_parallel_index
     assert target.parallel_config.data_parallel_index == data_parallel_index
+
+
+class _EmbeddingModel(torch.nn.Module):
+    def __init__(self, vocab_size: int, hidden_size: int):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab_size, hidden_size)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+
+@pytest.mark.parametrize("multimodal", [True, False])
+def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
+    """Models fed inputs_embeds must see the randomized dummy ids, not zeros."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m", dtype="float32", enable_prompt_embeds=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    model = _EmbeddingModel(32, model_config.get_inputs_embeds_size())
+    encoder_cache = EncoderCache() if multimodal else None
+    state = DefaultModelState(vllm_config, model, encoder_cache, torch.device("cpu"))
+    input_ids = torch.tensor([3, 7, 7, 1, 30])
+
+    with torch.inference_mode():
+        inputs_embeds = state.dummy_inputs_embeds(6, input_ids)
+        expected = model.embed_input_ids(input_ids)
+
+    assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
+    torch.testing.assert_close(inputs_embeds[:5], expected)
+    torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)

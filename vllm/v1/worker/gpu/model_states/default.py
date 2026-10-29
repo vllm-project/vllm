@@ -89,11 +89,21 @@ class DefaultModelState(ModelState):
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.apply_staged_writes()
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         if self.supports_mm_inputs:
-            return self.encoder_runner.inputs_embeds[:num_tokens]
-        return self.inputs_embeds[:num_tokens]
+            inputs_embeds = self.encoder_runner.inputs_embeds
+        else:
+            inputs_embeds = self.inputs_embeds
+        if input_ids is not None:
+            inputs_embeds[: input_ids.shape[0]] = self.model.embed_input_ids(input_ids)
+        return inputs_embeds[:num_tokens]
 
     def prepare_inputs_embeds(
         self,
