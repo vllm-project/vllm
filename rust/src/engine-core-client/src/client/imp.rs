@@ -22,7 +22,9 @@ use crate::client::state::{
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder};
+use crate::metrics::{
+    EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
+};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
@@ -101,6 +103,14 @@ impl ClientInner {
     /// labeling.
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    /// Record a completed sleep or wake transition in
+    /// `vllm:engine_sleep_state`, exported only when engines record stats.
+    pub fn record_sleep_state(&self, state: EngineSleepState) {
+        if let Some(recorder) = &self.scheduler_stats_recorder {
+            recorder.record_sleep_state(state);
+        }
     }
 
     /// Register a newly added request. Return the selected engine id and the
@@ -453,10 +463,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let has_outputs = !batch.outputs.is_empty();
                     let mut iteration_tokens: u64 =
                         batch.outputs.iter().map(output_iteration_tokens).sum();
-                    let (engine_index, timestamp) = (batch.engine_index, batch.timestamp);
+                    let (engine_index, timestamp, weight_version) =
+                        (batch.engine_index, batch.timestamp, batch.weight_version);
                     let outputs = batch.outputs.into_iter().map(|output| EngineCoreStreamOutput {
                         engine_index,
                         timestamp,
+                        weight_version: weight_version.clone(),
                         output,
                     });
                     for output in inner.send_outputs(outputs) {

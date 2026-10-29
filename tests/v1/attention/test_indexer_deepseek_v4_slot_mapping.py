@@ -14,6 +14,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -113,10 +114,17 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
         num_reqs, 4
     )
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    # SM100's paged MQA logits only take varlen rows.
+    indices = (
+        torch.arange(num_reqs, dtype=torch.int32, device=device)
+        if mqa_logits_use_mx_scales()
+        else None
+    )
     schedule_metadata = indexer_module.get_paged_mqa_logits_metadata(
         torch.div(seq_lens, 16, rounding_mode="floor").unsqueeze(1),
         64,
         num_sms,
+        indices=indices,
     ).clone()
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
@@ -139,6 +147,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
             decode_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
             requires_padding=False,
             schedule_metadata=schedule_metadata,
+            indices=indices,
         ),
         block_table=block_table,
     )
@@ -157,7 +166,7 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(
         schedule_metadata,
         indexer_module.get_paged_mqa_logits_metadata(
-            expected_decode_seq_lens.unsqueeze(1), 64, num_sms
+            expected_decode_seq_lens.unsqueeze(1), 64, num_sms, indices=indices
         ),
     )
     assert metadata.decode is not None
@@ -279,7 +288,9 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
 def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
     """Packed MLA/indexer groups must retain 64 compressed rows per page."""
     kernel_block_size = select_common_block_size(
-        256, [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend]
+        256,
+        # indexer backend has no impl class
+        [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend],  # type: ignore[type-abstract]
     )
     spec = MLAAttentionSpec(
         block_size=256,
@@ -302,7 +313,9 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
     assert isinstance(block_size, int)
     assert (
         select_common_block_size(
-            block_size, [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend]
+            block_size,
+            # indexer backend has no impl class
+            [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend],  # type: ignore[type-abstract]
         )
         == block_size
     )
@@ -436,6 +449,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
 
 def test_index_conversion_warmup_uses_physical_block_stride():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(
             max_model_len=1024,

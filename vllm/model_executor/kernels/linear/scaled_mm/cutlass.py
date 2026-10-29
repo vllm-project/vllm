@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
     cutlass_fp8_supported,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
@@ -80,7 +79,6 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                     i_s_name,
                     torch.nn.Parameter(input_scale.max(), requires_grad=False),
                 )
-                setattr(layer, i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, i_zp_name)
 
@@ -104,7 +102,8 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
-        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
+        # For more details, see
+        # csrc/quantization/w8a8/cutlass/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
         if not config.input_symmetric:
             weight = getattr(layer, w_q_name)
@@ -220,12 +219,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             (0, pad_k, 0, pad_n),
         ).t()
         replace_parameter(layer, weight_name, padded_weight.data)
-        set_weight_attrs(
-            getattr(layer, weight_name),
-            {
-                "weight_loader": self.padded_weight_loader,
-            },
-        )
+        # The kept param already has a loader; reloads must use the padded one.
+        getattr(layer, weight_name).weight_loader = self.padded_weight_loader
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
@@ -234,12 +229,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
             replace_parameter(layer, weight_scale_name, padded_scale.data)
-            set_weight_attrs(
-                getattr(layer, weight_name),
-                {
-                    "weight_loader": self.padded_weight_loader,
-                },
-            )
+            getattr(layer, weight_name).weight_loader = self.padded_weight_loader
 
     def apply_scaled_mm(
         self,

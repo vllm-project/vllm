@@ -10,8 +10,10 @@ import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 import vllm.v1.attention.backends.mla.indexer as indexer
-from vllm.config import CUDAGraphMode
+from vllm.config import AttentionConfig, CUDAGraphMode
 from vllm.model_executor.layers.sparse_attn_indexer import PrefillRowShard
+
+MIN_ROWS = AttentionConfig().indexer_tp_shard_min_rows
 
 
 def _chunk(start: int, end: int) -> SimpleNamespace:
@@ -80,11 +82,11 @@ def test_shard_exchange_reassembles_rows_only(
     assert torch.all(buffer[decode + sum(sizes) :] == -7), "padding untouched"
 
 
-@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
 def test_balanced_row_shard_partitions_and_declines(tp_size: int) -> None:
     """The split covers every row once with >= 1 row per rank and declines
     below the activation floor (or on a single rank)."""
-    n = indexer.MIN_TP_SHARD_ROWS_PER_RANK * tp_size
+    n = MIN_ROWS
     shapes = [
         ([4 * n], [4 * n]),  # fresh prompt: the full causal cost ramp
         # uneven requests at different context depths
@@ -97,12 +99,38 @@ def test_balanced_row_shard_partitions_and_declines(tp_size: int) -> None:
             torch.tensor(query_lens, dtype=torch.int32),
             ratio,
             tp_size,
+            n,
         )
         assert sizes is not None and len(sizes) == tp_size
         assert sum(sizes) == sum(query_lens) and min(sizes) >= 1
     lens = torch.tensor([n - 1], dtype=torch.int32)
-    assert indexer.balanced_prefill_row_shard(lens, lens, ratio, tp_size) is None
-    assert indexer.balanced_prefill_row_shard(lens, lens, ratio, 1) is None
+    assert indexer.balanced_prefill_row_shard(lens, lens, ratio, tp_size, n) is None
+    assert indexer.balanced_prefill_row_shard(lens, lens, ratio, 1, n) is None
+
+
+def test_row_shard_threshold_is_total_not_per_rank() -> None:
+    """The activation floor counts TOTAL rows regardless of tp_size: a
+    per-rank floor would need 128K rows at TP8, i.e. an unschedulable
+    --max-num-batched-tokens of 128K on 80 GB Hopper nodes."""
+    lens = torch.tensor([MIN_ROWS], dtype=torch.int32)
+    for tp_size in (2, 4, 8):
+        sizes = indexer.balanced_prefill_row_shard(lens, lens, 4, tp_size, MIN_ROWS)
+        assert sizes is not None
+
+
+def test_tp2_old_per_rank_window_stays_replicated() -> None:
+    """32K-64K total rows engaged on TP2 under the old per-rank floor
+    (16K rows/rank); the total floor now keeps them replicated — the
+    all_gatherv latency term is largest at small tp."""
+    window = torch.tensor([3 * MIN_ROWS // 4], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(window, window, 4, 2, MIN_ROWS) is None
+
+
+def test_row_shard_floor_is_at_least_tp_size() -> None:
+    """A floor below tp_size still leaves every rank at least one row."""
+    lens = torch.tensor([8], dtype=torch.int32)
+    assert indexer.balanced_prefill_row_shard(lens, lens, 4, 8, 1) is not None
+    assert indexer.balanced_prefill_row_shard(lens - 1, lens - 1, 4, 8, 1) is None
 
 
 def test_row_sharding_gate_rejects_unsupported_configurations(
@@ -182,6 +210,10 @@ def test_profiling_run_reserves_exchange_transient(
                         decode_context_parallel_size=1,
                         prefill_context_parallel_size=1,
                     ),
+                    scheduler_config=SimpleNamespace(
+                        max_num_seqs=4, max_num_batched_tokens=512
+                    ),
+                    num_speculative_tokens=0,
                 ),
             )
             m.setattr(sparse_indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_metrics::METRICS;
 
 mod error;
 mod inflight;
@@ -16,15 +20,17 @@ mod request_metrics;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,
+    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage, WeightVersionSpan,
 };
 pub use request::GenerateRequest;
-pub use request_metrics::current_unix_timestamp_secs;
+pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
-use crate::request_metrics::RequestMetricsTracker;
+use crate::request_metrics::{
+    RequestMetricHandles, RequestMetricsTracker, resolve_request_metric_handles,
+};
 
 /// Thin generate-and-abort facade over [`EngineCoreClient`].
 ///
@@ -39,32 +45,47 @@ pub struct Llm {
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    /// Request metric handles per connected engine index, resolved at
+    /// construction so the request families export zero-valued series before
+    /// the first request.
+    request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
 }
 
 impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        METRICS.request.set_max_model_len(client.max_model_len());
+        let request_metric_handles = (client.engine_indices().into_iter())
+            .map(|engine| {
+                let handles = resolve_request_metric_handles(
+                    client.model_name(),
+                    engine,
+                    client.engine_stats_enabled(),
+                );
+                (engine, Arc::new(handles))
+            })
+            .collect();
         Self {
             client,
             randomize_request_id: true,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            request_metric_handles,
         }
     }
 
-    /// Enable or disable periodic stats logging.
-    pub fn with_log_stats(mut self, enabled: bool) -> Self {
-        if enabled {
-            let stats_logger = StatsLogger::start(
+    /// Enable periodic stats logging at the given interval, or disable it with
+    /// `None`. A zero interval logs as often as the timer allows.
+    pub fn with_log_stats(mut self, interval: Option<Duration>) -> Self {
+        self.stats_logger = interval.map(|interval| {
+            StatsLogger::start(
                 self.client.model_name().to_string(),
                 self.client.engine_indices(),
-            );
-            self.stats_logger = Some(stats_logger);
-        } else {
-            self.stats_logger = None;
-        }
+                interval,
+            )
+        });
         self
     }
 
@@ -102,6 +123,7 @@ impl Llm {
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
         let prepared = req.prepare(self.randomize_request_id)?;
+        let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared
             .engine_request
@@ -120,19 +142,16 @@ impl Llm {
 
         let stream = self.client.call(prepared.engine_request).await?;
 
-        let request_metrics = RequestMetricsTracker::new(
-            self.client.model_name().to_string(),
-            stream.engine_index(),
-            arrival_time,
-            prompt_len,
-            max_tokens_param,
-            1,
-            self.client.engine_stats_enabled(),
-        );
+        let handles = (self.request_metric_handles.get(&stream.engine_index()))
+            .expect("requests are routed only to connected engines")
+            .clone();
+        let request_metrics =
+            RequestMetricsTracker::new(handles, arrival_time, prompt_len, max_tokens_param, 1);
         let guard = self.inflight.track(external_request_id, internal_request_id);
 
         Ok(GenerateOutputStream::new(
             prompt_token_ids,
+            remote_prefill_cached_tokens,
             stream,
             request_metrics,
             guard,
