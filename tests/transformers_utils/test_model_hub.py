@@ -153,6 +153,23 @@ def test_invalid_tokenizer_fails_before_model_download(hubs):
     assert not hubs[1]
 
 
+@pytest.mark.parametrize("source", ["hf", "modelscope"])
+@pytest.mark.parametrize("filename", ["tekken.json", "tokenizer.model.v3"])
+def test_native_tokenizer_requires_explicit_mode(hubs, source, filename):
+    from vllm import LLM
+
+    (hubs[0] / filename).write_text("{}")
+    options = dict(model=str(hubs[0]), tokenizer=f"{source}://owner/tokenizer")
+    with pytest.raises(ValueError, match="--tokenizer-mode mistral"):
+        EngineArgs(**options)
+    with pytest.raises(ValueError, match="--tokenizer-mode mistral"):
+        LLM(**options)
+    for mode in ("mistral", "hf"):
+        args = EngineArgs(**options, tokenizer_mode=mode)
+        assert args.tokenizer_mode == mode
+        assert not list(Path(args.tokenizer).glob("*.safetensors"))
+
+
 def test_weight_ignore_patterns_preserve_config(hubs):
     args = EngineArgs(model="hf://owner/model", ignore_patterns=["*.json"])
     assert args.create_model_config().hf_config.model_type == "qwen3"

@@ -362,7 +362,8 @@ Use existing revision and download-directory options; URI revisions, subpaths,
 and queries are not supported.
 Explicit sources download a local repository snapshot before loading, which may
 include multiple weight formats. Tokenizer-only sources download metadata without
-weights. The initial implementation supports single-node Python serving
+weights. For independently downloaded Mistral tokenizers, set
+`--tokenizer-mode mistral` explicitly. The initial implementation supports single-node Python serving
 with `auto`, `hf`, `safetensors` or `pt` checkpoints. Cross-repository `auto_map`
 and separate code revisions require locally prepared repositories. Specify both
 the target and draft explicitly instead of using speculators target inference.
