@@ -436,11 +436,11 @@ class Fp8LinearMethod(LinearMethodBase):
                     return self.fp8_linear.apply_weights(layer, x, bias)
 
                 # per-tensor/channel: dequant to BF16 and run GEMM
-                weight_fp8 = layer.weight.to(torch.bfloat16)
-                weight_scale = layer.weight_scale.to(torch.bfloat16)
+                weight_fp8 = layer.weight.to(torch.float32)
+                weight_scale = layer.weight_scale.to(torch.float32)
                 if weight_scale.numel() == 1:
                     # Per-tensor: simple scalar multiplication
-                    weight_bf16 = weight_fp8 * weight_scale
+                    weight_bf16 = (weight_fp8 * weight_scale).to(torch.bfloat16)
                 else:
                     # Multiple scales (fused modules like QKV)
                     # Try to infer correct broadcasting
@@ -452,10 +452,12 @@ class Fp8LinearMethod(LinearMethodBase):
                         and weight_scale.shape[0] == weight_fp8.shape[0]
                     ):
                         # Per-row scaling
-                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
+                        weight_bf16 = (weight_fp8 * weight_scale.unsqueeze(1)).to(
+                            torch.bfloat16
+                        )
                     else:
                         # Fallback
-                        weight_bf16 = weight_fp8 * weight_scale
+                        weight_bf16 = (weight_fp8 * weight_scale).to(torch.bfloat16)
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
