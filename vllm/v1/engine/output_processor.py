@@ -485,12 +485,15 @@ class RequestState:
     ) -> tuple[list[int], SampleLogprobs | None, SamplingMask | None]:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
-        start, end = 0, len(self.detokenizer.output_token_ids) - num_held_tokens
+        num_output_tokens = self.detokenizer.num_output_tokens()
+        start, end = 0, num_output_tokens - num_held_tokens
         if delta:
             num_sent = len(token_ids) + self.num_held_tokens - num_held_tokens
             start = max(end - num_sent, 0)
         self.num_held_tokens = num_held_tokens
-        token_ids = self.detokenizer.output_token_ids[start:end]
+        # SlowIncrementalDetokenizer keeps prompt token ids ahead of the output
+        offset = len(self.detokenizer.token_ids) - num_output_tokens
+        token_ids = self.detokenizer.token_ids[offset + start : offset + end]
 
         logprobs = self.logprobs_processor.logprobs
         if logprobs:
