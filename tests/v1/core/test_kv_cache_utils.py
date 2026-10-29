@@ -1375,6 +1375,31 @@ def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     assert layout == KVCacheLayout.LBHNC
 
 
+def test_pipeline_stages_resolve_a_layout_every_stage_supports(monkeypatch):
+    """PP stages hold different layers, so their workers can report different
+    supported layouts (e.g. only one stage has FlashInfer layers on SM100)."""
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = None
+    any_layout = [layout.name for layout in get_supported_kv_cache_layouts([])]
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"], any_layout])
+    assert layout == KVCacheLayout.LBHNC
+
+    # A stage that declares nothing must not outvote a declared preference.
+    config.cache_config.kv_cache_layout = None
+    layout = resolve_kv_cache_layout(config, [["BLHNC", "LBNHC"], any_layout])
+    assert layout == KVCacheLayout.BLHNC
+
+    config.cache_config.kv_cache_layout = None
+    with pytest.raises(ValueError, match="No KV cache layout satisfies"):
+        resolve_kv_cache_layout(config, [["LBHNC"], ["LBNHC"]])
+
+
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))

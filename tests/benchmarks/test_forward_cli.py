@@ -16,6 +16,7 @@ from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
+from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
@@ -27,11 +28,146 @@ from vllm.v1.worker.utils import AttentionGroup
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Native Muse TRTLLM validation requires Blackwell.",
+)
+def test_bench_forward_muse_balanced_routing(tmp_path):
+    """Muse's native router supports finite, reproducible balanced graph replay."""
+    config = dict(
+        architectures=["MuseSpark1xForCausalLM"],
+        model_type="muse_spark_text",
+        vocab_size=128,
+        hidden_size=512,
+        intermediate_size=512,
+        moe_hidden_size=512,
+        moe_intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=64,
+        num_local_experts=8,
+        num_experts_per_tok=2,
+        num_shared_experts=0,
+        max_position_embeddings=64,
+        hidden_act="silu",
+        attention_bias=False,
+        layer_types=["full_attention"],
+        mlp_layer_types=["sparse"],
+        layer_rope_theta=[10000.0],
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        rms_norm_eps=1e-5,
+        post_norm_eps=1e-8,
+        residual_gate_temperature=0.3,
+        final_logit_softcapping=None,
+        output_multiplier=0.5,
+        routed_scaling_factor=1.0,
+        qk_scale_factor=1.0,
+        tie_word_embeddings=False,
+        torch_dtype="bfloat16",
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    entrypoint = (
+        "from vllm.model_executor.models import ModelRegistry; "
+        "ModelRegistry.register_model('MuseSpark1xForCausalLM', "
+        "'vllm.models.muse_spark.nvidia.model:MuseSpark1xForCausalLM'); "
+        "from vllm.entrypoints.cli.main import main; main()"
+    )
+    output = tmp_path / "results.json"
+    command = [
+        sys.executable,
+        "-c",
+        entrypoint,
+        "bench",
+        "forward",
+        "--model",
+        str(tmp_path),
+        "--skip-tokenizer-init",
+        "--moe-backend",
+        "flashinfer_trtllm",
+        "--routing",
+        "balanced",
+        "--max-model-len",
+        "64",
+        "--max-num-seqs",
+        "4",
+        "--max-num-batched-tokens",
+        "64",
+        "--kv-cache-memory-bytes",
+        "16777216",
+        "--kv-len-jitter",
+        "0",
+        "--kernel-config.enable_jit_warmup",
+        "false",
+        "--kernel-config.enable_cutedsl_warmup",
+        "false",
+        "--disable-flashinfer-autotune",
+        "--case",
+        "prefill=32",
+        "--case",
+        "decode=2*1@32",
+        "--iters",
+        "2",
+        "--samples",
+        "2",
+        "--output-json",
+        str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = json.loads(output.read_text())
+    assert len(rows) == 2
+    for row in rows:
+        (rank,) = row["ranks"]
+        assert rank["finite"] and rank["graph_deterministic"]
+        assert rank["graph_vs_eager"]["relative_rms"] == 0
+
+
+def test_balanced_routing_restores_expert_bias(dist_init):
+    """Fixture routes stay balanced despite selection bias, then restore it."""
+    from vllm.config import get_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+    from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
+
+    device = torch.device(current_platform.device_type)
+    layer = torch.nn.Module()
+    gate = GateLinear(4, 8, params_dtype=torch.float32).to(device)
+    layer.add_module("router", gate)
+    layer.top_k = 2
+    bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], device=device)
+    layer.register_buffer("expert_bias", bias.clone())
+    selector = MuseSpark1xRouter(
+        top_k=2,
+        num_experts=8,
+        expert_bias=layer.expert_bias,
+        route_scale=1.0,
+    )
+    hidden = torch.zeros(64, 4, device=device)
+    with torch.no_grad():
+        gate.weight.zero_()
+    fixture = RoutingFixture(layer, 64, 0, 1, 4, 0, device, mode="balanced")
+    try:
+        with set_forward_context(None, get_current_vllm_config(), num_tokens=64):
+            logits, _ = gate(hidden)
+            _, ids = selector.select_experts(hidden, logits)
+            fixture.check_applied()
+            counts = torch.bincount((ids // 2).flatten(), minlength=4)
+            assert counts.min() == counts.max()
+    finally:
+        fixture.remove()
+    torch.testing.assert_close(layer.expert_bias, bias, rtol=0, atol=0)
+    logits, _ = gate(hidden)
+    _, ids = selector.select_experts(hidden, logits)
+    assert set(ids.flatten().tolist()) == {0, 1}
+
+
 @pytest.mark.benchmark
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
 )
-def test_bench_forward_hybrid_verify(tmp_path):
+@pytest.mark.parametrize("routing", ["auto", "balanced"])
+def test_bench_forward_hybrid_verify(tmp_path, routing):
     """Repeated target verification starts from the same recurrent state."""
     config = dict(
         architectures=["Qwen3NextForCausalLM"],
@@ -72,6 +208,8 @@ def test_bench_forward_hybrid_verify(tmp_path):
             "--model",
             str(tmp_path),
             "--skip-tokenizer-init",
+            "--routing",
+            routing,
             "--exclude-drafter",
             "--speculative-config",
             '{"method":"ngram","num_speculative_tokens":5}',
@@ -107,9 +245,25 @@ def test_bench_forward_hybrid_verify(tmp_path):
     assert [row["case"] for row in rows] == ["verify", "mixed"]
     for row in rows:
         (rank,) = row["ranks"]
+        assert rank["routing"] == ("zipf" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["timing_scope"] == "target_only"
         assert row["median_us"] > 0
+
+
+def test_zipf_expert_selection():
+    """Popularity follows Zipf, with distinct experts and reproducible rows."""
+    rng = np.random.default_rng(0)
+    ids = zipf_topk_ids(50000, 32, 1, rng)
+    frequencies = np.sort(np.bincount(ids.ravel(), minlength=32))[::-1] / len(ids)
+    expected = np.arange(1, 33, dtype=float) ** -1.25
+    expected /= expected.sum()
+    np.testing.assert_allclose(frequencies, expected, atol=0.005, rtol=0)
+
+    ids = zipf_topk_ids(2048, 384, 6, np.random.default_rng(0))
+    assert ((ids >= 0) & (ids < 384)).all()
+    assert (np.diff(np.sort(ids, axis=1), axis=1) > 0).all()
+    assert np.array_equal(ids[:6], zipf_topk_ids(6, 384, 6, np.random.default_rng(0)))
 
 
 @pytest.mark.benchmark
