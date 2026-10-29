@@ -155,11 +155,14 @@ def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibl
             deadline = time.monotonic() + 120
             while len(children) != 2:
                 assert daemon._proc.poll() is None, "preload exited before spawning"
-                children = [
-                    child
-                    for child in parent.children()
-                    if "spawn_main" in " ".join(child.cmdline())
-                ]
+                children = []
+                for child in parent.children():
+                    try:
+                        if "spawn_main" in " ".join(child.cmdline()):
+                            children.append(child)
+                    except psutil.NoSuchProcess:
+                        # Short-lived children can exit before cmdline is read.
+                        continue
                 assert time.monotonic() < deadline, "daemon ranks did not spawn"
                 time.sleep(0.1)
             if after_ready:
