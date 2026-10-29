@@ -356,6 +356,15 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                if self.engram is not None and engram_hashes is not None:
+                    # A pipeline stage that starts at an Engram layer receives
+                    # the stream with the previous stage's post already
+                    # applied: inject here, before this block's pre.
+                    residual = self.engram(
+                        residual,
+                        engram_hashes[:, self.engram.layer_hash_index],
+                        engram_mask,
+                    )
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn,

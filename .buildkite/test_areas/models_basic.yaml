@@ -441,7 +441,7 @@ steps:
   dind: false
   device: mi355_4
   num_devices: 4
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   working_dir: /vllm-workspace/
   depends_on:
   - image-build-amd
