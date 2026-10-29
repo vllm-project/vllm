@@ -225,6 +225,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     IS_FP8: tl.constexpr,
     IS_MXFP4: tl.constexpr = False,
     MXFP4_BLOCK_RECORDS: tl.constexpr = 0,
+    MXFP4_DOT_SCALED: tl.constexpr = False,
+    MXFP4_HW_CVT: tl.constexpr = False,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -317,9 +319,16 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
                 mask=valid[:, None],
                 other=127,
             )
-            values = mxfp4_dequant_rows(v_packed, v_scales, HEAD_DIM)
-            keys = tl.trans(mxfp4_dequant_rows(k_packed, k_scales, HEAD_DIM))
-            scores = tl.dot(query, keys)
+            values = mxfp4_dequant_rows(v_packed, v_scales, HEAD_DIM, MXFP4_HW_CVT)
+            if MXFP4_DOT_SCALED:
+                scores = tl.dot_scaled(
+                    query, None, "bf16", tl.trans(k_packed), k_scales, "e2m1"
+                )
+            else:
+                keys = tl.trans(
+                    mxfp4_dequant_rows(k_packed, k_scales, HEAD_DIM, MXFP4_HW_CVT)
+                )
+                scores = tl.dot(query, keys)
         else:
             keys = tl.load(
                 k_cache_ptr
@@ -881,6 +890,8 @@ def qsa_sparse_paged_attention(
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
     is_mxfp4: bool = False,
+    mxfp4_dot_scaled: bool | None = None,
+    mxfp4_hw_cvt: bool | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16, FP8, or mxfp4_qsa K/V caches.
 
@@ -897,6 +908,14 @@ def qsa_sparse_paged_attention(
             raise ValueError("an mxfp4_qsa cache holds K and V in one view")
         mxfp4_records = block_records(k_cache)
         cache_head_dim = head_dim_from_record_bytes(k_cache.shape[3])
+        # gfx950 decodes E2M1 in hardware, for both the scaled MFMA (QK) and
+        # the V conversion; elsewhere both fall back to the portable decode.
+        from vllm.platforms.rocm import on_gfx950
+
+        if mxfp4_dot_scaled is None:
+            mxfp4_dot_scaled = on_gfx950()
+        if mxfp4_hw_cvt is None:
+            mxfp4_hw_cvt = on_gfx950()
     else:
         mxfp4_records = 0
         cache_head_dim = k_cache.shape[3]
@@ -954,6 +973,20 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
+    # Swept on MI355X at the TP2 decode shape (top-k 2048) only; other heads
+    # and selection widths reuse it untuned. mxfp4 tiles are a quarter of
+    # BF16's bytes, so wider tiles and fewer splits win.
+    if is_mxfp4 and base_programs > small_profile_limit:
+        if base_programs < 32:
+            block_n, target_splits, partial_warps = 64, 64, 4
+        elif base_programs <= 64:
+            block_n, target_splits, partial_warps = 64, 16, 2
+        elif base_programs <= 128:
+            block_n, target_splits, partial_warps = 64, 8, 2
+        elif base_programs <= 256:
+            block_n, target_splits, partial_warps = 64, 4, 2
+        elif base_programs <= 512:
+            block_n, target_splits, partial_warps = 64, 2, 2
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
@@ -1029,6 +1062,8 @@ def qsa_sparse_paged_attention(
         IS_FP8=is_fp8,
         IS_MXFP4=is_mxfp4,
         MXFP4_BLOCK_RECORDS=mxfp4_records,
+        MXFP4_DOT_SCALED=bool(is_mxfp4 and mxfp4_dot_scaled),
+        MXFP4_HW_CVT=bool(is_mxfp4 and mxfp4_hw_cvt),
         num_warps=partial_warps,
         num_stages=partial_stages,
     )
