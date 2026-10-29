@@ -884,6 +884,10 @@ def init_int8_linear_kernel(
     )
 
 
+class NoCompatibleMPLinearKernelError(ValueError):
+    """No eligible mixed-precision kernel can implement the layer."""
+
+
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
@@ -899,7 +903,8 @@ def choose_mp_linear_kernel(
             the compute capability. Defaults to None.
 
     Raises:
-        ValueError: If no kernel can implement the given config.
+        NoCompatibleMPLinearKernelError: If no eligible kernel can implement
+            the given config.
 
     Returns:
         type[MPLinearKernel]: Chosen kernel.
@@ -949,7 +954,7 @@ def choose_mp_linear_kernel(
                 f" {kernel.__name__} cannot implement due to: {failure_reason}"
             )
 
-    raise ValueError(
+    raise NoCompatibleMPLinearKernelError(
         "Failed to find a kernel that can implement the "
         "WNA16 linear layer. Reasons: \n" + "\n".join(failure_reasons)
     )

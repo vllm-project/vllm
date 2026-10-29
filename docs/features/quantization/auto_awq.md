@@ -93,6 +93,12 @@ selection path that CPU and XPU already use. CDNA and earlier ROCm targets keep 
 kernels. The selected kernel is logged once at startup, for example
 `Using RDNAHybridW4A16LinearKernel for AutoAWQMarlinLinearMethod`.
 
+With automatic backend selection on RDNA, if no eligible mixed-precision kernel
+can implement a layer, vLLM falls back to the legacy AWQ method and logs the
+reason. The legacy method still enforces its own format and shape requirements.
+Explicit backend preferences retain their existing selection behavior; loading
+or execution errors after kernel selection do not trigger legacy fallback.
+
 Because kernel availability depends on the GPU arch and on the checkpoint's group size, bit width
 and zero-point setting, an AutoAWQ model that works on one GPU may take a slower path on another.
 Check the startup log line before comparing throughput across machines.
