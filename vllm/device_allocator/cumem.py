@@ -65,6 +65,8 @@ def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
+    if lib_name is None:
+        raise RuntimeError("cumem allocator library is not loaded")
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
         lib_name, "my_malloc", "my_free"
@@ -343,25 +345,30 @@ class CuMemAllocator:
         torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
-            if not data.is_asleep:
+            if (
+                tags is not None
+                and data.tag in DEFERRABLE_TAGS
+                and data.tag not in tags
+            ):
                 continue
-            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
-                handle = data.handle
+            handle = data.handle
+            was_asleep = data.is_asleep
+            if was_asleep:
                 create_and_map(handle)
                 data.is_asleep = False
-                if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
-                elif current_platform.is_rocm():
-                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
-                    libcudart.cudaMemset(ptr, 0, handle[1])
-                    torch.accelerator.synchronize()
+            if data.cpu_backup_tensor is not None:
+                # Retry the copy for an allocation mapped by a failed wake.
+                cpu_backup_tensor = data.cpu_backup_tensor
+                size_in_bytes = (
+                    cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+                )
+                cpu_ptr = cpu_backup_tensor.data_ptr()
+                libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                data.cpu_backup_tensor = None
+            elif was_asleep and current_platform.is_rocm():
+                # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
+                libcudart.cudaMemset(ptr, 0, handle[1])
+                torch.accelerator.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

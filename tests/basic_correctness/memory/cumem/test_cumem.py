@@ -511,3 +511,40 @@ def test_cudagraph_pool_sleep(level):
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_wake_up_retries_host_backup_after_copy_failure(monkeypatch):
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag="weights"):
+        weights = torch.arange(1024, dtype=torch.uint8, device=DEVICE_TYPE)
+        expected = weights.clone()
+
+    allocator.sleep(offload_tags=("weights",))
+
+    real_cuda_memcpy = cumem.libcudart.cudaMemcpy
+    calls = 0
+
+    def flaky_cuda_memcpy(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("injected host-to-device copy failure")
+        return real_cuda_memcpy(*args)
+
+    monkeypatch.setattr(cumem.libcudart, "cudaMemcpy", flaky_cuda_memcpy)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        allocator.wake_up()
+
+    allocator.wake_up()
+
+    assert calls == 2
+    assert torch.equal(weights, expected)
+
+
+def test_get_pluggable_allocator_requires_loaded_library(monkeypatch):
+    monkeypatch.setattr(cumem, "lib_name", None)
+
+    with pytest.raises(RuntimeError, match="not loaded"):
+        cumem.get_pluggable_allocator(lambda handle: None, lambda ptr: (0, 0, ptr, 0))
