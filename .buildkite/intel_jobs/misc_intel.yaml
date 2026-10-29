@@ -19,7 +19,7 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/
-    - tests/v1/determinism/test_xpu_batch_invariant_ut.py
+    - tests/v1/determinism/
     - .buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh
     - .buildkite/intel_jobs/misc_intel.yaml
   commands:
@@ -28,6 +28,9 @@ steps:
       'export VLLM_BATCH_INVARIANT=1 &&
       cd tests &&
       pytest -v -s v1/determinism/test_xpu_batch_invariant_ut.py &&
+      pytest -v -s v1/determinism/test_batch_invariance.py &&
+      VLLM_TEST_TP_SIZE=2 pytest -v -s v1/determinism/test_batch_invariance.py
+      -k "bs1_vs_bsN or without_batch_invariance_should_fail" &&
       bash ../.buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh'
 
 # Disabled until the KV connectors installation is locked.
