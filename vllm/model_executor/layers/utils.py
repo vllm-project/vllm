@@ -407,6 +407,11 @@ def rocm_unquantized_gemm_impl(
         and k <= 8192
     )
 
+    if skinny_gemm_enabled and on_gfx11():
+        out = _gfx11_skinny_gemm(x, weight, bias, weight_ok_for_wvsplitk, cu_count)
+        if out is not None:
+            return out
+
     if use_wvsplitk:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
@@ -426,6 +431,79 @@ def rocm_unquantized_gemm_impl(
         return tgemm.mm(x, weight, bias)
 
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def _gfx11_skinny_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    weight_ok_for_wvsplitk: bool,
+    cu_count: int,
+) -> torch.Tensor | None:
+    """Decode-sized GEMMs that beat hipBLASLt on gfx11, or None."""
+    from vllm.platforms.rocm import on_gfx1100
+
+    n = x.numel() // x.size(-1)
+    m, k = weight.shape
+    wvsplitk_ok = weight_ok_for_wvsplitk and (bias is None or bias.is_contiguous())
+    # N = 17..32 on gfx1100: the WMMA kernel reads every weight byte once,
+    # where wvSplitK stops at 16 and hipBLASLt picks slow tiles (N=24: HC
+    # down 51 -> 27 us, router 18 -> 10). With K < 512 rocBLAS stays ahead.
+    # At N = 13..16 it beats wvSplitK on the tall weights up to K = 2560
+    # (GDN in_proj 39 -> 33 us, out_proj 20 -> 16).
+    if (
+        (
+            (16 < n <= 32 and k >= 512)
+            or (12 < n <= 16 and m >= 2048 and 512 <= k <= 2560)
+        )
+        and bias is None
+        and x.dtype == torch.float16
+        and weight.is_contiguous()
+        and on_gfx1100()
+        and hasattr(torch.ops._rocm_C, "skinny_wmma_f16")
+    ):
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.skinny_wmma_f16(x_view, weight, 0)
+        return out.reshape(*x.shape[:-1], m)
+    # N = 6..12 for any M > 8, N = 13..16 in one call from M = 256 (K >= 1024),
+    # and N = 20 for tall weights: with in_proj_ba (24x5120) at N=16 wvSplitK
+    # is 6x slower than rocBLAS on gfx1100, while at N <= 12 it is 2.6x faster
+    # for any M. At N=16 one call halves the time of chunks from M = 256
+    # (router, shared expert, HC down 45 -> 36 us), but with K = 320 rocBLAS
+    # wins (13 vs 22 us). Otherwise N = 13..24 goes in chunks of <= 12 rows,
+    # which re-reads the weight per chunk: it pays on short weights
+    # (in_proj_ba 34 -> 14-22 us) and on the 62080-row lm_head at N=24
+    # (1.95 -> 1.49 ms), not in between.
+    if (
+        wvsplitk_ok
+        and m > 8
+        and (
+            5 < n <= 12
+            or (12 < n <= 16 and m >= 256 and k >= 1024)
+            or (n == 20 and m >= 1024)
+        )
+    ):
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.wvSplitK(weight, x_view, cu_count, bias)
+        return out.reshape(*x.shape[:-1], m)
+    # A single output row (e.g. a shared-expert gate) above N = 5 would go
+    # to hipBLASLt, which takes ~120 us for it on gfx1100.
+    if m == 1 and n > 5 and bias is None:
+        x_view = x.reshape(-1, x.size(-1))
+        out = torch.sum(x_view.float() * weight, -1, keepdim=True)
+        return out.to(x.dtype).reshape(*x.shape[:-1], 1)
+    if wvsplitk_ok and 12 < n <= 24 and (8 < m < 1024 or m >= 32768) and bias is None:
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        chunks = (n + 11) // 12
+        step = (n + chunks - 1) // chunks
+        out = torch.cat(
+            [
+                ops.wvSplitK(weight, x_view[i : i + step], cu_count, None)
+                for i in range(0, n, step)
+            ]
+        )
+        return out.reshape(*x.shape[:-1], m)
+    return None
 
 
 def rocm_unquantized_gemm_fake(

@@ -28,7 +28,6 @@ from vllm.model_executor.layers.quantization import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -36,6 +35,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_kv_cache_scheme_dtype,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -199,6 +199,10 @@ def _init_kv_cache_quant(
 
     # See [Note: Register q/k/v/prob scales in state dict]
     if should_load_quant_weights(quant_method):
+        from vllm.model_executor.layers.quantization.kv_cache import (
+            BaseKVCacheMethod,
+        )
+
         assert isinstance(quant_method, BaseKVCacheMethod)
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
@@ -278,17 +282,18 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             kv_cache_dtype = "auto"
 
-        # llm-compressor models declare an FP8 KV-cache scheme in their
-        # checkpoint config. Honor it only when the user did not explicitly
-        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
-        # The "auto" case is normally resolved upstream in
-        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
-        # case anything bypassed that path.
+        # compressed-tensors / llm-compressor models declare a KV-cache scheme
+        # in their checkpoint config. Honor it only when the user did not
+        # explicitly pick a kv_cache_dtype; an explicit choice
+        # (e.g. int8_per_token_head, bfloat16) must win. get_kv_cache_scheme_dtype
+        # maps the scheme to our extended per-token-head dtypes (int4/int8/
+        # fp8) as well as plain fp8.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
-            kv_cache_dtype = "fp8"
+        scheme_dtype = get_kv_cache_scheme_dtype(kv_cache_scheme)
+        if scheme_dtype is not None and kv_cache_dtype == "auto":
+            kv_cache_dtype = scheme_dtype
             if cache_config is not None:
-                cache_config.cache_dtype = "fp8"
+                cache_config.cache_dtype = kv_cache_dtype
 
         # Check if per-head quant scales are required based on kv_cache_scheme
         use_per_head_quant_scales = (

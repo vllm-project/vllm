@@ -66,7 +66,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    CUSTOM = 12
+    CUSTOM = 15
 
     @property
     def is_per_token_head(self) -> bool:
@@ -90,6 +90,11 @@ class KVQuantMode(IntEnum):
             KVQuantMode.OCTAVE_K3V3,
             KVQuantMode.OCTAVE_K3V3_COMPACT,
         )
+
+    @property
+    def uses_per_query_maps(self) -> bool:
+        """True when kernels take per-query request and causal-length maps."""
+        return self.is_per_token_head or self.is_octave
 
     @property
     def is_turboquant(self) -> bool:

@@ -15,6 +15,7 @@ from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
+from vllm.models.qwen4_exp.amd import qsa as qsa_module
 from vllm.models.qwen4_exp.amd.indexer_qsa import (
     QSAIndexer,
     apply_qsa_rmsnorm,
@@ -27,6 +28,8 @@ from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.ops import rocm_octave
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -320,6 +323,45 @@ def test_fused_pre_indexer_gate_is_config_shaped(overrides, expected) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not is_flash_attn_varlen_func_available(),
+    reason="AMD QSA requires FlashAttention",
+)
+@pytest.mark.parametrize("kv_cache_dtype", qsa_module._OCTAVE_CACHE_DTYPES)
+def test_qsa_impl_accepts_octave_kv_cache(
+    kv_cache_dtype: str,
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FlashAttentionImpl rejects quantized caches it cannot read, and
+    octave_* counts as quantized. QSA reads Octave with its own kernel, so it
+    must still build, keep the Octave dtype and take the Octave path."""
+    head_size = 256
+    monkeypatch.setitem(rocm_octave._rope_dim_by_head_size, head_size, 64)
+    config = SimpleNamespace(
+        attention_config=default_vllm_config.attention_config,
+        compilation_config=default_vllm_config.compilation_config,
+        scheduler_config=default_vllm_config.scheduler_config,
+        model_config=SimpleNamespace(dtype=torch.float16),
+    )
+    monkeypatch.setattr(qsa_module, "get_current_vllm_config", lambda: config)
+
+    impl = qsa_module.Qwen4ExpQSAFlashAttentionImpl(
+        num_heads=8,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    assert impl.kv_cache_dtype == kv_cache_dtype
+    assert impl.octave_fmt == rocm_octave.OctaveFormat.from_cache_dtype(
+        kv_cache_dtype, head_size, 64
+    )
+
+
 def test_qsa_selection_uses_portable_topk_on_rocm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,6 +439,72 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.skipif(
+    not hasattr(torch.ops._rocm_C, "qsa_index_scores_rdna3"),
+    reason="Requires the gfx1100 QSA index kernel",
+)
+@pytest.mark.parametrize(
+    ("num_rows", "num_requests", "interleave"),
+    [
+        pytest.param(64, 1, False, id="one_request"),
+        pytest.param(128, 1, False, id="page_not_tile_aligned"),
+        pytest.param(300, 2, False, id="two_requests"),
+        pytest.param(96, 3, True, id="mixed_blocks"),
+    ],
+)
+def test_qsa_index_scores_hip_matches_triton(
+    monkeypatch: pytest.MonkeyPatch,
+    num_rows: int,
+    num_requests: int,
+    interleave: bool,
+) -> None:
+    """The gfx1100 WMMA scorer keeps the Triton kernel's logits contract."""
+    from vllm.platforms.rocm import on_gfx1100
+
+    if not on_gfx1100():
+        pytest.skip("gfx1100 only")
+    torch.manual_seed(3)
+    page_size = 400 if num_rows == 128 else 1600
+    compress_ratio, pages = 4, 4
+    k_cache = (
+        torch.randn(num_requests * pages, page_size, 1, 128, device="cuda") * 0.3
+    ).half()
+    page_table = (
+        torch.randperm(num_requests * pages, device="cuda")
+        .view(num_requests, pages)
+        .to(torch.int32)
+    )
+    q = (torch.randn(num_rows, 4, 128, device="cuda") * 0.3).half()
+    rows = torch.arange(num_rows, device="cuda")
+    if interleave:
+        token_to_req = (rows % num_requests).to(torch.int32)
+    else:
+        token_to_req = (rows * num_requests // num_rows).to(torch.int32)
+    sequence_lengths = torch.tensor(
+        [pages * page_size * compress_ratio - 1 - 777 * i for i in range(num_requests)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    query_positions = (
+        sequence_lengths[token_to_req.long()].long() - 1 - rows % 37 * 50
+    ).contiguous()
+    args = (q, k_cache, page_table, token_to_req, query_positions, sequence_lengths)
+
+    assert qsa_ops._use_hip_scores(*args)
+    logits, visible = qsa_ops.qsa_mqa_paged(*args, compress_ratio)
+    monkeypatch.setattr(qsa_ops, "_use_hip_scores", lambda *a: False)
+    ref_logits, ref_visible = qsa_ops.qsa_mqa_paged(*args, compress_ratio)
+
+    assert torch.equal(visible, ref_visible)
+    in_range = (
+        torch.arange(logits.shape[1], device="cuda")[None, :] < ref_visible[:, None]
+    )
+    torch.testing.assert_close(
+        logits[in_range], ref_logits[in_range], rtol=1e-4, atol=1e-5
+    )
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize(
     ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
     [
@@ -407,11 +515,13 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
     ],
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_qsa_sparse_paged_attention_matches_reference(
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -422,16 +532,14 @@ def test_qsa_sparse_paged_attention_matches_reference(
     indexer_budget = 2048
     indexer_compress_ratio = 4
     selection_width = indexer_budget + indexer_compress_ratio - 1
-    q = torch.randn(
-        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
+    q = torch.randn(num_rows, num_query_heads, head_dim, device="cuda", dtype=dtype)
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
         num_kv_heads,
         2 * head_dim,
         device="cuda",
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
     block_table = (

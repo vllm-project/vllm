@@ -63,6 +63,17 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         input_quant = scheme_dict.get("input_activations")
         format = scheme_dict.get("format")
 
+        if format == "octave-w3-planar":
+            from .compressed_tensors_moe_octave_w3 import (
+                CompressedTensorsOctaveW3MoEMethod,
+            )
+
+            return CompressedTensorsOctaveW3MoEMethod(
+                weight_quant,
+                layer.moe_config,
+                (quant_config.config or {}).get("octave_w3", {}),
+            )
+
         if quant_config._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
             from .compressed_tensors_moe_w4a8_mxfp4 import (
                 CompressedTensorsW4A8Mxfp4MoEMethod,

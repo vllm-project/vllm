@@ -92,8 +92,8 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        if vllm_config.model_config.dtype not in (torch.bfloat16, torch.float16):
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
 
         self.layer_id = int(layer_id)
         self.index_n_heads = int(config.indexer_n_heads)
@@ -102,11 +102,15 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
-        self.use_fused_pre_indexer = supports_fused_pre_indexer(
-            rotary_emb,
-            self.index_head_dim,
-            self.index_kv_heads,
-            self.compress_ratio,
+        # The fused kernels round through BF16.
+        self.use_fused_pre_indexer = (
+            vllm_config.model_config.dtype == torch.bfloat16
+            and supports_fused_pre_indexer(
+                rotary_emb,
+                self.index_head_dim,
+                self.index_kv_heads,
+                self.compress_ratio,
+            )
         )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
@@ -133,7 +137,7 @@ class QSAIndexer(nn.Module):
         cache_prefix = f"{prefix}." if prefix else ""
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,
@@ -142,7 +146,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,

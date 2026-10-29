@@ -83,6 +83,9 @@ class Sampler:
             TraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Rows whose logits processors or thinking budget touch logits outside
+        # the top-k set, so they cannot sample from gathered top-k logits.
+        self.needs_full_vocab = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -94,13 +97,16 @@ class Sampler:
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        needs_processing |= self.thinking_budget_state.add_request(
+        needs_full_vocab = self.thinking_budget_state.add_request(
             req_idx, sampling_params
         )
         for processor in self.logits_processors:
-            needs_processing |= processor.add_request(req_idx, sampling_params)
-        self.needs_logits_processing[req_idx] = needs_processing
+            needs_full_vocab |= processor.add_request(req_idx, sampling_params)
+        self.needs_full_vocab[req_idx] = needs_full_vocab
+        self.needs_logits_processing[req_idx] = (
+            self.sampling_states.add_request(req_idx, sampling_params)
+            or needs_full_vocab
+        )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -130,6 +136,28 @@ class Sampler:
             return None
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
+
+    def top_k_logits_width(self, idx_mapping_np: np.ndarray, max_k: int) -> int:
+        """Largest top_k of the batch when its sampling needs no logits outside
+        each row's top-k, else 0.
+
+        Temperature, min_p and top_p only compare logits inside the top-k set,
+        so a row holding just its top-k logits (-inf elsewhere) samples the
+        same distribution. Anything that rewrites or reads logits outside that
+        set before top_k (bias, penalties, bad words, thinking budget) or after
+        it (logprobs, sampling masks, trace replay) needs the full vocabulary.
+        """
+        if self.return_sampling_mask or self.trace_replay_state is not None:
+            return 0
+        top_k = self.sampling_states.top_k.np[idx_mapping_np]
+        if top_k.size == 0 or top_k.max() > max_k:
+            return 0
+        if (
+            np.any(self.needs_full_vocab[idx_mapping_np])
+            or self.get_logprobs_dims(idx_mapping_np) is not None
+        ):
+            return 0
+        return int(top_k.max())
 
     def __call__(
         self,

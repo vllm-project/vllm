@@ -423,11 +423,12 @@ def _launched_kernel_names(fn) -> set:
     }
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @gfx1100_only
 def test_dispatch_boundary(dist_init, dtype):
-    """The scalar/WMMA crossover sits between M=11 and M=12 for both
-    dtypes; the boundary must be exact (see the WMMA_MIN_M table)."""
+    """The bf16 scalar/WMMA crossover sits between M=11 and M=12; the
+    boundary must be exact (see the WMMA_MIN_M table). fp16 reaches the
+    v_dot2 and dec16 kernels below M=12 instead of the scalar one."""
 
     def run(m):
         outs, _ = _outputs_and_ref(M=m, K=4096, N=512, seed=1248, dtype=dtype)

@@ -99,6 +99,13 @@ def _make_qzeros(E, groups, N):
     return qz.unsqueeze(0).expand(E, -1, -1).contiguous()
 
 
+def _make_asym_qzeros(E, groups, N):
+    """Random per-group zero points in GPTQ v2 format (no +1 offset)."""
+    zeros = torch.randint(0, 16, (E * groups, N), dtype=torch.int32, device=device)
+    qz = pack_quantized_values_into_int32(zeros, scalar_types.uint4, packed_dim=1)
+    return qz.view(E, groups, N // 8)
+
+
 def _make_ct_weights(E, N, K, group_size, dtype):
     """Compressed-tensors canonical N-first layout: packed ``[E, N, K // 8]``
     and scales ``[E, N, K // group_size]``, plus the dequantized weights."""
@@ -114,10 +121,15 @@ def _make_ct_weights(E, N, K, group_size, dtype):
 @pytest.mark.parametrize("M", NUM_TOKENS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_size_m", [1, 4])
+@pytest.mark.parametrize("use_v2_format", [False, True])
 def test_fused_moe_w1_matches_dense(
-    E, K, N_inter, top_k, group_size, M, dtype, block_size_m
+    E, K, N_inter, top_k, group_size, M, dtype, block_size_m, use_v2_format
 ):
-    """w1 GEMM via fused kernel matches per-expert dense kernel."""
+    """w1 GEMM via fused kernel matches per-expert dense kernel.
+
+    ``use_v2_format`` covers asymmetric checkpoints: random zero points with
+    no GPTQ v1 offset.
+    """
     N_gate_up = N_inter * 2
     groups = K // group_size
 
@@ -125,7 +137,10 @@ def test_fused_moe_w1_matches_dense(
     x = torch.randn(M, K, dtype=dtype, device=device)
     w13 = _make_packed_weights(E, K, N_gate_up)
     w13_s = _make_scales(E, groups, N_gate_up, dtype)
-    w13_z = _make_qzeros(E, groups, N_gate_up)
+    if use_v2_format:
+        w13_z = _make_asym_qzeros(E, groups, N_gate_up)
+    else:
+        w13_z = _make_qzeros(E, groups, N_gate_up)
 
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
@@ -146,6 +161,7 @@ def test_fused_moe_w1_matches_dense(
         block_size_m,
         False,
         0,
+        use_v2_format,
     )
 
     # Per-expert dense reference
@@ -159,7 +175,7 @@ def test_fused_moe_w1_matches_dense(
                 w13[e],
                 w13_z[e],
                 w13_s[e],
-                False,
+                use_v2_format,
             )
             ref_out[flat] = ref.squeeze()
 
@@ -411,6 +427,7 @@ def test_process_weights_from_compressed_tensors_layout(dtype):
         1,
         False,
         0,
+        use_v2_format=True,
     )
     act_out = torch.empty(M * top_k, N_inter, dtype=dtype, device=device)
     apply_moe_activation(MoEActivation.SILU, act_out, w1_out)
@@ -429,6 +446,7 @@ def test_process_weights_from_compressed_tensors_layout(dtype):
         1,
         True,
         top_k,
+        use_v2_format=True,
     )
 
     ref = torch.zeros(M, K, device=device)

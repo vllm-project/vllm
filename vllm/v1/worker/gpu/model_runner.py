@@ -737,7 +737,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
 
-        self.block_tables = BlockTables(
+        self.block_table_kwargs: dict[str, Any] = dict(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -750,6 +750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
+        self.block_tables = BlockTables(**self.block_table_kwargs)
         if self.pcp_manager is not None:
             self.pcp_manager.set_block_tables(self.block_tables)
         self.ubatch_runner = maybe_build_ubatch_runner(
@@ -839,6 +840,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            self.kv_connector.bind_model_runner(self)
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
@@ -1664,6 +1666,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _top_k_logits_width(
+        self, input_batch: InputBatch, grammar_output: GrammarOutput | None
+    ) -> int:
+        """k to sample the batch from gathered top-k logits, or 0 for the full
+        vocabulary. Every input is replicated, so all TP ranks agree."""
+        max_k = envs.VLLM_TOP_K_LOGITS_MAX
+        if (
+            max_k <= 0
+            or grammar_output is not None
+            or self.parallel_config.tensor_parallel_size <= 1
+            or not hasattr(self.model, "compute_top_k_logits")
+            or not hasattr(self.sampler, "top_k_logits_width")
+        ):
+            return 0
+        return self.sampler.top_k_logits_width(input_batch.idx_mapping_np, max_k)
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1687,7 +1705,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            top_k = self._top_k_logits_width(input_batch, grammar_output)
+            if top_k:
+                logger.info_once(
+                    "Sampling from gathered top-k logits (k <= %d).", top_k
+                )
+                # Gather only each rank's top-k logits; the rest of the row gets
+                # the lowest fp16 logit, which top_k masks anyway (a finite fill:
+                # with -inf the top-k/top-p pivot search does not converge and
+                # takes 2.4x longer). top_k keeps ties with the k-th logit, so a
+                # few more are gathered to keep them.
+                ids, values = self.model.compute_top_k_logits(
+                    sample_hidden_states, top_k + 8
+                )
+                logits = values.new_full(
+                    (values.shape[0], self.vocab_size),
+                    torch.finfo(torch.float16).min,
+                ).scatter_(1, ids, values)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
 
         invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row

@@ -30,7 +30,8 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
                           const std::optional<torch::Tensor>& wtab,
                           const std::optional<torch::Tensor>& wtags,
                           const std::optional<torch::Tensor>& stab,
-                          const std::optional<torch::Tensor>& stags);
+                          const std::optional<torch::Tensor>& stags,
+                          int64_t window);
 
 void octave_window_store(torch::Tensor key, torch::Tensor value,
                          torch::Tensor slot_mapping, torch::Tensor positions,
@@ -63,7 +64,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor block_table, Tensor q_to_req, Tensor indices, Tensor! mid_o, "
       "Tensor k_signs, Tensor v_signs, float sm_scale, int num_kv_splits, "
       "int fmt, Tensor? positions=None, Tensor? wtab=None, "
-      "Tensor? wtags=None, Tensor? stab=None, Tensor? stags=None) -> ()");
+      "Tensor? wtags=None, Tensor? stab=None, Tensor? stags=None, "
+      "int window=64) -> ()");
   ops.impl("octave_decode_sparse", torch::kCUDA, &octave_decode_sparse);
   ops.def(
       "octave_window_store(Tensor key, Tensor value, Tensor slot_mapping, "

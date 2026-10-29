@@ -60,6 +60,8 @@ LUT_MULT = {3: 59.0, 4: 46.0}
 # Fixed point of the stored scales: a code stands for LUT[c] * scale / LUT_ONE,
 # which keeps small blocks' scales out of the fp16 subnormal range.
 LUT_ONE = 64.0
+# Largest exact window octave_decode_sparse takes (kMaxWindowHits - kSinks).
+MAX_EXACT_WINDOW = 1020
 
 _rope_dim_by_head_size: dict[int, int] = {}
 

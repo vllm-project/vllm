@@ -54,7 +54,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only kernel test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("n", range(1, 6))
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6, 16, 24])
 def test_rocm_unquantized_gemm_single_output_real_kernel(dtype, n):
     torch.manual_seed(0)
     x = torch.randn(n, 2048, device="cuda", dtype=dtype)
@@ -288,10 +288,10 @@ def test_rocm_unquantized_gemm_padded_weight_real_kernel(monkeypatch, dtype):
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [1, 128])
+@pytest.mark.parametrize("m", [1])
 def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
-    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
-    # fall back to torch.nn.functional.linear.
+    # A single output row takes wvSplitK only for n in [1, 5] (see PR #40687);
+    # above that it does not call it (M > 8 goes up to n = 12, see below).
     x = torch.randn(6, 64, dtype=torch.float16)
     weight = torch.randn(m, 64, dtype=torch.float16)
 
@@ -342,3 +342,61 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x_view = wvsplitkrc_mock.call_args.args[0]
     assert x_view.is_contiguous()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "m,k,wvsplitk_calls",
+    [(256, 2048, 1), (24, 2048, 2), (4096, 320, 0)],
+)
+def test_rocm_unquantized_gemm_gfx1x_n16_dispatch(monkeypatch, m, k, wvsplitk_calls):
+    # At N = 16, one wvSplitK call from M = 256, chunks for short weights, and
+    # rocBLAS when K is small.
+    x = torch.randn(16, k, dtype=torch.float16)
+    weight = torch.randn(m, k, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    assert wvsplitk_mock.call_count == wvsplitk_calls
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("k,uses_wmma", [(2560, True), (320, False)])
+def test_rocm_unquantized_gemm_gfx1100_n24_wmma(monkeypatch, k, uses_wmma):
+    # At N = 17..32 the WMMA kernel takes K >= 512; shorter K stays elsewhere.
+    x = torch.randn(24, k, dtype=torch.float16)
+    weight = torch.randn(256, k, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1100", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wmma_mock = MagicMock(side_effect=lambda x_view, w, _: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "skinny_wmma_f16", wmma_mock)
+    monkeypatch.setattr(
+        utils.ops,
+        "wvSplitK",
+        MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t()),
+    )
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    assert wmma_mock.called == uses_wmma
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)

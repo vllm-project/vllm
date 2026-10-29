@@ -8,7 +8,8 @@ expert routing + W4A16 dequant + dot product with atomic output accumulation.
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
   - Packed int32 ``[E, K/8, N]`` with exllama shuffle
   - Scales ``[E, groups, N]`` in activation dtype
-  - Zero points ``[E, groups, N/8]`` packed int32 (synthesized, symmetric only)
+  - Zero points ``[E, groups, N/8]`` packed int32, GPTQ v2 format (from the
+    checkpoint, or synthesized for symmetric weights)
 """
 
 import torch
@@ -34,8 +35,29 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
 )
 from vllm.platforms import current_platform
+
+_IDENTITY_ROUTING: dict[
+    tuple[int, torch.device], tuple[torch.Tensor, torch.Tensor]
+] = {}
+
+
+def _identity_routing(
+    rows: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``sorted_token_ids`` and ``num_tokens_post_padded`` for one (token,
+    expert) pair per block in pair order: with block size 1 every block is
+    independent, so the pairs need no sorting by expert."""
+    key = (rows, device)
+    if key not in _IDENTITY_ROUTING:
+        _IDENTITY_ROUTING[key] = (
+            torch.arange(rows, dtype=torch.int32, device=device),
+            torch.tensor([rows], dtype=torch.int32, device=device),
+        )
+    return _IDENTITY_ROUTING[key]
 
 
 def rdna3_moe_kernel_available() -> bool:
@@ -61,6 +83,10 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     ``[M * top_k, K]`` intermediate are fused away, hence
     ``TopKWeightAndReduceNoOP``.
     """
+
+    # The output is zeroed and then only accumulated into, so the caller's
+    # buffer can be written directly instead of copied into afterwards.
+    writes_output_from_zero = True
 
     def __init__(
         self,
@@ -98,9 +124,12 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # Symmetric int4 weights only: the kernel consumes synthesized zero
-        # points and has no path for checkpoint zero points.
-        return activation_key is None and weight_key in (kInt4Static, kInt4Static32)
+        return activation_key is None and weight_key in (
+            kInt4Static,
+            kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -178,14 +207,23 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         gate_up_out = scratch[: rows * gate_up].view(rows, gate_up)
         act_out = scratch[rows * gate_up : rows * (gate_up + act_n)].view(rows, act_n)
 
-        # BLOCK_SIZE_M=1 for decode (no padding waste), 4 for prefill.
-        block_size_m = 1 if M <= 4 else 4
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids,
-            block_size_m,
-            global_num_experts,
-            expert_map,
-        )
+        # BLOCK_SIZE_M=1 for decode (no padding waste, no alignment kernels),
+        # 4 for prefill. Decode with speculative tokens reaches 24 rows (6
+        # sequences x 4); there block 1 is still faster: TP4 MTP k=3, step
+        # 35.4 -> 33.9 ms at 4 users and 44.1 -> 41.2 ms at 6.
+        block_size_m = 1 if M <= 24 else 4
+        if block_size_m == 1 and expert_map is None:
+            sorted_token_ids, num_tokens_post_padded = _identity_routing(
+                rows, hidden_states.device
+            )
+            expert_ids = topk_ids.reshape(-1).to(torch.int32)
+        else:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids,
+                block_size_m,
+                global_num_experts,
+                expert_map,
+            )
 
         if (
             self._empty_topk_weights is None
@@ -197,7 +235,7 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         topk_weights_f32 = topk_weights.reshape(-1).float()
         no_topk_weights = self._empty_topk_weights
 
-        gate_up_out.zero_()
+        torch._foreach_zero_([gate_up_out, output])
         ops.moe_gptq_gemm_rdna3(
             hidden_states,
             gate_up_out,
@@ -211,15 +249,22 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             top_k,
             block_size_m,
             apply_router_weight_on_input,
+            use_v2_format=True,
         )
 
-        self.activation(activation, act_out, gate_up_out)
+        # Given [gate | up], the kernel applies SiLU-and-mul as it loads it.
+        fuse_act = (
+            activation == MoEActivation.SILU
+            and hidden_states.dtype == torch.float16
+            and gate_up == 2 * act_n
+        )
+        if not fuse_act:
+            self.activation(activation, act_out, gate_up_out)
 
         # output_topk=top_k makes the kernel accumulate into out[token_id],
         # fusing the top-k reduction into the atomic write-back.
-        output.zero_()
         ops.moe_gptq_gemm_rdna3(
-            act_out,
+            gate_up_out if fuse_act else act_out,
             output,
             w2,
             self.w2_scale,
@@ -232,4 +277,5 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             block_size_m,
             not apply_router_weight_on_input,
             output_topk=top_k,
+            use_v2_format=True,
         )

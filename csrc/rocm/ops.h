@@ -42,7 +42,48 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor expert_ids,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
-                         int64_t output_topk);
+                         int64_t output_topk, bool use_v2_format);
+
+void moe_octw3_gemm_rdna3(torch::Tensor a, torch::Tensor c, torch::Tensor w,
+                          torch::Tensor scales, torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk, int64_t had);
+
+void octw3_rotate_rdna3(torch::Tensor x, torch::Tensor y, bool silu_mul,
+                        int64_t had);
+
+void moe_octw3_wmma_gemm_rdna3(
+    torch::Tensor a, torch::Tensor c, torch::Tensor w, torch::Tensor scales,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t a_div, int64_t output_topk, int64_t block_size_m);
+
+void qsa_index_scores_rdna3(torch::Tensor q, torch::Tensor k_cache,
+                            torch::Tensor page_table,
+                            torch::Tensor token_to_req,
+                            torch::Tensor query_positions,
+                            torch::Tensor sequence_lengths,
+                            torch::Tensor visible, torch::Tensor logits,
+                            int64_t compress_ratio, double divisor);
+
+std::vector<torch::Tensor> qwen4_hc_combine_mix(
+    const torch::Tensor& h, const torch::Tensor& block_out,
+    const torch::Tensor& inj, const torch::Tensor& norm_w,
+    const torch::Tensor& wd, const torch::Tensor& wu, double eps);
+
+std::vector<torch::Tensor> qwen4_hc_mix_xn(const torch::Tensor& xn,
+                                           const torch::Tensor& wd,
+                                           const torch::Tensor& wu);
+
+std::vector<torch::Tensor> qwen4_hc_up_mix(const torch::Tensor& dl,
+                                           const torch::Tensor& xn,
+                                           const torch::Tensor& wu);
+
+torch::Tensor skinny_wmma_f16(const torch::Tensor& x, const torch::Tensor& w,
+                              int64_t split);
 
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,

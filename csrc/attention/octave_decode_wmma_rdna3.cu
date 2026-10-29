@@ -46,8 +46,7 @@ using octave::Format;
 using octave::LUT_ONE;
 using octave::R;
 constexpr int QG = 4;  // query tokens per block
-// Exact recent and leading positions (sparse window mode).
-[[maybe_unused]] constexpr int kWindow = 64;
+// Exact leading positions (sparse window mode).
 [[maybe_unused]] constexpr int kSinks = 4;
 [[maybe_unused]] constexpr int QROW = D + 8;  // padded LDS row (bank spread)
 [[maybe_unused]] constexpr float PSCALE = 256.0f;
@@ -127,7 +126,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int64_t smo, int64_t smh, int64_t sms, const int* __restrict__ idx,
     int64_t sidx, int topk, const int* __restrict__ qpos,
     const int* __restrict__ wtags, int wmask, const int* __restrict__ stags,
-    int smask) {
+    int smask, int window) {
   #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
@@ -299,13 +298,13 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         return (pb >= 0 && pb < num_phys_blocks) ? pb : -1;
       };
       // Exact-window tokens (attended by octave_window_attn instead): the
-      // last kWindow positions before the query, and the first kSinks.
+      // last `window` positions before the query, and the first kSinks.
       const int rpos = SP && wtags ? qpos[grp * QG + seg0] : 0;
       auto in_window = [&](int pos, int pb, int off) {
         const int t = irow[min(pos, topk - 1)];
         const int d = rpos - t;
         const int slot = pb * block_size + off;
-        return (d >= 0 && d < kWindow && wtags[slot & wmask] == slot) ||
+        return (d >= 0 && d < window && wtags[slot & wmask] == slot) ||
                (t >= 0 && t < kSinks && stags[slot & smask] == slot);
       };
       auto sel_ptr = [&](int pos) {
@@ -604,7 +603,8 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        int64_t num_kv_splits, int64_t fmt,
                        const std::optional<torch::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask, int64_t query_group) {
+                       const int* stags, int smask, int window,
+                       int64_t query_group) {
   using namespace octave_wmma;
   // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
   // only).
@@ -654,7 +654,7 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
             query.stride(0), query.stride(1), cache.stride(0),              \
             cache.stride(1), cache.stride(2), mid_o.stride(0),              \
             mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
-            wmask, stags, smask)
+            wmask, stags, smask, window)
   #define SQW(B, KC, T)          \
     do {                         \
       if (sp)                    \

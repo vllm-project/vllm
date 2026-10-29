@@ -30,6 +30,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms.rocm import on_gfx1x
 
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
@@ -38,6 +39,7 @@ from ..common.hyperconnection import (
 from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
+    hc_combine_and_mix,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
@@ -161,6 +163,17 @@ class GatedResidual(nn.Module):
         block's mix. Its combine with ``block_output`` is fused with this
         module's input RMSNorm.
         """
+        if self.use_combine and on_gfx1x():
+            return hc_combine_and_mix(
+                hidden_states,
+                prev_block_output,
+                prev_injection,
+                self.hc_norm.weight,
+                self.input_mix_weight_down_block_inject.weight,
+                self.input_mix_weight_up.weight,
+                self.config.rms_norm_eps,
+                self.hc_count,
+            )
         hidden_states, xn = hc_combine_norm(
             hidden_states,
             prev_block_output,

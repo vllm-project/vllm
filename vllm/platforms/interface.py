@@ -1291,6 +1291,14 @@ class Platform:
         return False
 
     @classmethod
+    def use_custom_allreduce_graph_registration(cls) -> bool:
+        """Returns if the buffers a cuda graph captures can be IPC-registered, so
+        that captured all reduces read the input tensor in place instead of
+        copying it into the pre-registered buffer.
+        """
+        return True
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         """Returns True if we register attention as one giant opaque custom op
         on the current platform

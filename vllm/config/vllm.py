@@ -2696,6 +2696,18 @@ class VllmConfig:
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
 
+        # The jart all-reduce + RMSNorm fusion only pays off below its size cap.
+        import vllm.envs as envs
+
+        if envs.VLLM_JART_AR and envs.VLLM_JART_AR_FUSE and self.model_config:
+            from vllm.distributed.device_communicators.jart_all_reduce import (
+                jart_fusion_max_tokens,
+            )
+
+            max_token_num = jart_fusion_max_tokens(self.model_config.get_hidden_size())
+            if compile_range_end is not None and 1 < max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
+
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
                 compilation_config.pass_config.rope_kvcache_fusion_max_token_num

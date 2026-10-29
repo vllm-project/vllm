@@ -382,6 +382,19 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/attention/octave_decode_mfma_cdna.cu"
     )
   endif()
+  # RDNA3 per-token-head INT8/INT4 attention (prefill, decode, fused
+  # reshape_and_cache), gfx1100.
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    list(APPEND VLLM_EXT_SRC
+      "csrc/attention/rdna3_torch_bindings.cpp"
+      "csrc/attention/paged_prefill_attn_rdna3_v2_int8.cu"
+      "csrc/attention/paged_prefill_attn_rdna3_v2_int4.cu"
+      "csrc/attention/reshape_cache_int4_rdna3.cu"
+      "csrc/attention/pth_decode_int4_rdna3.cu"
+      "csrc/attention/pth_decode_int8_rdna3.cu"
+      "csrc/attention/pth_decode_int8_rdna3_wmma.cu"
+    )
+  endif()
 
   message(STATUS "Enabling C extension.")
   define_extension_target(
@@ -1652,6 +1665,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/moe_octw3_rdna3.cu"
+      "csrc/rocm/moe_octw3_wmma_rdna3.cu"
+      "csrc/rocm/qwen4_hc_rdna3.cu"
+      "csrc/rocm/qsa_index_rdna3.cu"
+      "csrc/rocm/skinny_wmma_rdna3.cu"
+      "csrc/rocm/jart_ar.cu"
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
   endif()
 

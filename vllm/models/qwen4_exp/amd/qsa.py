@@ -11,7 +11,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.cache import CacheDType
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -75,9 +76,13 @@ def _octave_mid_o_capacity(vllm_config: VllmConfig) -> int:
 
 # Exact window of the Octave QSA cache: fp16 shadow tables (entries, powers of
 # two) of every stored token and of each sequence's leading positions; the
-# kernels keep the last 64 and the first 4 selected positions exact.
+# kernels keep the last `window` and the first 4 selected positions exact.
 _OCTAVE_WINDOW_ENTRIES = 16384
 _OCTAVE_SINK_ENTRIES = 2048
+_OCTAVE_WINDOW = 64
+# The MTP draft layer copies from recent context and loses ~15% of its accepted
+# tokens per step when positions 64-1000 back are read at 3 bits.
+_OCTAVE_DRAFT_WINDOW = rocm_octave.MAX_EXACT_WINDOW
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -107,12 +112,25 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
             current_workspace_manager().get_simultaneous(((numel,), torch.float32))
 
 
+_QSA_DTYPES = (torch.bfloat16, torch.float16)
 _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "octave_k3v4",
     "octave_k3v3",
     "octave_k3v3_compact",
 )
-_QSA_CACHE_DTYPES: tuple[CacheDType, ...] = ("auto", "bfloat16", *_OCTAVE_CACHE_DTYPES)
+_QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
+    "auto",
+    "bfloat16",
+    "float16",
+    *_OCTAVE_CACHE_DTYPES,
+)
+
+
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType:
+    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
+        return "auto"
+    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
@@ -123,7 +141,7 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     sparse decode kernel over the selected positions.
     """
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = list(_QSA_CACHE_DTYPES)
 
     @classmethod
@@ -166,8 +184,32 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     supports_dcp: bool = False
     supports_pcp: bool = False
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        *args,
+        **kwargs,
+    ) -> None:
+        # FlashAttentionImpl rejects quantized caches it cannot read; QSA
+        # reads Octave with its own kernel.
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            "auto" if kv_cache_dtype in _OCTAVE_CACHE_DTYPES else kv_cache_dtype,
+            *args,
+            **kwargs,
+        )
+        self.kv_cache_dtype = kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         if self.dcp_world_size != 1:
@@ -176,7 +218,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             )
         if self.kv_cache_dtype not in _QSA_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or Octave main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP16 or Octave main KV cache"
             )
         self.supports_quant_query_input = False
         self.octave_fmt: rocm_octave.OctaveFormat | None = None
@@ -194,6 +236,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             )
             self._octave_capacity = _octave_mid_o_capacity(vllm_config)
             self._octave_positions: torch.Tensor | None = None
+            self.octave_window = _OCTAVE_WINDOW
             device = torch.device("cuda", torch.accelerator.current_device_index())
             dtype = vllm_config.model_config.dtype
             row = (self.num_kv_heads, 2 * self.head_size)
@@ -327,13 +370,14 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 self._wtags,
                 self._stab,
                 self._stags,
+                self.octave_window,
             )
             return output
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA requires BF16 Q/K/V")
+        if key_cache.dtype != query.dtype or query.dtype not in _QSA_DTYPES:
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16 Q/K/V")
 
         from .ops.qsa import qsa_sparse_paged_attention
 
@@ -369,11 +413,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         model_config = vllm_config.model_config
         if cache_config is None:
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
-        if model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        if model_config.dtype not in _QSA_DTYPES:
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
         if cache_config.cache_dtype not in _QSA_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or Octave main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP16 or Octave main KV cache"
             )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
@@ -452,15 +496,17 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         self.layer_name = f"{prefix}.attn"
         self.attn_type = AttentionType.DECODER
-        self.kv_cache_dtype = cache_config.cache_dtype
+        self.kv_cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
         if (
             self.kv_cache_dtype not in _OCTAVE_CACHE_DTYPES
-            and self.kv_cache_torch_dtype != torch.bfloat16
+            and self.kv_cache_torch_dtype != model_config.dtype
         ):
-            raise NotImplementedError("Qwen4Exp QSA requires BF16 cache storage")
+            raise NotImplementedError(
+                "Qwen4Exp QSA cache storage must match the model dtype"
+            )
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
@@ -478,6 +524,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             AttentionType.DECODER,
             None,
         )
+        if self.impl.octave_fmt is not None and layer_id >= config.num_hidden_layers:
+            self.impl.octave_window = _OCTAVE_DRAFT_WINDOW
         self.indexer = QSAIndexer(
             vllm_config=vllm_config,
             config=config,

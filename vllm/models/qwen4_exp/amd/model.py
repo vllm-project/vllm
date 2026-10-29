@@ -161,6 +161,11 @@ _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
 )
 
 
+_PLE_OFF = __import__("os").environ.get("VLLM_QWEN4_PLE_OFF") == "1"
+if _PLE_OFF:
+    print("ABLACION: PLE n-gram APAGADO", flush=True)
+
+
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation."""
 
@@ -179,6 +184,58 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
             self.experts.moe_config.skip_final_all_reduce = False
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
+        _keep_path = __import__("os").environ.get("VLLM_QWEN4_EXPERT_KEEP")
+        if _keep_path and "mtp" not in prefix:  # TEMPORAL poda emulada (no commitear)
+            L = extract_layer_index(prefix)
+            keep = torch.load(_keep_path, weights_only=False)["keep"][L]
+            mask = torch.full((config.num_experts,), -30000.0)
+            mask[keep] = 0.0
+            self.register_buffer("_keep_mask", mask, persistent=False)
+            gate, orig = self.gate, self.gate.forward
+
+            def _masked(x, _orig=orig, _m=self):
+                out = _orig(x)
+                lg = out[0] if isinstance(out, tuple) else out
+                lg = lg + _m._keep_mask.to(lg.dtype)
+                return (lg, *out[1:]) if isinstance(out, tuple) else lg
+
+            gate.forward = _masked
+            if L == 0:
+                print(f"PODA EMULADA: {_keep_path}", flush=True)
+        self._cap_dir = __import__("os").environ.get("VLLM_QWEN4_MOE_CAPTURE")
+        if self._cap_dir and "mtp" not in prefix:  # TEMPORAL captura (no commitear)
+            self._cap_L = extract_layer_index(prefix)
+            self._cap_x, self._cap_lg, self._cap_n = [], [], 0
+            self._cap_max = int(
+                __import__("os").environ.get("VLLM_QWEN4_MOE_CAPTURE_TOK", "65536")
+            )
+            from vllm.distributed import get_tensor_model_parallel_rank
+
+            self._cap_rank0 = get_tensor_model_parallel_rank() == 0
+        else:
+            self._cap_dir = None
+
+    def forward(self, hidden_states, already_sequence_parallel=False):
+        if (
+            self._cap_dir
+            and self._cap_rank0
+            and self._cap_n < self._cap_max
+            and __import__("os").path.exists(f"{self._cap_dir}/ON")
+        ):
+            x = hidden_states.view(-1, hidden_states.shape[-1])
+            lg = self.gate(x)[0]
+            self._cap_x.append(x.detach().to(torch.float16).cpu())
+            self._cap_lg.append(lg.detach().float().cpu())
+            self._cap_n += x.shape[0]
+            if self._cap_n >= self._cap_max:
+                torch.save(
+                    {"x": torch.cat(self._cap_x), "logits": torch.cat(self._cap_lg)},
+                    f"{self._cap_dir}/capa{self._cap_L:02d}.pt",
+                )
+                self._cap_x, self._cap_lg = [], []
+                print(f"CAPTURA capa {self._cap_L} hecha", flush=True)
+        return super().forward(hidden_states, already_sequence_parallel)
+
 
 
 class Qwen4ExpDecoderLayer(nn.Module):
@@ -257,7 +314,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
             hidden_size=config.hidden_size,
-            params_dtype=torch.bfloat16,
+            params_dtype=torch.get_default_dtype(),
             hc_lowrank=config.hc_lowrank,
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,
@@ -294,12 +351,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = self.ple(
-                hidden_states,
-                input_ids,
-                query_start_loc,
-                ngram_context,
-            )
+            if not _PLE_OFF:  # TEMPORAL ablación n-gram (no commitear)
+                hidden_states = self.ple(
+                    hidden_states,
+                    input_ids,
+                    query_start_loc,
+                    ngram_context,
+                )
 
         # Fuse a pending combine with this HC module's mix when possible.
         if prev_block_output is not None and prev_injection is not None:
@@ -459,7 +517,7 @@ class Qwen4ExpModel(nn.Module):
             hc_config = HyperConnectionConfig(
                 hc_count=config.hc_count,
                 hidden_size=config.hidden_size,
-                params_dtype=torch.bfloat16,
+                params_dtype=torch.get_default_dtype(),
                 hc_lowrank=config.hc_lowrank,
                 rms_norm_eps=config.rms_norm_eps,
                 hc_per_branch_norm=True,
@@ -650,6 +708,161 @@ class Qwen4ExpModel(nn.Module):
             mapper=mapper,
         )
         return loaded
+
+
+def _apaga_neuronas(model: nn.Module) -> None:
+    """TEMPORAL (no commitear): poda de neuronas emulada; escala 0 en gate y up."""
+    path = __import__("os").environ.get("VLLM_QWEN4_NEURON_KEEP")
+    if not path:
+        return
+    from vllm.distributed import (
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+    )
+
+    keep = torch.load(path, weights_only=False)["neuronas"]  # bool [48, 512, 640]
+    r, tp = get_tensor_model_parallel_rank(), get_tensor_model_parallel_world_size()
+    n = 0
+    for name, mod in model.named_modules():
+        if not isinstance(mod, Qwen4ExpSparseMoeBlock) or "mtp" in name:
+            continue
+        L = extract_layer_index(name)
+        sc = next(
+            m.w13_weight_scale
+            for m in mod.experts.modules()
+            if hasattr(m, "w13_weight_scale")
+        )  # [E, 2*I_local, grupos]
+        il = sc.shape[1] // 2
+        k = keep[L][:, r * il : (r + 1) * il].to(sc.device)  # [512, I_local]
+        off = (~k).to(sc.dtype)[:, :, None]
+        E = k.shape[0]
+        sc.data[:E, :il] *= 1 - off
+        sc.data[:E, il:] *= 1 - off
+        n += 1
+    print(f"NEURONAS APAGADAS: {path} en {n} capas (rango {r}/{tp})", flush=True)
+
+
+def _octave_w3(model: nn.Module) -> None:
+    """TEMPORAL (no commitear): Octave-W3 emulado en los expertos conservados.
+
+    W4 -> Lloyd-Max 3 bits por grupo de 32 (con Hadamard por bloques) -> W4 otra vez.
+    """
+    import os
+
+    path = os.environ.get("VLLM_QWEN4_OCTW3")
+    if not path:
+        return
+    modo = os.environ.get("VLLM_QWEN4_OCTW3_MODE", "had")
+    keep = torch.load(path, weights_only=False)["keep"]
+    sh = None
+    lv = None
+
+    def unpack(x):
+        return ((x.unsqueeze(-1) >> sh) & 0xF).flatten(-2)
+
+    def had(n, dev):
+        H = torch.ones(1, 1, device=dev, dtype=torch.float32)
+        while H.shape[0] < n:
+            H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+        return H / n**0.5
+
+    def lloyd3(W):
+        N, K = W.shape
+        g = W.view(N, -1, 32)
+        rms = g.pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-8)
+        best = berr = None
+        for f in (0.8, 0.9, 1.0, 1.1, 1.2):
+            sc = (rms * f).half().float()
+            q = lv[(g / sc).unsqueeze(-1).sub(lv).abs().argmin(-1)] * sc
+            e = (q - g).pow(2).sum(-1, keepdim=True)
+            best = q if best is None else torch.where(e < berr, q, best)
+            berr = e if berr is None else torch.minimum(e, berr)
+        return best.view(N, K)
+
+    def proc(qw, sc, zp, e, hb):
+        # qw [N, K/8], sc [N, K/32], zp [N/8, K/32]
+        q = unpack(qw).float()
+        z = unpack(zp.t().contiguous()).t().float()
+        N, K = q.shape
+        W = ((q.view(N, -1, 32) - z[:, :, None]) * sc.float()[:, :, None]).view(N, K)
+        if modo == "had":
+            H = had(hb, W.device)
+            W = (
+                lloyd3((W.view(N, -1, hb) @ H).view(N, K)).view(N, -1, hb) @ H.t()
+            ).view(N, K)
+        g = W.view(N, -1, 32)
+        lo, hi = g.min(-1).values, g.max(-1).values
+        s2 = ((hi - lo) / 15).clamp_min(1e-8).half()
+        z2 = (-lo / s2.float()).round().clamp(0, 15)
+        q2 = (
+            (g / s2.float()[:, :, None] + z2[:, :, None])
+            .round()
+            .clamp(0, 15)
+            .view(N, K)
+        )
+        qw.copy_(_pk(q2, sh))
+        sc.copy_(s2)
+        zp.copy_(_pk(z2.t().contiguous(), sh).t().contiguous())
+
+    n = 0
+    for name, mod in model.named_modules():
+        if not isinstance(mod, Qwen4ExpSparseMoeBlock) or "mtp" in name:
+            continue
+        L = extract_layer_index(name)
+        ex = next(m for m in mod.experts.modules() if hasattr(m, "w13_weight_packed"))
+        if sh is None:
+            dev = ex.w13_weight_packed.device
+            sh = torch.arange(0, 32, 4, dtype=torch.int32, device=dev)
+            lv = torch.tensor(
+                [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520],
+                device=dev,
+                dtype=torch.float32,
+            )
+        for e in keep[L]:
+            proc(
+                ex.w13_weight_packed.data[e],
+                ex.w13_weight_scale.data[e],
+                ex.w13_weight_zero_point.data[e],
+                e,
+                128,
+            )
+            proc(
+                ex.w2_weight_packed.data[e],
+                ex.w2_weight_scale.data[e],
+                ex.w2_weight_zero_point.data[e],
+                e,
+                32,
+            )
+        n += 1
+    print(f"OCTAVE-W3 EMULADO ({modo}): {path} en {n} capas", flush=True)
+
+
+def _router_curado(model: nn.Module) -> None:
+    """TEMPORAL (no commitear): sustituye W_gate por el router curado {capa: [E, H]}."""
+    import os
+
+    path = os.environ.get("VLLM_QWEN4_GATE_OVERRIDE")
+    if not path:
+        return
+    res = torch.load(path, weights_only=False)
+    n = 0
+    for name, mod in model.named_modules():
+        if not isinstance(mod, Qwen4ExpSparseMoeBlock) or "mtp" in name:
+            continue
+        L = extract_layer_index(name)
+        if L in res:
+            w = mod.gate.weight
+            w.data.copy_(res[L].to(w.device, w.dtype))
+            n += 1
+    print(f"ROUTER CURADO: {path} en {n} capas", flush=True)
+
+
+def _pk(q: torch.Tensor, sh: torch.Tensor) -> torch.Tensor:
+    """[..., K] enteros 0..15 -> [..., K/8] int32 (nibble bajo primero)."""
+    q = q.to(torch.int64).view(*q.shape[:-1], -1, 8)
+    v = (q << sh.to(torch.int64)).sum(-1)
+    v = torch.where(v >= 2**31, v - 2**32, v)
+    return v.to(torch.int32)
 
 
 class Qwen4ExpForCausalLM(
@@ -856,6 +1069,11 @@ class Qwen4ExpForCausalLM(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_top_k_logits(
+        self, hidden_states: torch.Tensor, k: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.logits_processor.get_top_k_tokens(self.lm_head, hidden_states, k)
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         return self.model._mtp_hidden_buffer
@@ -1075,7 +1293,11 @@ class Qwen4ExpForConditionalGeneration(
             self,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(weights, mapper=mapper)
+        loaded = loader.load_weights(weights, mapper=mapper)
+        _apaga_neuronas(self)  # TEMPORAL (no commitear): una vez, con todo cargado
+        _octave_w3(self)
+        _router_curado(self)
+        return loaded
 
     @classmethod
     def get_mamba_state_dtype_from_config(
