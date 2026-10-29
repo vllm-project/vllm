@@ -963,6 +963,10 @@ class EngineCore:
                 self._reset_caches()
             if preparing:
                 self.release_kv_cache_memory()
+                # The scheduler-side connector stops before the workers release
+                # what it uses, and restarts after the workers rebuild it.
+                if (kv_connector := self.scheduler.get_kv_connector()) is not None:
+                    kv_connector.checkpoint_prepare()
                 self.collective_rpc("checkpoint_prepare")
                 self.collective_rpc("synchronize_device")
                 self._checkpoint_state = CheckpointState.PREPARED
@@ -2312,6 +2316,14 @@ class EngineCoreProc(EngineCore):
             return "Preparing for a checkpoint requires --enable-sleep-mode"
         if self.model_executor.is_sleeping:
             return "Preparing for a checkpoint requires an awake engine"
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None and not kv_connector.supports_checkpoint(
+            self.vllm_config
+        ):
+            return (
+                f"{type(kv_connector).__name__} does not support process "
+                "checkpoints with this configuration"
+            )
         self._checkpoint_state = CheckpointState.PREPARING
         try:
             self.pause_generation(mode=mode, clear_cache=False)
@@ -2333,6 +2345,8 @@ class EngineCoreProc(EngineCore):
         self._checkpoint_state = CheckpointState.RESTORING
         try:
             self.collective_rpc("checkpoint_restore")
+            if (kv_connector := self.scheduler.get_kv_connector()) is not None:
+                kv_connector.checkpoint_restore()
             self.wake_up(["kv_cache"])
         except Exception as e:
             self._fail_checkpoint(e)

@@ -211,6 +211,14 @@ class KVConnectorBase_V1(ABC):
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
 
+    @classmethod
+    def supports_checkpoint(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether a process checkpoint of an engine with this connector and
+        config can be restored, with `checkpoint_prepare` and
+        `checkpoint_restore` implemented as needed. The engine refuses to
+        prepare otherwise."""
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -234,6 +242,20 @@ class KVConnectorBase_V1(ABC):
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    def checkpoint_prepare(self) -> None:
+        """Release what a process checkpoint must not contain, such as
+        transports and peer state. Called on the scheduler-side instance, then
+        on every worker-side instance, once the engine has drained and
+        released its KV cache."""
+        return
+
+    def checkpoint_restore(self) -> None:
+        """Rebuild what `checkpoint_prepare` released, either in a process
+        restored from the checkpoint or in the process that prepared. Called
+        on every worker-side instance, then on the scheduler-side instance,
+        before the KV cache wakes up."""
+        return
 
     # ==============================
     # Worker-side methods

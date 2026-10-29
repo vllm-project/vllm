@@ -232,6 +232,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
+    def supports_checkpoint(cls, vllm_config: "VllmConfig") -> bool:
+        children = cls._get_connector_classes_and_configs(vllm_config)
+        return bool(children) and all(
+            child.supports_checkpoint(config) for child, config in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
@@ -268,6 +275,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def restore_kv_caches(self) -> None:
         for c in self._connectors:
             c.restore_kv_caches()
+
+    def checkpoint_prepare(self) -> None:
+        for c in self._connectors:
+            c.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        for c in self._connectors:
+            c.checkpoint_restore()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:

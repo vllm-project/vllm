@@ -874,15 +874,22 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.model_executor.is_sleeping = False
     core._reset_caches = MagicMock()
     core.reject_new_requests = False
-    core.scheduler.get_kv_connector.return_value = None
+    kv_connector = MagicMock()
+    kv_connector.supports_checkpoint.return_value = True
+    core.scheduler.get_kv_connector.return_value = kv_connector
+    # Record the scheduler-side connector calls among the executor calls.
+    core.model_executor.attach_mock(kv_connector, "kv_connector")
+    core.model_executor.get_kv_connector_handshake_metadata.return_value = []
 
     assert core.checkpoint_prepare("wait") is None
     assert core.checkpoint_prepare("wait") is None
     assert core.checkpoint_state() == (CheckpointState.PREPARED, None)
     assert core.reject_new_requests
     assert _executor_calls(core) == [
+        "kv_connector.supports_checkpoint",
         "synchronize_device",
         "discard",
+        "kv_connector.checkpoint_prepare",
         "checkpoint_prepare",
         "synchronize_device",
     ]
@@ -891,9 +898,31 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.checkpoint_restore()
     core.checkpoint_restore()
     assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
-    assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
+    assert _executor_calls(core) == [
+        "checkpoint_restore",
+        "kv_connector.checkpoint_restore",
+        "wake_up",
+        "get_kv_connector_handshake_metadata",
+    ]
     core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
     assert not core.reject_new_requests
+
+
+def test_checkpoint_prepare_refuses_unsupported_kv_connector():
+    """A KV connector whose process checkpoint cannot be restored makes the
+    engine refuse to prepare, with nothing paused."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    kv_connector = MagicMock()
+    kv_connector.supports_checkpoint.return_value = False
+    core.scheduler.get_kv_connector.return_value = kv_connector
+
+    refusal = core.checkpoint_prepare("wait")
+    assert refusal is not None and "does not support process checkpoints" in refusal
+    kv_connector.supports_checkpoint.assert_called_once_with(core.vllm_config)
+    assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
+    core.scheduler.set_pause_state.assert_not_called()
 
 
 @pytest.mark.parametrize("deferred", [False, True])
