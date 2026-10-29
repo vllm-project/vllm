@@ -7,9 +7,10 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, DeviceConfig, ModelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import (
     BatchDescriptor,
     DPMetadata,
@@ -26,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCaptureLayout,
     RoutedExpertsCapturer,
     RoutedExpertsSink,
     bind_routed_experts_capturer,
@@ -123,7 +125,8 @@ def _full_attention_kv_group(
 
 
 @pytest.mark.parametrize("eplb_enabled", [False, True])
-def test_base_router_capture_pre_eplb_mapping(eplb_enabled):
+@pytest.mark.parametrize("layout", [None, RoutedExpertsCaptureLayout(((0, 2),))])
+def test_base_router_capture_pre_eplb_mapping(eplb_enabled, layout):
     eplb_state = None
     if eplb_enabled:
         eplb_state = EplbLayerState()
@@ -135,18 +138,25 @@ def test_base_router_capture_pre_eplb_mapping(eplb_enabled):
     router = _make_router(eplb_state)
 
     captured = []
+    layouts = []
 
     def capture_fn(ids):
         captured.append(ids.clone())
 
-    router.set_capture_fn(capture_fn)
+    def capture_with_layout(ids, *, layout):
+        layouts.append(layout)
+        capture_fn(ids)
+
+    router.set_capture_fn(capture_fn if layout is None else capture_with_layout)
     topk_weights, topk_ids = router.select_experts(
         hidden_states=torch.empty(1),
         router_logits=torch.empty(1),
+        capture_layout=layout,
     )
 
     assert topk_weights.shape == topk_ids.shape
     assert len(captured) == 1
+    assert layouts == ([] if layout is None else [layout])
     assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
 
@@ -784,3 +794,237 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+@pytest.fixture
+def capturer(tmp_path, monkeypatch):
+    from transformers import MixtralConfig
+
+    from vllm.platforms.cpu import CpuPlatform
+
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CpuPlatform())
+    model_path = tmp_path / "mixtral"
+    MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        num_hidden_layers=4,
+        num_local_experts=16,
+        num_experts_per_tok=2,
+    ).save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            dtype="float32",
+            max_model_len=32,
+            enforce_eager=True,
+            skip_tokenizer_init=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+    capturer = RoutedExpertsCapturer(8, config)
+    capturer.device_buffer.fill_(-1)
+    return capturer
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected_rows"),
+    [
+        (((7, 7),), list(range(7, 14))),
+        (((0, 3), (7, 2)), [0, 1, 2, 7, 8]),
+        ((), []),
+        (((14, 0),), []),
+    ],
+)
+def test_explicit_capture_layout_selects_padded_dp_block(
+    ranges, expected_rows, capturer, monkeypatch
+):
+    def no_forward_context():
+        raise AssertionError("Explicit layouts must not infer rows")
+
+    monkeypatch.setattr(f"{_REC_MODULE}.get_forward_context", no_forward_context)
+    ids = torch.arange(28, dtype=torch.int32).reshape(14, 2)
+    layout = RoutedExpertsCaptureLayout(ranges)
+
+    capturer.capture(layer_id=0, topk_ids=ids, layout=layout)
+
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[: len(expected_rows), 0] = ids[expected_rows]
+    torch.testing.assert_close(capturer.device_buffer, expected)
+
+
+def test_explicit_capture_layout_overwrites_previous_rows(capturer):
+    ids = torch.arange(14, dtype=torch.int32).reshape(7, 2)
+    capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((0, 7),)))
+    previous = capturer.snapshot_routing_data(7)
+
+    capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((5, 2),)))
+    current = capturer.snapshot_routing_data(2)
+
+    assert current.shape == (2, 4, 2)
+    torch.testing.assert_close(current[:, 0], ids[5:].to(capturer.output_dtype))
+    torch.testing.assert_close(previous[:, 0], ids.to(capturer.output_dtype))
+    assert (capturer.device_buffer[:, 1:] == -1).all()
+
+
+def test_explicit_capture_layout_preserves_microbatch_rows(capturer):
+    ids = torch.arange(10, dtype=torch.int32).reshape(5, 2)
+    with patch(f"{_REC_MODULE}.dbo_current_ubatch_token_offset", side_effect=[0, 3]):
+        capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((0, 3),)))
+        capturer.capture(0, ids, layout=RoutedExpertsCaptureLayout(((3, 2),)))
+
+    torch.testing.assert_close(capturer.device_buffer[:5, 0], ids)
+    assert (capturer.device_buffer[5:, 0] == -1).all()
+    assert (capturer.device_buffer[:, 1:] == -1).all()
+
+
+def _capture_group(rank=1, world_size=2):
+    from vllm.platforms.cpu import CpuPlatform
+
+    with (
+        patch("torch.distributed.get_rank", return_value=rank),
+        patch("torch.distributed.new_group"),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        return GroupCoordinator([list(range(world_size))], rank, "gloo", False)
+
+
+@pytest.mark.parametrize("rows", [0, 3])
+def test_explicit_capture_layout_single_rank_needs_no_communicator(rows, capturer):
+    group = _capture_group(rank=0, world_size=1)
+    ids = torch.arange(rows * 2, dtype=torch.int32).reshape(rows, 2)
+    layout = RoutedExpertsCaptureLayout(((0, rows),), group, (rows,))
+
+    assert group.device_communicator is None
+    capturer.capture(0, ids, layout=layout)
+
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[:rows, 0] = ids
+    torch.testing.assert_close(capturer.device_buffer, expected)
+
+
+@pytest.mark.parametrize(
+    ("shard_sizes", "ranges", "expected_rows"),
+    [
+        ((3, 2), ((0, 5),), [0, 1, 2, 3, 4]),
+        ((7, 7), ((0, 3), (7, 2)), [0, 1, 2, 7, 8]),
+        ((7, 7), ((7, 2), (0, 3)), [7, 8, 0, 1, 2]),
+        ((2, 0), (), []),
+        ((0, 2), ((0, 2),), [0, 1]),
+        ((0, 0), (), []),
+    ],
+)
+@pytest.mark.parametrize("rank", [0, 1])
+def test_explicit_capture_layout_gathers_and_skips_internal_padding(
+    shard_sizes, ranges, expected_rows, rank, capturer
+):
+    gather_group = _capture_group(rank)
+    rows = torch.arange(sum(shard_sizes), dtype=torch.int32)
+    ids = torch.stack((rows, (rows + 1) % 16))
+    peers = ids.T.split(shard_sizes)
+    local = peers[rank]
+    if len(local) > 1:
+        assert not local.is_contiguous()
+    layout = RoutedExpertsCaptureLayout(ranges, gather_group, shard_sizes)
+
+    def gather(input_, dim, sizes):
+        assert dim == 0
+        assert sizes == list(shard_sizes)
+        assert input_.is_contiguous()
+        torch.testing.assert_close(input_, local)
+        return torch.cat(peers)
+
+    with patch.object(gather_group, "all_gatherv", side_effect=gather) as collective:
+        capturer.capture(layer_id=0, topk_ids=local, layout=layout)
+
+    collective.assert_called_once()
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[: len(expected_rows), 0] = ids.T[expected_rows]
+    torch.testing.assert_close(capturer.device_buffer, expected)
+
+
+@pytest.mark.parametrize("span", [(1, 2), (-1, 1), (0, -1), (3, 0)])
+def test_explicit_capture_layout_rejects_invalid_source_rows(span, capturer):
+    with pytest.raises(ValueError, match="source range"):
+        capturer.capture(
+            0,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout((span,)),
+        )
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize(
+    ("sizes", "has_group", "message"),
+    [
+        ((2,), True, "group size"),
+        ((2, -1), True, "non-negative"),
+        ((2, 3), True, "local rows"),
+        ((2, 2), False, "require a gather group"),
+    ],
+)
+def test_capture_rejects_invalid_collective_layout_before_gather(
+    sizes, has_group, message, capturer
+):
+    group = _capture_group() if has_group else None
+    with (
+        patch.object(GroupCoordinator, "all_gatherv") as gather,
+        pytest.raises(ValueError, match=message),
+    ):
+        capturer.capture(
+            0,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, 2),), group, sizes),
+        )
+    gather.assert_not_called()
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize("layer_id", [-1, 4])
+def test_capture_layout_rejects_invalid_layer_before_collective(layer_id, capturer):
+    group = _capture_group()
+    with (
+        patch.object(group, "all_gatherv") as gather,
+        pytest.raises(IndexError, match="layer"),
+    ):
+        capturer.capture(
+            layer_id,
+            torch.ones((2, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, 4),), group, (2, 2)),
+        )
+    gather.assert_not_called()
+    assert (capturer.device_buffer == -1).all()
+
+
+@pytest.mark.parametrize(("offset", "rows"), [(0, 9), (1, 8)])
+def test_capture_layout_does_not_write_past_buffer_capacity(offset, rows, capturer):
+    with (
+        patch(f"{_REC_MODULE}.dbo_current_ubatch_token_offset", return_value=offset),
+        pytest.raises(ValueError, match="capacity"),
+    ):
+        capturer.capture(
+            0,
+            torch.ones((rows, 2), dtype=torch.int32),
+            layout=RoutedExpertsCaptureLayout(((0, rows),)),
+        )
+    assert (capturer.device_buffer == -1).all()
+
+
+def test_default_router_keeps_legacy_selection_signature():
+    class LegacyRouter(DummyRouter):
+        # Deliberately model a plugin implementing the pre-layout signature.
+        def _select_experts(  # type: ignore[override]
+            self,
+            hidden_states,
+            router_logits,
+            topk_indices_dtype=None,
+            *,
+            input_ids=None,
+        ):
+            return super()._select_experts(
+                hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
+            )
+
+    router = LegacyRouter(top_k=2, global_num_experts=16, eplb_state=None)
+    weights, ids = router.select_experts(torch.ones((2, 4)), torch.ones((2, 4)))
+    torch.testing.assert_close(weights, torch.ones((2, 2)))
+    torch.testing.assert_close(ids, torch.tensor([[11, 12], [13, 14]]))

@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import Protocol, runtime_checkable
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 class RoutedExpertsCaptureSource(Protocol):
     layer_id: int
     capture_fn: Callable[[torch.Tensor], None] | None
+
+
+@dataclass(frozen=True)
+class RoutedExpertsCaptureLayout:
+    """Restore this DP rank's rows; sizes and ranges stay fixed during graph replay."""
+
+    # Ordered (start, length) spans in input or rank-concatenated gathered rows.
+    source_ranges: tuple[tuple[int, int], ...]
+    # All group ranks participate, even with empty ranges. None skips gathering.
+    gather_group: GroupCoordinator | None = None
+    # Physical row counts in group order, agreed by all ranks; empty without a group.
+    # The backend must support the supplied sizes, including uneven/empty shards.
+    shard_sizes: tuple[int, ...] = ()
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -85,18 +99,68 @@ class RoutedExpertsCapturer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
+    def capture(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        *,
+        layout: RoutedExpertsCaptureLayout | None = None,
+    ) -> None:
+        """Record logical IDs using explicit spans or default row restoration."""
         if not 0 <= layer_id < self.device_buffer.shape[1]:
             raise IndexError(
                 f"routed-experts layer {layer_id} exceeds capture buffer "
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        ctx = get_forward_context()
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        if layout is None:
+            ctx = get_forward_context()
+            local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        else:
+            local_topk_ids = self._capture_with_layout(topk_ids, layout)
         offset = dbo_current_ubatch_token_offset()
+        if layout is not None and offset + len(local_topk_ids) > len(
+            self.device_buffer
+        ):
+            raise ValueError("routed-experts rows exceed capture buffer capacity")
         self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
             local_topk_ids
+        )
+
+    @staticmethod
+    def _capture_with_layout(
+        topk_ids: torch.Tensor, layout: RoutedExpertsCaptureLayout
+    ) -> torch.Tensor:
+        if layout.gather_group is not None:
+            world_size = layout.gather_group.world_size
+            if len(layout.shard_sizes) != world_size:
+                raise ValueError("capture shard_sizes must match gather group size")
+            if any(size < 0 for size in layout.shard_sizes):
+                raise ValueError("capture shard_sizes must be non-negative")
+            rank = layout.gather_group.rank_in_group
+            if topk_ids.shape[0] != layout.shard_sizes[rank]:
+                raise ValueError("capture local rows do not match shard_sizes")
+            if world_size > 1:
+                topk_ids = layout.gather_group.all_gatherv(
+                    topk_ids.contiguous(), dim=0, sizes=list(layout.shard_sizes)
+                )
+        elif layout.shard_sizes:
+            raise ValueError("capture shard_sizes require a gather group")
+
+        ranges = layout.source_ranges
+        if not ranges:
+            return topk_ids[:0]
+        if any(
+            start < 0 or length < 0 or start + length > len(topk_ids)
+            for start, length in ranges
+        ):
+            raise ValueError("capture source range exceeds available rows")
+        if len(ranges) == 1:
+            start, length = ranges[0]
+            return topk_ids.narrow(0, start, length)
+        return torch.cat(
+            [topk_ids.narrow(0, start, length) for start, length in ranges],
+            dim=0,
         )
 
     def _restore_local_topk_ids(
