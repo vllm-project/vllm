@@ -1579,6 +1579,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
+    "DSparkMiniMaxDraftModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
@@ -1909,6 +1914,18 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
+    "TransformersForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+        # TODO: Use a dense model once one opts into the Transformers MTP standard
+        is_available_online=False,
+    ),
+    "TransformersMoEForMTP": _HfExamplesInfo(
+        "zai-org/GLM-4.5",
+        speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
+    ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct"
     ),
