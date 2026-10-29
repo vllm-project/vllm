@@ -4471,3 +4471,13 @@ Aucune action moteur effectuée au redémarrage (autologon + Docker au logon ont
 **Q47 requalifiée** (user : « ça fait partie du package de l'issue, en fonction de ce qui sera décidé ») : le choix de modèle et de budget (Haiku sur les 200 $/mois Anthropic, prévenir Argumentum + 2025-Epita) n'est **pas un arbitrage séparé** — il se rend avec les résultats de #4434. Aucun engagement de crédit d'ici là.
 
 **Fourni à leur demande** : références de logs + commandes de reproduction, créneaux Swift propres (**10:00-16:00Z** et **après 22:00Z**, pic ~17-20Z), jauges à 18:05Z (KV 31,1 %, 1 en cours, 0 en attente, 0 préemption, GPU 0/1 80-81 %, GPU 2 libre). **Aucun run payant lancé, aucun déploiement GPU.**
+
+### Rectification (29/10 20:2xZ) — roo-extensions recroise mes chiffres et publie une mesure plus exacte que la mienne
+
+Preuve : [roo-extensions#4434 c.6504596191](https://github.com/jsboige/roo-extensions/issues/4434#issuecomment-6504596191). Trois réserves, **les trois fondées** :
+
+1. **`bestKB` est arrondi en base 1024** — je l'ai comparé à un plafond décimal (`15 * 1024 = 15 360`), ce qui mélange deux unités. Mon « 17,0-20,6 KB pour un plafond de 15,36 KB » est **mal posé**. Leur recroisement donne la bonne mesure, en octets : **`originalBytes` 17 377 → 21 126 o**, **`truncatedBytes` 14 878 → 15 341 o**, **perte brute 2 150 → 5 785 o par passe**, sur 6 troncatures vérifiées. La conclusion tient — et même mieux — mais avec leurs chiffres, pas les miens.
+2. **Le dénominateur « 17 passes » n'est PAS établi.** J'avais posé 17 = 16 replis + 1 succès, ce qui suppose que chaque événement correspond à une passe distincte du même process. Ni le nombre de passes, ni l'attribution aux branches/process n'est démontrée. À retirer de mes affirmations : les **comptes d'événements** (16, 8, 1, 4, 6) sont reproduits ; le **ratio** ne l'est pas.
+3. **Les horodatages du journal n'ont pas de TZ explicite** (`[2026-10-29 07:32:05]`). Je les ai écrits en les supposant UTC ; c'est une convention non vérifiée à la source, pas une mesure. Tant que ce n'est pas estampillé, toute conversion vers `Z` est une hypothèse.
+
+**Leçon (la même que celle du 08/10 sur les fuseaux, et elle se répète)** : j'ai raison sur le symptôme et faux sur l'instrument qui le prouve — deux fois dans la même journée, sur le même dossier. Ce qui a tranché, c'est la contre-mesure du propriétaire, pas ma déduction sur les octets d'un fichier. **Une taille arrondie et un plafond décimal ne se comparent pas ; un compte d'événements n'est pas un ratio de passes ; un horodatage sans TZ n'est pas de l'UTC.**
