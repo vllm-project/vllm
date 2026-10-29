@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from typing import Any
+
 import torch
 
-from vllm import CompletionOutput, RequestOutput
+from vllm import CompletionOutput, PromptType, RequestOutput, TextPrompt
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
+from vllm.inputs import EngineInput, tokens_input
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
@@ -23,6 +27,10 @@ class _Renderer:
 
 
 class _InputProcessor:
+    # Only read for beam allowlists, which these tests do not use.
+    vllm_config = None
+    generation_config_fields: dict[str, Any] = {}
+
     @staticmethod
     def resolve_watermarking(params) -> bool:
         return False
@@ -42,11 +50,13 @@ class _FakeOffline(BeamSearchOfflineMixin):
     def __init__(self) -> None:
         self.captured_params: list = []
 
-    def _preprocess_cmpl(self, prompts):
-        return [
-            {"type": "token", "prompt": "prompt", "prompt_token_ids": [1]}
-            for _ in prompts
-        ]
+    def _preprocess_cmpl(
+        self,
+        prompts: Sequence[PromptType],
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        return [tokens_input([1], prompt="prompt") for _ in prompts]
 
     def _render_and_run_requests(self, prompts, params, output_type, **kwargs):
         num_requests = len(list(prompts))
@@ -81,7 +91,7 @@ def test_offline_beam_search_disables_incremental_detokenization() -> None:
     serving = _FakeOffline()
     params = BeamSearchParams(beam_width=2, max_tokens=4)
 
-    serving.beam_search(["prompt"], params)
+    serving.beam_search([TextPrompt(prompt="prompt")], params)
 
     assert serving.captured_params, "expected the engine to be invoked at least once"
     assert all(not p.detokenize for p in serving.captured_params)
@@ -132,7 +142,7 @@ def test_structured_output_beam_params_disable_detokenization() -> None:
     )
     beams = [
         BeamSearchSequence(
-            orig_prompt={"type": "token", "prompt": "prompt", "prompt_token_ids": [1]},
+            orig_prompt=tokens_input([1], prompt="prompt"),
             tokens=[1, 3],
             logprobs=[],
         )
@@ -148,5 +158,7 @@ def test_structured_output_beam_params_disable_detokenization() -> None:
     )
 
     assert len(built) == len(beams)
-    assert all(entry is not None for entry in built)
-    assert all(not entry[0].detokenize for entry in built)
+    for entry in built:
+        assert entry is not None
+        beam_params, _ = entry
+        assert not beam_params.detokenize
