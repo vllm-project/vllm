@@ -86,7 +86,9 @@ def make_graph_capture_profiler(
             vllm_config.device_config.device_type
         ),
     )
-    return wrapper.profiler
+    # Serving creates wrapper.profiler only when a session starts. Capture
+    # needs the same settings without starting that session.
+    return wrapper.build_profiler()
 
 
 @contextmanager

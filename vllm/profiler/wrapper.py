@@ -430,9 +430,13 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Mark done even on failure, to avoid retrying every step.
         self._version_metadata_added = True
 
+    def build_profiler(self) -> torch.profiler.profile:
+        """Build one unstarted profiler from the current settings."""
+        return torch.profiler.profile(**self._profiler_kwargs)
+
     @override
     def _start(self) -> None:
-        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self.profiler = self.build_profiler()
         self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
         self.profiler.start()

@@ -839,8 +839,9 @@ class TestGraphCaptureProfiler:
             ),
             device_config=SimpleNamespace(device_type="xpu"),
         )
-        profiler = MagicMock()
-        wrapper = MagicMock(profiler=profiler)
+        built = MagicMock()
+        wrapper = MagicMock()
+        wrapper.build_profiler.return_value = built
 
         with (
             patch.object(
@@ -852,13 +853,56 @@ class TestGraphCaptureProfiler:
         ):
             result = graph_capture.make_graph_capture_profiler(config, subsystem)
 
-        assert result is profiler
+        assert result is built
+        wrapper.build_profiler.assert_called_once_with()
         capture_config = wrapper_cls.call_args.args[0]
         assert capture_config.torch_profiler_dir == "/traces/capture_traces"
         assert wrapper_cls.call_args.kwargs["worker_name"] == expected
         # Activities follow the runner device, not a hardcoded CUDA list.
         assert wrapper_cls.call_args.kwargs["activities"] == ["CPU", "XPU"]
         wrapper.start.assert_not_called()
+
+    def test_enabled_rank_returns_enterable_profiler(self):
+        """Rank 0 with capture enabled can enter the profiler it builds.
+
+        The wrapper does not create its profiler until a serving session
+        starts, so this must build a separate unstarted profiler.
+        """
+        config = MagicMock(
+            profiler_config=ProfilerConfig(
+                profiler="torch",
+                torch_profiler_dir="/traces",
+                capture_torch_profiler=True,
+            ),
+            device_config=SimpleNamespace(device_type="xpu"),
+        )
+        built = MagicMock()
+
+        with (
+            patch.object(
+                graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
+            ),
+            patch(
+                "vllm.profiler.wrapper.torch.profiler.profile", return_value=built
+            ) as profile,
+        ):
+            profiler = graph_capture.make_graph_capture_profiler(config)
+            with profiler:
+                pass
+
+        assert profiler is built
+        profile.assert_called_once()
+        kwargs = profile.call_args.kwargs
+        assert kwargs["schedule"] is None
+        assert kwargs["record_shapes"] is True
+        assert kwargs["with_stack"] is True
+        assert kwargs["activities"] == [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.XPU,
+        ]
+        built.__enter__.assert_called_once()
+        built.__exit__.assert_called_once()
+        built.start.assert_not_called()
 
     def test_capture_config_overrides(self):
         config = ProfilerConfig(
