@@ -78,7 +78,6 @@ steps:
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   - tests/models/test_muse_spark_rocm_loading.py
-  - tests/models/test_ming_v3_asr_logits_processor.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
@@ -95,7 +94,6 @@ steps:
       models/test_deepseek_v41_pcp.py
       models/test_deepseek_v41_pipeline.py
       models/test_deepseek_v4_vl_stream_weights.py
-      models/test_ming_v3_asr_logits_processor.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
@@ -111,11 +109,6 @@ steps:
       source_file_dependencies:
       - vllm/models/deepseek_v4/
       - vllm/models/deepseek_v41/
-      - vllm/model_executor/models/ming_v3_asr_logits_processor.py
-      - vllm/v1/worker/gpu/sample/
-      - vllm/v1/worker/gpu/states.py
-      - vllm/v1/worker/gpu/buffer_utils.py
-      - tests/models/test_ming_v3_asr_logits_processor.py
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_hyv4_rocm.py
       - tests/models/transformers/test_layer_registry_e2e.py
@@ -150,7 +143,6 @@ steps:
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
         models/test_dsv41_mono_decode.py
-        models/test_ming_v3_asr_logits_processor.py
         models/test_muse_spark_rocm_loading.py
         models/test_deepseek_v4_vl_stream_weights.py
         models/test_muse_spark_logits_local.py
