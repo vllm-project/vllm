@@ -210,6 +210,10 @@ def test_profiling_run_reserves_exchange_transient(
                         decode_context_parallel_size=1,
                         prefill_context_parallel_size=1,
                     ),
+                    scheduler_config=SimpleNamespace(
+                        max_num_seqs=4, max_num_batched_tokens=512
+                    ),
+                    num_speculative_tokens=0,
                 ),
             )
             m.setattr(sparse_indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
