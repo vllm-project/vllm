@@ -62,38 +62,77 @@ _ENGINE_TEARDOWN_S = 5.0
 # Time RPCs get to send their last responses once EngineCore has stopped;
 # whatever is still open after that (e.g. KV-event streams) is cancelled.
 _RPC_FLUSH_S = 5.0
-# How often to check whether the in-flight RPCs still have requests.
+# How often to check whether anything can still send EngineCore a request.
 _IDLE_POLL_S = 0.1
+# RPCs that stay open until the client or the server ends them. They carry no
+# request, so shutdown does not wait for them before stopping EngineCore.
+_SUBSCRIPTION_METHODS = frozenset({"SubscribeKvEvents"})
 
 
-async def _wait_for_requests(rpcs: asyncio.Future, async_llm: AsyncLLM) -> None:
-    """Return once ``rpcs`` is done or the RPCs have no request in flight.
+class _InflightRpcs(grpc.aio.ServerInterceptor):
+    """Counts the in-flight RPCs of one service, except subscriptions.
+
+    An RPC counts from the moment the server dispatches it, before its request
+    message is received, so one whose request is still arriving or being
+    preprocessed (tokenization, media fetch and processing), and is not yet
+    known to AsyncLLM, counts too. It stops counting when the RPC's task
+    finishes, whether or not its handler ran.
+    """
+
+    def __init__(self, service: str):
+        self.count = 0
+        self._prefix = f"/{service}/"
+
+    async def intercept_service(self, continuation, handler_call_details):
+        handler = await continuation(handler_call_details)
+        method = handler_call_details.method
+        if (
+            handler is not None
+            and method.startswith(self._prefix)
+            and method[len(self._prefix) :] not in _SUBSCRIPTION_METHODS
+        ):
+            # grpc.aio runs interceptors in the task that serves the RPC.
+            self.count += 1
+            asyncio.current_task().add_done_callback(self._done)
+        return handler
+
+    def _done(self, task: asyncio.Task) -> None:
+        self.count -= 1
+
+
+async def _wait_for_requests(
+    rpcs: asyncio.Future, async_llm: AsyncLLM, inflight: _InflightRpcs
+) -> None:
+    """Return once ``rpcs`` is done or nothing can still send EngineCore a request.
 
     EngineCore rejects every request it reads once its shutdown has started,
-    even one an RPC forwarded before SIGTERM, so it must keep running until
-    the requests are done. RPCs that carry none, such as KV-event streams, do
-    not hold it back. Idle has to hold on two polls in a row, which gives an
-    RPC accepted just before SIGTERM a poll interval to add its request.
+    even one an RPC forwarded before SIGTERM, so it must keep running while
+    an RPC other than a subscription is in flight or AsyncLLM still has a
+    request. Idle has to hold on two polls in a row, which covers an RPC that
+    gRPC accepted before SIGTERM but has not yet handed to its task.
     """
     idle = False
     while not rpcs.done():
-        was_idle, idle = idle, async_llm.get_num_unfinished_requests() == 0
+        was_idle = idle
+        idle = inflight.count == 0 and async_llm.get_num_unfinished_requests() == 0
         if was_idle and idle:
             return
         await asyncio.wait([rpcs], timeout=_IDLE_POLL_S)
 
 
-async def _drain_and_stop(server, async_llm: AsyncLLM, shutdown_timeout: int) -> None:
+async def _drain_and_stop(
+    server, async_llm: AsyncLLM, shutdown_timeout: int, inflight: _InflightRpcs
+) -> None:
     """Stop the gRPC server and AsyncLLM within ``--shutdown-timeout``.
 
     0 keeps the abort behavior: in-flight RPCs get ``_RPC_GRACE_S``, then
     EngineCore gets its default join. Otherwise the server refuses new RPCs at
-    once and EngineCore keeps serving until the in-flight requests are done;
-    RPCs still running at the deadline (``--shutdown-timeout``, but no less
-    than ``_RPC_GRACE_S``) are cancelled and abort their requests. EngineCore
-    then drains work that outlives an RPC, such as NIXL prefill blocks the
-    decode side has not read yet, until the same deadline plus
-    ``_ENGINE_TEARDOWN_S`` for teardown.
+    once and EngineCore keeps serving until the in-flight RPCs (``inflight``)
+    and their requests are done; RPCs still running at the deadline
+    (``--shutdown-timeout``, but no less than ``_RPC_GRACE_S``) are cancelled
+    and abort their requests. EngineCore then drains work that outlives an
+    RPC, such as NIXL prefill blocks the decode side has not read yet, until
+    the same deadline plus ``_ENGINE_TEARDOWN_S`` for teardown.
     """
     loop = asyncio.get_running_loop()
     if shutdown_timeout == 0:
@@ -107,7 +146,7 @@ async def _drain_and_stop(server, async_llm: AsyncLLM, shutdown_timeout: int) ->
     deadline = loop.time() + grace
     logger.info("Draining in-flight requests (shutdown_timeout=%ds)", shutdown_timeout)
     rpcs = asyncio.ensure_future(server.stop(grace=grace))
-    await _wait_for_requests(rpcs, async_llm)
+    await _wait_for_requests(rpcs, async_llm, inflight)
     remaining = max(deadline - loop.time(), 0.0)
     await loop.run_in_executor(
         None, partial(async_llm.shutdown, timeout=remaining + _ENGINE_TEARDOWN_S)
@@ -151,7 +190,11 @@ async def serve_grpc(args: argparse.Namespace):
     servicer = VllmEngineServicer(async_llm, start_time)
 
     # Create gRPC server
+    inflight = _InflightRpcs(
+        vllm_engine_pb2.DESCRIPTOR.services_by_name["VllmEngine"].full_name
+    )
     server = grpc.aio.server(
+        interceptors=[inflight],
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
@@ -239,7 +282,7 @@ async def serve_grpc(args: argparse.Namespace):
             health_servicer.set_not_serving()
         except Exception:  # broad: must not prevent server.stop() / shutdown()
             logger.warning("Failed to set health status to NOT_SERVING", exc_info=True)
-        await _drain_and_stop(server, async_llm, vllm_config.shutdown_timeout)
+        await _drain_and_stop(server, async_llm, vllm_config.shutdown_timeout, inflight)
         logger.info("Shutdown complete")
 
 

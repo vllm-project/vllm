@@ -3,6 +3,7 @@
 """Shutdown sequencing of the gRPC launcher (``_drain_and_stop``)."""
 
 import asyncio
+import contextlib
 import threading
 import time
 
@@ -18,7 +19,8 @@ class FakeAsyncLLM:
     """``shutdown(timeout)`` blocks like EngineCore's drain mode: it returns
     once no request is in flight, or counts as killed when the timeout passes
     first. Like EngineCore, it rejects a request it reads after shutdown has
-    started, even one that was added before."""
+    started, even one that was added before. Like AsyncLLM, it only counts a
+    request once preprocessing is done."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -47,13 +49,16 @@ class FakeAsyncLLM:
 
 def make_server(llm):
     async def generate(request, context):
-        tokens, _, queued = request.decode().partition(":")
+        # "<tokens>[:<s queued in EngineCore>[:<s of preprocessing>]]"
+        tokens, queued, preprocess = (request.decode().split(":") + ["0", "0"])[:3]
+        # Tokenization or media processing, before AsyncLLM knows the request.
+        await asyncio.sleep(float(preprocess))
         with llm.lock:
             llm.inflight += 1
         try:
             # The request can wait in EngineCore's input queue, e.g. behind a
             # long prefill step, before EngineCore reads it.
-            await asyncio.sleep(float(queued or 0))
+            await asyncio.sleep(float(queued))
             with llm.lock:
                 if llm.started is not None:
                     llm.rejected += 1
@@ -65,21 +70,22 @@ def make_server(llm):
             with llm.lock:
                 llm.inflight -= 1
 
-    async def hold(request, context):
-        # Like SubscribeKvEvents: open until the client or the server ends it.
+    async def subscribe(request, context):
+        # Open until the client or the server ends it.
         yield b"e"
         await asyncio.Event().wait()
 
-    server = grpc.aio.server()
+    inflight = grpc_server._InflightRpcs("test.Svc")
+    server = grpc.aio.server(interceptors=[inflight])
     handlers = {
         "Generate": grpc.unary_stream_rpc_method_handler(generate),
-        "Hold": grpc.unary_stream_rpc_method_handler(hold),
+        "SubscribeKvEvents": grpc.unary_stream_rpc_method_handler(subscribe),
     }
     server.add_generic_rpc_handlers(
         (grpc.method_handlers_generic_handler("test.Svc", handlers),)
     )
     port = server.add_insecure_port("127.0.0.1:0")
-    return server, port
+    return server, port, inflight
 
 
 async def call(port, method, arg=b""):
@@ -97,14 +103,42 @@ async def call(port, method, arg=b""):
 async def shut_down(rpcs, shutdown_timeout):
     """Start the RPCs, then time ``_drain_and_stop`` as SIGTERM would run it."""
     llm = FakeAsyncLLM()
-    server, port = make_server(llm)
+    server, port, inflight = make_server(llm)
     await server.start()
     clients = [asyncio.create_task(call(port, *rpc)) for rpc in rpcs]
     await asyncio.sleep(0.3)
     t0 = time.monotonic()
-    await grpc_server._drain_and_stop(server, llm, shutdown_timeout)
+    await grpc_server._drain_and_stop(server, llm, shutdown_timeout, inflight)
     elapsed = time.monotonic() - t0
     return llm, t0, elapsed, await asyncio.gather(*clients)
+
+
+@pytest.mark.asyncio
+async def test_inflight_count_follows_rpcs():
+    llm = FakeAsyncLLM()
+    server, port, inflight = make_server(llm)
+    await server.start()
+    try:
+        subscription = asyncio.create_task(call(port, "SubscribeKvEvents"))
+        rpc = asyncio.create_task(call(port, "Generate", b"50"))
+        await asyncio.sleep(0.2)
+        assert inflight.count == 1  # the subscription does not count
+        assert await rpc == (50, grpc.StatusCode.OK)
+        await asyncio.sleep(0.1)
+        assert inflight.count == 0
+        # A cancelled RPC stops counting too.
+        rpc = asyncio.create_task(call(port, "Generate", b"1000"))
+        await asyncio.sleep(0.2)
+        assert inflight.count == 1
+        rpc.cancel()
+        await asyncio.sleep(0.2)
+        assert inflight.count == 0
+        subscription.cancel()
+        for task in (rpc, subscription):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    finally:
+        await server.stop(None)
 
 
 @pytest.mark.asyncio
@@ -132,9 +166,18 @@ async def test_requests_queued_at_sigterm_are_served():
 
 
 @pytest.mark.asyncio
+async def test_request_in_preprocessing_at_sigterm_is_served():
+    # Accepted before SIGTERM, still preprocessing 0.3 s after it: AsyncLLM
+    # has no request then, but the RPC is in flight.
+    llm, _, _, results = await shut_down([("Generate", b"50:0:0.6")], 10)
+    assert llm.rejected == 0
+    assert results == [(50, grpc.StatusCode.OK)]
+
+
+@pytest.mark.asyncio
 async def test_open_rpc_without_request_does_not_hold_shutdown(monkeypatch):
     monkeypatch.setattr(grpc_server, "_RPC_FLUSH_S", 0.5)
-    llm, t0, elapsed, results = await shut_down([("Hold",)], 30)
+    llm, t0, elapsed, results = await shut_down([("SubscribeKvEvents",)], 30)
     # EngineCore stops right away, and the open RPC is cancelled after the
     # flush instead of holding shutdown for the whole grace period.
     assert llm.started - t0 < 0.5
