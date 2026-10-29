@@ -4,9 +4,6 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_max_and_sumexp,
-)
 
 # The feature is a log-odds, log(q / (1 - q)), which a row carrying all of its
 # mass on one token sends to infinity. Clamp it symmetrically.
@@ -160,12 +157,35 @@ def _refit_kernel(
     tl.store(counts_ptr + k, 0.0, mask=mask)
 
 
+@triton.jit
+def _max_and_sumexps(logits, BLOCK_SIZE: tl.constexpr):
+    """Block max, its sumexp, and its sumexp with the max entry left out.
+
+    The excluding sum is what keeps the feature accurate. Forming the full sum
+    and subtracting the max's own e^(m-m) = 1 term afterwards is catastrophic
+    cancellation: the complement mass is the whole quantity of interest, and it
+    is gone as soon as it falls below an fp32 ulp of 1.0 (~6e-8), which a
+    confident drafter reaches routinely.
+    """
+    block_max, argmax = tl.max(logits, axis=0, return_indices=True)
+    finite = block_max > float("-inf")
+    exps = tl.exp(logits - block_max)
+    # Exclude by position, not by value: a tie would zero both copies, and
+    # -inf vocab padding ties with itself across the whole block.
+    is_max = tl.arange(0, BLOCK_SIZE) == argmax
+    sumexp = tl.where(finite, tl.sum(exps, axis=0), 0.0)
+    excl_sumexp = tl.where(finite, tl.sum(tl.where(is_max, 0.0, exps), axis=0), 0.0)
+    return block_max, sumexp, excl_sumexp
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _local_max_sumexp_kernel(
     local_max_ptr,
     local_max_stride,
     local_sumexp_ptr,
     local_sumexp_stride,
+    local_excl_sumexp_ptr,
+    local_excl_sumexp_stride,
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
@@ -190,6 +210,10 @@ def _local_max_sumexp_kernel(
             local_max_ptr + token_idx * local_max_stride + block_idx, float("-inf")
         )
         tl.store(local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, 0.0)
+        tl.store(
+            local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
+            0.0,
+        )
         return
 
     # Draft logits are pre-temperature, and acceptance is decided on the scaled
@@ -209,10 +233,14 @@ def _local_max_sumexp_kernel(
         ).to(tl.float32)
         / temp
     )
-    block_max, block_sumexp = _compute_max_and_sumexp(logits)
+    block_max, block_sumexp, block_excl_sumexp = _max_and_sumexps(logits, BLOCK_SIZE)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, block_max)
     tl.store(
         local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, block_sumexp
+    )
+    tl.store(
+        local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
+        block_excl_sumexp,
     )
 
 
@@ -230,6 +258,8 @@ def _predict_kernel(
     local_max_stride,
     local_sumexp_ptr,
     local_sumexp_stride,
+    local_excl_sumexp_ptr,
+    local_excl_sumexp_stride,
     idx_mapping_ptr,
     idx_mapping_stride,
     step_ptr,
@@ -276,6 +306,11 @@ def _predict_kernel(
         mask=blocks_mask,
         other=0.0,
     )
+    excl_sumexps = tl.load(
+        local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + blocks,
+        mask=blocks_mask,
+        other=0.0,
+    )
 
     # The feature, logit(q(m*)) for the row's max draft logit, m*, is:
     #   q(x) = e^(x - m*) / Σ_z e^(z - m*)
@@ -287,17 +322,21 @@ def _predict_kernel(
     # lossless. Scoring the drawn token instead would select on the proposal
     # and bias the emitted distribution toward the drafter's confident modes.
 
-    # Rescale each block's partial to the global max and sum. The most likely
-    # token contributes exactly e^(m - m) = 1, so removing it leaves the sum
-    # over every other token.
-    global_max = tl.max(maxes, axis=0)
-    total_sumexp = tl.sum(
-        tl.where(blocks_mask, sumexps * tl.exp(maxes - global_max), 0.0), axis=0
+    # Rescale each block's partial to the global max and sum. Only the block
+    # holding the global max drops its own entry; a block that merely ties
+    # contributes in full, because that is a different token and so is genuinely
+    # part of the complement. Every term is non-negative, so the complement keeps
+    # fp32 relative accuracy however small it is -- which is the point, since the
+    # feature is its logarithm and is read at e^-80.
+    global_max, best_block = tl.max(maxes, axis=0, return_indices=True)
+    sums = tl.where(blocks == best_block, excl_sumexps, sumexps)
+    complement_sumexp = tl.sum(
+        tl.where(blocks_mask, sums * tl.exp(maxes - global_max), 0.0), axis=0
     )
-    complement_sumexp = tl.maximum(total_sumexp - 1.0, 0.0)
 
     # Shifted by m*, the numerator is e^(m* - m*) = 1, so the feature is just the
-    # negated complement log-sum-exponential. Clamp to the min/max log-odds.
+    # negated complement log-sum-exponential. A genuinely one-hot row sends it to
+    # infinity, so clamp to the min/max log-odds.
     feature = -tl.log(complement_sumexp)
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
@@ -476,11 +515,14 @@ class OnlineAcceptanceEstimator:
             num_tokens, num_blocks, dtype=torch.float32, device=self.device
         )
         local_sumexp = torch.empty_like(local_max)
+        local_excl_sumexp = torch.empty_like(local_max)
         _local_max_sumexp_kernel[(num_tokens, num_blocks)](
             local_max,
             local_max.stride(0),
             local_sumexp,
             local_sumexp.stride(0),
+            local_excl_sumexp,
+            local_excl_sumexp.stride(0),
             logits,
             logits.stride(0),
             idx_mapping,
@@ -503,6 +545,8 @@ class OnlineAcceptanceEstimator:
             local_max.stride(0),
             local_sumexp,
             local_sumexp.stride(0),
+            local_excl_sumexp,
+            local_excl_sumexp.stride(0),
             idx_mapping,
             idx_mapping.stride(0),
             draft_step,
