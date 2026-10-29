@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 
@@ -119,7 +120,7 @@ def trtllm_decode_sparse_mla_dsv4(
     )
 
 
-def sparse_index_key(attn: DeepseekV4FlashInferMLAAttention) -> str:
+def sparse_index_key(attn: DeepseekV4Attention) -> str:
     """Layers with equal keys build equal sparse-index tables in a step: a
     compressed layer's table depends on its compressed cache, compress ratio
     and top-k indices, which only its index source writes."""

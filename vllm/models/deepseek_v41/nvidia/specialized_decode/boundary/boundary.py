@@ -151,7 +151,6 @@ class Boundaries:
             norm,
             None if quant is None else (quant.data, quant.scale),
         )
-        assert layer_input is not None
         stream = self.mhc_stream if step.side_stream else torch.cuda.current_stream()
         aux = None
         if capture_aux and step.side_stream:

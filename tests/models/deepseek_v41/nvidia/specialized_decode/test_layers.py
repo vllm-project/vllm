@@ -18,6 +18,9 @@ and leave the last on its own: FULL decode graphs of 12 down to 1 requests
 requests) and low-batch (one request). The draft samples probabilistically
 (the requests at temperature 0), so the fused and vocabulary-sharded Markov
 samplers run, and the specialized-decode run replays its post-forward CUDA graphs.
+On Hopper 34 requests start above the executor's 192 rows, where the FULL
+graphs run the stock layers, and steps above the fused all-reduce's 144 rows
+take the stock boundary.
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -27,7 +30,8 @@ they arrive, and two stock runs already differ. Prefill
 positions are compared before the decoder's bounded replay only, which runs
 the later layers of a prefill step on each request's last tokens.
 
-Needs four GB300 (SM103) GPUs; about 10 minutes, mostly two engine starts.
+Needs four GB300 (SM103) or four H100/H200 (SM90) GPUs; about 10 minutes,
+mostly two engine starts.
 """
 
 import zlib
@@ -151,12 +155,15 @@ class _Probe:
         core.register_forward_hook(self._keep_output)
 
         index = {layer: i for i, layer in enumerate(layers)}
-        sublayer = Boundaries.sublayer
         # Executor boundaries traced (the executor runs only in captures):
         # proves that the CUDA graphs hold the executor, not the stock layers.
         self.executor_sublayers = 0
         # The same for the DSpark draft's executor (layers outside ``index``).
         self.draft_sublayers = 0
+        # The rows of the captured steps that hold the target's executor.
+        self.executor_rows: set[int] = set()
+
+        sublayer = Boundaries.sublayer
 
         def sublayer_and_keep(boundaries, layer, ffn, state, step, **kwargs):
             i = index.get(layer)
@@ -164,6 +171,7 @@ class _Probe:
                 self.draft_sublayers += 1
             else:
                 self.executor_sublayers += 1
+                self.executor_rows.add(step.rows)
             out = sublayer(boundaries, layer, ffn, state, step, **kwargs)
             if ffn and i is not None:
                 residual = out[0].residual
@@ -293,6 +301,7 @@ class StepRecorder:
             "decode": type(decode).__name__,
             "executor_sublayers": target._layer_probe.executor_sublayers,
             "draft_sublayers": target._layer_probe.draft_sublayers,
+            "executor_rows": sorted(target._layer_probe.executor_rows),
             "draft_decode": type(draft_decode).__name__,
             "model_state": type(model_state).__name__,
             "attention": [type(m.attn).__name__ for m in layers(target)],
@@ -309,6 +318,14 @@ class StepRecorder:
             "draft_attention": [type(m.attn).__name__ for m in layers(draft)],
             "draft_routed_experts": [
                 plan.moe.gemm is not None for plan in getattr(draft_decode, "plans", ())
+            ],
+            "low_batch_moe": [
+                getattr(plan.moe, "routed", None) is not None
+                for plan in getattr(decode, "plans", ())
+            ],
+            "draft_low_batch_moe": [
+                getattr(plan.moe, "routed", None) is not None
+                for plan in getattr(draft_decode, "plans", ())
             ],
             "draft_logits": type(draft.logits_processor).__name__,
             "markov_samplers": [
@@ -417,7 +434,42 @@ class StepRecorder:
             torch.save(self._steps, path)
 
 
-def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str):
+# Engine settings of each GPU's executor: the attention it runs over, and
+# FULL decode graphs of 1 to max_num_seqs requests of 6 rows.
+GB300_ENGINE = {
+    "attention_config": {
+        "backend": "FLASHINFER_MLA_SPARSE_DSV41",
+        "indexer_kv_dtype": "mxfp4",
+        "indexer_sparse_logits": True,
+    },
+    "kv_cache_dtype": "fp8",
+    "compilation_config": {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [6, 12, 24, 48, 96],
+    },
+    "max_num_seqs": 16,
+}
+# Up to 40 requests: graphs above the executor's 192 rows run the stock layers.
+HOPPER_GRAPHS = [6, 12, 24, 48, 96, 144, 192, 240]
+HOPPER_ENGINE = {
+    "compilation_config": {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": HOPPER_GRAPHS,
+    },
+    "max_num_seqs": 40,
+}
+HOPPER_MAX_ROWS = 192
+HOPPER_FUSED_ROWS = 144
+
+
+def _serve(
+    vllm_runner,
+    specialized_decode: bool,
+    prompts,
+    max_tokens,
+    path: str,
+    engine: dict,
+):
     """Greedy decode of ``prompts``: each prompt's output tokens and the
     paths each rank took; the steps' rows saved under ``path``."""
     from vllm import SamplingParams
@@ -438,29 +490,18 @@ def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str
             "draft_sample_method": "probabilistic",
             "enable_adaptive_verification": False,
         },
-        attention_config={
-            "backend": "FLASHINFER_MLA_SPARSE_DSV41",
-            "indexer_kv_dtype": "mxfp4",
-            "indexer_sparse_logits": True,
-        },
-        kv_cache_dtype="fp8",
         engram_config={"cpu_offload": True},
         # Autotuning times each run apart and may pick other tactics for the
         # stock paths; FlashInfer's defaults are the same in both.
         enable_flashinfer_autotune=False,
-        # Decode graphs of 1, 2, 4, 8 and 16 requests of 6 rows.
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [6, 12, 24, 48, 96],
-        },
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         max_model_len=4096,
         block_size=None,
-        max_num_seqs=16,
         max_num_batched_tokens=MAX_BATCHED_TOKENS,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.6,
+        **engine,
     ) as runner:
         llm = runner.llm
         paths = llm.collective_rpc("paths")
@@ -520,45 +561,45 @@ def _check_close(got: dict, want: dict, keys: list, layers, output: bool) -> Non
     assert len(flipped) <= len(keys) // 4, sorted(flipped)
 
 
-@pytest.mark.distributed(num_gpus=4)
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(103),
-    reason="decode_backend=latency_specialized runs on GB300 (SM103)",
-)
-def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("needs four GPUs")
+def _requests(n: int) -> tuple[list[int], list[list[int]], list[int]]:
+    """The prompt lengths, prompts and output lengths of ``n`` requests."""
     g = torch.Generator().manual_seed(0)
     # Distinct prompt lengths past both ratios' 512 compressed entries.
-    lens = (torch.randperm(900, generator=g)[:12] + 1100).tolist()
-    prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
+    lens = (torch.randperm(900, generator=g)[:n] + 1100).tolist()
+    prompts = [torch.randint(1000, 60000, (k,), generator=g).tolist() for k in lens]
     # More tokens than the prefill steps decode (at most 6 a step), so all
-    # requests decode together; the last runs on alone.
-    max_tokens = [60 + 2 * i for i in range(len(prompts) - 1)] + [120]
+    # requests decode together; the last runs on alone, at least 20 tokens
+    # past the others.
+    max_tokens = [60 + 2 * i for i in range(n - 1)] + [max(120, 60 + 2 * n + 20)]
+    return lens, prompts, max_tokens
 
-    on, paths_on = _serve(vllm_runner, True, prompts, max_tokens, f"{tmp_path}/on")
-    off, paths_off = _serve(vllm_runner, False, prompts, max_tokens, f"{tmp_path}/off")
 
-    # The executors run the target and DSpark draft models over their stock
-    # layers, with every MoE layer on the low-batch GEMMs (the target's
-    # deferring), and the draft samples on the fused and sharded samplers.
+def _check_paths(
+    paths_on: list,
+    paths_off: list,
+    decode: str,
+    draft_decode: str,
+    samplers: list[bool],
+) -> None:
+    """The executors ``decode`` and ``draft_decode`` run the target and DSpark
+    draft models over their stock layers, with recorded metadata builds, and
+    the draft samples on the fused and sharded Markov ``samplers``; the stock
+    run has none of it."""
     for rank in paths_on:
-        assert rank["decode"] == "SpecializedDecode", rank
+        assert rank["decode"] == decode, rank
         assert rank["executor_sublayers"] > 0, "no step ran the executor"
         assert rank["draft_sublayers"] > 0, "no draft step ran the executor"
-        assert rank["draft_decode"] == "DraftDecode", rank
+        assert rank["draft_decode"] == draft_decode, rank
         assert rank["model_state"] == "DeepseekV41SpecializedDecodeModelState", rank
-        assert rank["routed_experts"] == [True] * len(LAYERS), rank
-        assert rank["draft_routed_experts"] == [True] * len(rank["draft_attention"])
         assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
         assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
         assert rank["metadata_graphs"] > 0, rank
-        assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
-        assert rank["markov_samplers"] == [True, True], rank
+        assert rank["markov_samplers"] == samplers, rank
         assert rank["post_forward_graphs"], rank
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank
+        assert rank["executor_rows"] == [], rank
         assert rank["draft_sublayers"] == 0, rank
         assert rank["draft_decode"] == "NoneType", rank
         assert rank["model_state"] == "DeepseekV41ModelState", rank
@@ -570,19 +611,13 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:
         assert paths_on[0][key] == paths_off[0][key], key
-    assert paths_on[0]["attention"] == ["DeepseekV4FlashInferMLAAttention"] * 5
 
-    got_steps = torch.load(f"{tmp_path}/on")
-    want_steps = torch.load(f"{tmp_path}/off")
 
-    # The decode steps covered every per-step gate on the specialized-decode run.
+def _check_runs(lens, on, off, got_steps, want_steps, paths_on, paths_off) -> None:
+    """Every decode token and sampled prefill position of the two runs whose
+    earlier greedy tokens agree, close at every layer; the post-forward region
+    replayed from its CUDA graphs on the specialized-decode run only."""
     full = [s for s in got_steps if s["full"]]
-    assert {s["requests"] for s in full} >= {1, 12}, full
-    # 5 to 8 requests replay the 48-row graph, the largest whose next mHC
-    # coefficients run on the side stream.
-    assert any(5 <= s["requests"] <= 8 for s in full), "no 48-row FULL step"
-    assert any(s["padded_rows"] > s["rows"] for s in full), "no padded FULL step"
-    assert any(s["rows"] > 48 for s in full), "no FULL step above 48 rows"
     assert all(s["post_forward"] is not None for s in got_steps), "a step not sampled"
     assert any(s["post_forward"] == "replay" for s in full), "no post-forward replay"
     assert all(s["post_forward"] == "eager" for s in want_steps)
@@ -611,9 +646,97 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     keys = sorted(k for k in got.keys() & want.keys() if same_context(k))
     decode = [k for k in keys if len(k) == 3]
     prefill = [k for k in keys if len(k) == 2]
-    assert len(decode) >= (DRAFTS + 1) * len(prompts), len(decode)
+    assert len(decode) >= (DRAFTS + 1) * len(lens), len(decode)
     assert len(prefill) > sum(lens) // (2 * PREFILL_SAMPLE), len(prefill)
     _check_close(got, want, decode, LAYERS, output=True)
     replay_start = paths_on[0]["decoder_replay_start"]
     assert replay_start == paths_off[0]["decoder_replay_start"]
     _check_close(got, want, prefill, range(replay_start), output=False)
+
+
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(103),
+    reason="decode_backend=latency_specialized runs on GB300 (SM103)",
+)
+def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("needs four GPUs")
+    lens, prompts, max_tokens = _requests(12)
+    on, paths_on = _serve(
+        vllm_runner, True, prompts, max_tokens, f"{tmp_path}/on", GB300_ENGINE
+    )
+    off, paths_off = _serve(
+        vllm_runner, False, prompts, max_tokens, f"{tmp_path}/off", GB300_ENGINE
+    )
+
+    # Every MoE layer on the low-batch GEMMs (the target's deferring).
+    _check_paths(paths_on, paths_off, "SpecializedDecode", "DraftDecode", [True, True])
+    for rank in paths_on:
+        assert rank["routed_experts"] == [True] * len(LAYERS), rank
+        assert rank["draft_routed_experts"] == [True] * len(rank["draft_attention"])
+        assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
+    assert paths_on[0]["attention"] == ["DeepseekV4FlashInferMLAAttention"] * 5
+
+    got_steps = torch.load(f"{tmp_path}/on")
+    want_steps = torch.load(f"{tmp_path}/off")
+
+    # The decode steps covered every per-step gate on the specialized-decode run.
+    full = [s for s in got_steps if s["full"]]
+    assert {s["requests"] for s in full} >= {1, 12}, full
+    # 5 to 8 requests replay the 48-row graph, the largest whose next mHC
+    # coefficients run on the side stream.
+    assert any(5 <= s["requests"] <= 8 for s in full), "no 48-row FULL step"
+    assert any(s["padded_rows"] > s["rows"] for s in full), "no padded FULL step"
+    assert any(s["rows"] > 48 for s in full), "no FULL step above 48 rows"
+    _check_runs(lens, on, off, got_steps, want_steps, paths_on, paths_off)
+
+
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="the Hopper executor runs on SM90",
+)
+def test_hopper_specialized_decode_matches_the_model(vllm_runner, tmp_path):
+    """The Hopper executors over FlashMLA, Humming and the stock fused
+    all-reduce + mHC: 34 requests decode together above its 192 rows (the
+    stock layers in the 240-row graph), then finish one by one through every
+    graph it holds, the 192-row one on the stock boundary."""
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("needs four GPUs")
+    lens, prompts, max_tokens = _requests(34)
+    on, paths_on = _serve(
+        vllm_runner, True, prompts, max_tokens, f"{tmp_path}/on", HOPPER_ENGINE
+    )
+    off, paths_off = _serve(
+        vllm_runner, False, prompts, max_tokens, f"{tmp_path}/off", HOPPER_ENGINE
+    )
+
+    # The vocabulary-sharded Markov sampler needs SM100.
+    _check_paths(
+        paths_on,
+        paths_off,
+        "HopperSpecializedDecode",
+        "HopperDraftDecode",
+        [True, False],
+    )
+    held = [n for n in HOPPER_GRAPHS if n <= HOPPER_MAX_ROWS]
+    for rank in paths_on:
+        # Every FULL decode graph up to the cap holds the executor, none above.
+        assert rank["executor_rows"] == held, rank
+        assert rank["low_batch_moe"] == [True] * len(LAYERS), rank
+        draft_layers = len(rank["draft_attention"])
+        assert rank["draft_low_batch_moe"] == [True] * draft_layers, rank
+        assert rank["fused_mhc_max_rows"] == HOPPER_FUSED_ROWS, rank
+        assert rank["stock_fused_mhc_max_rows"] == HOPPER_FUSED_ROWS, rank
+    assert paths_on[0]["attention"] == ["DeepseekV4FlashMLAAttention"] * 5
+
+    got_steps = torch.load(f"{tmp_path}/on")
+    want_steps = torch.load(f"{tmp_path}/off")
+    full = [s for s in got_steps if s["full"]]
+    assert {s["requests"] for s in full} >= {1, 34}, full
+    assert any(s["padded_rows"] > HOPPER_MAX_ROWS for s in full), "no stock FULL step"
+    assert any(s["padded_rows"] == HOPPER_MAX_ROWS for s in full), "no 192-row step"
+    assert any(s["padded_rows"] == HOPPER_FUSED_ROWS for s in full), "no 144-row step"
+    assert any(s["padded_rows"] > s["rows"] for s in full), "no padded FULL step"
+    _check_runs(lens, on, off, got_steps, want_steps, paths_on, paths_off)

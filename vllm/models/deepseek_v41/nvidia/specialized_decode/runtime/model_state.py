@@ -31,9 +31,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from ...model_state import DeepseekV41ModelState
 from .. import take_drafts
-from .draft import check_low_batch_graph
 from .metadata_graphs import AttnMetadataCudaGraphs, GraphKey
-from .warmup import warm_up
 
 
 def padded_decode_batch(
@@ -87,12 +85,12 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         drafts = [
             draft.build_specialized_decode(self.decode) for draft in take_drafts()
         ]
-        if drafts:
-            check_low_batch_graph(vllm_config)
-        warm_up(self.decode, vllm_config, drafts)
+        self.decode.warm_up(vllm_config, drafts)
         self.graphs = AttnMetadataCudaGraphs(
             vllm_config,
             vllm_config.num_speculative_tokens + self.num_new_sampled_tokens_per_step,
+            self.decode.recordable_builders,
+            self.decode.recorded_max_rows,
         )
         # Leading rows of _replay_start known to hold zeros.
         self._zero_replay_starts = 0

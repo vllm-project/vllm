@@ -49,7 +49,7 @@ from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
 
 from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS
 from ..attention.sparse_mla import SparseIndexTables, SparseMlaDecode
-from ..attention.step import AttentionStep
+from ..attention.step import AttentionStep, StepMla, StepTables
 from ..boundary.boundary import BoundaryState
 from ..moe.routed_expert_gemm import build_routed_expert_gemms
 from ..moe.step import MoEStep
@@ -114,11 +114,12 @@ class DraftDecode:
         self.mhc_stream = target.mhc_stream
         self.all_reduce = target.all_reduce
         self.boundaries = target.boundaries
-        self.tables = SparseIndexTables(attns)
+        tables = SparseIndexTables(attns)
+        self.tables: StepTables = tables
         # The persistent KV counters are the target's: the draft's decode
         # launches run after the target's on the same stream.
-        self.mla = SparseMlaDecode(
-            self.tables, FUSED_MHC_MAX_ROWS * max(attn.padded_heads for attn in attns)
+        self.mla: StepMla = SparseMlaDecode(
+            tables, FUSED_MHC_MAX_ROWS * max(attn.padded_heads for attn in attns)
         )
         gemms = build_routed_expert_gemms(
             [layer.ffn.experts for layer in layers], fused_front=False

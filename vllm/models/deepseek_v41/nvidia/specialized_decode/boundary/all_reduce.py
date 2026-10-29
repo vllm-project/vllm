@@ -14,19 +14,25 @@ from .. import FUSED_MHC_MAX_ROWS
 
 
 class BoundaryAllReduce(AllReduceMHC):
-    """``AllReduceMHC`` sized for every FULL decode graph of the executor, with
-    the residual-only variant and, optionally, the MXFP8 layer input.
+    """``AllReduceMHC`` sized for every FULL decode graph of the executor
+    (``max_num_tokens`` rows), with the residual-only variant and, optionally,
+    the MXFP8 layer input.
 
     A producer that stores its contribution into the mailbox itself (the
     publishing ``wo_b`` GEMM) calls ``mark_published``; the next ``__call__``
     with that tensor then launches only the consumer.
     """
 
-    def __init__(self, config: PreTrainedConfig, quantize_layer_input: bool) -> None:
+    def __init__(
+        self,
+        config: PreTrainedConfig,
+        quantize_layer_input: bool,
+        max_num_tokens: int = FUSED_MHC_MAX_ROWS,
+    ) -> None:
         super().__init__(
             hidden_size=config.hidden_size,
             hc_mult=config.hc_mult,
-            max_num_tokens=FUSED_MHC_MAX_ROWS,
+            max_num_tokens=max_num_tokens,
             top_k=config.num_experts_per_tok,
             device=current_platform.current_device(),
             quantize_layer_input=quantize_layer_input,

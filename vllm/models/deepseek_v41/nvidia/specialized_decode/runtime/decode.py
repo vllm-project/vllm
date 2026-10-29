@@ -29,18 +29,20 @@ joined.
 same steps, on this executor's fused kernel and streams.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
 
 import torch
 from torch import nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.deepseek_v41.common.engram import Engram
 from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ...flashinfer_sparse import DeepseekV4FlashInferMLAAttention
@@ -53,11 +55,12 @@ from .. import (
 )
 from ..attention.indexer import OVERLAP_MAX_ROWS, CandidateOverlap
 from ..attention.sparse_mla import SparseIndexTables, SparseMlaDecode
-from ..attention.step import AttentionStep
+from ..attention.step import AttentionStep, StepMla, StepTables
 from ..boundary.boundary import Boundaries, BoundaryState
 from ..engram.prefetch import EngramPrefetch
 from ..moe.routed_expert_gemm import build_routed_expert_gemms
 from ..moe.step import MoEStep
+from .metadata_graphs import RECORDABLE_BUILDERS
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -162,6 +165,16 @@ class LayerPlan(NamedTuple):
 class SpecializedDecode:
     """The decode executor over one backbone's local layers."""
 
+    # Rows of the largest step the executor runs.
+    max_rows: int = FUSED_MHC_MAX_ROWS
+    # The attention metadata builders whose decode builds the model state
+    # records, and the largest step it records them for (None: every FULL
+    # decode graph).
+    recordable_builders: frozenset[type] = RECORDABLE_BUILDERS
+    recorded_max_rows: int | None = None
+    tables: StepTables
+    mla: StepMla
+
     def __init__(
         self, backbone: "DeepseekV4Model", config: DecodeConfig, lm_head: nn.Module
     ) -> None:
@@ -195,10 +208,10 @@ class SpecializedDecode:
             if uses_checked_flashinfer("the publishing wo_b GEMM")
             else None
         )
-        self.tables = SparseIndexTables(attns)
+        self.tables = tables = SparseIndexTables(attns)
         # A decode launch has at most one row per token and padded head.
         self.mla = SparseMlaDecode(
-            self.tables, FUSED_MHC_MAX_ROWS * max(attn.padded_heads for attn in attns)
+            tables, FUSED_MHC_MAX_ROWS * max(attn.padded_heads for attn in attns)
         )
         source = next(
             (
@@ -256,7 +269,11 @@ class SpecializedDecode:
     def for_target(
         cls, backbone: "DeepseekV4Model", config: DecodeConfig, lm_head: nn.Module
     ) -> "SpecializedDecode":
-        """The executor of the target model's backbone."""
+        """The executor of the target model's backbone, for this GPU."""
+        if current_platform.is_device_capability(90):
+            from ..hopper.decode import HopperSpecializedDecode
+
+            return HopperSpecializedDecode(backbone, config, lm_head)
         return cls(backbone, config, lm_head)
 
     def for_draft(self, backbone: "DSparkDeepseekV4Model") -> "DraftDecode":
@@ -268,18 +285,34 @@ class SpecializedDecode:
 
         return DraftDecode(self, backbone)
 
+    def gates(self, rows: int) -> DecodeStep:
+        """The step of ``rows`` rows (0 < rows <= ``max_rows``)."""
+        return step_gates(rows, self)
+
+    def warm_up(
+        self, vllm_config: VllmConfig, drafts: Sequence["DraftDecode"] = ()
+    ) -> None:
+        """Tune and compile the kernels of the executor and of the DSpark
+        draft's (``drafts``), before memory profiling."""
+        from .draft import check_low_batch_graph
+        from .warmup import warm_up
+
+        if drafts:
+            check_low_batch_graph(vllm_config)
+        warm_up(self, vllm_config, drafts)
+
     def plan(
         self,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
     ) -> DecodeStep | None:
         """The step this forward runs, or None to run the stock layers: only
-        FULL CUDA graph captures of pure decode steps of up to
-        ``FUSED_MHC_MAX_ROWS`` rows run the executor."""
+        FULL CUDA graph captures of pure decode steps of up to ``max_rows``
+        rows run the executor."""
         rows = positions.shape[0]
         if (
             intermediate_tensors is not None
-            or not 0 < rows <= FUSED_MHC_MAX_ROWS
+            or not 0 < rows <= self.max_rows
             or not is_forward_context_available()
         ):
             return None
@@ -290,7 +323,7 @@ class SpecializedDecode:
             return None
         if not captures_pure_decode(self._swa_prefixes):
             return None
-        return step_gates(rows, self)
+        return self.gates(rows)
 
     def run(
         self,

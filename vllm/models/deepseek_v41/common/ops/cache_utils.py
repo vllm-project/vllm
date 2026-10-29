@@ -827,6 +827,7 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    launch_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -834,6 +835,9 @@ def compute_global_topk_indices_and_lens(
     1. Block-table lookup (local index → global slot id)
     2. Valid-entry counting (topk_lens per token)
     3. Masking padding tokens to length 0
+
+    With ``launch_pdl`` (CUDA) the kernel launches as a programmatic dependent
+    of the previous kernel and lets the next one launch early.
     """
     num_tokens = topk_indices.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
@@ -851,6 +855,8 @@ def compute_global_topk_indices_and_lens(
         block_size,
         is_valid_token,
         TRITON_BLOCK_SIZE=1024,
+        LAUNCH_PDL=launch_pdl,
+        **({"launch_pdl": True} if launch_pdl else {}),
     )
     return global_topk_indices, topk_lens
 
@@ -869,8 +875,12 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_size: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
+    LAUNCH_PDL: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
+    if LAUNCH_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     is_valid_token = tl.load(is_valid_token_ptr + token_idx)
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
