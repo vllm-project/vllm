@@ -148,6 +148,32 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
+@pytest.mark.parametrize(
+    "num_reqs,has_prefill,shard_decode_requests,expected",
+    [
+        (0, False, True, 0),
+        (1, False, True, 1),
+        (3, False, True, 1),
+        (4, False, True, 1),
+        (5, False, True, 2),
+        (8, False, True, 2),
+        (5, True, True, 5),
+        (5, False, False, 5),
+    ],
+)
+def test_decode_graph_dispatch_uses_largest_owner_batch(
+    num_reqs, has_prefill, shard_decode_requests, expected
+):
+    """Only sharded pure decode dispatches graphs by the largest owner batch."""
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=shard_decode_requests,
+    )
+    assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == expected
+
+
 def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     """Rank 0's draft logits land in each batch request's persistent slot."""
     manager = PCPManager(
@@ -298,6 +324,34 @@ def test_capture_uses_pcp_persistent_inputs():
         actual = getattr(input_batch, name)
         torch.testing.assert_close(actual, getattr(dummy_batch, name))
         assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
+
+
+@pytest.mark.parametrize(
+    ("num_local_reqs", "expected_states"),
+    [(2, [11, 22]), (4, [11, 11, 22, 22])],
+)
+def test_capture_segments_index_global_request_state(num_local_reqs, expected_states):
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_reqs=2,
+        max_num_tokens=8,
+    )
+    dummy_batch = InputBatch.make_dummy(num_local_reqs, 8, manager.input_buffers)
+
+    input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
+
+    request_states = torch.tensor([11, 22])
+    assert request_states[input_batch.idx_mapping].tolist() == expected_states
+    assert request_states[input_batch.expanded_idx_mapping].tolist() == expected_states
+    assert (
+        request_states.numpy()[input_batch.idx_mapping_np].tolist() == expected_states
+    )
+    assert dummy_batch.idx_mapping.tolist() == list(range(num_local_reqs))
+    torch.testing.assert_close(input_batch.query_start_loc, dummy_batch.query_start_loc)
+    assert input_batch.num_reqs == num_local_reqs
 
 
 def test_block_table_rebind_updates_interleave():

@@ -16,6 +16,70 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1 CUDA graphs
+
+DeepSeek-V4.1-Flash supports PCP CUDA graphs on NVIDIA CUDA using Model Runner V2
+and `FLASHMLA_SPARSE_DSV41`. Select the graph mode explicitly:
+
+- `FULL_AND_PIECEWISE` uses full graphs for decode and breakable piecewise graphs
+  for prefill and mixed batches within the captured token sizes.
+- `FULL_DECODE_ONLY` uses full graphs for decode; prefill and mixed batches run
+  eagerly.
+- `NONE` disables CUDA graphs. Pure `FULL` and `PIECEWISE` modes are not
+  supported by this V4.1 PCP path.
+
+V4.1 uses breakable CUDA graphs rather than `torch.compile` graph splitting.
+Set `VLLM_USE_BREAKABLE_CUDAGRAPH=1` for piecewise modes. Compilation `mode=0`
+(`NONE`) disables `torch.compile`, not CUDA graphs: `cudagraph_mode` controls
+graph execution separately.
+
+For example, a four-GPU TP1/PCP4 instance with fixed-length DSpark can use:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_BREAKABLE_CUDAGRAPH=1 \
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --language-model-only --tokenizer-mode deepseek_v41 \
+    --tensor-parallel-size 1 --prefill-context-parallel-size 4 \
+    --enable-expert-parallel --all2all-backend allgather_reducescatter \
+    --attention-backend FLASHMLA_SPARSE_DSV41 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
+    --max-model-len 32768 --max-num-seqs 32 --max-num-batched-tokens 4096 \
+    --enable-prefix-caching --swa-bounded-replay --no-async-scheduling \
+    --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[5,6,10,12,20,24,40,48,80,96,160,192,256,512,768,1024],"max_cudagraph_capture_size":1024}' \
+    --cudagraph-metrics
+```
+
+Capture sizes are token counts. The example covers a 4096-token prefill split
+across PCP4 with 1024 tokens per rank, plus padded DSpark draft and verification
+buckets. Mixed and uneven batches can have larger local token counts; batches
+outside the captured sizes run eagerly. The draft processes the restored
+global batch, so do not divide its capture budget by the PCP size. Increase the
+capture sizes when increasing the batch-token limit. Use `--cudagraph-metrics`
+to check actual `FULL` and `PIECEWISE` execution counts; the configured mode
+alone does not prove either path ran.
+
+The example enables automatic prefix caching, which PCP bounded replay requires,
+and SWA bounded replay. Large
+piecewise graphs use an eager break to select the bounded decoder replay batch,
+then run its matching inner graph when available; larger replay batches fall
+back to eager execution. Keep `cudagraph_decoder_replay` enabled (the default)
+to retain bounded trimming in piecewise graphs. Full graphs and piecewise
+graphs below `decoder_replay_trim_threshold` keep the whole batch. Prefix-cache
+hits and bounded trimming depend on the requests and are not guaranteed by
+enabling the flags alone.
+
+Omit `--speculative-config` for ordinary decoding. PCP continues to require
+PP=DP=DCP=1, text-only input, synchronous scheduling, and no KV connector or
+MegaMoE. Adaptive speculative verification is unsupported. Engram tables remain
+TP-sharded and replicated across PCP ranks; account for their host memory when
+choosing the TP/PCP split.
+
+Speculative full-graph replay requires flattened or variable-length indexer queries,
+including when a PCP rank owns no decode requests. On SM90, fixed DSpark with
+5 speculative tokens uses the flattened path; native multi-query shapes such
+as 1 or 3 speculative tokens are rejected for graph execution. Use eager mode
+for those shapes.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

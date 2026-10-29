@@ -1421,6 +1421,9 @@ def test_v41_pcp_ring_links_match_request_positions(
         capacity=capacity,
         tail_size=1,
         device=torch.device("cpu"),
+        gather_tokens_buffer=torch.empty(num_rows, dtype=torch.int64),
+        ring_write_slots_buffer=torch.empty(pcp_size * num_rows, dtype=torch.int64),
+        prev_row_indices_buffer=torch.empty(num_rows, dtype=torch.int64),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
         ),
