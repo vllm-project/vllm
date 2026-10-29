@@ -76,22 +76,22 @@ _PARSE_MTP_WEIGHT_NAMES = frozenset(
 
 def _content_normalized_positions(
     patches: torch.Tensor,
-    patch_generator: nn.Module,
+    embeddings: nn.Module,
     image_size: tuple[int, int],
     content_size: tuple[int, int],
 ) -> torch.Tensor:
     """Apply Parse 3.5's content-normalized positional field to one page."""
     height, width = image_size
     content_height, content_width = content_size
-    patch_size = int(patch_generator.patch_size)
+    patch_size = int(embeddings.patch_size)
     rows, cols = height // patch_size, width // patch_size
     if height % patch_size or width % patch_size:
         raise ValueError(f"image size {image_size} is not patch aligned")
     if not (0 < content_height <= height and 0 < content_width <= width):
         raise ValueError(f"content size {content_size} must be within {image_size}")
 
-    positional_grid = patch_generator.pos_embed.reshape(
-        1, patch_generator.num_rows, patch_generator.num_cols, -1
+    positional_grid = embeddings.position_embedding.reshape(
+        1, embeddings.num_rows, embeddings.num_cols, -1
     ).permute(0, 3, 1, 2)
     content_rows = (content_height + patch_size - 1) // patch_size
     content_cols = (content_width + patch_size - 1) // patch_size
@@ -590,12 +590,12 @@ class RadioWithNeck(nn.Module):
             raise ValueError("image_sizes and content_sizes must have equal length")
         if pixel_values.ndim == 2:
             pixel_values = pixel_values.unsqueeze(0)
-        patch_generator = self.model_encoder.model.patch_generator
-        backbone = self.model_encoder.model
-        patch_size = int(patch_generator.patch_size)
-        num_skip = int(patch_generator.num_skip)
-        num_cls = int(patch_generator.num_cls_tokens)
-        patches = patch_generator.embedder(pixel_values)
+        embeddings = self.model_encoder.embeddings
+        backbone = self.model_encoder
+        patch_size = int(embeddings.patch_size)
+        num_skip = int(embeddings.num_skip)
+        num_cls = int(embeddings.num_cls_tokens)
+        patches = embeddings.patch_projection(pixel_values)
         cursor = 0
         positioned_pages = []
         for image_size, content_size in zip(image_sizes, content_sizes):
@@ -607,18 +607,18 @@ class RadioWithNeck(nn.Module):
             cursor += patch_count
             positioned_pages.append(
                 _content_normalized_positions(
-                    page, patch_generator, image_size, content_size
+                    page, embeddings, image_size, content_size
                 )
             )
         if not positioned_pages or cursor != patches.shape[1]:
             raise ValueError("packed patch sequence does not match image_sizes")
-        hidden = patch_generator.cls_token_dynamic(
+        hidden = embeddings._cls_token_dynamic(
             torch.cat(positioned_pages, dim=1), imgs_sizes=image_sizes
         )
-        hidden = patch_generator.patch_normalizer(hidden)
+        hidden = embeddings.patch_normalizer(hidden)
         mask_meta = None
         if len(image_sizes) > 1:
-            mask_meta = backbone.inter_image_mask_metadata(
+            mask_meta = backbone._inter_image_mask_metadata(
                 image_sizes, device=hidden.device
             )
         hidden = backbone.encoder(inputs_embeds=hidden, mask_meta=mask_meta)
@@ -876,11 +876,15 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
         synthetic_layerscales = {
             name: param
             for name, param in self.encoder.model_encoder.named_parameters()
-            if name.endswith((".ls1", ".ls2")) and name not in radio_loaded
+            if name.endswith((".layer_scale1.lambda1", ".layer_scale2.lambda1"))
+            and name not in radio_loaded
         }
         if synthetic_layerscales:
+            layerscale_markers = (".ls1", ".ls2", ".layer_scale1", ".layer_scale2")
             source_layerscales = {
-                name for name in radio_source_names if ".ls1" in name or ".ls2" in name
+                name
+                for name in radio_source_names
+                if any(marker in name for marker in layerscale_markers)
             }
             if radio_model_name not in identity_layerscale_models:
                 raise RuntimeError(

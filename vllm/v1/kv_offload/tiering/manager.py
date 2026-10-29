@@ -75,15 +75,13 @@ _TIER_POLL_LOCK_TIMEOUT_S = 1.0
 # Warn after this much continuous failure to acquire the lock. Above the 5 s
 # warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
 _TIER_POLL_STALL_WARN_S = 30.0
-# Give up after rounds have failed continuously for this long. Counted in time,
-# not rounds: at the default 1 ms interval a round budget is spent in a blink,
-# so a transient fault (a peer reconnecting) would turn the thread off for
-# good. on_schedule_end() still serves the tiers, so the fallback is per-step
-# servicing rather than none.
-_TIER_POLL_GIVE_UP_AFTER_S = 30.0
-# Minimum spacing between logged tracebacks for a run of failing rounds, which
-# would otherwise log one per interval.
-_TIER_POLL_ERROR_LOG_INTERVAL_S = 1.0
+# Back off after this much continuous failure (time, not rounds, so a brief
+# fault doesn't trip it). Never exit: an idle engine would leave peers unserved.
+_TIER_POLL_BACK_OFF_AFTER_S = 30.0
+# Minimum wait between rounds while backing off.
+_TIER_POLL_BACKOFF_S = 1.0
+# Minimum spacing between failure logs.
+_TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 # How long shutdown() waits for the thread to finish its round.
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
 
@@ -407,9 +405,12 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _tier_poll_loop(self) -> None:
         stalled_since: float | None = None
-        # Start of the current run of failed rounds, and when one last logged.
+        # Current failure run: start, count, and last log time.
         failing_since: float | None = None
+        failures = 0
         last_error_log = 0.0
+        backing_off = False
+        backoff_s = max(self._tier_poll_interval_s, _TIER_POLL_BACKOFF_S)
         while not self._tier_poll_stop.is_set():
             if not self._lock.acquire(timeout=_TIER_POLL_LOCK_TIMEOUT_S):
                 now = time.monotonic()
@@ -428,28 +429,45 @@ class TieringOffloadingManager(OffloadingManager):
             try:
                 self.poll_tiers()
                 failing_since = None
+                failures = 0
             except Exception:
-                # Never let a round kill the thread silently: on_schedule_end()
-                # still serves these tiers, so persistent failure degrades to
-                # per-step servicing instead of stopping the tier-poll thread.
+                # Keep retrying so peers are served while idle. Rate-limit
+                # logs: traceback on the first failure, a summary after.
                 now = time.monotonic()
                 if failing_since is None:
                     failing_since = now
+                failures += 1
                 if now - last_error_log >= _TIER_POLL_ERROR_LOG_INTERVAL_S:
                     last_error_log = now
-                    logger.exception("KV offload tier-poll round failed")
+                    if failures == 1:
+                        logger.exception("KV offload tier-poll round failed")
+                    else:
+                        logger.warning(
+                            "KV offload tier-poll thread has failed %d "
+                            "consecutive rounds (%.0fs); still retrying so "
+                            "peers are served while the engine is idle.",
+                            failures,
+                            now - failing_since,
+                        )
             finally:
                 self._lock.release()
             if (
                 failing_since is not None
-                and time.monotonic() - failing_since >= _TIER_POLL_GIVE_UP_AFTER_S
+                and time.monotonic() - failing_since >= _TIER_POLL_BACK_OFF_AFTER_S
             ):
-                logger.error(
-                    "KV offload tier-poll thread stopping after %.0fs of "
-                    "consecutive failures; falling back to per-step servicing.",
-                    _TIER_POLL_GIVE_UP_AFTER_S,
-                )
-                return
+                if not backing_off:
+                    logger.error(
+                        "KV offload tier-poll thread backing off to %.1fs "
+                        "after %.0fs of consecutive failures; it keeps "
+                        "retrying so peers are still served while the engine "
+                        "is idle.",
+                        backoff_s,
+                        _TIER_POLL_BACK_OFF_AFTER_S,
+                    )
+                    backing_off = True
+                self._tier_poll_stop.wait(backoff_s)
+                continue
+            backing_off = False
             # Yield unconditionally, and only after release(). Python locks are
             # not fair, so a release-then-reacquire loop could starve the
             # scheduler thread; this pause is what bounds its wait to one round.
@@ -1207,10 +1225,18 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # In-flight primary<->secondary transfers (pending promotions are
-        # translated to transfer jobs in on_schedule_end), plus any work the
-        # secondary tiers themselves still have outstanding.
-        # Deferred releases keep the tiers polled until they complete.
+        """Report whether outstanding work needs an engine step to finish.
+
+        Work a live tier-poll thread finishes on its own is excluded, so an
+        engine that only serves peers can go idle.
+        """
+        if self._polled_tiers:
+            # Without a live thread, or with another tier a peer lookup can
+            # promote from, only a step makes progress.
+            thread = self._tier_poll_thread
+            if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
+                return True
+            return any(state.pending_cascade_keys for state in self._req_state.values())
         return (
             bool(self._jobs)
             or bool(self._deferred_releases)
