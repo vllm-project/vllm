@@ -50,7 +50,12 @@ class _StubImageProcessor:
     slice_mode = True
 
     def find_best_resize(
-        self, image_size, scale_resolution, patch_size, allow_upscale=False
+        self,
+        image_size,
+        scale_resolution,
+        patch_size,
+        downsample_mode,
+        allow_upscale=False,
     ):
         height, width = image_size
         if (height * width > scale_resolution * scale_resolution) or allow_upscale:
@@ -58,13 +63,19 @@ class _StubImageProcessor:
             height = int(scale_resolution / math.sqrt(aspect_ratio))
             width = int(height * aspect_ratio)
         # The OCR delta: one 2x2 merge in "4x" mode, two in "16x".
-        merge_factor = 2 if self.downsample_mode == "4x" else 4
+        merge_factor = 2 if downsample_mode == "4x" else 4
         best_width = ensure_divide(width, patch_size * merge_factor)
         best_height = ensure_divide(height, patch_size * merge_factor)
         return best_height, best_width
 
     def get_refine_size(
-        self, image_size, grid, scale_resolution, patch_size, allow_upscale=False
+        self,
+        image_size,
+        grid,
+        scale_resolution,
+        patch_size,
+        downsample_mode,
+        allow_upscale=False,
     ):
         height, width = image_size
         grid_y, grid_x = grid
@@ -74,6 +85,7 @@ class _StubImageProcessor:
             (refine_height / grid_y, refine_width / grid_x),
             scale_resolution,
             patch_size,
+            downsample_mode,
             allow_upscale=allow_upscale,
         )
         return best_height * grid_y, best_width * grid_x
@@ -167,10 +179,18 @@ def test_4x_mode_aligns_the_patch_grid_to_two_patches():
     # Upscaled to ~448 on the long side, then aligned: "4x" rounds to 28px and
     # "16x" to 56px, which lands on a different grid for the same image.
     assert info._pinned_image_processor("4x").find_best_resize(
-        (200, 300), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (200, 300),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="4x",
+        allow_upscale=True,
     ) == (364, 560)
     assert info._pinned_image_processor("16x").find_best_resize(
-        (200, 300), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (200, 300),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="16x",
+        allow_upscale=True,
     ) == (392, 560)
 
     # 364*560 / (14*14*4) = 260 against 392*560 / (14*14*16) = 70: the ratio is
@@ -227,7 +247,12 @@ def test_sliced_image_token_counts_match_the_transformers_divisor():
     assert grids != [0, 0]
     processor = info._pinned_image_processor("4x")
     refine = processor.get_refine_size(
-        (1120, 1680), grids, _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (1120, 1680),
+        grids,
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="4x",
+        allow_upscale=True,
     )
     expected_patch = (
         (refine[0] // grids[0])
@@ -453,12 +478,21 @@ def test_placeholder_matches_the_transformers_formula(width, height, mode):
     # Rebuild `target_sizes` exactly as `_preprocess` records it.
     sliced = grids != [0, 0]
     source_h, source_w = processor.find_best_resize(
-        (height, width), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=not sliced
+        (height, width),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode=mode,
+        allow_upscale=not sliced,
     )
     target_sizes = [[source_h // _PATCH_SIZE, source_w // _PATCH_SIZE]]
     if sliced:
         refine_h, refine_w = processor.get_refine_size(
-            (height, width), grids, _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+            (height, width),
+            grids,
+            _SCALE_RESOLUTION,
+            _PATCH_SIZE,
+            downsample_mode=mode,
+            allow_upscale=True,
         )
         patch_h, patch_w = refine_h // grids[0], refine_w // grids[1]
         target_sizes += [[patch_h // _PATCH_SIZE, patch_w // _PATCH_SIZE]] * (
@@ -500,6 +534,7 @@ def test_pixel_and_target_size_paths_agree_on_the_default_resize():
             (height, width),
             _SCALE_RESOLUTION,
             _PATCH_SIZE,
+            downsample_mode="4x",
             allow_upscale=not sliced,
         )
         target_sizes = [[source_h // _PATCH_SIZE, source_w // _PATCH_SIZE]]
@@ -509,6 +544,7 @@ def test_pixel_and_target_size_paths_agree_on_the_default_resize():
                 grids,
                 _SCALE_RESOLUTION,
                 _PATCH_SIZE,
+                downsample_mode="4x",
                 allow_upscale=True,
             )
             patch_h, patch_w = refine_h // grids[0], refine_w // grids[1]

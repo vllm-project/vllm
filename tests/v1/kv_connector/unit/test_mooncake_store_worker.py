@@ -2340,10 +2340,10 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
     layout = thread.token_databases[0].store_layout
     assert isinstance(layout, RankLocalStoreLayout)
     base_addr = layout.kv_caches_base_addr[0]
-    block_len = layout.block_len[0]
-    assert first_addrs == [[base_addr], [base_addr + block_len]]
-    assert second_addrs == [[base_addr + 2 * block_len]]
-    expected_size = block_len
+    block_stride = layout.block_stride[0]
+    assert first_addrs == [[base_addr], [base_addr + block_stride]]
+    assert second_addrs == [[base_addr + 2 * block_stride]]
+    expected_size = layout.block_len[0]
     assert first_sizes == [[expected_size], [expected_size]]
     assert second_sizes == [[expected_size]]
 
@@ -4632,15 +4632,15 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
             for cache in caches
             for head_idx in range(cache.shape[1])
         ]
-        assert db.block_len == [head_cache.stride(0) * head_cache.element_size()] * (
+        assert db.block_stride == [head_cache.stride(0) * head_cache.element_size()] * (
             num_layers * caches[0].shape[1]
         )
     elif layout.is_layer_compact:
         assert db.kv_caches_base_addr == [cache.data_ptr() for cache in caches]
-        assert db.block_len == [spec.page_size_bytes] * num_layers
+        assert db.block_stride == [spec.page_size_bytes] * num_layers
     else:
         assert db.kv_caches_base_addr == [raw.data_ptr()]
-        assert db.block_len == [num_layers * spec.page_size_bytes]
+        assert db.block_stride == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
@@ -4709,7 +4709,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
 
     db = worker.token_dbs[0]
     assert db.kv_caches_base_addr == [source.data_ptr()]
-    assert db.block_len == [page_size]
+    assert db.block_stride == [page_size]
     worker.store.register_buffer.assert_called_once_with(
         source.data_ptr(), source.nbytes
     )
@@ -4772,7 +4772,7 @@ def test_register_kv_caches_separate_head_groups():
     ]
     db = worker.token_dbs[0]
     assert db.kv_caches_base_addr == expected_addrs
-    assert db.block_len == [head_block_bytes] * len(expected_addrs)
+    assert db.block_stride == [head_block_bytes] * len(expected_addrs)
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
