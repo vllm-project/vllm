@@ -482,8 +482,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Speculative verification uses native top-k/top-p masking even
             # when target-only sampling can use FlashInfer's fused sampler.
-            if current_platform.is_rocm() or (
-                current_platform.is_cuda() and self.speculative_config is not None
+            # CPU has no fused sampler, so it always masks with the kernel.
+            if (
+                current_platform.is_rocm()
+                or current_platform.is_cpu()
+                or (current_platform.is_cuda() and self.speculative_config is not None)
             ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
