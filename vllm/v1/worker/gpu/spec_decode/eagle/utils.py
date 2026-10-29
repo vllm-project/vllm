@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import AbstractContextManager, nullcontext
+
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
@@ -84,6 +87,13 @@ def maybe_share_target_embed(
         draft_inner.embed_tokens = target_embed
 
 
+def _drafter_build_context() -> AbstractContextManager[None]:
+    """Exempt the drafter from batch invariance when VLLM_BI_DRAFTER=0."""
+    if envs.VLLM_BI_DRAFTER:
+        return nullcontext()
+    return batch_invariance_exempt()
+
+
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
@@ -96,7 +106,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     )
     if draft_load_config is not vllm_config.load_config:
         vllm_config = replace(vllm_config, load_config=draft_load_config)
-    with set_model_tag("eagle_head"), batch_invariance_exempt():
+    with set_model_tag("eagle_head"), _drafter_build_context():
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
         )

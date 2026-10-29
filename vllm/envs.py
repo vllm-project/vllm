@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BI_DRAFTER: bool = True
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -655,6 +656,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Under VLLM_BATCH_INVARIANT, keep the EAGLE/MTP drafter batch invariant.
+    # Set to 0 to let the drafter use faster non-batch-invariant kernels.
+    # Target tokens, logprobs and the output distribution are unaffected
+    # (lossless rejection sampling), but with temperature > 0 the token a
+    # seeded request samples, and the acceptance rate, can depend on batch
+    # composition.
+    "VLLM_BI_DRAFTER": lambda: bool(int(os.getenv("VLLM_BI_DRAFTER", "1"))),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),

@@ -14,6 +14,7 @@ from vllm.model_executor.determinism.scope import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import _drafter_build_context
 
 
 class _NonInvariantTritonExperts(TritonExperts):
@@ -55,3 +56,12 @@ def test_exempt_scope_accepts_experts_without_batch_invariance(monkeypatch):
     with batch_invariance_exempt():
         assert check(_NonInvariantTritonExperts) == (True, None)
         assert check(TritonExperts) == (True, None)
+
+
+@pytest.mark.parametrize("bi_drafter", [True, False])
+def test_drafter_is_exempt_only_when_bi_drafter_is_off(monkeypatch, bi_drafter):
+    """VLLM_BI_DRAFTER=0 opts the drafter out; by default it stays invariant."""
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", bi_drafter)
+    with _drafter_build_context():
+        assert requires_batch_invariant_kernels() == bi_drafter

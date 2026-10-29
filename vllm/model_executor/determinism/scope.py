@@ -27,8 +27,8 @@ def requires_batch_invariant_kernels() -> bool:
     """Whether kernels chosen now must be batch invariant.
 
     Today only the modular MoE experts selection consults this, and only the
-    model runner V2 EAGLE/MTP drafter is built inside
-    :func:`batch_invariance_exempt`; other batch-invariant kernel choices still
-    read ``VLLM_BATCH_INVARIANT`` directly.
+    model runner V2 EAGLE/MTP drafter, with ``VLLM_BI_DRAFTER=0``, is built
+    inside :func:`batch_invariance_exempt`; other batch-invariant kernel
+    choices still read ``VLLM_BATCH_INVARIANT`` directly.
     """
     return envs.VLLM_BATCH_INVARIANT and not _exempt.get()
