@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from itertools import chain, islice
+from itertools import chain
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -417,14 +417,9 @@ class RequestOffloadState:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            for req_block_hash in islice(
-                self.req.block_hashes,
-                group_config.hashes_per_chunk * len(group_state.offload_keys)
-                + group_config.hashes_per_chunk
-                - 1,
-                None,
-                group_config.hashes_per_chunk,
-            ):
+            stride = group_config.hashes_per_chunk
+            start = stride * (len(group_state.offload_keys) + 1) - 1
+            for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
                 self.req_context.set_offload_key_position(
@@ -894,13 +889,17 @@ class OffloadingConnectorScheduler:
         self,
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
-    ) -> int | None:
+    ) -> tuple[int | None, int | None]:
         """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
         can invalidate an earlier group's result, so the loop re-runs when that
         happens until num_hit_tokens converges.
+
+        Returns the number of hit tokens (None to defer) and the hit boundary
+        the full-attention groups proved before any sliding-window/Mamba group
+        narrowed it (None if not reached).
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
@@ -934,6 +933,7 @@ class OffloadingConnectorScheduler:
         # in the current convergence iteration. Reset when a non-eagle group
         # tightens the hit boundary, requiring a fresh pop.
         eagle_verified: set[int] = set()
+        full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
@@ -964,11 +964,21 @@ class OffloadingConnectorScheduler:
                     )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
                 )
+                if (
+                    sliding_window_size_in_chunks is not None
+                    and full_attention_hit_boundary is None
+                ):
+                    # Groups before the first sparse group are full attention.
+                    full_attention_hit_boundary = (
+                        max_hit_size_tokens
+                        if self._full_attention_groups and not defer_lookup
+                        else 0
+                    )
 
                 # For eagle groups, query one extra chunk that will be popped.
                 # Widening applies to every group type: without it, the pop
@@ -1020,7 +1030,7 @@ class OffloadingConnectorScheduler:
                         initial_window + int(is_eagle_unverified),
                     )
                 if num_hit_chunks == 0:
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if num_hit_chunks is None:
                     defer_lookup = True
@@ -1037,7 +1047,7 @@ class OffloadingConnectorScheduler:
                 new_num_hit_tokens = max_hit_size_tokens - num_computed_tokens
                 if new_num_hit_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if new_num_hit_tokens < num_hit_tokens:
                     if not group_config.is_eagle_group:
@@ -1060,7 +1070,7 @@ class OffloadingConnectorScheduler:
                 "Offloading manager delayed request %s as backend requested",
                 req_status.req.request_id,
             )
-            return None
+            return None, full_attention_hit_boundary
 
         # Possibly delay the request if any hit chunk is already being loaded.
         if self._chunks_being_loaded:
@@ -1086,7 +1096,7 @@ class OffloadingConnectorScheduler:
                         " chunks are already being loaded",
                         req_status.req.request_id,
                     )
-                    return None
+                    return None, full_attention_hit_boundary
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -1095,7 +1105,7 @@ class OffloadingConnectorScheduler:
             num_computed_tokens,
         )
 
-        return num_hit_tokens
+        return num_hit_tokens, full_attention_hit_boundary
 
     def _make_boundary_key(
         self,
@@ -1114,7 +1124,25 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
     ) -> int | None:
-        complete_hit = self._lookup_complete_chunks(req_status, max_num_new_tokens)
+        complete_hit, full_attention_hit_boundary = self._lookup_complete_chunks(
+            req_status, max_num_new_tokens
+        )
+        num_hit_tokens = self._lookup_partial_tail_hit(
+            req_status, complete_hit, max_num_new_tokens
+        )
+        if num_hit_tokens is not None and full_attention_hit_boundary is not None:
+            self._maybe_register_shared_prefix_junction(
+                req_status, full_attention_hit_boundary, num_hit_tokens
+            )
+        return num_hit_tokens
+
+    def _lookup_partial_tail_hit(
+        self,
+        req_status: RequestOffloadState,
+        complete_hit: int | None,
+        max_num_new_tokens: int | None,
+    ) -> int | None:
+        """Extend a complete-chunk hit with a partial tail, if supported."""
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
@@ -1237,6 +1265,21 @@ class OffloadingConnectorScheduler:
                 req, group_config, key_tokens, key
             )
         return True, False
+
+    def _maybe_register_shared_prefix_junction(
+        self, req_status: RequestOffloadState, boundary: int, num_hit_tokens: int
+    ) -> None:
+        """Pin a shared-prefix junction where a sparse group cut the hit, as
+        ``get_computed_blocks`` does for a local hit, so the recompute retains
+        the sliding-window/Mamba state at the full-attention hit boundary."""
+        if self.config.retention_interval is None:
+            return
+        if boundary <= req_status.num_locally_computed_tokens + num_hit_tokens:
+            return
+        request = req_status.req
+        # Never lower a junction the local prefix cache already set.
+        if boundary > request.shared_prefix_boundary:
+            request.shared_prefix_boundary = boundary
 
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
