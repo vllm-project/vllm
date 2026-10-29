@@ -25,14 +25,14 @@ meta:
     b200: verified
     h200: verified
     mi350x: verified
+    mi355x: verified
 
 model:
   model_id: "mistralai/Mistral-Large-4-1T-A52B"
   min_vllm_version: "0.34.0"
   docker_image:
     nvidia: "vllm/vllm-openai:mistral-large-4"
-    # Not published yet.
-    amd: "vllm/vllm-openai-rocm:mistral-4-large"
+    amd: "vllm/vllm-openai-rocm:mistral-large-4"
   install:
     docker:
       note: "Mistral Large 4 support ships in these images; no vLLM release or nightly wheel includes it yet. The ROCm image also carries the MXFP4 expert path and the AITER tuning tables."
@@ -550,11 +550,11 @@ presets:
     select:
       features:
         spec_decoding: dspark
-    description: "MXFP4 experts fit four MI350X GPUs, so one 8-GPU node runs two TP4 replicas (start the second with HIP_VISIBLE_DEVICES=4,5,6,7 and another port). Validated with DSpark and the FP8 KV cache."
+    description: "MXFP4 experts fit four MI350X GPUs, so one 8-GPU node runs two TP4 replicas (run the second in its own container on GPUs 4-7, e.g. `docker run -e ROCR_VISIBLE_DEVICES=4,5,6,7`, on another port). Validated with DSpark and the FP8 KV cache."
     tp: 4
     runbook: |
       Measured on MI350X, TP4, FP8 checkpoint with MXFP4 experts at load
-      (a4w4), FP8 KV cache, DSpark depth 3. 200 real prompts (80 MT-Bench
+      (a4w4; the preset's default a8w4 measured level), FP8 KV cache, DSpark depth 3. 200 real prompts (80 MT-Bench
       first turns + 120 GSM8K questions), greedy, ≤ 512 output tokens.
 
       | DSpark vs no spec | c1 | c8 | c32 |
@@ -762,7 +762,7 @@ guide: |
 
   - **vLLM**: the `vllm/vllm-openai:mistral-large-4` image. No vLLM release or
     nightly wheel includes Mistral Large 4 support yet.
-  - **AMD**: the ROCm image `vllm/vllm-openai-rocm:mistral-4-large`.
+  - **AMD**: the ROCm image `vllm/vllm-openai-rocm:mistral-large-4`.
   - **mistral_common**: `mistral_common[image] >= 1.13.0` (included in both images).
   - **MegaMoE** (P/D presets only): the image does not include `nvshmem4py-cu13`;
     install it in the container, or drop the `--kernel-config` flag.
@@ -809,7 +809,8 @@ guide: |
   ## AMD (ROCm)
 
   Mistral Large 4 runs on AMD Instinct MI350 Series GPUs (gfx950) with the ROCm build
-  of vLLM (image `vllm/vllm-openai-rocm:mistral-4-large`). The routed experts run as OCP MXFP4 on AITER's fused MoE, either from the
+  of vLLM (image `vllm/vllm-openai-rocm:mistral-large-4`). The routed experts run as
+  OCP MXFP4 on AITER's fused MoE, either from the
   AMD Quark MXFP4 checkpoint or from the FP8 checkpoint re-quantized at load
   (`VLLM_FP8_MOE_REQUANT=mxfp4`, layer by layer, so peak load memory stays low). With
   MXFP4 experts the model fits four GPUs, so one 8-GPU node serves two TP4 replicas.
