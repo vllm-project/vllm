@@ -3,7 +3,16 @@
 import copy
 
 import pytest
+import torch
 
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
@@ -464,3 +473,62 @@ def test_host_buffer_save_hybrid_attention_and_mamba():
     )
     assert ssm2 == ssm_table
     assert req_id not in connector_scheduler._reqs_save_state
+
+
+@pytest.mark.parametrize("group_kind", ["uniform_type", "chunked_local"])
+def test_host_buffer_save_resaves_straddling_block_of_other_attention_groups(
+    group_kind: str,
+):
+    """A UniformTypeKVCacheSpecs group (layers with different head sizes)
+    reaches the scheduler as one of its layer specs, and chunked local
+    attention blocks hold token positions too. Both are saved by position, so
+    the block straddling the chunk boundary is copied again."""
+    block_size, num_tokens, token_budget = 16, 40, 24
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        kv_role="kv_producer",
+    )
+    layer_spec = dict(block_size=block_size, num_kv_heads=4, dtype=torch.float16)
+    if group_kind == "uniform_type":
+        spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "layer0": FullAttentionSpec(head_size=16, **layer_spec),
+                "layer1": FullAttentionSpec(head_size=32, **layer_spec),
+            }
+        )
+        assert spec is not None
+    else:
+        spec = ChunkedLocalAttentionSpec(
+            head_size=16, attention_chunk_size=64, **layer_spec
+        )
+    kv_cache_config = generate_scheduler_kv_cache_config(
+        [
+            KVCacheConfig(
+                num_blocks=100,
+                kv_cache_tensors=[],
+                kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
+            )
+        ]
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[token_budget // block_size : -(-num_tokens // block_size)]
