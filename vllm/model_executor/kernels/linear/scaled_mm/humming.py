@@ -83,6 +83,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
         self.locks = create_humming_locks(layer.weight.device)
+        layer.register_buffer("humming_locks", self.locks, persistent=False)
 
     def apply_weights(
         self,
@@ -150,6 +151,7 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
         self.locks = create_humming_locks(layer.weight.device)
+        layer.register_buffer("humming_locks", self.locks, persistent=False)
 
     def apply_weights(
         self,

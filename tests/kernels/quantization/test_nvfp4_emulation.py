@@ -864,3 +864,20 @@ def test_nvfp4_dense_emulation(
         torch.testing.assert_close(actual, saved, atol=0, rtol=0)
     assert torch.equal(layer.weight, original_weight)
     assert torch.equal(layer.weight_scale.view(torch.uint8), original_scale)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+def test_emulation_e2m1_table_is_layer_buffer() -> None:
+    """Sleep level 2 restores only buffers, so the device E2M1 table must be one."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.zeros(1, device="cuda"), requires_grad=False
+    )
+    with set_current_vllm_config(
+        VllmConfig(kernel_config=KernelConfig(linear_backend="emulation"))
+    ):
+        kernel = init_nvfp4_linear_kernel()
+    kernel.process_weights_after_loading(layer)
+    lut = dict(layer.named_buffers())["e2m1_lut"]
+    assert lut is nvfp4_emulation_utils.kE2M1ToFloat_handle.val and lut.is_cuda
+    assert "e2m1_lut" not in layer.state_dict()

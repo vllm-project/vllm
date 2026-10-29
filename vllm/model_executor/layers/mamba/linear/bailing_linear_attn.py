@@ -481,9 +481,10 @@ class BailingMoELinearAttention(LinearAttention):
             self.slope_rate = slope_rate * (
                 1 - self.layer_idx / (self.num_hidden_layers - 1) + 1e-5
             )
-        self.tp_slope = self.slope_rate[
+        tp_slope = self.slope_rate[
             self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
         ].contiguous()
+        self.register_buffer("tp_slope", tp_slope, persistent=False)
 
         # Register for compilation
         compilation_config = get_current_vllm_config().compilation_config
