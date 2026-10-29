@@ -741,19 +741,12 @@ class NixlBaseConnectorWorker:
             )
 
         # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
-        ucx_backend_params: dict[str, str] = {
-            str(k): str(v)
-            for k, v in vllm_config.kv_transfer_config.get_from_extra_config(
-                "ucx_backend_params", {}
-            ).items()
-        }
+        params = self.kv_transfer_config.get_from_extra_config("ucx_backend_params", {})
+        ucx_backend_params = {k: str(v) for k, v in params.items()}
         sleep_mode = vllm_config.model_config.enable_sleep_mode and config is not None
         # With UCX params, create every backend here, in the configured order.
-        explicit_backends = (
-            config is not None
-            and not sleep_mode
-            and bool(ucx_backend_params)
-            and "UCX" in self.nixl_backends
+        explicit_backends = (config is not None and not sleep_mode) and (
+            bool(ucx_backend_params) and "UCX" in self.nixl_backends
         )
         if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
@@ -770,12 +763,12 @@ class NixlBaseConnectorWorker:
             )
         elif explicit_backends:
             for backend in self.nixl_backends:
-                params: dict[str, str] = {}
+                nixl_params: dict[str, str] = {}
                 if backend == "UCX":
                     if not non_ucx_backends:
-                        params["num_threads"] = str(num_threads)
-                    params.update(ucx_backend_params)
-                self.nixl_wrapper.create_backend(backend, params)
+                        nixl_params["num_threads"] = str(num_threads)
+                    nixl_params.update(ucx_backend_params)
+                self.nixl_wrapper.create_backend(backend, nixl_params)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
