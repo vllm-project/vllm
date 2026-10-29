@@ -15,7 +15,9 @@ import pytest
 
 from vllm.v1.simple_kv_offload import cuda_mem_ops
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
+    _HIP_MEMCPY_FLAG_EXT_PREFER_CE,
     BatchMemcpyParams,
+    _copy_flags_for_hip_version,
     _CUmemcpyAttributes,
     _load_hip_runtime,
     _num_attrs_for_hip_version,
@@ -43,6 +45,22 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 def test_num_attrs_for_hip_version(version: int, expected: int):
     assert _num_attrs_for_hip_version(version) == expected
+
+
+# From HIP 7.16, a batch copy without hipMemcpyFlagExtPreferCE runs as a blit
+# kernel on the CUs instead of on the SDMA engines.
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        (0, 0),  # unknown (hipRuntimeGetVersion failed)
+        (70_253_211, 0),  # ROCm 7.2.2
+        (71_500_000, 0),  # ROCm 7.15 -- just below the 7.16 cutoff
+        (71_600_000, _HIP_MEMCPY_FLAG_EXT_PREFER_CE),  # ROCm 7.16
+        (80_000_000, _HIP_MEMCPY_FLAG_EXT_PREFER_CE),  # ROCm 8.0
+    ],
+)
+def test_copy_flags_for_hip_version(version: int, expected: int):
+    assert _copy_flags_for_hip_version(version) == expected
 
 
 @pytest.mark.parametrize(
