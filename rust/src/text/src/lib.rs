@@ -27,7 +27,7 @@ use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
-use vllm_llm::{GenerateOutputStream, Llm};
+use vllm_llm::{EngineCoreLlm, GenerateOutputStream};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
@@ -180,13 +180,13 @@ impl TextRequestProcessor {
     }
 }
 
-/// Raw text facade above [`Llm`].
+/// Raw text facade above [`EngineCoreLlm`].
 ///
 /// This layer stays below chat semantics: prompt text or prompt token IDs flow
 /// in, decoded text deltas and terminal metadata flow out.
 pub struct TextLlm {
     /// Generate-only client owned by this text facade.
-    llm: Llm,
+    llm: EngineCoreLlm,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
 }
@@ -194,7 +194,7 @@ pub struct TextLlm {
 impl TextLlm {
     /// Create a new text-generation facade from a shared LLM client plus a text
     /// backend.
-    pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
+    pub fn new(llm: EngineCoreLlm, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.engine_core_client().max_model_len();

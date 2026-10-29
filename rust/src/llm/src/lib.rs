@@ -39,7 +39,7 @@ use crate::request_metrics::{
 /// outputs. It tracks an in-flight external→internal request-id index (see
 /// [`InflightRequests`]) so that aborts issued against external (user-supplied)
 /// ids can be resolved to the internal engine ids that engine-core understands.
-pub struct Llm {
+pub struct EngineCoreLlm {
     client: EngineCoreClient,
     randomize_request_id: bool,
     stream_interval: NonZeroU32,
@@ -51,7 +51,7 @@ pub struct Llm {
     request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
 }
 
-impl Llm {
+impl EngineCoreLlm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {

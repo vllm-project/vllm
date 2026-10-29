@@ -69,7 +69,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -370,7 +370,7 @@ impl ChatLlm {
 
     /// Convenience constructor for one shared backend object that implements
     /// both text and chat responsibilities.
-    pub fn from_shared_backend(llm: Llm, backend: DynChatTextBackend) -> Self {
+    pub fn from_shared_backend(llm: EngineCoreLlm, backend: DynChatTextBackend) -> Self {
         let text = TextLlm::new(llm, backend.clone());
         Self::new(text, backend)
     }
