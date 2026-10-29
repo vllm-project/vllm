@@ -415,14 +415,18 @@ def launch_fp8_per_token(
 
 
 class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
-    def get_warmup_keys(self, *, n, k, out_dtype, max_tokens):
+    def get_warmup_keys(self, *, n, k, out_dtype, max_tokens, num_processors=0):
         from vllm.model_executor.warmup.jit_warmup_triton_helper import (
             triton_scalar_specialization_rep,
         )
 
+        if num_processors == 0:
+            from vllm.utils.platform_utils import num_compute_units
+
+            num_processors = num_compute_units(torch.accelerator.current_device_index())
         choices: dict[tuple, int] = {}
         for m in range(1, max_tokens + 1):
-            config = get_heuristic_config(m, n, k)
+            config = get_heuristic_config(m, n, k, num_processors)
             bm, bn, bk = (
                 config[key] for key in ("block_size_m", "block_size_n", "block_size_k")
             )
@@ -436,7 +440,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             )
             choices.setdefault(key, m)
         return [
-            (m, n, k, out_dtype, bias)
+            (m, n, k, out_dtype, bias, num_processors)
             for m in choices.values()
             for bias in (False, True)
         ]
@@ -446,7 +450,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             TritonWarmupTensor,
         )
 
-        m, n, k, out_dtype, bias = compile_key
+        m, n, k, out_dtype, bias, num_processors = compile_key
         a = TritonWarmupTensor(torch.float8_e4m3fn, shape=(m, k))
         b = TritonWarmupTensor(torch.float8_e4m3fn, shape=(k, n), strides=(1, k))
         scale = TritonWarmupTensor(torch.float32)
@@ -457,7 +461,7 @@ class _Fp8PerTokenWarmup(VllmJitKernel[tuple]):
             scale,
             out_dtype,
             TritonWarmupTensor(out_dtype) if bias else None,
-            get_heuristic_config(m, n, k),
+            get_heuristic_config(m, n, k, num_processors),
             _warmup=True,
         )
 

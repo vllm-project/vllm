@@ -55,6 +55,13 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
             from vllm.platforms.rocm import on_rdna
 
             self.use_heuristic = on_rdna()
+        self.num_processors = 0
+        if self.use_heuristic:
+            from vllm.utils.platform_utils import num_compute_units
+
+            self.num_processors = num_compute_units(
+                torch.accelerator.current_device_index()
+            )
         if self.use_heuristic and not self.has_tuned_configs:
             from vllm.config import get_current_vllm_config
             from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
@@ -66,6 +73,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
                 k=k,
                 out_dtype=c.out_dtype,
                 max_tokens=get_current_vllm_config().scheduler_config.max_num_batched_tokens,
+                num_processors=self.num_processors,
             )
 
     @classmethod
@@ -103,7 +111,15 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         if self.use_heuristic and not torch.compiler.is_compiling():
             return _w8a8_triton_per_token_scaled_mm_func(
-                A, B, As, Bs, out_dtype, bias, self.has_tuned_configs, True
+                A,
+                B,
+                As,
+                Bs,
+                out_dtype,
+                bias,
+                self.has_tuned_configs,
+                True,
+                self.num_processors,
             ).view(*output_shape)
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
             A,
@@ -114,6 +130,7 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
             bias,
             self.has_tuned_configs,
             self.use_heuristic,
+            self.num_processors,
         ).view(*output_shape)
 
 
@@ -282,6 +299,7 @@ def _w8a8_triton_per_token_scaled_mm_func(
     bias: torch.Tensor | None,
     has_tuned_configs: bool,
     use_heuristic: bool = False,
+    num_processors: int = 0,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         get_w8a8_per_token_fp8_config,
@@ -301,8 +319,12 @@ def _w8a8_triton_per_token_scaled_mm_func(
             qx, weight, x_scale, weight_scale, output_dtype, bias
         ):
             if config is None:
+                if num_processors == 0:
+                    from vllm.utils.platform_utils import num_compute_units
+
+                    num_processors = num_compute_units(qx.get_device())
                 choice = heuristic.get_heuristic_config(
-                    qx.size(0), weight.size(1), qx.size(1)
+                    qx.size(0), weight.size(1), qx.size(1), num_processors
                 )
             else:
                 choice = {
@@ -363,6 +385,7 @@ def _w8a8_triton_per_token_scaled_mm_fake(
     bias: torch.Tensor | None,
     has_tuned_configs: bool,
     use_heuristic: bool = False,
+    num_processors: int = 0,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device

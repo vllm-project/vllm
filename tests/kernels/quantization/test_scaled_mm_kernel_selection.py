@@ -112,6 +112,9 @@ def test_triton_fp8_backend_requires_fp8(
     platform_mock._enum = PlatformEnum.ROCM
     platform_mock.get_device_capability.return_value = (12, 0)
     triton_platform_mock.supports_fp8.return_value = supports_fp8
+    monkeypatch.setattr(
+        "vllm.utils.platform_utils.num_compute_units", lambda *_args: 32
+    )
     monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
     config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
     kwargs = dict(
@@ -129,6 +132,42 @@ def test_triton_fp8_backend_requires_fp8(
         else:
             with pytest.raises(ValueError, match="requires FP8 support"):
                 init_fp8_linear_kernel(**kwargs)
+
+
+def test_fp8_heuristic_scales_occupancy_and_split_k():
+    """Fewer processors can fill the GPU without the same split-K expansion."""
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+        get_heuristic_config,
+    )
+
+    assert get_heuristic_config(128, 4096, 4096, 32)["engine"] == "contiguous"
+    assert get_heuristic_config(128, 4096, 4096, 16)["engine"] == "shared"
+    assert get_heuristic_config(8, 2048, 32768, 32)["split_k"] == 4
+    assert get_heuristic_config(8, 2048, 32768, 16)["split_k"] == 1
+
+
+def test_fp8_heuristic_scales_persistent_grid_without_mutating_cached_choices():
+    """Selecting a smaller GPU must preserve cached choices for a larger GPU."""
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+        get_heuristic_config,
+    )
+
+    large = get_heuristic_config(8192, 28672, 4096, 32)
+    small = get_heuristic_config(8192, 28672, 4096, 16)
+    assert large["variant"] == small["variant"] == "persistent"
+    assert large["programs"] == 64
+    assert small["programs"] == 32
+    assert get_heuristic_config(8192, 28672, 4096, 32) == large
+
+
+@pytest.mark.parametrize("num_processors", [0, -1])
+def test_fp8_heuristic_requires_positive_processor_count(num_processors):
+    from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic_rules import (  # noqa: E501
+        get_heuristic_config,
+    )
+
+    with pytest.raises(ValueError, match="num_processors must be positive"):
+        get_heuristic_config(128, 4096, 4096, num_processors)
 
 
 def test_is_supported_is_abstract():

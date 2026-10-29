@@ -179,8 +179,9 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("tuned", [False, True])
 @pytest.mark.parametrize("rdna", [False, True])
+@pytest.mark.parametrize("num_processors", [16, 32])
 def test_triton_fp8_per_token_backend_preserves_linear_shape(
-    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned, rdna
+    per_token_fp8_configs, monkeypatch, out_dtype, use_bias, tuned, rdna, num_processors
 ):
     """Select the backend and validate quantization, weight layout and 3D output."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
@@ -196,6 +197,9 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
 
     if current_platform.is_rocm():
         monkeypatch.setattr("vllm.platforms.rocm.on_rdna", lambda: rdna)
+        monkeypatch.setattr(
+            "vllm.utils.platform_utils.num_compute_units", lambda *_args: num_processors
+        )
 
     if tuned:
         per_token_fp8_configs[33] = {
@@ -219,6 +223,7 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
         )
     assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
     assert kernel.use_heuristic == (current_platform.is_rocm() and rdna)
+    assert kernel.num_processors == (num_processors if kernel.use_heuristic else 0)
     if not tuned:
 
         def unexpected_lookup(*_args):
@@ -482,8 +487,11 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
     not current_platform.is_rocm() or not current_platform.supports_fp8(),
     reason="Requires ROCm FP8",
 )
-@pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048)])
-def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(n, k, monkeypatch):
+@pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048), (2048, 4096), (4096, 4096)])
+@pytest.mark.parametrize("num_processors", [16, 32])
+def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(
+    n, k, num_processors, monkeypatch
+):
     """Startup compilation must cover odd and aligned serving token counts."""
     from vllm.model_executor.layers.quantization.utils import (
         fp8_per_token_heuristic as heuristic,
@@ -491,7 +499,11 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(n, k, monkeypatc
     from vllm.triton_utils import triton
 
     heuristic.fp8_per_token_warmup.warmup(
-        n=n, k=k, out_dtype=torch.bfloat16, max_tokens=257
+        n=n,
+        k=k,
+        out_dtype=torch.bfloat16,
+        max_tokens=257,
+        num_processors=num_processors,
     )
     misses = []
     monkeypatch.setattr(
@@ -504,7 +516,7 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(n, k, monkeypatc
         "kernel_load_end_hook",
         lambda *args: misses.append(args),
     )
-    for m in (1, 3, 15, 17, 33, 63, 65, 127, 129, 255, 257):
+    for m in (1, 3, 15, 17, 33, 63, 65, 127, 129, 161, 191, 192, 193, 255, 257):
         a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
         b = (0.2 * torch.randn(n, k, device=device)).to(a.dtype).t()
         sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
@@ -515,7 +527,7 @@ def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(n, k, monkeypatc
             sb,
             torch.bfloat16,
             None,
-            heuristic.get_heuristic_config(m, n, k),
+            heuristic.get_heuristic_config(m, n, k, num_processors),
         )
         torch.testing.assert_close(
             out,

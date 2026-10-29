@@ -84,8 +84,8 @@ def _legacy_config(m: int, n: int) -> dict:
     )
 
 
-def _shape_config(m: int, n: int, k: int) -> dict:
-    if (((m + 63) // 64) * ((n + 63) // 64)) / 32 <= 7.5:
+def _shape_config(m: int, n: int, k: int, num_processors: int) -> dict:
+    if (((m + 63) // 64) * ((n + 63) // 64)) / num_processors <= 7.5:
         if m * n <= 131072:
             if n / k <= 0.0625:
                 if m <= 16:
@@ -93,7 +93,7 @@ def _shape_config(m: int, n: int, k: int) -> dict:
                         if (
                             m <= 32
                             and k >= 4096
-                            and ((m + 15) // 16) * ((n + 31) // 32) < 128
+                            and ((m + 15) // 16) * ((n + 31) // 32) < 4 * num_processors
                         ):
                             return _CHOICES[10]
                         return _CHOICES[13]
@@ -101,7 +101,7 @@ def _shape_config(m: int, n: int, k: int) -> dict:
                         if (
                             m <= 32
                             and k >= 4096
-                            and ((m + 15) // 16) * ((n + 31) // 32) < 128
+                            and ((m + 15) // 16) * ((n + 31) // 32) < 4 * num_processors
                         ):
                             return _CHOICES[9]
                         return _CHOICES[13]
@@ -221,8 +221,11 @@ def _shape_config(m: int, n: int, k: int) -> dict:
 
 
 @lru_cache(maxsize=2048)
-def get_heuristic_config(m: int, n: int, k: int) -> dict:
-    choice = _shape_config(m, n, k)
+def get_heuristic_config(m: int, n: int, k: int, num_processors: int = 32) -> dict:
+    """Select by shape and processor count; 32 retains the reference policy."""
+    if num_processors <= 0:
+        raise ValueError("num_processors must be positive")
+    choice = _shape_config(m, n, k, num_processors)
     if m >= 128 and n >= 24576 and k <= 1024:
         if k <= 512:
             return _CHOICES[33] if 192 < m <= 1024 else _CHOICES[22]
@@ -244,4 +247,6 @@ def get_heuristic_config(m: int, n: int, k: int) -> dict:
             return _CHOICES[35]
     if 8 < m <= 64 and k >= 8192 and n <= k // 2 and n * k >= 60 * 1024**2:
         return _CHOICES[24 if m <= 16 else 37 if m <= 32 else 38]
+    if choice.get("variant") == "persistent":
+        return dict(choice, programs=2 * num_processors)
     return choice
