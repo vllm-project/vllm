@@ -24,6 +24,7 @@ from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
@@ -368,8 +369,6 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     spec.seeds = torch.arange(3)
     spec.draft_tokens = torch.empty(3, 2, dtype=torch.long)
     spec.draft_logits = None
-    spec.draft_logits_num_shards = 1
-    spec.draft_logits_shard_idx = 0
     spec.use_fp64_gumbel = False
     spec.enable_adaptive_verification = True
     spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
@@ -456,7 +455,9 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     scores = torch.randn(batch, steps, top_k, top_k, device=device)
     tokens = torch.full((batch, steps), -1, dtype=torch.long, device=device)
     cache = (
-        torch.full((batch, steps, vocab), -float("inf"), device=device)
+        DraftLogitsCache(
+            batch, steps, vocab, dtype=torch.float32, fill=-float("inf"), device=device
+        )
         if probabilistic
         else None
     )
@@ -498,13 +499,17 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
                 assert index == realized.argmax().item()
             if cache is not None:
                 torch.testing.assert_close(
-                    cache[state, step, candidates[row, step]], realized
+                    cache.values[state, step, candidates[row, step]], realized
                 )
-                assert cache[state, step, old_candidates[row, step]].isneginf().all()
+                assert (
+                    cache.values[state, step, old_candidates[row, step]]
+                    .isneginf()
+                    .all()
+                )
             previous = index
     assert (tokens[2] == -1).all()
     if cache is not None:
-        assert cache[1].isneginf().all()
+        assert cache.values[1].isneginf().all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -522,7 +527,9 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
     seeds = mapping.to(torch.int64)
     positions = torch.arange(21, 21 + steps, device=device).repeat(batch)
     tokens = torch.empty(batch, steps, dtype=torch.int64, device=device)
-    cache = torch.empty(batch, steps, top_k, device=device)
+    cache = DraftLogitsCache(
+        batch, steps, top_k, dtype=torch.float32, fill=0.0, device=device
+    )
     first_round = None
     for start in (21, 22):
         positions.view(batch, steps).copy_(
@@ -549,7 +556,7 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
                 positions.view(batch, steps)[:, step] - 1,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=cache,
+                logits_cache=cache.values,
                 logits_cache_col=torch.tensor(step, device=device),
                 use_fp64=use_fp64,
             )

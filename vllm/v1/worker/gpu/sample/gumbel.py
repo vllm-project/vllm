@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.batch_shard import shard_owner, shard_row
+from vllm.v1.worker.gpu.spec_decode.draft_logits import draft_logits_row
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
 # retained Philox helper for rejection sampling.
@@ -229,13 +229,12 @@ def gumbel_block_argmax(
     logits_cache_col_ptr,
     logits_cache_source_ptr,
     logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     vocab_size,
     IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
-    CACHE_NUM_SHARDS: tl.constexpr = 1,
-    CACHE_SHARD_IDX: tl.constexpr = 0,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
@@ -255,16 +254,14 @@ def gumbel_block_argmax(
             logits_cache_source_ptr + token_idx * logits_cache_source_stride + block,
             mask=mask,
         )
+        row = draft_logits_row(req_state_idx, logits_cache_row_mapping_ptr)
         tl.store(
             logits_cache_ptr
-            + shard_row(req_state_idx, CACHE_NUM_SHARDS) * logits_cache_stride_0
+            + row * logits_cache_stride_0
             + col * logits_cache_stride_1
             + block,
             cached_logits,
-            mask=mask
-            & is_valid_req
-            # A batch-sharded cache holds only this rank's requests, packed by row.
-            & (shard_owner(req_state_idx, CACHE_NUM_SHARDS) == CACHE_SHARD_IDX),
+            mask=mask & (row >= 0),
         )
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
@@ -297,6 +294,7 @@ def _gumbel_sample_kernel(
     logits_cache_col_ptr,
     logits_cache_source_ptr,
     logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -309,8 +307,6 @@ def _gumbel_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
-    CACHE_NUM_SHARDS: tl.constexpr,
-    CACHE_SHARD_IDX: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
@@ -338,13 +334,12 @@ def _gumbel_sample_kernel(
         logits_cache_col_ptr,
         logits_cache_source_ptr,
         logits_cache_source_stride,
+        logits_cache_row_mapping_ptr,
         vocab_size,
         IS_DRAFTING=IS_DRAFTING,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
-        CACHE_NUM_SHARDS=CACHE_NUM_SHARDS,
-        CACHE_SHARD_IDX=CACHE_SHARD_IDX,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -363,8 +358,7 @@ def gumbel_sample(
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
-    logits_cache_num_shards: int = 1,
-    logits_cache_shard_idx: int = 0,
+    logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -410,6 +404,7 @@ def gumbel_sample(
         logits_cache_col,
         logits_cache_source,
         logits_cache_source.stride(0) if logits_cache_source is not None else 0,
+        logits_cache_row_mapping,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -422,8 +417,6 @@ def gumbel_sample(
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,
-        CACHE_NUM_SHARDS=logits_cache_num_shards,
-        CACHE_SHARD_IDX=logits_cache_shard_idx,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
