@@ -12,7 +12,6 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
     get_kv_cache_configs,
     new_kv_cache_spec,
@@ -27,6 +26,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
@@ -70,7 +70,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch, gpu_block_size, shared_host_pool
 ):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -190,7 +192,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30

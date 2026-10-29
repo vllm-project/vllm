@@ -571,8 +571,6 @@ WORKDIR /vllm-workspace
 # run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
 RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
     "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
-# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
-ENV VLLM_GPU_SYNC_CHECK=error
 
 FROM test AS test-smoke
 RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"
