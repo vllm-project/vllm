@@ -3,7 +3,7 @@
 """ROCm MoE implementation for MuseSpark1x checkpoints."""
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 import torch
 
@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
+    aiter_triton_kernel_w4a4_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
@@ -52,7 +55,11 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
@@ -101,7 +108,12 @@ def _validate_tp_post_norm_deployment(
 def validate_bf16_deployment(moe_config: FusedMoEConfig) -> None:
     """Reject deployments whose BF16 finalization is not implemented."""
     _validate_tp_post_norm_deployment(moe_config, "BF16")
-    if moe_config.moe_backend not in ("auto", "triton"):
+    # An MXFP4 backend (e.g. aiter_triton_mxfp4_mxfp4 on gfx1250) only selects
+    # the quantized layers' kernels; the BF16 layers stay on Triton.
+    if (
+        moe_config.moe_backend not in ("auto", "triton")
+        and "mxfp4" not in moe_config.moe_backend
+    ):
         raise NotImplementedError(
             "MuseSpark1x BF16 on ROCm requires the Triton MoE backend; got "
             f"{moe_config.moe_backend!r}."
@@ -553,6 +565,115 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         )
 
 
+class MuseSparkAiterW4A4Experts(MuseSparkAiterExperts):
+    """gfx1250 AITER Triton/Gluon W4A4 experts, one unweighted output per route.
+
+    Each route is its own row routed with top-1 one-hot logits, so the kernel's
+    gate weight is 1.0 and its scatter is a permutation, not a reduction.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        super().__init__(moe_config, quant_config)
+        # The kernel clamps gate/up at 7.0 when no limit is set; MuseSpark1x
+        # experts are unclamped SiLU, and a limit <= 0 disables the clamp.
+        if quant_config.gemm1_clamp_limit is None:
+            quant_config = replace(quant_config, gemm1_clamp_limit=0.0)
+        self._kernel_quant_config = quant_config
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        if not rocm_aiter_ops.is_enabled():
+            return False
+        from vllm.platforms.rocm import on_gfx1250
+
+        return on_gfx1250()
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, kMxfp4Dynamic)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "MuseSpark1x requires router weights after the post-expert norm."
+            )
+        if expert_map is not None:
+            raise NotImplementedError(
+                "MuseSpark1x MXFP4 on gfx1250 does not support expert "
+                "parallelism yet; drop --enable-expert-parallel."
+            )
+
+        num_tokens, top_k = topk_ids.shape
+        hidden_dim = hidden_states.shape[-1]
+        expected_output_shape = (num_tokens, top_k, hidden_dim)
+        if output.shape != expected_output_shape:
+            raise ValueError(
+                "MuseSpark1x AITER output has shape "
+                f"{tuple(output.shape)}, expected {expected_output_shape}."
+            )
+
+        expanded_hidden_states = take_expanded(hidden_states, top_k)
+        if expanded_hidden_states is None:
+            expanded_hidden_states = (
+                hidden_states[:, None, :]
+                .expand(num_tokens, top_k, hidden_dim)
+                .reshape(num_tokens * top_k, hidden_dim)
+                .contiguous()
+            )
+        num_routes = num_tokens * top_k
+        one_hot_logits = torch.zeros(
+            (num_routes, global_num_experts),
+            dtype=torch.bfloat16,
+            device=topk_ids.device,
+        )
+        one_hot_logits.scatter_(1, topk_ids.reshape(num_routes, 1).long(), 1.0)
+
+        moe_config = self.moe_config
+        assert moe_config.intermediate_size_per_partition_unpadded is not None
+        assert moe_config.hidden_dim_unpadded is not None
+        route_output = aiter_triton_kernel_w4a4_moe_forward(
+            hidden_states=expanded_hidden_states,
+            w1=w1,
+            w2=w2,
+            gating_output=one_hot_logits,
+            topk=1,
+            renormalize=True,
+            activation=activation,
+            quant_config=self._kernel_quant_config,
+            apply_router_weight_on_input=False,
+            global_num_experts=global_num_experts,
+            unpadded_N_w1=moe_config.intermediate_size_per_partition_unpadded * 2,
+            unpadded_K_w1=moe_config.hidden_dim_unpadded,
+            unpadded_N_w2=moe_config.hidden_dim_unpadded,
+            unpadded_K_w2=moe_config.intermediate_size_per_partition_unpadded,
+        )
+        self._park_route_output(route_output.view_as(output))
+
+
 class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
     """Quark W8A8 FP8 method using route-preserving Triton experts."""
 
@@ -613,13 +734,16 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 "MuseSpark1x MXFP4 on ROCm requires Quark OCP W4A4 with "
                 f"dynamic MXFP4 activations; got {self.ocp_mx_scheme!r}."
             )
-        if self.mxfp4_backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        if self.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            self.experts_cls = MuseSparkAiterExperts
+        elif self.mxfp4_backend is Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4:
+            self.experts_cls = MuseSparkAiterW4A4Experts
+        else:
             raise NotImplementedError(
-                "MuseSpark1x MXFP4 on ROCm requires the "
-                "AITER_MXFP4_MXFP4 backend; got "
+                "MuseSpark1x MXFP4 on ROCm requires the AITER_MXFP4_MXFP4 "
+                "(gfx950) or AITER_TRITON_MXFP4_MXFP4 (gfx1250) backend; got "
                 f"{self.mxfp4_backend.value}."
             )
-        self.experts_cls = MuseSparkAiterExperts
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -840,6 +964,11 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
                 f"checkpoints; got {quant_config.get_name()!r}."
             )
 
+        # Quark's excluded layers (0 and 61): skip building the generic
+        # unquantized method, whose oracle rejects MXFP4-only backends.
+        _, _, method_cls = quant_config.get_quant_method_target(prefix, type(self))
+        if method_cls is UnquantizedFusedMoEMethod:
+            return MuseSparkUnquantizedFusedMoE(moe_config)
         quant_method = quant_config.get_quant_method(self, prefix)
         if isinstance(quant_method, UnquantizedFusedMoEMethod):
             return MuseSparkUnquantizedFusedMoE(moe_config)
