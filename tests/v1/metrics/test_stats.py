@@ -26,10 +26,12 @@ from vllm.v1.utils import compute_iteration_details
 
 
 @pytest.mark.parametrize(
-    "verified_lengths, expected_per_pos",
+    "num_verified_per_req, expected_per_pos",
     [([3, 0, 0], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
 )
-def test_verified_counters_differ_from_proposals(verified_lengths, expected_per_pos):
+def test_verified_counters_differ_from_proposals(
+    num_verified_per_req, expected_per_pos
+):
     registry = CollectorRegistry()
     config = SpeculativeConfig(
         method="ngram",  # no weights needed
@@ -42,10 +44,10 @@ def test_verified_counters_differ_from_proposals(verified_lengths, expected_per_
         per_engine_labelvalues={0: ["0"]},  # any string
     )
     stats = SpecDecodingStats.new(num_spec_tokens=5)
-    for verified in verified_lengths:
+    for num_verified in num_verified_per_req:
         stats.observe_draft_stats_per_req(
             num_draft_tokens=5,
-            num_verified_tokens=verified,
+            num_verified_tokens=num_verified,
             num_accepted_tokens=0,
         )
     assert stats.num_verified_tokens_per_pos == expected_per_pos
