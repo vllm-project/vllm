@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
-from typing import cast
 from uuid import uuid4
 
 import torch
@@ -224,18 +223,6 @@ TorchProfilerActivityMap = {
     "PrivateUse1": torch.profiler.ProfilerActivity.PrivateUse1,
     "XPU": torch.profiler.ProfilerActivity.XPU,
 }
-
-
-def default_torch_profiler_activities(device_type: str) -> list[TorchProfilerActivity]:
-    """CPU plus the accelerator activity for a runner device.
-
-    ``cuda`` covers CUDA and ROCm; ``xpu`` selects Intel GPU events. Device
-    types torch cannot profile fall back to CPU-only.
-    """
-    accelerator = device_type.upper()
-    if accelerator == "CPU" or accelerator not in TorchProfilerActivityMap:
-        return ["CPU"]
-    return ["CPU", cast(TorchProfilerActivity, accelerator)]
 
 
 def graph_capture_profiler_config(profiler_config: ProfilerConfig) -> ProfilerConfig:

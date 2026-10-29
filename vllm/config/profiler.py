@@ -137,7 +137,8 @@ class ProfilerConfig:
 
     capture_torch_profiler: bool = False
     """If `True`, enables a torch profiler during GPU graph capture on rank 0.
-    Activities include CPU and the runner device (CUDA/ROCm or XPU).
+    Uses the same activities as serving (`torch_profiler_activities` or the
+    platform default).
     Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
     Requires `profiler` to be set to 'torch'."""
 

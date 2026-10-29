@@ -25,7 +25,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.profiler.wrapper import (
     TorchProfilerWrapper,
-    default_torch_profiler_activities,
+    create_worker_profiler,
     graph_capture_profiler_config,
 )
 
@@ -73,14 +73,10 @@ def make_graph_capture_profiler(
     worker_name = f"graph_capture_rank_{local_rank}"
     if subsystem:
         worker_name += f"_{subsystem}"
-    wrapper = TorchProfilerWrapper(
-        capture_config,
-        worker_name=worker_name,
-        local_rank=local_rank,
-        activities=default_torch_profiler_activities(
-            vllm_config.device_config.device_type
-        ),
+    wrapper = create_worker_profiler(
+        capture_config, worker_name=worker_name, local_rank=local_rank
     )
+    assert isinstance(wrapper, TorchProfilerWrapper)
     # Serving creates wrapper.profiler only when a session starts. Capture
     # needs the same settings without starting that session.
     return wrapper.build_profiler()

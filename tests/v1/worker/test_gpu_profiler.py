@@ -31,7 +31,6 @@ from vllm.profiler.wrapper import (
     TorchProfilerWrapper,
     WorkerProfiler,
     create_worker_profiler,
-    default_torch_profiler_activities,
     graph_capture_profiler_config,
     validate_worker_profiler_config,
 )
@@ -837,10 +836,9 @@ class TestGraphCaptureProfiler:
                 torch_profiler_dir="/traces",
                 capture_torch_profiler=True,
             ),
-            device_config=SimpleNamespace(device_type="xpu"),
         )
         built = MagicMock()
-        wrapper = MagicMock()
+        wrapper = MagicMock(spec=TorchProfilerWrapper)
         wrapper.build_profiler.return_value = built
 
         with (
@@ -848,39 +846,42 @@ class TestGraphCaptureProfiler:
                 graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
             ),
             patch.object(
-                graph_capture, "TorchProfilerWrapper", return_value=wrapper
-            ) as wrapper_cls,
+                graph_capture, "create_worker_profiler", return_value=wrapper
+            ) as create,
         ):
             result = graph_capture.make_graph_capture_profiler(config, subsystem)
 
         assert result is built
         wrapper.build_profiler.assert_called_once_with()
-        capture_config = wrapper_cls.call_args.args[0]
+        capture_config = create.call_args.args[0]
         assert capture_config.torch_profiler_dir == "/traces/capture_traces"
-        assert wrapper_cls.call_args.kwargs["worker_name"] == expected
-        # Activities follow the runner device, not a hardcoded CUDA list.
-        assert wrapper_cls.call_args.kwargs["activities"] == ["CPU", "XPU"]
+        assert create.call_args.kwargs["worker_name"] == expected
         wrapper.start.assert_not_called()
 
     def test_enabled_rank_returns_enterable_profiler(self):
         """Rank 0 with capture enabled can enter the profiler it builds.
 
         The wrapper does not create its profiler until a serving session
-        starts, so this must build a separate unstarted profiler.
+        starts, so this must build a separate unstarted profiler. Configured
+        activities are honored, as in serving.
         """
         config = MagicMock(
             profiler_config=ProfilerConfig(
                 profiler="torch",
                 torch_profiler_dir="/traces",
+                torch_profiler_activities=["CPU", "XPU"],
                 capture_torch_profiler=True,
             ),
-            device_config=SimpleNamespace(device_type="xpu"),
         )
         built = MagicMock()
 
         with (
             patch.object(
                 graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
+            ),
+            patch(
+                "vllm.profiler.wrapper.current_platform",
+                SimpleNamespace(device_type="cuda"),
             ),
             patch(
                 "vllm.profiler.wrapper.torch.profiler.profile", return_value=built
@@ -931,18 +932,6 @@ class TestGraphCaptureProfiler:
         assert capture_config.torch_profiler_with_flops
         assert capture_config.torch_profiler_with_memory
         assert not capture_config.torch_profiler_use_gzip
-
-    @pytest.mark.parametrize(
-        "device_type,expected",
-        [
-            ("cuda", ["CPU", "CUDA"]),
-            ("xpu", ["CPU", "XPU"]),
-            ("cpu", ["CPU"]),
-            ("tpu", ["CPU"]),
-        ],
-    )
-    def test_activities_follow_runner_device(self, device_type, expected):
-        assert default_torch_profiler_activities(device_type) == expected
 
     @pytest.mark.parametrize("local_rank,enabled", [(0, False), (1, True)])
     def test_no_binding_when_disabled_or_off_rank(
