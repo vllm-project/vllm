@@ -846,6 +846,72 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
         )
 
 
+def test_tkw1_dispatch_requires_per_act_token_quant():
+    """A per_out_ch_quant=True config without per-token activation quant
+    (e.g. quark's W4A8 FP8 MoE) still gets quant_method==PER_TOKEN from
+    derive_aiter_quant_method(), but must not route to asm_moe_tkw1 when
+    apply_router_weight_on_input is set — only per_act_token_quant does.
+    See vllm-project/vllm#54966.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
+        derive_aiter_quant_method,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=1,
+        seed=7,
+    )
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=torch.ones(4, 1, device="cuda"),
+        w2_scale=torch.ones(4, 1, device="cuda"),
+        per_out_ch_quant=True,
+    )
+    assert derive_aiter_quant_method(quant_config) == QuantMethod.PER_TOKEN
+    assert not quant_config.per_act_token_quant
+
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=1,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+
+    with (
+        mock.patch.object(rocm_aiter_ops, "asm_moe_tkw1") as tkw1_mock,
+        mock.patch.object(rocm_aiter_ops, "fused_moe") as fused_moe_mock,
+    ):
+        rocm_aiter_fused_experts(
+            hidden_states=case["hidden_states"],
+            w1=w1_shuffled,
+            w2=w2_shuffled,
+            topk_weights=case["topk_weights"],
+            topk_ids=case["topk_ids"],
+            moe_config=moe_config,
+            quant_config=quant_config,
+            quant_method=derive_aiter_quant_method(quant_config),
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=True,
+        )
+
+    assert fused_moe_mock.call_count == 1 and tkw1_mock.call_count == 0, (
+        "Per-channel weight scale without per-token activation scale should "
+        "dispatch to fused_moe, not asm_moe_tkw1."
+    )
+
+
 # Enum tests --------------------------------------------------------------
 
 

@@ -330,7 +330,10 @@ def _write_moe_output(output: torch.Tensor, result: torch.Tensor) -> None:
 def derive_aiter_quant_method(quant_config: FusedMoEQuantConfig) -> QuantMethod:
     """Re-derive the `QuantMethod` an `AiterExperts` leaf would statically set
     via `_AITER_QUANT_METHOD`. For callers that invoke
-    `rocm_aiter_fused_experts` directly instead of through a leaf."""
+    `rocm_aiter_fused_experts` directly instead of through a leaf.
+
+    Weight-scheme only: PER_TOKEN doesn't imply per-token activation quant.
+    """
     if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
         return QuantMethod.BLOCK_1X32
     if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
@@ -440,7 +443,15 @@ def rocm_aiter_fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    if apply_router_weight_on_input and quant_method == QuantMethod.PER_TOKEN:
+    if (
+        apply_router_weight_on_input
+        and quant_config.use_fp8_w8a8
+        and quant_config.per_act_token_quant
+    ):
+        # tkw1 only cares about activation granularity, not quant_method
+        # (weight scheme) — e.g. quark's W4A8 has per_out_ch_quant=True
+        # (quant_method==PER_TOKEN) with static activation scale and must
+        # not take this path.
         assert num_local_tokens is None, (
             "AITER tkw1 kernel does not support `num_local_tokens`"
         )
