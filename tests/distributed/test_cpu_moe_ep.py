@@ -710,3 +710,115 @@ def test_cpu_bf16_moe_prepare_finalize_ragged(dp_size, apply_weight_on_input):
         params=apply_weight_on_input,
         timeout=120,
     )
+
+
+def _bf16_moe_shared_expert_worker(
+    rank, world_size, tp_size, dp_size, port, dp_port, params
+):
+    _init_tp_dp_environment(
+        rank, tp_size, dp_size, port, dp_port, enable_expert_parallel=True
+    )
+    from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.parallel import ParallelConfig
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUUnquantizedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    hidden_size = intermediate_size = 128
+    num_experts = 4
+    hidden = torch.randn(4, hidden_size, dtype=dtype) / (0.5 * math.sqrt(hidden_size))
+    logits = torch.randn(4, num_experts, dtype=dtype)
+    w1 = torch.randn(num_experts, 2 * intermediate_size, hidden_size, dtype=dtype) / (
+        0.5 * math.sqrt(hidden_size)
+    )
+    w2 = torch.randn(num_experts, hidden_size, intermediate_size, dtype=dtype) / (
+        0.5 * math.sqrt(intermediate_size)
+    )
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=dp_size,
+            data_parallel_rank=rank,
+            enable_expert_parallel=True,
+            is_moe_model=True,
+        )
+    )
+    shared = torch.nn.Linear(hidden_size, hidden_size, bias=False, dtype=dtype)
+    with set_current_vllm_config(config), torch.inference_mode():
+        layer = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=dtype,
+            shared_experts=shared,
+            prefix="cpu_shared_ep",
+        )
+        assert isinstance(layer.shared_experts, SharedExperts)
+        routed = layer.routed_experts
+        assert routed.expert_map is not None
+        local = _get_local_expert_slice(routed.expert_map, routed.local_num_experts)
+        routed.w13_weight.copy_(w1[local])
+        routed.w2_weight.copy_(w2[local])
+        assert isinstance(routed.quant_method, UnquantizedFusedMoEMethod)
+        routed.quant_method.process_weights_after_loading(routed)
+        kernel = routed.quant_method.moe_kernel
+        assert kernel is not None
+        assert isinstance(kernel.fused_experts, CPUUnquantizedExperts)
+        isa = kernel.fused_experts.isa
+        weights, ids = layer.router.select_experts(
+            hidden, logits, topk_indices_dtype=torch.int32
+        )
+        reference = torch.empty_like(hidden)
+        ops.cpu_fused_moe(
+            reference,
+            hidden,
+            ops.cpu_prepack_moe_weight(w1, isa),
+            ops.cpu_prepack_moe_weight(w2, isa),
+            None,
+            None,
+            weights,
+            ids,
+            "silu",
+            isa,
+        )
+        for sizes in [[3, 1], [1, 3]]:
+            start, count = sum(sizes[:rank]), sizes[rank]
+            local_hidden = hidden[start : start + count]
+            with set_forward_context(
+                None,
+                config,
+                num_tokens=count,
+                num_tokens_across_dp=torch.tensor(sizes, dtype=torch.int),
+            ):
+                output = layer(local_hidden, logits[start : start + count])
+            expected = reference[start : start + count] + shared(local_hidden)
+            assert output.shape == local_hidden.shape
+            torch.testing.assert_close(
+                output,
+                expected,
+                atol=get_default_atol(output),
+                rtol=get_default_rtol(output),
+            )
+    dist.barrier()
+
+
+@pytest.mark.distributed
+def test_cpu_bf16_moe_shared_expert_added_once():
+    """Real MoERunner adds each origin-local shared expert after routed combine."""
+    _spawn_workers(
+        _bf16_moe_shared_expert_worker,
+        world_size=2,
+        tp_size=1,
+        dp_size=2,
+        params=None,
+        timeout=120,
+    )
