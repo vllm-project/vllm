@@ -2883,13 +2883,13 @@ class _PrefixGrammar(StructuredOutputGrammar):
         return False
 
     def rollback(self, num_tokens: int) -> None:
-        pass
+        raise NotImplementedError
 
     def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
         raise NotImplementedError
 
     def reset(self) -> None:
-        pass
+        raise NotImplementedError
 
 
 def test_spec_decode_stats_keep_batch_after_all_padding_draft():
