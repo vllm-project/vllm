@@ -3,7 +3,7 @@
 import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import lcm
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +34,11 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import (
+    SlidingWindowSpec,
+    is_full_attention_spec,
+    iter_layer_specs,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -59,6 +64,9 @@ class ConnectorLoad:
 class RequestLoadPlan:
     assignments: tuple[ConnectorLoad, ...]
     is_async: bool
+    fallback_index: int
+    load_modes: tuple[bool, ...]
+    loaded_group_ids: tuple[int, ...] = ()
 
     @property
     def num_tokens(self) -> int:
@@ -150,7 +158,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-        prom_metrics: dict[str, KVConnectorPromMetrics | None],
+        prom_metrics: dict[str, KVConnectorPromMetrics],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
         self._prom_metrics = prom_metrics
@@ -230,15 +238,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._range_load = load_policy == "range_aware"
         self._scheduler_block_size = None
         if self._range_load:
-            if (
-                role == KVConnectorRole.SCHEDULER
-                and kv_cache_config.has_mamba_layers
-                and not all(c.supports_load_range for c in self._connectors)
-            ):
-                raise ValueError(
-                    "MultiConnector range_aware loading with recurrent KV cache "
-                    "groups requires every child connector to support range loads"
-                )
             self._scheduler_block_size, _ = resolve_kv_cache_block_sizes(
                 kv_cache_config, vllm_config
             )
@@ -545,14 +544,117 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         if self._range_load:
-            # The terminal source restores state at the adopted prefix endpoint.
-            connector_index = (
-                self._load_plans[request.request_id].assignments[-1].connector_index
-            )
+            return self._load_plans[request.request_id].loaded_group_ids
         else:
             connector_index = self._requests_to_connector[request.request_id]
         connector = self._connectors[connector_index]
         return connector.get_loaded_kv_cache_group_ids(request)
+
+    def get_loaded_kv_cache_group_ids_for_prefix(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        if not self._range_load:
+            child = self._connectors[self._requests_to_connector[request.request_id]]
+            return child.get_loaded_kv_cache_group_ids_for_prefix(request, end_token)
+        plan = self._load_plans[request.request_id]
+        start = plan.assignments[0].load_range.start_token
+        if end_token != start + plan.num_tokens:
+            assignments = tuple(
+                replace(
+                    a,
+                    load_range=KVLoadRange(
+                        a.load_range.start_token,
+                        min(a.load_range.end_token, end_token),
+                        a.load_range.end_token >= end_token,
+                    ),
+                )
+                for a in plan.assignments
+                if a.load_range.num_tokens and a.load_range.start_token < end_token
+            )
+            plan = replace(plan, assignments=assignments)
+            plan = self._assign_windows(request, plan) or self._single_load_plan(
+                request, plan.fallback_index, start, end_token, plan.load_modes
+            )
+            self._load_plans[request.request_id] = plan
+        return plan.loaded_group_ids
+
+    def _assign_windows(
+        self, request: "Request", plan: RequestLoadPlan
+    ) -> RequestLoadPlan | None:
+        groups = self._kv_cache_config.kv_cache_groups
+        full = {
+            i for i, g in enumerate(groups) if is_full_attention_spec(g.kv_cache_spec)
+        }
+        windows = set(range(len(groups))) - full
+        if any(
+            not all(
+                isinstance(s, SlidingWindowSpec)
+                for s in iter_layer_specs(groups[i].kv_cache_spec)
+            )
+            for i in windows
+        ):
+            return None
+        if any(
+            not full.issubset(
+                self._connectors[a.connector_index].get_loaded_kv_cache_group_ids(
+                    request
+                )
+            )
+            or (windows and not a.use_range_api)
+            for a in plan.assignments
+        ):
+            return None
+        if not windows:
+            return replace(plan, loaded_group_ids=tuple(sorted(full)))
+
+        end = plan.assignments[0].load_range.start_token + plan.num_tokens
+        assignments = {a.connector_index: a for a in plan.assignments}
+        for i, child in enumerate(self._connectors):
+            if not child.supports_load_range or plan.load_modes[i] != plan.is_async:
+                continue
+            owned = windows.intersection(
+                child.get_loadable_window_group_ids(request, end)
+            )
+            if not owned:
+                continue
+            assignment = assignments.get(
+                i, ConnectorLoad(i, KVLoadRange(end, end), True)
+            )
+            assignments[i] = replace(
+                assignment,
+                load_range=replace(
+                    assignment.load_range,
+                    window_group_ids=tuple(sorted(owned)),
+                    window_end_token=end,
+                ),
+            )
+            windows -= owned
+            if not windows:
+                return replace(
+                    plan,
+                    assignments=tuple(assignments.values()),
+                    loaded_group_ids=tuple(range(len(groups))),
+                )
+        return None
+
+    def _single_load_plan(
+        self,
+        request: "Request",
+        index: int,
+        start: int,
+        end: int,
+        load_modes: tuple[bool, ...],
+    ) -> RequestLoadPlan:
+        child = self._connectors[index]
+        return RequestLoadPlan(
+            assignments=(ConnectorLoad(index, KVLoadRange(start, end), False),),
+            is_async=load_modes[index],
+            fallback_index=index,
+            load_modes=load_modes,
+            loaded_group_ids=child.get_loaded_kv_cache_group_ids_for_prefix(
+                request, end
+            ),
+        )
 
     def _effective_load_range_alignment(self, connector: KVConnectorBase_V1) -> int:
         assert self._scheduler_block_size is not None
@@ -623,7 +725,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     aligned_covered = covered // alignment * alignment
                     if not previous.supports_load_range:
                         return self._select_single_load(
-                            req_id, matches, num_computed_tokens
+                            request, matches, num_computed_tokens
                         )
                     previous_range = ranges[previous_connector]
                     if aligned_covered <= previous_range.start_token:
@@ -643,7 +745,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             covered = endpoint
 
         if not ranges:
-            return self._select_single_load(req_id, matches, num_computed_tokens)
+            return self._select_single_load(request, matches, num_computed_tokens)
 
         terminal_connector = next(reversed(ranges))
         terminal_range = ranges[terminal_connector]
@@ -653,46 +755,54 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             is_terminal=True,
         )
 
-        if len(ranges) == 1:
-            return self._select_single_load(req_id, matches, num_computed_tokens)
+        if len(ranges) == 1 and all(
+            is_full_attention_spec(g.kv_cache_spec)
+            for g in self._kv_cache_config.kv_cache_groups
+        ):
+            return self._select_single_load(request, matches, num_computed_tokens)
 
         async_loads = tuple(i for i in ranges if matches[i][1])
         if async_loads and len(async_loads) != len(ranges):
             # A range request has one scheduler-level completion state. Mixing
             # sync and async children can acknowledge tokens that a sync child
             # has not loaded in the step where the request is parked.
-            return self._select_single_load(req_id, matches, num_computed_tokens)
+            return self._select_single_load(request, matches, num_computed_tokens)
 
         longest_single = max(matches, key=lambda match: match[0])
         if longest_single[0] > covered - num_computed_tokens:
-            return self._select_single_load(req_id, matches, num_computed_tokens)
+            return self._select_single_load(request, matches, num_computed_tokens)
 
-        plan = RequestLoadPlan(
+        prefix_plan = RequestLoadPlan(
             assignments=tuple(
                 ConnectorLoad(i, load_range, self._connectors[i].supports_load_range)
                 for i, load_range in ranges.items()
             ),
             is_async=bool(async_loads),
+            fallback_index=max(range(len(matches)), key=lambda i: matches[i][0]),
+            load_modes=tuple(is_async for _, is_async in matches),
         )
+        plan = self._assign_windows(request, prefix_plan)
+        if plan is None:
+            return self._select_single_load(request, matches, num_computed_tokens)
         self._load_plans[req_id] = plan
         return plan.num_tokens, plan.is_async
 
     def _select_single_load(
-        self, request_id: str, matches: list[tuple[int, bool]], num_computed_tokens: int
+        self,
+        request: "Request",
+        matches: list[tuple[int, bool]],
+        num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """Fall back to the connector with the longest complete prefix."""
         chosen = max(range(len(matches)), key=lambda i: matches[i][0])
         toks, load_async = matches[chosen]
         if toks > 0:
-            self._load_plans[request_id] = RequestLoadPlan(
-                assignments=(
-                    ConnectorLoad(
-                        chosen,
-                        KVLoadRange(num_computed_tokens, num_computed_tokens + toks),
-                        use_range_api=False,
-                    ),
-                ),
-                is_async=load_async,
+            self._load_plans[request.request_id] = self._single_load_plan(
+                request,
+                chosen,
+                num_computed_tokens,
+                num_computed_tokens + toks,
+                tuple(is_async for _, is_async in matches),
             )
         return (toks, load_async) if toks > 0 else (0, False)
 
@@ -701,6 +811,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_external_tokens: int,
     ) -> dict[CacheHitSource, int]:
+        if self._range_load and num_external_tokens:
+            sources: dict[CacheHitSource, int] = {}
+            for assignment in self._load_plans[request.request_id].assignments:
+                if not assignment.load_range.num_tokens:
+                    continue
+                child = self._connectors[assignment.connector_index]
+                for source, count in child.get_external_cache_hit_sources(
+                    request, assignment.load_range.num_tokens
+                ).items():
+                    sources[source] = sources.get(source, 0) + count
+            return sources
         chosen_connector = self._requests_to_connector.get(request.request_id)
         if chosen_connector is None:
             return super().get_external_cache_hit_sources(request, num_external_tokens)
@@ -713,14 +834,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         req_id = request.request_id
         if self._range_load:
-            plan = self._load_plans.pop(req_id, None)
-            if plan is not None and num_external_tokens > 0:
-                if len(plan.assignments) > 1 and num_external_tokens != plan.num_tokens:
-                    raise ValueError(
-                        "Range load token count changed after lookup: "
-                        f"expected {plan.num_tokens}, got {num_external_tokens} "
-                        f"for request {req_id}"
-                    )
+            if num_external_tokens > 0:
+                start = self._load_plans[req_id].assignments[0].load_range.start_token
+                self.get_loaded_kv_cache_group_ids_for_prefix(
+                    request, start + num_external_tokens
+                )
+                plan = self._load_plans[req_id]
                 if plan.is_async:
                     self._async_load_connectors_to_send[req_id] = plan.connector_indices
                 assignments = {a.connector_index: a for a in plan.assignments}
@@ -735,12 +854,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                         request, blocks, assignment.load_range
                     )
                 else:
-                    tokens = (
-                        num_external_tokens
-                        if len(assignments) == 1
-                        else assignment.load_range.num_tokens
+                    c.update_state_after_alloc(
+                        request, blocks, assignment.load_range.num_tokens
                     )
-                    c.update_state_after_alloc(request, blocks, tokens)
             return
 
         chosen_connector = self._requests_to_connector.get(req_id, -1)
@@ -994,7 +1110,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
-        prom_metrics: dict[str, KVConnectorPromMetrics | None] = {}
+        prom_metrics: dict[str, KVConnectorPromMetrics] = {}
         seen_classes: set[type] = set()
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
             vllm_config
@@ -1005,7 +1121,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             connector_prom = connector_cls.build_prom_metrics(
                 temp_config, metric_types, labelnames, per_engine_labelvalues
             )
-            prom_metrics[connector_cls.__name__] = connector_prom
+            if connector_prom is not None:
+                prom_metrics[connector_cls.__name__] = connector_prom
         return MultiKVConnectorPromMetrics(
             vllm_config,
             metric_types,
