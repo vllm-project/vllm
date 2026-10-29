@@ -404,11 +404,8 @@ class TestAsyncLookupManager:
             mgr.drain_results()
         mgr.shutdown()
 
-    def test_invalidate_drops_stale_absent_and_reprobes(self):
-        """Store-invalidation regression. After a block's absence was cached
-        (False), a successful store makes it present on disk; invalidate() must
-        drop that stale negative so the scheduler re-probes and sees it (True)
-        instead of serving the stale MISS."""
+    def test_store_marks_cached_miss_present(self):
+        """A successful store changes a cached miss into a known hit."""
         mgr = InMemoryLookupManager()
         ctx = _ctx("reqA")
         key = _key(1)
@@ -420,21 +417,18 @@ class TestAsyncLookupManager:
 
         # A successful store lands the block in the tier.
         mgr._existing.add(key)
-        mgr.invalidate([key])
+        mgr.mark_present([key])
 
-        # The stale negative must be gone; the next lookup re-states and
-        # re-probes, then sees the block as present.
-        assert key not in mgr._lookup_state
-        assert mgr.lookup(key, ctx) is None
-        mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
-        assert mgr.lookup(key, ctx) is True  # re-probed, now present
+        state = mgr._lookup_state[key]
+        assert state.result is True
+        assert state.phase is LookupPhase.RESOLVED
+        assert mgr.lookup(key, ctx) is True
+        assert mgr.batch_lookup_calls == 1
 
         mgr.shutdown()
 
-    def test_invalidate_is_noop_for_present_and_unknown_keys(self):
-        """invalidate() preserves present entries and ignores unknown keys."""
+    def test_mark_present_preserves_present_and_unknown_keys(self):
+        """mark_present() preserves hits and ignores keys with no state."""
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         ctx = _ctx("reqA")
         assert mgr.lookup(_key(1), ctx) is None
@@ -443,44 +437,21 @@ class TestAsyncLookupManager:
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), ctx) is True  # present, resolved
 
-        # A present entry must survive invalidate().
-        mgr.invalidate([_key(1)])
+        # An existing positive verdict stays present.
+        mgr.mark_present([_key(1)])
         assert _key(1) in mgr._lookup_state
         assert mgr.lookup(_key(1), ctx) is True
 
         # An unknown key is a no-op: no entry planted.
-        mgr.invalidate([_key(99)])
+        mgr.mark_present([_key(99)])
         assert _key(99) not in mgr._lookup_state
         mgr.shutdown()
 
-    def test_cleanup_is_safe_after_invalidate(self):
-        """cleanup() must not raise when a tracked key was dropped by
-        invalidate() (e.g. a block stored while its lookup was in flight). The
-        guard turns the would-be KeyError into a no-op for that key."""
-        mgr = InMemoryLookupManager()
-        ctx = _ctx("reqA")
-        key = _key(1)
-        assert mgr.lookup(key, ctx) is None
-        mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
-        assert mgr.lookup(key, ctx) is False  # absent, resolved & cached
-        assert key in mgr._lookup_state and "reqA" in mgr._req_keys
-
-        # Drop the verdict (a successful store), then tear down the request.
-        mgr.invalidate([key])
-        assert key not in mgr._lookup_state
-
-        # Must not raise KeyError; reqA's reverse-index entry is cleared.
-        mgr.cleanup("reqA")
-        assert key not in mgr._lookup_state
-        assert "reqA" not in mgr._req_keys
-        mgr.shutdown()
-
-    def test_invalidate_discards_stale_in_flight_result(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("in_flight", [False, True], ids=["pending", "in_flight"])
+    def test_store_supersedes_stale_probe_result(
+        self, monkeypatch: pytest.MonkeyPatch, in_flight: bool
     ):
-        """A probe started before a successful store must not restore its miss."""
+        """A pre-store probe cannot replace the known-present verdict."""
         key = _key(1)
         mgr = InMemoryLookupManager()
         probe_started = threading.Event()
@@ -501,24 +472,32 @@ class TestAsyncLookupManager:
         monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
         try:
             assert mgr.lookup(key, _ctx("req_a")) is None
-            mgr.flush()
-            assert probe_started.wait(timeout=5)
+            if in_flight:
+                mgr.flush()
+                assert probe_started.wait(timeout=5)
+            stale_generation = mgr._lookup_state[key].generation
 
-            # The first probe observed absence before the store completed.
+            # The successful store supersedes this lookup generation.
             mgr._existing.add(key)
-            mgr.invalidate([key])
-            assert key not in mgr._lookup_state
+            mgr.mark_present([key])
+            state = mgr._lookup_state[key]
+            assert state.generation != stale_generation
+            assert state.result is True
+            assert state.phase is LookupPhase.RESOLVED
 
-            # A fresh generation observes the successful store. The older
-            # in-flight result must be ignored when it arrives first.
-            assert mgr.lookup(key, _ctx("req_b")) is None
-            mgr.flush()
+            # Requests share the known-present state immediately.
+            assert mgr.lookup(key, _ctx("req_b")) is True
+            if not in_flight:
+                # flush() skips the stale pending generation.
+                mgr.flush()
+            # An old in-flight result must not replace the stored verdict.
             release_probe.set()
         finally:
             release_probe.set()
             mgr.shutdown()
 
-        assert calls == 2
+        assert calls == int(in_flight)
         assert mgr.lookup(key, _ctx("req_b")) is True
+        assert mgr._lookup_state[key].result is True
         mgr.cleanup("req_a")
         mgr.cleanup("req_b")

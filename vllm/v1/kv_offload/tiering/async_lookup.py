@@ -229,17 +229,20 @@ class AsyncLookupManager(ABC):
             if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
 
-    def invalidate(self, keys: Collection[OffloadKey]) -> None:
-        """Drop absent or unresolved verdicts for keys stored to this tier.
+    def mark_present(self, keys: Collection[OffloadKey]) -> None:
+        """Record that keys were successfully stored to this tier.
 
-        A probe that started before the store may still return a stale miss, so
-        pending and in-flight entries must be dropped along with resolved
-        misses. Present and unknown keys are left alone.
+        Advance the generation so pending and in-flight probes cannot replace
+        the known-present verdict with a stale result.
         """
         for key in keys:
             state = self._lookup_state.get(key)
-            if state is not None and state.result is not True:
-                del self._lookup_state[key]
+            if state is None or state.result is True:
+                continue
+            state.generation = self._next_generation
+            self._next_generation += 1
+            state.result = True
+            state.phase = LookupPhase.RESOLVED
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
@@ -248,10 +251,7 @@ class AsyncLookupManager(ABC):
         index to visit only keys associated with this request.
         """
         for key in self._req_keys.pop(req_id, ()):
-            # Guard: invalidate() may have dropped a key this request still references.
-            state = self._lookup_state.get(key)
-            if state is None:
-                continue
+            state = self._lookup_state[key]
             state.request_ids.discard(req_id)
             if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
                 del self._lookup_state[key]

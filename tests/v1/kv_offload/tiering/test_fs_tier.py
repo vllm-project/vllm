@@ -231,7 +231,7 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert os.path.exists(dest), f"Expected file at {dest}"
 
 
-def test_store_invalidates_a_cached_miss(fs_tier):
+def test_store_marks_a_cached_miss_present(fs_tier):
     tier, _ = fs_tier
     block_key = key(1)
     assert lookup_and_wait(tier, [block_key]) == [LookupResult.MISS]

@@ -287,7 +287,7 @@ class FileSystemTierManager(SecondaryTierManager):
             keys = self._store_job_keys.pop(job_id, None)
             if keys and success:
                 # Successful store: drop the cached absent verdict so it re-probes.
-                self._lookup_manager.invalidate(keys)
+                self._lookup_manager.mark_present(keys)
                 if self.events is not None:
                     self.events.append(
                         OffloadingEvent(

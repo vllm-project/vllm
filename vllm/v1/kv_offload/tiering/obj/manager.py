@@ -380,7 +380,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         for result in results:
             keys = self._store_job_keys.pop(result.job_id, None)
             if result.success and keys:
-                self._lookup_manager.invalidate(keys)
+                self._lookup_manager.mark_present(keys)
                 if self.events is not None:
                     self.events.append(
                         OffloadingEvent(
