@@ -2114,25 +2114,21 @@ def _flat_sigmoid_bias_topk_is_profitable(
     topk_group: int,
 ) -> bool:
     """Replace the grouped kernel with a register-resident Triton top-k when
-    the grouping eliminates nothing and the step runs under a CUDA graph.
+    the grouping eliminates nothing and the call is being captured into a
+    CUDA graph.
 
-    The Triton kernel wins on device time (1.67x-2.15x on gfx942 under graph
-    replay) but loses eagerly, where it is a Triton launch from Python against
-    a single C++ dispatch -- measured at -1.8% to -3.5% end-to-end throughput
-    with --enforce-eager. The forward-context check mirrors
-    vllm/models/deepseek_v41/amd/ops/sparse_indexer.py.
+    The Triton kernel wins on device time under graph replay but loses eagerly,
+    where it is a Triton launch from Python against a single C++ dispatch --
+    measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
+    Stream capture is the test because it holds for every graph vLLM records,
+    FULL and PIECEWISE, under either model runner, while the forward context's
+    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
     """
-    from vllm.config import CUDAGraphMode
-    from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
         can_use_sigmoid_bias_flat_topk,
     )
 
-    try:
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE:
-            return False
-    except AssertionError:
-        # No forward context (direct calls, unit tests): keep AITER.
+    if not torch.cuda.is_current_stream_capturing():
         return False
     return can_use_sigmoid_bias_flat_topk(
         gating_output,

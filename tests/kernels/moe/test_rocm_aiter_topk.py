@@ -545,32 +545,33 @@ def test_flat_topk_honours_routed_scaling(scale_factor):
 
 
 @pytest.mark.parametrize(
-    "groups,topk_group,mode_name,substituted",
+    "groups,topk_group,captured,substituted",
     [
-        (1, 1, "FULL", True),
-        (2, 2, "FULL", True),
-        (8, 4, "FULL", False),  # a group is eliminated -> AITER
-        (1, 1, "NONE", False),  # eager -> AITER
+        (1, 1, True, True),
+        (2, 2, True, True),
+        (8, 4, True, False),  # a group is eliminated -> AITER
+        (1, 1, False, False),  # eager -> AITER
     ],
 )
 def test_biased_grouped_topk_substitutes_only_when_expected(
-    monkeypatch, groups, topk_group, mode_name, substituted
+    monkeypatch, groups, topk_group, captured, substituted
 ):
     """End of the wiring: rocm_aiter_ops.biased_grouped_topk is the single
     call site both routers reach, so this asserts the substitution happens
-    there and only for the intended shapes."""
-    import vllm.forward_context as fc
-    from vllm.config import CUDAGraphMode
+    there and only for the intended shapes, and only while a CUDA graph is
+    being captured."""
     from vllm.model_executor.layers.fused_moe.router import (
         rocm_sigmoid_bias_flat_topk as K,
     )
 
-    class _Ctx:
-        def __init__(self, mode):
-            self.cudagraph_runtime_mode = mode
-
-    mode = getattr(CUDAGraphMode, mode_name)
-    monkeypatch.setattr(fc, "get_forward_context", lambda: _Ctx(mode))
+    gating, bias, weights, ids = _routing_inputs(
+        8, 64, 6, torch.bfloat16, torch.float32
+    )
+    # Compile the Triton kernel outside the graph.
+    K.sigmoid_bias_flat_topk(
+        gating, bias, torch.empty_like(weights), torch.empty_like(ids), True
+    )
+    torch.accelerator.synchronize()
 
     calls: list[int] = []
     orig = K.sigmoid_bias_flat_topk
@@ -581,19 +582,25 @@ def test_biased_grouped_topk_substitutes_only_when_expected(
 
     monkeypatch.setattr(K, "sigmoid_bias_flat_topk", counted)
 
-    gating, bias, weights, ids = _routing_inputs(
-        8, 64, 6, torch.bfloat16, torch.float32
-    )
-    rocm_aiter_ops.biased_grouped_topk(
-        gating,
-        bias,
-        weights,
-        ids,
-        groups,
-        topk_group,
-        True,
-        routed_scaling_factor=1.0,
-    )
+    def route():
+        rocm_aiter_ops.biased_grouped_topk(
+            gating,
+            bias,
+            weights,
+            ids,
+            groups,
+            topk_group,
+            True,
+            routed_scaling_factor=1.0,
+        )
+
+    if captured:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            route()
+        graph.replay()
+    else:
+        route()
     torch.accelerator.synchronize()
     assert bool(calls) is substituted
     assert torch.isfinite(weights).all()
