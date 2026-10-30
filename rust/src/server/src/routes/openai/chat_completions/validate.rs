@@ -5,7 +5,7 @@ use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
+use crate::routes::openai::utils::{validate_beam_search, validate_generation_prompt_truncation};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -65,22 +65,26 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if request.use_beam_search {
+    validate_beam_search(
+        request.use_beam_search,
+        request.length_penalty,
+        request.logprob_token_ids.as_deref(),
+        [
+            ("kv_transfer_params", request.kv_transfer_params.is_some()),
+            ("ec_transfer_params", request.ec_transfer_params.is_some()),
+        ],
+    )?;
+    // TODO: Python streams the final beams once the search finishes.
+    if request.use_beam_search && request.stream {
         bail_invalid_request!(
-            param = "use_beam_search",
-            "use_beam_search is not supported."
+            param = "stream",
+            "Streaming is not supported with beam search."
         );
     }
 
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    // Python's default is 1.0, which SDKs may send explicitly.
-    reject_non_default(
-        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
-        "length_penalty",
-        "length_penalty is not supported.",
-    )?;
     if !request.spaces_between_special_tokens {
         bail_invalid_request!(
             param = "spaces_between_special_tokens",

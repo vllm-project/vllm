@@ -4,7 +4,7 @@
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
+use crate::routes::openai::utils::{validate_beam_search, validate_generation_prompt_truncation};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -81,20 +81,38 @@ pub(super) fn validate_request_compat(
         }
     }
 
+    validate_beam_search(
+        request.use_beam_search,
+        request.length_penalty,
+        request.logprob_token_ids.as_deref(),
+        [
+            ("kv_transfer_params", request.kv_transfer_params.is_some()),
+            ("ec_transfer_params", request.ec_transfer_params.is_some()),
+        ],
+    )?;
     if request.use_beam_search {
-        bail_invalid_request!(
-            param = "use_beam_search",
-            "use_beam_search is not supported."
-        );
+        if request.stream {
+            bail_invalid_request!("Streaming is not currently supported with beam search");
+        }
+        if request.echo && request.logprobs.is_some() {
+            bail_invalid_request!(
+                param = "echo",
+                "`echo` with `logprobs` is not supported with beam search because beam \
+                 search does not compute prompt logprobs."
+            );
+        }
+        // TODO: Python returns the bare prompt as a single choice.
+        if request.max_tokens == Some(0) {
+            bail_invalid_request!(
+                param = "max_tokens",
+                "max_tokens=0 is not supported with beam search."
+            );
+        }
     }
 
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    // Python's default is 1.0, which SDKs may send explicitly.
-    if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
-        bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
-    }
     if !request.spaces_between_special_tokens {
         bail_invalid_request!(
             param = "spaces_between_special_tokens",
