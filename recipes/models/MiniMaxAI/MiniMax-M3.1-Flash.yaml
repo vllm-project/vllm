@@ -1022,6 +1022,112 @@ presets:
 
       The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
 
+  mi355x_agentx:
+    label: "AgentX TP4"
+    hardware: mi355x
+    strategy: single_node_tp
+    variants: [mxfp4]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 engine on four of the node's eight MI355X GPUs, serving the Quark MXFP4 checkpoint: seven-token DSpark with mono decode and an FP8 KV cache up to concurrency 8, seven-token DSpark with DBO and an NVFP4 KV cache at 16 and 32, and three-token DSpark with DBO and a host-DRAM KV tier at 64."
+    source: { label: "InferenceX #4671", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4671", key: "minimaxm31flash-fp4-mi355x-vllm-agentic-dspark", revision: a328b443582c45e45eef7f0c4f133f3e173f0211 }
+    image: "vllm/vllm-openai-rocm:minimax-m31-flash@sha256:ae8681212aa5291d8c27f06e90016435e3fca144a68fd5c439231f6475f74569"
+    tp: 4
+    select:
+      features: { text_only: true, spec_decoding: true }
+    args:
+      - "--enable-prefix-caching"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
+    # The DBO points pass the DBO flags directly: the DBO / SP prefill feature's
+    # modes set their own thresholds (8192, or 16384 with SP on the default
+    # checkpoint only), and this lane runs the 16384-token threshold without SP.
+    points:
+      c1:
+        label: "1 (mono)"
+        concurrency: 1
+        select: { features: { mono_decode: mono } }
+        args: ["--max-num-seqs", "2", "--max-num-batched-tokens", "8192"]
+      c2:
+        label: "2 (mono)"
+        concurrency: 2
+        select: { features: { mono_decode: mono } }
+        args: ["--max-num-seqs", "4", "--max-num-batched-tokens", "8192"]
+      c4:
+        label: "4 (mono)"
+        concurrency: 4
+        select: { features: { mono_decode: mono } }
+        args: ["--max-num-seqs", "8", "--max-num-batched-tokens", "8192"]
+      c8:
+        label: "8 (mono)"
+        concurrency: 8
+        select: { features: { mono_decode: mono } }
+        args: ["--max-num-seqs", "16", "--max-num-batched-tokens", "8192"]
+      c16:
+        label: "16 (DBO)"
+        concurrency: 16
+        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
+        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0" }
+      c32:
+        label: "32 (DBO)"
+        concurrency: 32
+        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
+        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0" }
+      c64:
+        label: "64 (DBO, KV offload)"
+        concurrency: 64
+        select: { kv_offload: simple }
+        args: ["--max-num-seqs", "128", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.9", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
+        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", PYTHONHASHSEED: "42" }
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 3 }
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false } }
+    runbook: |
+      The MI355X AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/)
+      (`minimaxm31flash-fp4-mi355x-vllm-agentic-dspark`,
+      [SemiAnalysisAI/InferenceX#4671](https://github.com/SemiAnalysisAI/InferenceX/pull/4671)),
+      on the Quark MXFP4 checkpoint with `--max-num-seqs` at twice the concurrency
+      (c64 admits 128). Throughput runs replaced block verification with synthetic
+      rejection at the committed golden DSpark acceptance length (4.04 for seven
+      tokens, 2.88 for three); the commands above keep block verification.
+
+      - **Concurrency 1-8** run mono decode with an FP8 KV cache and no DBO: a decode
+        step of up to 16 tokens runs each layer as one fused kernel, and prefill steps
+        stay at 8192 tokens.
+      - **Concurrency 16 and 32** run seven-token DSpark with DBO and an NVFP4 KV cache
+        at 0.85 memory utilization, leaving headroom for DBO prefill.
+      - **Concurrency 64** runs three-token DSpark with DBO at 0.90 and adds a host-DRAM
+        KV tier through `SimpleCPUOffloadConnector`, so cached prefixes are not lost
+        once the working set outgrows the GPU KV cache (14.6M tokens at 0.90).
+        `cpu_bytes_to_use` (1,349 GB) is the budget for the whole engine.
+
+      [InferenceX run 41003224750](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/41003224750)
+      passed all seven performance points and GSM8K at concurrency 8, 32 and 64 at
+      `a328b4435` (single run):
+
+      | Concurrency | Interactivity p50 / p90 (tokens/s/user) | Total tokens/s per GPU |
+      | --- | ---: | ---: |
+      | 1 | 551.0 / 515.7 | 6,766 |
+      | 2 | 548.9 / 410.4 | 6,918 |
+      | 4 | 546.3 / 395.6 | 9,494 |
+      | 8 | 407.4 / 240.0 | 15,411 |
+      | 16 | 228.6 / 168.3 | 27,275 |
+      | 32 | 172.3 / 115.1 | 54,158 |
+      | 64 | 71.4 / 47.3 | 75,434 |
+
+      GSM8K exact match (strict) over 1319 questions was 0.964 at concurrency 8, 0.959 at
+      32 and 0.957 at 64.
+
+      - **Concurrency 64 needed a rerun.** The first attempt hung at its first load from
+        the host KV tier (23 fetches in progress, none completing; `sample_tokens` RPC
+        timeout) and was rerun once, which passed. Treat the offload point as less
+        proven than the others.
+      - **Sequence-parallel prefill does not apply to this checkpoint.** InferenceX also
+        set `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1` at concurrency 64, and the server logged
+        sequence-parallel prefill as off; it is omitted here. SP prefill is available on
+        the default checkpoint through the DBO / SP prefill feature.
+
 guide: |
   ## Overview
 
