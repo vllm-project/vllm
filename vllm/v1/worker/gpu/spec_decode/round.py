@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 from vllm.v1.worker.gpu.spec_decode.step_observation import (
     StepObservation as _StepObservation,
 )
@@ -41,12 +42,16 @@ class PlanShape:
 
 @dataclass(frozen=True)
 class SpecResources:
-    """What speculation holds, declared once at startup.
+    """What speculation holds.
 
     The scheduler reserves ``max_candidates`` KV slots per decoding request and the
-    runner captures ``capture_shapes``. ``state_rows_per_request`` is how many
-    recurrent-state rows (GDN, Mamba2) a verify needs besides the committed one: one
-    per candidate, since each candidate row writes its own state.
+    runner captures ``capture_shapes``.
+
+    The speculator's config declares them (``SpeculatorConfig.resources``), and the
+    KV and recurrent-state pools are sized for that declaration. The engine core then
+    lowers them, never raises them, to what the model's layers verify
+    (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
+    to every worker.
     """
 
     max_candidates: int
@@ -56,6 +61,11 @@ class SpecResources:
     max_branching: int = 1
     """1 for chains. Above 1 the attention backend and the linear-attention layers must
     take a parent per row."""
+
+    @property
+    def plan_kind(self) -> PlanKind:
+        """The plans the speculator verifies: trees when it branches."""
+        return "tree" if self.max_branching > 1 else "chain"
 
     def __post_init__(self) -> None:
         if self.max_candidates < 1:

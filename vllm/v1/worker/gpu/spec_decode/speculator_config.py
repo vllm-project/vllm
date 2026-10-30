@@ -14,6 +14,7 @@ Parts only needed by the V1 model runner are marked "V1 model runner only", and
 will be removed with it.
 """
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -21,6 +22,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
     from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
@@ -147,13 +149,13 @@ class SpeculatorConfig:
     # --- Resources (the speculative round contract, see spec_decode/round.py) ---
 
     def resources(self, max_num_seqs: int) -> "SpecResources":
-        """What speculation holds, declared once at startup.
-
-        A pure function of the config: the scheduler and every worker compute it
-        on their own. The default is a chain of up to K drafts (``max_candidates``
-        K + 1) with a recurrent-state row per draft. Its decode graphs are the
-        uniform K + 1 shape, or one uniform shape per K of a Dynamic SD schedule,
-        plus the variable-length shape under adaptive verification.
+        """What speculation holds, declared once at startup; memory is sized for
+        it. The engine core may lower it to what the model verifies
+        (`adapt_resources`). The default is a chain of up to K drafts
+        (``max_candidates`` K + 1) with a recurrent-state row per draft. Its
+        decode graphs are the uniform K + 1 shape, or one uniform shape per K of
+        a Dynamic SD schedule, plus the variable-length shape under adaptive
+        verification.
         """
         from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 
@@ -168,6 +170,24 @@ class SpeculatorConfig:
             # graphs keep the uniform shape.
             shapes += (PlanShape(None),)
         return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
+
+    def adapt_resources(
+        self, declared: "SpecResources", caps: "SpecCapabilities"
+    ) -> "SpecResources":
+        """The resources to run with on a model whose layers verify at most
+        ``caps.plan_kind`` (at least ``"chain"``), at most ``declared``.
+
+        The default runs a speculator that branches as a chain of the same
+        length, and drops the variable-length shape from a tree whose
+        attention needs uniform rows. A tree speculator overrides it to pick
+        its chain (a 64-row tree is not a 64-token chain).
+        """
+        if caps.plan_kind == "chain":
+            return replace(declared, max_branching=1)
+        if caps.tree_requires_uniform_rows and declared.plan_kind == "tree":
+            shapes = tuple(s for s in declared.capture_shapes if s.uniform_count)
+            return replace(declared, capture_shapes=shapes)
+        return declared
 
     def candidate_budget(self, view: "BudgetView") -> int:
         """The rows per request, the root included, that the drafts proposed

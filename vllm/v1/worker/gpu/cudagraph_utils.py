@@ -56,6 +56,7 @@ from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
@@ -192,6 +193,9 @@ class CudaGraphManager:
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        # The speculation resources to capture for; the declared ones until the
+        # engine core sets what the model verifies (set_spec_resources).
+        self.spec_resources: SpecResources | None = None
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
@@ -269,12 +273,22 @@ class CudaGraphManager:
             self.decode_query_len > num_speculative_tokens
         ):
             return [self.decode_query_len]
-        resources = speculative_config.speculator_config.resources(self.max_num_reqs)
+        resources = self.spec_resources or (
+            speculative_config.speculator_config.resources(self.max_num_reqs)
+        )
         num_new_sampled_tokens_per_step = self.decode_query_len - num_speculative_tokens
         lens = [
             c - 1 + num_new_sampled_tokens_per_step for c in resources.uniform_counts
         ]
         return lens or [self.decode_query_len]
+
+    def set_spec_resources(self, resources: "SpecResources") -> None:
+        """Capture the decode shapes of ``resources`` (before any capture)."""
+        assert not self._graphs_captured
+        self.spec_resources = resources
+        self._candidates.clear()
+        self._capture_descs.clear()
+        self._init_candidates()
 
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""

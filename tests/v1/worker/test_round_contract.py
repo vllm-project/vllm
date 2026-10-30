@@ -464,23 +464,9 @@ def test_mrope_tree_positions_shift_every_section_by_the_plan_depth():
         assert rope[j, 5:].tolist() == [25, 26, 26, 27, 48, 49, 50, 50]
 
 
-class _TreeState(SimpleNamespace):
-    supports_tree_verify = True
-
-
-class _ChainState(SimpleNamespace):
-    supports_tree_verify = False
-
-
 def _tree_runner(**overrides):
     runner = SimpleNamespace(
         max_branching=2,
-        use_pp=False,
-        pcp_manager=None,
-        dcp_size=1,
-        batch_sharder=None,
-        parallel_config=SimpleNamespace(use_ubatching=False),
-        model_state=_TreeState(rope_state=None),
         max_num_reqs=4,
         max_num_tokens=16,
         num_speculative_steps=3,
@@ -492,20 +478,6 @@ def _tree_runner(**overrides):
     return runner
 
 
-@pytest.mark.parametrize(
-    "override, refused",
-    [
-        ({"model_state": _ChainState(rope_state=None)}, "without tree metadata"),
-        ({"use_pp": True}, "pipeline parallelism"),
-        ({"dcp_size": 2}, "context parallelism"),
-    ],
-)
-def test_runner_refuses_trees_it_cannot_lay_out(override, refused):
-    runner = _tree_runner(**override)
-    with pytest.raises(NotImplementedError, match=refused):
-        GPUModelRunner._init_tree_verify(runner)
-
-
 def test_runner_tree_buffers_back_every_batch_once_the_speculator_branches():
     runner = _tree_runner()
     GPUModelRunner._init_tree_verify(runner)
@@ -514,31 +486,6 @@ def test_runner_tree_buffers_back_every_batch_once_the_speculator_branches():
     chain = _tree_runner(max_branching=1)
     GPUModelRunner._init_tree_verify(chain)
     assert chain.input_buffers.tree_parents is None
-
-
-def _backend(name, tree):
-    return SimpleNamespace(get_name=lambda: name, supports_tree_verify=tree)
-
-
-def test_tree_speculator_needs_tree_backends_in_every_target_layer():
-    group = lambda backend, layers: SimpleNamespace(  # noqa: E731
-        backend=backend, layer_names=layers
-    )
-    runner = SimpleNamespace(
-        max_branching=2,
-        speculator=SimpleNamespace(draft_attn_layer_names={"draft.0"}),
-        attn_groups=[
-            [group(_backend("GDN_ATTN", True), ["t.0"])],
-            [group(_backend("FLASH_ATTN", False), ["draft.0"])],
-        ],
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    GPUModelRunner._check_tree_backends(runner)  # the draft's layers do not count
-    runner.attn_groups.append([group(_backend("FLASH_ATTN", False), ["t.1"])])
-    with pytest.raises(ValueError, match="FLASH_ATTN"):
-        GPUModelRunner._check_tree_backends(runner)
-    runner.max_branching = 1
-    GPUModelRunner._check_tree_backends(runner)
 
 
 def _random_paths(

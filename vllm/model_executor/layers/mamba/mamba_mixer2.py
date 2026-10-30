@@ -276,7 +276,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
     # --8<-- [end:mamba_mixer2]
 
     # The spec kernels follow CommonAttentionMetadata.tree_parents.
-    supports_tree_verify = True
+    spec_layer_variant = "mamba2"
 
     def __init__(
         self,

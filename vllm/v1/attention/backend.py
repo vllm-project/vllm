@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         KVCacheSpec,
         KVQuantMode,
     )
+    from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
@@ -71,12 +72,6 @@ class AttentionBackend(ABC):
 
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
-
-    # Does the backend verify speculative trees: read
-    # CommonAttentionMetadata.tree_parents (recurrent layers) or tree_ancestors
-    # (attention) instead of assuming each row follows the one before it? A
-    # speculator whose plans branch needs it in every layer of the target.
-    supports_tree_verify: bool = False
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -693,6 +688,30 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
         """
         return None
+
+    def spec_verify_plan_kind(
+        self,
+        *,
+        kv_cache_dtype: str,
+        sliding_window: int | None,
+        has_sinks: bool,
+        logits_soft_cap: float | None,
+        has_alibi: bool,
+        chunk_size: int | None,
+        rswa_window: int | None,
+        kv_sharing_target: str | None,
+    ) -> "PlanKind":
+        """The highest speculative plan kind this builder's backend verifies
+        correctly for a layer with these features.
+
+        ``"chain"`` assumes each verify row follows the one before it.
+        ``"tree"`` reads ``CommonAttentionMetadata.tree_ancestors`` (attention)
+        or ``tree_parents`` (recurrent layers) and applies every feature of the
+        layer (window, sinks, soft cap, ALiBi, chunk) by position. Features the
+        layer does not have are None or False. Read off the built builder, so an
+        instance may answer per layer group.
+        """
+        return "chain"
 
     def _init_reorder_batch_threshold(
         self,

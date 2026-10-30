@@ -46,6 +46,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     PlanBound,
     PlanInputs,
+    SpecResources,
     VerifyOutput,
     VerifyPlan,
 )
@@ -96,6 +97,16 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
+    # What speculation runs with (`bind_resources`); None until then.
+    resources: SpecResources | None = None
+
+    def bind_resources(self, resources: SpecResources) -> None:
+        """Run with ``resources``: the config's declared resources lowered to
+        what the target's layers verify (``SpeculatorConfig.adapt_resources``).
+        Called once on every worker, before capture. With
+        ``resources.max_branching == 1`` every batch is ``PlanInputs.chain_only``.
+        """
+        self.resources = resources
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -159,8 +170,8 @@ class BaseSpeculator(ABC):
         and stay valid until the step commits, and its host bound: request ``r``
         verifies ``bound.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``);
         the drafts past it leave the batch and count as rejected. A plan that is
-        not a chain needs ``SpecResources.max_branching > 1`` (declared by the
-        speculator's config) and a batch that is not
+        not a chain needs ``SpecResources.max_branching > 1`` (in the bound
+        resources, see `bind_resources`) and a batch that is not
         ``inputs.chain_only``. The plan's device ``count`` may stop short of its
         bound: the rows past it are never accepted.
         """

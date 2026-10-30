@@ -5,7 +5,6 @@ sends the batch past the chain-only fused MTP kernel. CPU only, kernels faked.""
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_layer_module
@@ -16,23 +15,14 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config import SpeculativeConfig
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
-)
-from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
-    OlmoHybridGatedDeltaNetAttention,
-)
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 PARENTS = torch.tensor([-1, 0, 0, 1, -1, 0, 1, 1], dtype=torch.int32)
 NUM_TOKENS = 4
@@ -192,44 +182,3 @@ def test_fused_mtp_decode_is_skipped_for_a_tree(monkeypatch):
     assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is True
     tree = _spec_metadata(torch.tensor([-1, 0, 0, 1], dtype=torch.int32))
     assert layer._can_use_fused_gdn_mtp_decode(tree) is False
-
-
-class _OwnKernels(QwenGatedDeltaNetAttention):
-    """A GDN layer that runs kernels of its own, as OLMo Hybrid and Kimi do."""
-
-
-class _OwnTreeKernels(_OwnKernels):
-    supports_tree_verify = True
-
-
-def test_tree_verify_is_not_inherited_by_recurrent_layer_subclasses():
-    assert QwenGatedDeltaNetAttention.supports_tree_verify
-    assert MambaMixer2.supports_tree_verify
-    assert _OwnTreeKernels.supports_tree_verify
-    for chain_only in (
-        GatedDeltaNetAttention,
-        _OwnKernels,
-        OlmoHybridGatedDeltaNetAttention,
-        KimiGatedDeltaNetAttention,
-    ):
-        assert not chain_only.supports_tree_verify, chain_only
-
-
-def test_tree_speculator_needs_tree_verify_in_every_recurrent_layer_class():
-    backend = SimpleNamespace(get_name=lambda: "GDN_ATTN", supports_tree_verify=True)
-    layers = {
-        "t.0": object.__new__(QwenGatedDeltaNetAttention),
-        "t.1": object.__new__(_OwnTreeKernels),
-        "draft.0": object.__new__(_OwnKernels),
-    }
-    runner = SimpleNamespace(
-        max_branching=2,
-        speculator=SimpleNamespace(draft_attn_layer_names={"draft.0"}),
-        attn_groups=[[SimpleNamespace(backend=backend, layer_names=list(layers))]],
-        compilation_config=SimpleNamespace(static_forward_context=layers),
-    )
-    GPUModelRunner._check_tree_backends(runner)  # the draft's layers do not count
-    layers["t.2"] = object.__new__(_OwnKernels)
-    runner.attn_groups[0][0].layer_names.append("t.2")
-    with pytest.raises(ValueError, match="_OwnKernels"):
-        GPUModelRunner._check_tree_backends(runner)

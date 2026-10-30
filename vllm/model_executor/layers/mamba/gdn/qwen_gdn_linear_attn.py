@@ -558,7 +558,7 @@ class ChunkGatedDeltaRule(CustomOp):
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     # The spec kernels follow CommonAttentionMetadata.tree_parents.
-    supports_tree_verify = True
+    spec_layer_variant = "gdn"
 
     def get_state_shape(
         self,

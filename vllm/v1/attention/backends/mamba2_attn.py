@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -22,6 +22,9 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 
 def compute_varlen_chunk_metadata(
@@ -93,8 +96,6 @@ def compute_varlen_chunk_metadata(
 
 
 class Mamba2AttentionBackend(AttentionBackend):
-    supports_tree_verify = True
-
     @staticmethod
     def get_name() -> str:
         return "MAMBA2_ATTN"
@@ -147,6 +148,11 @@ class Mamba2AttentionMetadataBuilder(
         kv_cache_spec: KVCacheSpec,
     ) -> int | None:
         return max_decode_query_len(vllm_config)
+
+    def spec_verify_plan_kind(self, **features: object) -> "PlanKind":
+        # Each decode row's recurrent state starts from its parent row's
+        # (CommonAttentionMetadata.tree_parents); attention features do not apply.
+        return "tree"
 
     def __init__(
         self,
@@ -224,12 +230,7 @@ class Mamba2AttentionMetadataBuilder(
             )
 
         tree_parents_d = None
-        if common_attn_metadata.tree_parents is not None and common.num_decodes > 0:
-            if self.vllm_config.cache_config.use_replayssm:
-                raise NotImplementedError(
-                    "A tree verify of Mamba2 layers needs the Triton state update; "
-                    "it does not run with --use-replayssm."
-                )
+        if common.num_decodes > 0:
             tree_parents_d = common_attn_metadata.tree_parents
 
         return replace(

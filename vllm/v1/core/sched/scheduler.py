@@ -337,6 +337,9 @@ class Scheduler(SchedulerInterface):
                     "buffers are sized from num_speculative_tokens."
                 )
             self.max_candidates = resources.max_candidates
+            # Declared; the engine core lowers it to what the model's layers
+            # verify (EngineCore._set_spec_resources). KV slots stay declared.
+            self.spec_resources = resources
             self.pads_new_decode_rows = self.speculator_config.pads_new_decode_rows
             # The default admit_limit sets no limit: call only an override.
             # Looked up on the class, where a mock config has none.

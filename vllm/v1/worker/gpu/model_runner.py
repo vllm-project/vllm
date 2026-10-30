@@ -76,6 +76,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     MambaSpec,
     SlidingWindowSpec,
@@ -165,6 +166,11 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
+)
+from vllm.v1.worker.gpu.spec_decode.capabilities import (
+    SpecCapabilities,
+    SpecLimit,
+    layer_spec_limits,
 )
 from vllm.v1.worker.gpu.spec_decode.commit import (
     ConvWindowAligner,
@@ -353,8 +359,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.chain_path = chain_path(self.max_num_reqs, max_rows, self.device)
         self.plan_layout: PlanLayout | None = None
         # What speculation holds (rows, decode graphs, branching), declared by
-        # the speculator's config; the scheduler reads the same declaration.
+        # the speculator's config. Memory is sized for it; set_spec_resources
+        # lowers it to what the model's layers verify before capture.
         self.spec_resources: SpecResources | None = None
+        self.spec_capabilities: SpecCapabilities | None = None
         self.max_branching = 1
         if self.speculative_config is not None:
             self.spec_resources = self.speculative_config.speculator_config.resources(
@@ -792,7 +800,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
             )
-        self._check_tree_backends()
         target_attn_layer_names = None
         if draft_attn_layer_names is not None:
             # Backend initialization adds layers that share target KV.
@@ -931,6 +938,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+        self.spec_capabilities = self.resolve_spec_capabilities()
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1827,23 +1835,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch.tree_pos_delta = self.plan_layout.pos_delta[:num_tokens]
 
     def _init_tree_verify(self) -> None:
-        """Startup checks and buffers of a speculator whose plans branch."""
+        """Buffers of a speculator whose plans branch."""
         if self.max_branching == 1:
             return
-        unsupported = {
-            "pipeline parallelism": self.use_pp,
-            "context parallelism": self.pcp_manager is not None or self.dcp_size > 1,
-            "batch-sharded sampling": self.batch_sharder is not None,
-            "micro-batching": self.parallel_config.use_ubatching,
-            "a model state without tree metadata": (
-                not type(self.model_state).supports_tree_verify
-            ),
-        }
-        for what, refused in unsupported.items():
-            if refused:
-                raise NotImplementedError(
-                    f"a speculator with max_branching > 1 does not support {what}"
-                )
         self.plan_layout = PlanLayout(
             self.max_num_reqs,
             self.max_num_tokens,
@@ -1853,48 +1847,61 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_buffers.tree_parents = self.plan_layout.tree_parents
         self.input_buffers.tree_ancestors = self.plan_layout.tree_ancestors
 
-    def _check_tree_backends(self) -> None:
-        """Every target layer's attention backend must verify trees."""
-        if self.max_branching == 1:
-            return
-        draft = getattr(self.speculator, "draft_attn_layer_names", None) or set()
-        refused = sorted(
-            {
-                group.backend.get_name()
-                for groups in self.attn_groups
-                for group in groups
-                if not group.backend.supports_tree_verify
-                and not set(group.layer_names) <= draft
-            }
+    def resolve_spec_capabilities(self) -> SpecCapabilities | None:
+        """What this rank's layers verify, after the attention backends are
+        built: the lowest plan kind of any target layer (draft layers do not
+        count), lowered to ``"chain"`` by each setting that keeps rows in chain
+        order. None without speculative decoding."""
+        if self.speculative_config is None:
+            return None
+        if self.cache_config.use_replayssm:
+            mamba_state_mode = "replay"
+        elif self.cache_config.use_kda_recoverssm:
+            mamba_state_mode = "recover"
+        else:
+            mamba_state_mode = "slots"
+        limits, tree_requires_uniform_rows = layer_spec_limits(
+            self.attn_groups,
+            self.compilation_config.static_forward_context,
+            mamba_state_mode,
+            excluded_layer_names=frozenset(
+                getattr(self.speculator, "draft_attn_layer_names", None) or ()
+            ),
         )
-        if refused:
-            raise ValueError(
-                f"the speculator verifies trees (max_branching="
-                f"{self.max_branching}), but attention backends {refused} do "
-                "not (AttentionBackend.supports_tree_verify)"
-            )
-        # A recurrent layer runs its own kernels behind a shared backend, so its
-        # class must declare tree verify as well.
-        from vllm.model_executor.layers.mamba.abstract import MambaBase
+        settings = {
+            "pipeline parallelism (no tree path broadcast)": self.use_pp,
+            "prefill context parallelism": self.pcp_manager is not None,
+            "decode context parallelism": self.dcp_size > 1,
+            "batch-sharded sampling": self.batch_sharder is not None,
+            "micro-batching": self.parallel_config.use_ubatching,
+            f"model state {type(self.model_state).__name__}": (
+                not type(self.model_state).supports_tree_verify
+            ),
+        }
+        limits += [
+            SpecLimit("chain", f"{what}: keeps verify rows in chain order")
+            for what, applies in settings.items()
+            if applies
+        ]
+        return SpecCapabilities.from_limits(limits, tree_requires_uniform_rows)
 
-        layers = self.compilation_config.static_forward_context
-        chain_only = sorted(
-            {
-                type(layers[name]).__name__
-                for groups in self.attn_groups
-                for group in groups
-                for name in group.layer_names
-                if name not in draft
-                and isinstance(layers.get(name), MambaBase)
-                and not type(layers[name]).supports_tree_verify
-            }
-        )
-        if chain_only:
-            raise ValueError(
-                f"the speculator verifies trees (max_branching="
-                f"{self.max_branching}), but recurrent layers {chain_only} verify "
-                "chains only (MambaBase.supports_tree_verify)"
-            )
+    def set_spec_resources(self, resources: SpecResources) -> None:
+        """Run speculation with ``resources``, the engine core's adaptation of
+        the declared ones to what every rank verifies. Called once, before the
+        CUDA graphs are captured; the memory stays sized for the declared
+        resources."""
+        self.spec_resources = resources
+        if resources.max_branching == 1 < self.max_branching:
+            # Lowered to chains: batches keep the chain layout.
+            self.max_branching = 1
+            self.chain_count = None
+            self.plan_layout = None
+            self.input_buffers.tree_parents = None
+            self.input_buffers.tree_ancestors = None
+        if self.cudagraph_manager is not None:
+            self.cudagraph_manager.set_spec_resources(resources)
+        if self.speculator is not None:
+            self.speculator.bind_resources(resources)
 
     def _chain_only(
         self,
@@ -2138,7 +2145,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _build_kv_compactor(self) -> KvCompactor:
         """A compactor over the target's own attention KV caches: no draft layers,
-        no layers that read another layer's cache, no encoder or cross attention.
+        no layers that read another layer's cache, no encoder or cross attention,
+        no hidden-state caches and no caches not paged by slot (a ring buffer
+        keeps its own chain commit).
 
         Block sizes come from the KV cache group, as the cache was allocated and
         the block table is kept: a hybrid model's group blocks are larger than its
@@ -2152,7 +2161,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec = specs.get(name)
                 if (
                     not isinstance(spec, AttentionSpec)
-                    or isinstance(spec, (EncoderOnlyAttentionSpec, CrossAttentionSpec))
+                    or isinstance(
+                        spec,
+                        (
+                            EncoderOnlyAttentionSpec,
+                            CrossAttentionSpec,
+                            HiddenStateCacheSpec,
+                        ),
+                    )
+                    or not spec.uses_slot_mapping
                     or spec.is_draft
                 ):
                     continue
