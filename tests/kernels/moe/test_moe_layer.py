@@ -151,7 +151,8 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
     "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
-    "mori":                        {None,         "fp8", "modelopt_fp8"},
+    # Pinned to EPv2, which rejects per-tensor FP8 activations.
+    "mori":                        {None, "fp8_blocked"},
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "flashinfer_nvlink_one_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
