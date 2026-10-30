@@ -398,6 +398,16 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 if cache is None or cache.ndim == 0:
                     break
                 stride = cache.stride(0) * cache.element_size()
+                if region.segments:
+                    if stride != region.block_stride:
+                        break
+                    for segment_offset, length in region.segments:
+                        bases.append(cache.data_ptr() + segment_offset)
+                        strides.append(stride)
+                        offsets.append(sum(sizes))
+                        sizes.append(length)
+                    counts.append(cache.shape[0])
+                    continue
                 if (
                     stride <= 0
                     or stride > region.block_stride
