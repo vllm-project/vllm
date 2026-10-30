@@ -63,6 +63,7 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
+from .inputs.tokenize import get_detokenization_tokens
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -681,29 +682,15 @@ class BaseRenderer(ABC, Generic[_T]):
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
 
-    @staticmethod
-    def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
-        token_ids = prompt["prompt_token_ids"]
-        special_tokens_mask = prompt.pop("prompt_special_tokens_mask", None)
-        if special_tokens_mask is None:
-            return token_ids
-        # TokenizeParams truncates both token_ids and the mask, but pads only token_ids.
-        # IDs beyond the mask are therefore padding tokens.
-        return [
-            token_id
-            for index, token_id in enumerate(token_ids)
-            if index >= len(special_tokens_mask) or not special_tokens_mask[index]
-        ]
-
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        prompt["prompt"] = tokenizer.decode(self._get_detokenization_tokens(prompt))
+        prompt["prompt"] = tokenizer.decode(get_detokenization_tokens(prompt))
 
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
         prompt["prompt"] = await self._async_tokenizer_decode(
-            self._get_detokenization_tokens(prompt)
+            get_detokenization_tokens(prompt)
         )
 
         return prompt
