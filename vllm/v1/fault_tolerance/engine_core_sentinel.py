@@ -18,6 +18,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
+    EngineCoreRequestType,
     EngineStatusType,
     UtilityOutput,
 )
@@ -34,6 +35,10 @@ logger = init_logger(__name__)
 FT_UTILITY_METHOD = "handle_fault_tolerance"
 
 
+class FaultTolerancePause(Exception):
+    """Raised in the busy loop to enter recovery on a ``pause`` command."""
+
+
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
 
@@ -48,12 +53,15 @@ class EngineCoreSentinel:
         self.resumed.set()
         self.status_type = EngineStatusType.HEALTHY
         self.fault_info: str | None = None
+        self.pause_requested = False
         self._dp_reinit_epoch = 0
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        if self.status_type != EngineStatusType.UNHEALTHY:
+        if ft_request.instruction == "pause":
+            result = self.pause(ft_request)
+        elif self.status_type != EngineStatusType.UNHEALTHY:
             reason = (
                 f"[FT] Rejecting {ft_request.instruction} on engine "
                 f"{self.engine_index}: status is {self.status_type.name}"
@@ -82,6 +90,7 @@ class EngineCoreSentinel:
     def on_fault(self, exc: Exception):
         """Called by the wrapper when the busy loop raises an exception."""
         self.resumed.clear()
+        self.pause_requested = False
         logger.warning(
             "[FT] Busy loop raised %s. Waiting for recovery.", type(exc).__name__
         )
@@ -152,6 +161,21 @@ class EngineCoreSentinel:
         )
         outputs.engine_index = self.engine_index
         self.engine.output_queue.put_nowait((0, outputs))
+
+    def pause(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        """Make a healthy engine recoverable without waiting for it to fault.
+
+        The busy loop raises at its next step boundary, so no collective is in
+        flight, and goes through ``on_fault``: requests are aborted and the
+        engine turns UNHEALTHY. A no-op on an engine that is already unhealthy.
+        """
+        if self.status_type == EngineStatusType.HEALTHY and not self.pause_requested:
+            self.pause_requested = True
+            self.engine.input_queue.put_nowait((EngineCoreRequestType.FT_PAUSE, None))
+        return FaultToleranceResult(
+            request_id=ft_request.request_id,
+            success=self.status_type != EngineStatusType.DEAD,
+        )
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         engine = self.engine

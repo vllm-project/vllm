@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_INSTRUCTIONS = {"retry"}
+_ALLOWED_INSTRUCTIONS = {"pause", "retry"}
 
 
 def _validate_payload(body: dict) -> tuple[str, dict]:
