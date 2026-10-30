@@ -43,7 +43,6 @@ from .stats import UMBPStoreConnectorStats, UMBPStorePromMetrics
 from .worker import UMBPStoreConnectorWorker
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -99,12 +98,6 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
 
 class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
-
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: KVTransferConfig
-    ) -> bool:
-        return False
 
     def __init__(
         self,

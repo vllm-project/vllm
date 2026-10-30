@@ -198,12 +198,8 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector is compatible with core lookahead hashing.
-
-        Defaults to True; MoRI and UMBP currently opt out.
-        TODO: Remove this gate once both support core lookahead hashing.
-        """
-        return True
+        """Whether the connector supports core lookahead hashing."""
+        return False
 
     @property
     def requires_kv_delivery(self) -> bool:
