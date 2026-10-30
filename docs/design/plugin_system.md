@@ -59,7 +59,7 @@ Some components are not registered through entry points but selected by class na
 
 - `--worker-cls` and `--worker-extension-cls` replace or extend the worker.
 - `--pp-group-cls` replaces the pipeline parallel `GroupCoordinator` with a subclass, e.g. one whose `isend_tensor_dict` / `irecv_tensor_dict` move the intermediate tensors between stages over a different transport. The subclass is constructed with the same arguments as `GroupCoordinator`, in every worker. With the V2 model runner the last stage also sends the sampled tokens to the other stages, through `make_sibling_device_group` / `sibling_broadcast`, which the subclass can override as well.
-- `--pipeline-stage-rank k` runs only stage `k` of `--pipeline-parallel-size` stages in an instance, with the other stages in other instances: the instance's `torch.distributed` world spans its own stage only, the PP group comes from `--pp-group-cls`, and `--distributed-executor-backend` names the executor that drives the stages.
+- `--pipeline-stage-rank k` runs only stage `k` of `--pipeline-parallel-size` stages in an instance, with the other stages in other instances: the instance's `torch.distributed` world spans its own stage only, the PP group comes from `--pp-group-cls`, and `--distributed-executor-backend` names the custom executor that drives the stages (the built-in `mp`, `ray`, `uni` and `external_launcher` executors are rejected, since they expect every stage in the instance).
 
 ## Guidelines for Writing Plugins
 

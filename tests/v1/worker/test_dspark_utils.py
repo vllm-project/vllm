@@ -39,14 +39,20 @@ class _FakeParallelConfig:
         default_factory=lambda: _FakeEPLBConfig(num_redundant_experts=32)
     )
     enable_elastic_ep: bool = True
+    pipeline_stage_rank: int | None = None
 
     def __post_init__(self) -> None:
+        if self.pipeline_stage_rank is not None and not (
+            0 <= self.pipeline_stage_rank < self.pipeline_parallel_size
+        ):
+            raise ValueError("pipeline_stage_rank out of range")
         if not self.enable_eplb and self.eplb_config.num_redundant_experts:
             raise ValueError("redundant experts require EPLB")
         if self.enable_elastic_ep and not self.enable_eplb:
             raise ValueError("elastic EP requires EPLB")
 
 
+@pytest.mark.parametrize("pipeline_stage_rank", [None, 1])
 @pytest.mark.parametrize(
     ("model_type", "enable_eplb", "num_redundant_experts", "shares_eplb_config"),
     [
@@ -59,8 +65,10 @@ def test_dspark_parallel_config_eplb_by_model_type(
     enable_eplb: bool,
     num_redundant_experts: int,
     shares_eplb_config: bool,
+    pipeline_stage_rank: int | None,
 ):
-    target_config = _FakeParallelConfig()
+    # pipeline_stage_rank=1: the target runs stage 1 of 2 in this instance.
+    target_config = _FakeParallelConfig(pipeline_stage_rank=pipeline_stage_rank)
     draft_model_config = _FakeModelConfig(
         hf_config=_FakeHFConfig(model_type=model_type)
     )
@@ -79,6 +87,7 @@ def test_dspark_parallel_config_eplb_by_model_type(
 
     assert draft_config is not target_config
     assert draft_config.pipeline_parallel_size == 1
+    assert draft_config.pipeline_stage_rank is None
     assert draft_config.tensor_parallel_size == 4
     assert draft_config.enable_eplb is enable_eplb
     assert draft_config.eplb_config.num_redundant_experts == num_redundant_experts

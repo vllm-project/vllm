@@ -48,10 +48,13 @@ def _get_dspark_parallel_config(
             draft_model_config.hf_config.model_type,
         )
 
+    # The draft runs whole in this instance: pipeline_parallel_size=1, and so
+    # no pipeline_stage_rank even when the target runs one stage of several.
     if enable_draft_eplb:
         return replace(
             parallel_config,
             pipeline_parallel_size=1,
+            pipeline_stage_rank=None,
             tensor_parallel_size=tensor_parallel_size,
             enable_elastic_ep=False,
         )
@@ -59,6 +62,7 @@ def _get_dspark_parallel_config(
     return replace(
         parallel_config,
         pipeline_parallel_size=1,
+        pipeline_stage_rank=None,
         tensor_parallel_size=tensor_parallel_size,
         enable_eplb=False,
         eplb_config=replace(
