@@ -80,7 +80,13 @@ def weight_reasons(model) -> list[str]:
         if a.local_num_heads != kda.NH or a.head_dim != kda.HD or a.conv_size != 4:
             reasons.append(f"{p}: KDA heads/head_dim/conv_size")
             continue
-        need(f"{p} in_proj", a.in_proj_qkvgfab.weight, (kda.NPROJ, H), bf)
+        # The kernel reads the first NPROJ rows; rows past them must be padding.
+        w_in = a.in_proj_qkvgfab.weight
+        rows = w_in.size(0) - a.in_proj_padding
+        if rows > kda.NPROJ:
+            reasons.append(f"{p} in_proj: {rows} rows, kernel reads {kda.NPROJ}")
+        else:
+            need(f"{p} in_proj", w_in[: kda.NPROJ], (kda.NPROJ, H), bf)
         need(f"{p} f_b_proj", a.f_b_proj.weight, (kda.PROJ, kda.HD), bf)
         need(f"{p} o_norm", a.o_norm.weight, (kda.HD,), bf)
         need(f"{p} conv1d", a.conv1d.weight.view(-1, 4), (kda.QKV, 4), f32)
