@@ -125,6 +125,7 @@ def transfer_run_periodically(
             # We sync the rebalanced flag across ranks before each iteration so
             # all ranks make a coordinated decision to continue or stop.
             while layer_idx < num_layers:
+                model_state.worker_progress = 2 * layer_idx
                 flag = torch.tensor(
                     [int(model_state.rebalanced)],
                     dtype=torch.int32,
@@ -180,6 +181,7 @@ def transfer_run_periodically(
                     transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )
+                model_state.worker_progress = 2 * layer_idx + 1
 
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into

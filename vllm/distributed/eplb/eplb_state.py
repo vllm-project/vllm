@@ -228,6 +228,12 @@ class EplbModelState:
     Number of layers committed by move_to_workspace in the current async EPLB
     rearrangement.
     """
+    worker_progress: int = -1
+    """
+    Async worker progress in the current rearrangement, written by the worker:
+    2 * layer while transferring the layer, plus 1 once it is published. -1
+    until the worker starts the first layer.
+    """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
     Per-ubatch scalar int32 tensors holding the number of real (non-padding)
@@ -727,20 +733,11 @@ class EplbState:
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self._async_rearrangement_in_progress():
                 if (
-                    ep_group.rank() == 0
-                    and self.expert_rearrangement_step
+                    self.expert_rearrangement_step
                     % self.expert_rearrangement_step_interval
                     == 0
                 ):
-                    logger.warning(
-                        "Async EPLB rearrangement still in progress after %d steps: %s",
-                        self.expert_rearrangement_step,
-                        ", ".join(
-                            f"{ms.model_name} {ms.num_committed_layers}/"
-                            f"{ms.model.num_moe_layers} layers committed"
-                            for ms in self.model_states.values()
-                        ),
-                    )
+                    self._warn_async_rearrangement_in_progress()
                 # Still performing asynchronous rearrangement; update
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
@@ -755,6 +752,36 @@ class EplbState:
         return self.is_async and any(
             model_state.rebalanced for model_state in self.model_states.values()
         )
+
+    def _warn_async_rearrangement_in_progress(self) -> None:
+        """Warn with the EP ranks whose async worker is furthest behind.
+
+        Must run on every EP rank, since it all-reduces over the EP CPU group.
+        """
+        # The async worker moves models in order, so the first one still
+        # rebalancing is the one being transferred.
+        model_state = next(ms for ms in self.model_states.values() if ms.rebalanced)
+        ep_group = get_ep_group()
+        progress = torch.zeros(ep_group.world_size, dtype=torch.int64)
+        progress[ep_group.rank_in_group] = model_state.worker_progress
+        ep_group.cpu_all_reduce_(progress)
+        if ep_group.rank_in_group == 0:
+            slowest = int(progress.min())
+            if slowest < 0:
+                stage = "computing the new placement"
+            else:
+                layer, published = divmod(slowest, 2)
+                stage = f"{'published' if published else 'transferring'} layer {layer}"
+            logger.warning(
+                "Async EPLB rearrangement still in progress after %d steps: "
+                "%d/%d layers of %s committed, slowest EP ranks %s: %s",
+                self.expert_rearrangement_step,
+                model_state.num_committed_layers,
+                model_state.model.num_moe_layers,
+                model_state.model_name,
+                (progress == slowest).nonzero().flatten().tolist(),
+                stage,
+            )
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness
@@ -1058,6 +1085,7 @@ class EplbState:
                     num_gpus=num_gpus,
                 )
                 eplb_model_state.num_committed_layers = 0
+                eplb_model_state.worker_progress = -1
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
