@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the optional ``b12x`` package."""
+"""Accessors for the ``b12x`` package shipped with flashinfer-python."""
 
 import importlib
 import importlib.util
@@ -49,7 +49,7 @@ _B12X_SUBMODULES = {
 
 
 def has_b12x() -> bool:
-    """Return whether the B12X package is installed."""
+    """Return whether the b12x package is available."""
     return _HAS_B12X
 
 

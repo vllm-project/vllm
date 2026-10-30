@@ -87,7 +87,7 @@ def _causal_sliding_window_mask(
             torch.bfloat16,
             "auto",
             None,
-            "Install the b12x backend with `pip install vllm[b12x]`",
+            "The b12x backend requires flashinfer-python>=0.7.2",
             id="package-not-installed",
         ),
         pytest.param(
