@@ -123,6 +123,9 @@ steps:
   - vllm/_custom_ops.py
   - vllm/compilation/decorators.py
   - vllm/compilation/caching.py
+  - vllm/compilation/backends.py
+  - vllm/compilation/piecewise_backend.py
+  - vllm/config/compilation.py
   - vllm/env_override.py
   - vllm/model_executor/utils.py
   - vllm/v1/worker/cpu_worker.py
@@ -177,6 +180,9 @@ steps:
       tests/kernels/moe/test_cpu_fused_moe.py::test_cpu_fused_moe_input_weighting_preserves_router_weights
       tests/kernels/moe/test_cpu_fused_moe.py::test_cpu_vec_fused_moe_shape_support
       tests/compile/test_aot_compile.py::test_inductor_aot_roundtrip
+      tests/compile/test_aot_compile.py::test_compile_opt_out_retraces_changed_closure
+      tests/compile/test_aot_compile.py::test_compile_opt_out_preserves_native_aot_roundtrip
+      tests/compile/test_aot_compile.py::test_compile_opt_out_respected_in_dynamo_trace_once
       tests/v1/distributed/test_internal_lb_dp.py::test_cpu_ep_internal_lb_matches_reference_after_idle
       tests/compile/test_inductor_operator_str_patch.py
       tests/model_executor/test_utils.py

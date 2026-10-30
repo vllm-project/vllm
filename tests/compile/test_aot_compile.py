@@ -947,6 +947,11 @@ def _run_graph_cache_probe():
 
     cache_dir()  # Exercise a tmp default populated before backend initialization.
     config = make_vllm_config()
+    # Exercise VllmBackend independently of platform serving-mode defaults.
+    config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+    config.compilation_config.post_init_cudagraph_sizes()
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.backend == "inductor"
     x = torch.arange(64, device=current_platform.device_type).reshape(8, 8).float()
     expected = x * 2 + 1 + int(os.environ["VLLM_TEST_CACHE_OFFSET"])
     with use_vllm_config(config):
