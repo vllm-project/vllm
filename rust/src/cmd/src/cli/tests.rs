@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
-use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
+use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
     ParserSelection, ReasoningEffort, RendererSelection,
@@ -14,6 +14,11 @@ use vllm_server::{
 use vllm_text::backend::hf::ModelSource;
 
 use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+
+/// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
+fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
+    args.data_parallel_lb.resolve(&args.managed_engine, args.headless).unwrap()
+}
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
@@ -94,6 +99,22 @@ fn render_args_allow_omitted_max_model_len() {
     let config = args.into_config();
 
     assert_eq!(config.max_model_len, None);
+}
+
+#[test]
+fn render_args_select_native_glm5_next() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "local-glm5_next",
+        "--tokenizer-mode",
+        "glm5_next",
+    ])
+    .unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    assert_eq!(args.into_config().renderer, RendererSelection::Glm5Next);
 }
 
 #[test]
@@ -277,6 +298,12 @@ fn serve_args_forward_python_flags_with_separator() {
                             "float16",
                         ],
                     },
+                    data_parallel_lb: DataParallelLbArgs {
+                        data_parallel_rank: None,
+                        data_parallel_start_rank: None,
+                        data_parallel_hybrid_lb: false,
+                        data_parallel_external_lb: false,
+                    },
                 },
             ),
         }
@@ -341,7 +368,7 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     };
     assert_eq!(args.runtime.shutdown_timeout, 60);
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -363,7 +390,7 @@ fn serve_args_forward_disable_log_stats_to_managed_engine() {
     };
     assert!(args.runtime.disable_log_stats);
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -390,7 +417,7 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
     };
     assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     let profiler_flag_index = config
         .python_args
         .iter()
@@ -416,10 +443,10 @@ fn serve_args_select_structured_outputs_backend_and_forward_config() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        let frontend = args.to_frontend_config("tcp://127.0.0.1:0".into());
+        let frontend = args.to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args));
         (
             frontend.structured_outputs_backend,
-            args.to_managed_engine_config(5555).python_args,
+            args.to_managed_engine_config(5555, &topology(&args), None).python_args,
         )
     };
 
@@ -517,7 +544,7 @@ fn serve_args_tool_strict_level_requires_xgrammar() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        args.to_frontend_config("tcp://127.0.0.1:0".into()).validate()
+        args.to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args)).validate()
     };
 
     assert!(validate("function", "xgrammar").is_ok());
@@ -543,7 +570,8 @@ fn serve_args_forward_stream_interval_to_frontend_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let frontend_config =
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(frontend_config.stream_interval.get(), 4);
 
     let error = Cli::try_parse_from([
@@ -566,7 +594,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
     };
 
     let config = parse(&[]);
@@ -712,10 +740,11 @@ fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
     };
     assert_eq!(args.runtime.max_logprobs, Some(-1));
 
-    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let frontend_config =
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(frontend_config.max_logprobs, Some(-1));
 
-    let engine_config = args.to_managed_engine_config(5555);
+    let engine_config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--max-logprobs",
@@ -736,7 +765,7 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
     };
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -758,7 +787,7 @@ fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
             "kimi_k3",
         ]
     "#]]
-    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
+    .assert_debug_eq(&args.to_managed_engine_config(5555, &topology(&args), None).python_args);
 }
 
 #[test]
@@ -776,7 +805,7 @@ fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -801,7 +830,7 @@ fn serve_args_do_not_forward_disabled_reasoning_parser_to_managed_engine() {
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     assert!(config.python_args.is_empty());
 }
 
@@ -821,7 +850,7 @@ fn serve_args_forward_reasoning_parser_even_with_passthrough_reasoning_parser() 
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -879,7 +908,7 @@ fn serve_passes_enable_request_id_headers_into_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert!(config.api_server_options.enable_request_id_headers);
 }
 
@@ -896,7 +925,7 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert!(config.api_server_options.enable_prompt_tokens_details);
 }
 
@@ -913,7 +942,7 @@ fn serve_passes_return_tokens_as_token_ids_into_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert!(config.api_server_options.default_return_tokens_as_token_ids);
 }
 
@@ -925,7 +954,7 @@ fn serve_rejects_log_outputs_without_log_requests() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
     };
 
     let error = config(&["--enable-log-outputs"]).validate().unwrap_err();
@@ -941,7 +970,7 @@ fn serve_resolves_output_logging_from_log_flags() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
             .api_server_options
             .log_outputs
             .outputs
@@ -1010,7 +1039,7 @@ fn serve_passes_tls_into_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     let tls = config.tls.expect("tls configured");
     assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
     assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
@@ -1025,7 +1054,7 @@ fn serve_without_ssl_flags_has_no_tls() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert!(config.tls.is_none());
 }
 
@@ -1043,7 +1072,7 @@ fn serve_ssl_keyfile_without_certfile_fails_validation() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     // TLS is requested (a key was given) but there is no certificate, so
     // validation fails loud rather than silently serving plaintext.
     assert_eq!(config.tls.as_ref().expect("tls requested").cert_file, None);
@@ -1067,7 +1096,7 @@ fn serve_mtls_without_ca_certs_fails_validation() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     // Client-cert verification without a CA bundle has nothing to verify
     // against, so it fails loud at startup.
     let err = config.validate().unwrap_err().to_string();
@@ -1167,7 +1196,7 @@ fn serve_args_parse_lora_modules_in_both_forms() {
     };
     // Frontend-only flag: the managed Python engine must not see it.
     assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     expect![[r#"
         [
             LoraModulePath {
@@ -1302,7 +1331,7 @@ fn serve_passes_api_keys_into_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(config.api_keys, vec!["secret-a", "secret-b"]);
     let debug = format!("{config:#?}");
     assert!(debug.contains("api_keys: [<redacted>; 2]"));
@@ -1368,7 +1397,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3, glm5_next)
 
         For more information, try '--help'.
     "#]]
@@ -1410,7 +1439,7 @@ fn serve_args_enable_per_request_metrics_requires_engine_stats() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:0".into());
+    let config = args.to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args));
     assert!(config.api_server_options.enable_per_request_metrics);
     assert!(config.validate().is_ok());
 
@@ -1425,7 +1454,10 @@ fn serve_args_enable_per_request_metrics_requires_engine_stats() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let error = args.to_frontend_config("tcp://127.0.0.1:0".into()).validate().unwrap_err();
+    let error = args
+        .to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args))
+        .validate()
+        .unwrap_err();
     assert!(
         format!("{error:#}")
             .contains("--enable-per-request-metrics requires engine statistics logging")
@@ -1657,7 +1689,7 @@ fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
         panic!("expected serve args")
     };
 
-    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
     expect![[r#"
         (
             Some(
@@ -1689,7 +1721,7 @@ fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
             "org/config",
         ]
     "#]]
-    .assert_debug_eq(&args.to_managed_engine_config(1234).python_args);
+    .assert_debug_eq(&args.to_managed_engine_config(1234, &topology(&args), None).python_args);
 }
 
 #[test]
@@ -1755,14 +1787,14 @@ fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
         serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
         expected
     );
-    let engine = args.to_managed_engine_config(1234);
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
         expected
     );
     assert!(!engine.python_args.iter().any(|arg| arg == "--hf-config-path"));
-    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
     assert_eq!(serde_json::to_value(config.hf_overrides).unwrap(), expected);
 
     let payload = serde_json::json!({"model_tag":"Qwen/Qwen3-0.6B", "hf_overrides":expected});
@@ -1855,7 +1887,7 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
     };
     assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--max-model-len",
@@ -2094,7 +2126,8 @@ fn custom_histogram_buckets_reach_frontend_config() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let serve_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let serve_config =
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
 
     let args_json =
         format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B","custom_histogram_buckets":{buckets}}}"#);
@@ -2511,6 +2544,12 @@ fn serve_args_accept_handshake_aliases() {
                         max_model_len: None,
                         python_args: [],
                     },
+                    data_parallel_lb: DataParallelLbArgs {
+                        data_parallel_rank: None,
+                        data_parallel_start_rank: None,
+                        data_parallel_hybrid_lb: false,
+                        data_parallel_external_lb: false,
+                    },
                 },
             ),
         }
@@ -2543,6 +2582,113 @@ fn serve_args_accept_data_parallel_primary_flags() {
 }
 
 #[test]
+fn serve_rank_zero_frontend_hosts_the_coordinator_for_its_single_rank() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-rpc-port",
+        "13345",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "1",
+        "--data-parallel-hybrid-lb",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    // Coordinated DP spans both ranks even though this frontend connects to one.
+    let config = args.to_frontend_config("tcp://127.0.0.1:13345".to_string(), &topology(&args));
+    assert_eq!(
+        config.effective_coordinator_mode(true),
+        Some(EngineCoreCoordinatorMode::InProc)
+    );
+    assert_eq!(config.effective_coordinator_mode(false), None);
+}
+
+#[test]
+fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-address",
+        "10.99.48.128",
+        "--data-parallel-rpc-port",
+        "13345",
+        "--data-parallel-size",
+        "4",
+        "--data-parallel-size-local",
+        "2",
+        "--data-parallel-start-rank",
+        "2",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let topology = topology(&args);
+
+    // A non-zero rank's frontend serves only its own engines' second handshake,
+    // over local IPC, and runs no coordinator.
+    let config = args.to_frontend_config("ipc:///tmp/vllm-rs-h".to_string(), &topology);
+    let TransportMode::HandshakeOwner {
+        handshake_address,
+        engine_start_index,
+        engine_count,
+        data_parallel_size,
+        local_input_address,
+        ..
+    } = &config.transport_mode
+    else {
+        panic!("expected handshake-owned transport");
+    };
+    assert_eq!(handshake_address, "ipc:///tmp/vllm-rs-h");
+    assert_eq!(
+        (*engine_start_index, *engine_count, *data_parallel_size),
+        (2, 2, 4)
+    );
+    assert!(
+        local_input_address
+            .as_deref()
+            .is_some_and(|address| address.starts_with("ipc://"))
+    );
+    assert_eq!(config.effective_coordinator_mode(true), None);
+
+    // The engines dial the rank-0 handshake and this frontend's local one.
+    let engine =
+        args.to_managed_engine_config(13345, &topology, Some("ipc:///tmp/vllm-rs-h".to_string()));
+    let command = engine.to_command();
+    expect![[r#"
+        [
+            "-m",
+            "vllm.entrypoints.cli.main",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--headless",
+            "--data-parallel-address",
+            "10.99.48.128",
+            "--data-parallel-rpc-port",
+            "13345",
+            "--data-parallel-size",
+            "4",
+            "--headless-client-handshake-address",
+            "ipc:///tmp/vllm-rs-h",
+            "--reasoning-parser",
+            "qwen3",
+            "--data-parallel-size-local",
+            "2",
+            "--data-parallel-start-rank",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&command.get_args().collect::<Vec<_>>());
+}
+
+#[test]
 fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -2558,12 +2704,14 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
     let TransportMode::HandshakeOwner {
         handshake_address,
         advertised_host,
+        engine_start_index,
         engine_count,
+        data_parallel_size,
         ready_timeout,
         local_input_address,
         local_output_address,
@@ -2574,7 +2722,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
     assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
     assert_eq!(advertised_host, "10.99.48.128");
+    assert_eq!(*engine_start_index, 0);
     assert_eq!(*engine_count, 4);
+    assert_eq!(*data_parallel_size, 4);
     assert!(
         local_input_address
             .as_deref()
@@ -2592,7 +2742,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
+                engine_start_index: 0,
                 engine_count: 4,
+                data_parallel_size: 4,
                 ready_timeout: 600s,
                 local_input_address: Some(
                     "<ipc input>",
@@ -2679,7 +2831,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: handshake_address.clone(),
             advertised_host: advertised_host.clone(),
+            engine_start_index: 0,
             engine_count: *engine_count,
+            data_parallel_size: *engine_count,
             ready_timeout: *ready_timeout,
             local_input_address: Some("<ipc input>".to_string()),
             local_output_address: Some("<ipc output>".to_string()),
@@ -2706,14 +2860,16 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
     expect![[r#"
         Config {
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
+                engine_start_index: 0,
                 engine_count: 4,
+                data_parallel_size: 4,
                 ready_timeout: 600s,
                 local_input_address: None,
                 local_output_address: None,
@@ -2834,7 +2990,7 @@ fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
     assert!(!config.manages_engine);
 }
@@ -3016,7 +3172,7 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string(), &topology(&args));
 
     assert_eq!(
         config.listener_mode,
@@ -3049,7 +3205,7 @@ fn serve_frontend_config_binds_grpc_on_http_host() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string(), &topology(&args));
 
     assert_eq!(
         config.grpc_listener_mode,
@@ -3169,9 +3325,11 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
         panic!("expected serve args");
     };
     assert_eq!(
-        args.to_frontend_config("tcp://localhost:1234".into()).revision.as_deref(),
+        args.to_frontend_config("tcp://localhost:1234".into(), &topology(&args))
+            .revision
+            .as_deref(),
         Some("release")
     );
-    let engine = args.to_managed_engine_config(1234);
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }
