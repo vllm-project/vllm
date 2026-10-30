@@ -61,6 +61,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngineFactory,
 )
 from vllm.logger import init_logger
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization.online.lm_head import (
     restore_quantized_lm_heads,
@@ -1466,13 +1467,14 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(self) -> LoRALoadEvent | None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
+        return self.take_lora_load_event()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -1485,6 +1487,9 @@ class Worker(WorkerBase):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        return self.model_runner.take_lora_load_event()
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.

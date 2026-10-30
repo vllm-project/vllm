@@ -927,6 +927,11 @@ class AsyncLLM(EngineClient):
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
                     if logger_ref[0]:
+                        if outputs.lora_load_event:
+                            logger_ref[0].record_lora_load_event(
+                                outputs.lora_load_event,
+                                engine_idx=outputs.engine_index,
+                            )
                         logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
