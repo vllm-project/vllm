@@ -39,6 +39,7 @@ from vllm.v1.simple_kv_offload.metrics import (
 
 SAVE_OUTCOMES = MetricName.SAVE_OUTCOMES
 LOAD_BLOCKS = MetricName.LOAD_BLOCKS
+CAPPED_STORE_BLOCKS = MetricName.CAPPED_STORE_BLOCKS
 USED_BLOCKS = MetricName.USED_BLOCKS
 PENDING_STORE_BLOCKS = MetricName.PENDING_STORE_BLOCKS
 INFO = MetricName.INFO
@@ -188,6 +189,7 @@ def test_prom_metrics_registers_tier1_metrics() -> None:
     assert set(defs) == {
         SAVE_OUTCOMES,
         LOAD_BLOCKS,
+        CAPPED_STORE_BLOCKS,
         USED_BLOCKS,
         PENDING_STORE_BLOCKS,
         INFO,
@@ -197,6 +199,7 @@ def test_prom_metrics_registers_tier1_metrics() -> None:
     assert {m.kwargs["name"] for m in defs.values()} == {
         SAVE_OUTCOMES,
         LOAD_BLOCKS,
+        CAPPED_STORE_BLOCKS,
         USED_BLOCKS,
         PENDING_STORE_BLOCKS,
         INFO,
@@ -211,6 +214,7 @@ def test_prom_metrics_registers_tier1_metrics() -> None:
         "outcome",
     ]
     assert defs[LOAD_BLOCKS].kwargs["labelnames"] == ["model_name", "engine"]
+    assert defs[CAPPED_STORE_BLOCKS].kwargs["labelnames"] == ["model_name", "engine"]
     assert defs[INFO].kwargs["labelnames"] == [
         "model_name",
         "engine",

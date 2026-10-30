@@ -126,6 +126,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("num_cpu_blocks must be a positive integer")
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
+        # Cap on GPU blocks pinned by queued or in-flight stores; 0 = no cap.
+        # Past it, stores are skipped (eager) or deferred (lazy) instead of
+        # pinning GPU KV while a slow offload tier catches up.
+        max_pending_store_blocks = extra_config.get("max_pending_store_blocks", 0)
+        if type(max_pending_store_blocks) is not int or max_pending_store_blocks < 0:
+            raise ValueError("max_pending_store_blocks must be a non-negative integer")
 
         kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
         if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
@@ -190,6 +196,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 "instead of automatic sizing from byte budgets.",
                 num_cpu_blocks,
             )
+        if max_pending_store_blocks:
+            logger.info(
+                "Capping blocks pinned by pending stores at "
+                "max_pending_store_blocks=%d.",
+                max_pending_store_blocks,
+            )
 
         if role == KVConnectorRole.SCHEDULER:
             from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -212,6 +224,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache if disk_mode else False,
                 num_cpu_blocks=num_cpu_blocks,
                 aligned_num_cpu_blocks=aligned_num_cpu_blocks,
+                max_pending_store_blocks=max_pending_store_blocks,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
