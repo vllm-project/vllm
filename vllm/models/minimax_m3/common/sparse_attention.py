@@ -73,12 +73,6 @@ logger = init_logger(__name__)
 
 
 def _minimax_m3_aiter_sparse_pa_requested() -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype.
-
-    Any per-rank KV head count is served: the attend folds the head axis into
-    the batch axis, and both the indexer's emitted page table and the Triton
-    builders it otherwise falls back to address every head's cache.
-    """
     return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
 
 
