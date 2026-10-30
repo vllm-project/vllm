@@ -646,8 +646,7 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
 
 _QUOTE_RE = re.compile(r"['\"]")
 _LITERAL_BODY_RE = {
-    quote: re.compile(r"\\.|" + quote, re.DOTALL)
-    for quote in ("'", '"', "'''", '"""')
+    quote: re.compile(r"\\.|" + quote, re.DOTALL) for quote in ("'", '"', "'''", '"""')
 }
 _CTRL_CHAR_ESCAPES = {"\x00": "\\x00", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 _CTRL_CHAR_RE = re.compile(r"\\(?:\r\n|.)|[\x00\n\r\t]", re.DOTALL)
@@ -710,9 +709,7 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
         if raw:
             out.append(body)
         else:
-            out.append(
-                _CTRL_CHAR_RE.sub(partial(_escape_ctrl_char, quote=quote), body)
-            )
+            out.append(_CTRL_CHAR_RE.sub(partial(_escape_ctrl_char, quote=quote), body))
         cursor = stop
     out.append(text[cursor:])
     return "".join(out)
