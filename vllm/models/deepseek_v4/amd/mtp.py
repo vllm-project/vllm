@@ -302,6 +302,18 @@ class DeepSeekV4MTP(nn.Module):
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                layer.mtp_block.ffn,
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers.values()
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4 MTP fused shared experts are not supported yet; "
+                "please open an issue."
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

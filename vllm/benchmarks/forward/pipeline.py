@@ -19,7 +19,6 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
 )
-from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
 
@@ -144,23 +143,15 @@ class PipelineBench(ForwardBench):
             assert received is not None
             for key, tensor in self.input_tensors.tensors.items():
                 tensor.copy_(received[key])
-        context = get_forward_context()
-        saved = dict(vars(context))
-
-        def forward():
-            for name, value in saved.items():
-                setattr(context, name, value)
-            with override_forward_context(context):
-                return self._model_forward(**inputs)
-
-        self._run_model = forward
+        self._run_model = self._make_forward(inputs)
         self.snapshots = [(view, view.clone()) for view in self.state_views]
         self.input_snapshots = (
             {k: v.clone() for k, v in self.input_tensors.tensors.items()}
             if self.input_tensors is not None
             else {}
         )
-        output = forward()
+        output = self._run_model()
+        self.draft_reference = self.drafter.tokens.clone() if self.drafter else None
         self.reference = {k: v.clone() for k, v in _tensors(output).items()}
         if not pp.is_last_rank:
             pp.send_tensor_dict(_tensors(output), all_gather_group=get_tp_group())
@@ -201,6 +192,8 @@ class PipelineBench(ForwardBench):
                 v.numel() * v.element_size() for v in self.state_views
             ),
         )
+        if self.drafter is not None:
+            self.result["drafter"] = self.drafter.check(self.draft_reference)
 
     def _stream(self, profile: bool = False):
         pp, world = get_pp_group(), get_world_group()

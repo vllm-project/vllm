@@ -10,6 +10,7 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
@@ -31,11 +32,12 @@ def _layers(layer_num_heads: list[int]):
     """Stand-in attention layers, one per head count, as one attention group."""
     return {
         f"layer_{i}": SimpleNamespace(
+            attn_type=AttentionType.DECODER,
             impl=MagicMock(
                 spec=CPUAttentionBackendImpl,
                 num_heads=num_heads,
                 sliding_window=None,
-            )
+            ),
         )
         for i, num_heads in enumerate(layer_num_heads)
     }

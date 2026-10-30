@@ -25,7 +25,7 @@ new, reading vLLM's KV records and weights as loaded.
   the block's non-causal SWA rows).
   The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
-  DSpark tokens), TP2 / TP4, `fp8_ds_mla` KV records (ROCm), text tokens (the
+  DSpark tokens), TP2 / TP4 / TP8 (gfx950), `fp8_ds_mla` KV records (ROCm), text tokens (the
   routing bias is `e_score_correction_bias`).
 - Contract: a drop-in for `DeepseekV4DecoderLayer.forward`:
   in  `x` (the previous FFN output, reduced, bf16 [M, 5120]), `residual`

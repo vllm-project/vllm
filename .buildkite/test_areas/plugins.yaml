@@ -11,6 +11,13 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  # Import-time platform resolution (see test_import_vllm_does_not_resolve_platform)
+  - vllm/__init__.py
+  - vllm/env_override.py
+  - vllm/platforms/__init__.py
+  - vllm/utils/torch_utils.py
+  - vllm/utils/torch_version.py
+  - tests/plugins_tests/test_platform_plugins.py
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
@@ -62,6 +69,12 @@ steps:
       - vllm/plugins/
       - tests/plugins/
       - vllm/platforms/rocm.py
+      - vllm/__init__.py
+      - vllm/env_override.py
+      - vllm/platforms/__init__.py
+      - vllm/utils/torch_utils.py
+      - vllm/utils/torch_version.py
+      - tests/plugins_tests/test_platform_plugins.py
 
 
 # Disabled until the GGUF plugin installation is locked.

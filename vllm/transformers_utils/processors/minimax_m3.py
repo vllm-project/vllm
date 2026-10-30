@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax M3 VL HuggingFace-compatible Processor / ImageProcessor /
+"""MiniMax M3.1 VL HuggingFace-compatible Processor / ImageProcessor /
 VideoProcessor, vendored into vLLM so the model loads without
 ``--trust-remote-code`` (the released checkpoint only ships these classes as
 remote code via ``auto_map``).
 
-Adapted verbatim from the ``MiniMaxAI/Minimax-M3-preview`` repository files
-``image_processor.py``, ``video_processor.py`` and ``processing_minimax.py``
-(revision ``db01c0fe``). Both image and video processors use Qwen-style
-``smart_resize`` (bound by total pixels). The original async frame-sampling
-helpers are intentionally omitted: vLLM performs its own frame loading and
-feeds decoded frames to the processor.
+Both image and video processors use the MiniMax M3.1 aligned-size resize
+(``compute_aligned_size``): tiny inputs are upscaled to a minimum area /
+short side, then both dims are ceil-aligned to the patch factor and capped
+at a per-modality long side (selectable via the OpenAI-style ``detail``
+kwarg or an explicit ``max_long_side_pixel``). The original async
+frame-sampling helpers are intentionally omitted: vLLM performs its own
+frame loading and feeds decoded frames to the processor.
 """
 
 import math
@@ -35,125 +36,158 @@ from transformers.utils import TensorType
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import group_videos_by_shape, reorder_videos
 
-# Maximum allowed aspect ratio before smart_resize rejects the input.
+# Maximum allowed aspect ratio before compute_aligned_size rejects the input.
 MAX_RATIO = 200
 
-# Fixed (non-configurable) bounds for the long-side resize logic, per the
-# MiniMax-M3 size spec. ``min_short_side_pixel`` is the floor the short edge is
-# enlarged to; ``*_MAX_TOTAL_PIXELS`` is the hard area cap that, once exceeded,
-# aborts processing instead of downscaling.
-MIN_SHORT_SIDE_PIXEL = 112
-IMAGE_MAX_TOTAL_PIXELS = 12_845_056  # 3584 ** 2 (width * height)
-VIDEO_MAX_TOTAL_PIXELS = 301_056_000  # width * height * frames
+# Fixed (non-configurable) bounds of the aligned-size resize, per the
+# MiniMax M3.1 size spec. ``MIN_SHORT_SIDE_PIXEL`` is the floor the short
+# edge is enlarged to; ``VIDEO_MAX_TOTAL_PIXELS`` is the hard volumetric cap
+# (width * height * frames) that, once exceeded, aborts video processing.
+MIN_SHORT_SIDE_PIXEL = 168
+MIN_PIXELS = MIN_SHORT_SIDE_PIXEL**2
+VIDEO_MAX_TOTAL_PIXELS = 301_056_000
+
+# OpenAI-style ``detail`` -> long-side pixel cap, per modality.
+IMAGE_DETAIL_MAX_LONG_SIDE_PIXEL = {"low": 672, "auto": 2016, "high": 3584}
+VIDEO_DETAIL_MAX_LONG_SIDE_PIXEL = {"low": 504, "auto": 672, "high": 2188}
 
 
-def round_by_factor(number: int | float, factor: int) -> int:
-    return round(number / factor) * factor
-
-
-def ceil_by_factor(number: int | float, factor: int) -> int:
-    return math.ceil(number / factor) * factor
-
-
-def floor_by_factor(number: int | float, factor: int) -> int:
-    return math.floor(number / factor) * factor
-
-
-def _smart_resize_by_long_side(
+def compute_aligned_size(
     height: int,
     width: int,
     factor: int,
+    *,
+    min_pixels: int = MIN_PIXELS,
     max_long_side_pixel: int,
-    min_short_side_pixel: int,
-    max_total_pixels: int | None,
+    min_short_side: int = MIN_SHORT_SIDE_PIXEL,
 ) -> tuple[int, int]:
-    """Long-side based resize (MiniMax-M3 size spec).
+    """Compute the resize target ``(resized_height, resized_width)``.
 
-    (a) if the long side exceeds ``max_long_side_pixel`` → shrink so the long
-        side equals ``max_long_side_pixel``;
-    (b) else if the short side is below ``min_short_side_pixel`` → enlarge so the
-        short side equals ``min_short_side_pixel``;
-    (c) if the resulting area still exceeds ``max_total_pixels`` → raise.
+    Three layers (mirrors sglang's M3.1 ``compute_aligned_size``):
 
-    (a) and (b) are mutually exclusive (they branch on the *original* long side).
-    Both sides are then rounded to a multiple of ``factor``. For videos the
-    ``max_total_pixels`` cap is volumetric (width * height * frames) and is
-    enforced by the caller, so pass ``max_total_pixels=None`` here.
-    """
-    long_side = max(height, width)
-    short_side = min(height, width)
+    1. Aspect-ratio guard: reject inputs whose ratio exceeds ``MAX_RATIO``.
+    2. Floor layers: upscale proportionally when the area is below
+       ``min_pixels``, or the short side is below ``min_short_side``.
+    3. Alignment layer: ``_align_to_factor`` ceil-aligns both dims to
+       ``factor`` and caps them at ``max_long_side_pixel``.
 
-    scaled_height: float = height
-    scaled_width: float = width
-    if long_side > max_long_side_pixel:
-        beta = max_long_side_pixel / long_side
-        scaled_height = height * beta
-        scaled_width = width * beta
-    elif short_side < min_short_side_pixel:
-        beta = min_short_side_pixel / short_side
-        scaled_height = height * beta
-        scaled_width = width * beta
+    Args:
+        height: Original height in pixels, must be > 0.
+        width: Original width in pixels, must be > 0.
+        factor: Alignment factor, usually ``patch_size * merge_size``.
+        min_pixels: Area floor; smaller inputs are upscaled to at least
+            this area before alignment.
+        max_long_side_pixel: Per-dim cap applied by the alignment layer
+            (used for both dims).
+        min_short_side: Short-side pixel floor.
 
-    h_bar = max(factor, round_by_factor(scaled_height, factor))
-    w_bar = max(factor, round_by_factor(scaled_width, factor))
+    Returns:
+        ``(resized_height, resized_width)``, both multiples of ``factor``
+        and at most ``max_long_side_pixel``.
 
-    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
-        raise ValueError(
-            f"image area {h_bar * w_bar} exceeds max_total_pixels "
-            f"{max_total_pixels} after resizing"
-        )
-    return h_bar, w_bar
+    Raises:
+        ValueError: If the aspect ratio exceeds ``MAX_RATIO``.
 
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int = 28,
-    min_pixels: int = 4 * 28 * 28,
-    max_pixels: int = 451584,
-    max_long_side_pixel: int | None = None,
-    min_short_side_pixel: int = MIN_SHORT_SIDE_PIXEL,
-    max_total_pixels: int | None = None,
-) -> tuple[int, int]:
-    """Rescale (height, width) so each side is a multiple of ``factor``.
-
-    When ``max_long_side_pixel`` is set, use the MiniMax-M3 long-side resize
-    spec (see :func:`_smart_resize_by_long_side`). Otherwise fall back to the
-    Qwen-VL area bound, keeping the total area within ``[min_pixels, max_pixels]``.
     """
     if max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
             f"absolute aspect ratio must be smaller than {MAX_RATIO}, "
             f"got {max(height, width) / min(height, width)}"
         )
-    if max_long_side_pixel is not None:
-        return _smart_resize_by_long_side(
-            height,
-            width,
-            factor=factor,
-            max_long_side_pixel=max_long_side_pixel,
-            min_short_side_pixel=min_short_side_pixel,
-            max_total_pixels=max_total_pixels,
-        )
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = floor_by_factor(height / beta, factor)
-        w_bar = floor_by_factor(width / beta, factor)
-    elif h_bar * w_bar < min_pixels:
+    if height * width < min_pixels:
         beta = math.sqrt(min_pixels / (height * width))
-        h_bar = ceil_by_factor(height * beta, factor)
-        w_bar = ceil_by_factor(width * beta, factor)
-    return h_bar, w_bar
+        height = math.ceil(height * beta)
+        width = math.ceil(width * beta)
+    if min(height, width) < min_short_side:
+        beta = min_short_side / min(height, width)
+        height = math.ceil(height * beta)
+        width = math.ceil(width * beta)
+    return _align_to_factor(
+        height, width, factor, (max_long_side_pixel, max_long_side_pixel)
+    )
+
+
+def _align_to_factor(
+    height: int,
+    width: int,
+    factor: int,
+    max_size: tuple[int, int],
+) -> tuple[int, int]:
+    """Ceil-align both dims to ``factor``, then cap at per-dim ``max_size``.
+
+    When either aligned dim exceeds its cap, scale both dims back down
+    proportionally (integer arithmetic, preserving the aspect ratio) and
+    ceil-align again.
+
+    Returns:
+        ``(height, width)`` with both dims multiples of ``factor`` and at
+        most the corresponding ``max_size`` dim.
+
+    """
+    max_w, max_h = max_size
+    # Round the caps down to factor multiples so alignment never exceeds them.
+    max_w = max_w - (max_w % factor)
+    max_h = max_h - (max_h % factor)
+    new_w = width if width % factor == 0 else width + (factor - width % factor)
+    new_h = height if height % factor == 0 else height + (factor - height % factor)
+    if new_w > max_w or new_h > max_h:
+        new_w_ = min((new_w * max_w) // new_w, (new_w * max_h) // new_h)
+        new_h_ = min((new_h * max_w) // new_w, (new_h * max_h) // new_h)
+        new_w = new_w_
+        new_h = new_h_
+        new_w = new_w if new_w % factor == 0 else new_w + (factor - new_w % factor)
+        new_h = new_h if new_h % factor == 0 else new_h + (factor - new_h % factor)
+    assert new_w <= max_w and new_h <= max_h, (
+        f"_align_to_factor: result (h={new_h}, w={new_w}) exceeds max_size "
+        f"{max_size}; input (h={height}, w={width}, factor={factor})"
+    )
+    return new_h, new_w
+
+
+def resolve_max_long_side_pixel(
+    detail: "str | None",
+    max_long_side_pixel: "int | None",
+    *,
+    modality: str,
+) -> int:
+    """Resolve the long-side pixel cap from ``detail`` / explicit override.
+
+    ``detail`` (default ``"auto"``) maps to a per-modality cap. An explicit
+    ``max_long_side_pixel`` takes priority over a non-auto ``detail``; the
+    ``"auto"`` tier value itself is treated as "unset" so the processor class
+    defaults (2016 for images, 672 for videos) do not shadow ``detail``.
+
+    Raises:
+        ValueError: If ``detail`` or ``modality`` is not a known value.
+
+    """
+    if modality == "image":
+        detail_map = IMAGE_DETAIL_MAX_LONG_SIDE_PIXEL
+    elif modality == "video":
+        detail_map = VIDEO_DETAIL_MAX_LONG_SIDE_PIXEL
+    else:
+        raise ValueError(f"unknown modality {modality!r}")
+    detail = detail or "auto"
+    if detail not in detail_map:
+        raise ValueError(
+            f"invalid detail {detail!r} for {modality}; "
+            f"expected one of {sorted(detail_map)}"
+        )
+    if max_long_side_pixel is not None and max_long_side_pixel != detail_map["auto"]:
+        return max_long_side_pixel
+    return detail_map[detail]
 
 
 class MiniMaxM3VLImageProcessorKwargs(ImagesKwargs, total=False):  # type: ignore[call-arg]
     patch_size: int
     temporal_patch_size: int
     merge_size: int
+    detail: "str | None"
+    max_long_side_pixel: "int | None"
+    # Legacy keys from released preprocessor_config.json files; accepted for
+    # backward compatibility but ignored by the aligned-size resize.
+    min_pixels: int
     max_pixels: int
-    max_long_side_pixel: int
 
 
 class MiniMaxM3VLImageProcessor(TorchvisionBackend):
@@ -171,12 +205,11 @@ class MiniMaxM3VLImageProcessor(TorchvisionBackend):
     patch_size = 14
     temporal_patch_size = 2
     merge_size = 2
-    max_pixels = 451584  # 672 * 672
-    # Long-side resize spec (opt-in via ``max_long_side_pixel``). The latter two
-    # are fixed per the spec and are not exposed as configurable kwargs.
-    max_long_side_pixel = None
+    # Aligned-size resize bounds (M3.1). ``detail`` selects the long-side cap
+    # ("low"/"auto"/"high"); an explicit ``max_long_side_pixel`` wins.
+    detail = "auto"
+    max_long_side_pixel = 2016
     min_short_side_pixel = MIN_SHORT_SIDE_PIXEL
-    max_total_pixels = IMAGE_MAX_TOTAL_PIXELS
     valid_kwargs = MiniMaxM3VLImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
 
@@ -202,7 +235,7 @@ class MiniMaxM3VLImageProcessor(TorchvisionBackend):
         patch_size: int,
         temporal_patch_size: int,
         merge_size: int,
-        max_pixels: int,
+        detail: str,
         max_long_side_pixel: "int | None",
         disable_grouping: "bool | None",
         return_tensors: "str | TensorType | None",
@@ -213,17 +246,18 @@ class MiniMaxM3VLImageProcessor(TorchvisionBackend):
         )
         resized_images_grouped = {}
         factor = patch_size * merge_size
+        max_long_side = resolve_max_long_side_pixel(
+            detail, max_long_side_pixel, modality="image"
+        )
         for shape, stacked_images in grouped_images.items():
             height, width = stacked_images.shape[-2:]
             if do_resize:
-                resized_height, resized_width = smart_resize(
+                resized_height, resized_width = compute_aligned_size(
                     height,
                     width,
                     factor=factor,
-                    max_pixels=max_pixels,
-                    max_long_side_pixel=max_long_side_pixel,
-                    min_short_side_pixel=self.min_short_side_pixel,
-                    max_total_pixels=self.max_total_pixels,
+                    max_long_side_pixel=max_long_side,
+                    min_short_side=self.min_short_side_pixel,
                 )
                 stacked_images = self.resize(
                     stacked_images,
@@ -308,19 +342,19 @@ class MiniMaxM3VLImageProcessor(TorchvisionBackend):
         images_kwargs = images_kwargs or {}
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
-        max_pixels = images_kwargs.get("max_pixels", self.max_pixels)
+        detail = images_kwargs.get("detail", self.detail)
         max_long_side_pixel = images_kwargs.get(
             "max_long_side_pixel", self.max_long_side_pixel
         )
-
-        resized_height, resized_width = smart_resize(
+        max_long_side = resolve_max_long_side_pixel(
+            detail, max_long_side_pixel, modality="image"
+        )
+        resized_height, resized_width = compute_aligned_size(
             height,
             width,
             factor=patch_size * merge_size,
-            max_pixels=max_pixels,
-            max_long_side_pixel=max_long_side_pixel,
-            min_short_side_pixel=self.min_short_side_pixel,
-            max_total_pixels=self.max_total_pixels,
+            max_long_side_pixel=max_long_side,
+            min_short_side=self.min_short_side_pixel,
         )
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         return grid_h * grid_w
@@ -330,13 +364,16 @@ class MiniMaxM3VLVideoProcessorKwargs(VideosKwargs, total=False):  # type: ignor
     patch_size: int
     temporal_patch_size: int
     merge_size: int
-    min_pixels: int
-    max_pixels: int
-    max_long_side_pixel: int
-    total_pixels: int
+    detail: "str | None"
+    max_long_side_pixel: "int | None"
     min_frames: int
     max_frames: int
     fps: "float | int"
+    # Legacy keys from released preprocessor_config.json files; accepted for
+    # backward compatibility but ignored by the aligned-size resize.
+    min_pixels: int
+    max_pixels: int
+    total_pixels: int
 
 
 class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
@@ -354,13 +391,12 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
     patch_size = 14
     temporal_patch_size = 2
     merge_size = 2
-    min_pixels = 4 * 28 * 28
-    max_pixels = 768 * 28 * 28  # 602,112
-    total_pixels = int(64000 * 28 * 28 * 0.9)  # ~45M, ~64k tokens budget
-    # Long-side resize spec (opt-in via ``max_long_side_pixel``). The video
+    # Aligned-size resize bounds (M3.1). ``detail`` selects the long-side cap
+    # ("low"/"auto"/"high"); an explicit ``max_long_side_pixel`` wins. The
     # ``max_total_pixels`` cap is volumetric (width * height * frames) and is
     # enforced in ``_preprocess`` once the frame count is known.
-    max_long_side_pixel = None
+    detail = "auto"
+    max_long_side_pixel = 672
     min_short_side_pixel = MIN_SHORT_SIDE_PIXEL
     max_total_pixels = VIDEO_MAX_TOTAL_PIXELS
     fps = 1.0
@@ -386,8 +422,7 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
         patch_size: int,
         temporal_patch_size: int,
         merge_size: int,
-        min_pixels: int,
-        max_pixels: int,
+        detail: str = "auto",
         max_long_side_pixel: "int | None" = None,
         return_tensors: "str | TensorType | None" = None,
         **kwargs,
@@ -395,27 +430,21 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
         factor = patch_size * merge_size
+        max_long_side = resolve_max_long_side_pixel(
+            detail, max_long_side_pixel, modality="video"
+        )
         for shape, stacked_videos in grouped_videos.items():
             batch_size, num_frames, channels, height, width = stacked_videos.shape
             resized_height, resized_width = height, width
             if do_resize:
-                resized_height, resized_width = smart_resize(
+                resized_height, resized_width = compute_aligned_size(
                     height,
                     width,
                     factor=factor,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
-                    max_long_side_pixel=max_long_side_pixel,
-                    min_short_side_pixel=self.min_short_side_pixel,
-                    # Per-frame raise disabled; the video cap is volumetric and
-                    # is enforced below once num_frames is known.
-                    max_total_pixels=None,
+                    max_long_side_pixel=max_long_side,
+                    min_short_side=self.min_short_side_pixel,
                 )
-                if (
-                    max_long_side_pixel is not None
-                    and resized_height * resized_width * num_frames
-                    > self.max_total_pixels
-                ):
+                if resized_height * resized_width * num_frames > self.max_total_pixels:
                     raise ValueError(
                         f"video area {resized_height * resized_width * num_frames} "
                         f"(width * height * frames) exceeds max_total_pixels "
@@ -424,8 +453,10 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
                 stacked_videos = stacked_videos.view(
                     batch_size * num_frames, channels, height, width
                 )
+                # Resize in float32, matching the training/SFT pipeline (and
+                # sglang): uint8 resize rounds intermediates and shifts pixels.
                 stacked_videos = self.resize(
-                    stacked_videos,
+                    stacked_videos.float(),
                     size=SizeDict(height=resized_height, width=resized_width),
                     resample=resample,
                 )
