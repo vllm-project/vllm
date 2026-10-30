@@ -41,9 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -722,8 +719,6 @@ class AliceAIForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
-        if not is_mtp_completeness_check_enabled():
-            return loaded
         expected_target_weights = {
             name
             for name, _ in self.named_parameters()
