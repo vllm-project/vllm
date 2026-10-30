@@ -68,6 +68,7 @@ def test_liveness_monitor_does_not_mask_unexpected_exit(monkeypatch):
     manager._snapshot_exit_event = threading.Event()
     manager._expected_exit_pids = {123}
     manager._snapshot_pid = None
+    manager._snapshot_failed = None
     wait_calls = 0
 
     def wait(sentinels, timeout):

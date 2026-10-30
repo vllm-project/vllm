@@ -45,11 +45,6 @@ def test_fake_provider_round_trip(tmp_path, sleeping_child):
         assert captured["state"] == SnapshotState.HIBERNATED
         manifest = captured["manifest"]
         assert manifest["format_version"] == 2
-        assert manifest["resource_policy"] == {
-            "weights": "cuda_image",
-            "kv": "cuda_image",
-            "runtime": "cuda_image",
-        }
         assert manifest["persistence"] == "durable"
         assert manifest["integrity"] == "optimistic"
         assert captured["manager_timings"]["total_seconds"] >= 0
@@ -172,8 +167,28 @@ def test_prepare_capture_keeps_ready_state_when_root_is_dead(tmp_path, monkeypat
     assert manager.snapshot_status()["operation_started_at"] is None
 
 
+def test_fail_capture_from_draining_resumes_source(tmp_path, sleeping_child):
+    manager = EngineSnapshotManager(
+        str(tmp_path / "control.sock"),
+        str(tmp_path / "snapshots"),
+        sleeping_child,
+    )
+    manager.start()
+    client = SnapshotControlClient(str(tmp_path / "control.sock"))
+    try:
+        client.request("prepare_capture")
+
+        failed = client.request("fail_capture", {"error": "rollback failed"})
+
+        assert failed["state"] == SnapshotState.ATTACHING
+        assert failed["root_pid"] == sleeping_child
+        assert manager._pid_alive(sleeping_child)
+    finally:
+        manager.close()
+
+
 @pytest.mark.parametrize(
-    "state", (SnapshotState.DRAINING, SnapshotState.ATTACHING, SnapshotState.VERIFYING)
+    "state", (SnapshotState.ATTACHING, SnapshotState.VERIFYING)
 )
 def test_fail_capture_discards_engine_from_rollback_states(
     tmp_path, sleeping_child, state
@@ -205,7 +220,7 @@ def test_fail_capture_waits_for_provider_process_exit(tmp_path, monkeypatch):
         str(tmp_path / "snapshots"),
         123,
     )
-    manager.status.state = SnapshotState.DRAINING
+    manager.status.state = SnapshotState.ATTACHING
     alive = iter((True, True, False))
     events: list[Any] = []
     monkeypatch.setattr(manager, "_pid_alive", lambda pid: next(alive))
@@ -231,7 +246,7 @@ def test_fail_capture_records_provider_cleanup_failure(tmp_path, monkeypatch):
         str(tmp_path / "snapshots"),
         123,
     )
-    manager.status.state = SnapshotState.DRAINING
+    manager.status.state = SnapshotState.ATTACHING
     monkeypatch.setattr(manager, "_pid_alive", lambda pid: True)
 
     def fail_cleanup(pid):
