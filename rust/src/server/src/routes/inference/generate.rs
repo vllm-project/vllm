@@ -379,7 +379,7 @@ fn collect_generate(
         request_id,
         model: response_model,
         created,
-        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details),
+        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
         output_mode: GenerateOutputMode::Tokens,
         choices: vec![GenerateResponseChoice {
             index: 0,
