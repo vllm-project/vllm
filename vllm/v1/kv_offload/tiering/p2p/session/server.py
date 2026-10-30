@@ -782,9 +782,6 @@ class ServerRole:
                 rnd.available.clear()
                 rnd.finishing = True
                 self._pending_store_results.extend(self._fail_unwritten_round_jobs(rnd))
-                # A lookup HIT may already be on the wire. Preserve its empty
-                # round so on_fetch fails it promptly, without affecting a
-                # fresh lookup round under the same kv_request_id.
                 if not rnd.inflight and (
                     rnd.demand_received or not rnd.lookup_supplied
                 ):

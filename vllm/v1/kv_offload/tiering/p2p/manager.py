@@ -1033,7 +1033,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Also expires `_reaped_stores` entries whose consumer can no longer
         be waiting, which is why this runs before the empty check below.
         """
-        # Reset uses the same failure/tombstone path as timeout reaping.
         now = time.monotonic()
         if self._reaped_stores:
             retention_deadline = now - _REAPED_ID_RETENTION_S
@@ -1046,11 +1045,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         if not self._unbound_stores:
             return
-        deadline = float("inf") if force else now - self._unbound_store_timeout_s
+        deadline = now - self._unbound_store_timeout_s
         expired: list[str] | None = None
         for kid, batches in self._unbound_stores.items():
             # Batches are appended in arrival order, so the head is oldest.
-            if batches and batches[0].submitted_at <= deadline:
+            if batches and (force or batches[0].submitted_at <= deadline):
                 if expired is None:
                     expired = []
                 expired.append(kid)

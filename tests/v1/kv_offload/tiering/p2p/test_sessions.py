@@ -3856,8 +3856,6 @@ def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
     assert session.poll().stores == [StoreResult(1, success)]
     assert not session.has_pending_work
     assert session.drain_stores().stores == []
-    # The completed job also supplied an unmatched block. Drain must remove
-    # that reference before its primary slot can be reused.
     _fetch(conn, "req-1", [b"extra"], [6])
     session.poll()
     assert len(transport._transfers) == 1
@@ -3893,7 +3891,6 @@ def test_drain_rejects_unfetched_lookup_round_without_timeout():
     assert len(done) == 1
     assert done[0][TransferDoneMsg.SUCCESS] is False
 
-    # Withdrawal belongs to round 0; a fresh HIT under the same id is valid.
     conn.enqueue(
         {
             TYPE_KEY: LookupMsg.TYPE,

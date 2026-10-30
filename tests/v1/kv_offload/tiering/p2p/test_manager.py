@@ -3158,7 +3158,6 @@ def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound)
 
     key = OffloadKey(b"unfetched")
     if bound:
-        # An initial handoff binds the id to a session before more stores arrive.
         first = OffloadKey(b"first")
         consumer.submit_load(_job_metadata(10, [first], [0], ctx.kv_transfer_params))
         list(producer.get_finished_jobs())
@@ -3182,7 +3181,6 @@ def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound)
 
     consumer.submit_load(_job_metadata(30, [key], [1], ctx.kv_transfer_params))
     list(producer.get_finished_jobs())
-    # A late consumer must never read a slot released by drain.
     assert list(consumer.get_finished_jobs()) == [JobResult(30, False)]
     producer.submit_store(_job_metadata(31, [key], [0], _remote_decoder_kv_params()))
     assert list(producer.get_finished_jobs()) == [JobResult(31, False)]
