@@ -72,11 +72,10 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -89,7 +88,6 @@ from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
     speculative_target_watermark_key,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
@@ -100,7 +98,7 @@ from vllm.v1.worker.gpu.async_utils import (
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
-    get_kv_cache_spec,
+    get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -624,17 +622,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
-    def get_kv_cache_spec(self):
-        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+    def get_kv_cache_layer_configs(self):
+        configs = get_kv_cache_layer_configs(self.vllm_config)
         # A draft running at DCP=1 under a DCP target keeps a replicated cache.
         if (
             isinstance(self.speculator, DraftModelSpeculator)
             and self.speculator.dcp_size == 1
             and self.dcp_size > 1
         ):
-            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
-                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
-        return kv_cache_spec
+            for name in self.speculator.draft_attn_layer_names & configs.keys():
+                config = configs[name]
+                configs[name] = replace(
+                    config, spec=replace(config.spec, dcp_sharded=False)
+                )
+        return configs
 
     def initialize_kv_cache(
         self,
@@ -657,37 +658,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
-        block_sizes = []
-        max_num_blocks_per_group = []
-        slot_mapping_enabled = []
-        dcp_sharded = []
-        sliding_window_reach = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
-            dcp_sharded.append(spec.dcp_sharded)
-            sliding_window_reach.append(
-                layer_spec.num_retained_tokens
-                if isinstance(layer_spec, SlidingWindowSpec)
-                else 0
-            )
-            # Let each cache type account for CP. Attention KV is DCP-sharded,
-            # while Mamba/GDN recurrent state is replicated across DCP ranks.
-            max_num_blocks = spec.max_num_blocks_per_req(
-                self.vllm_config, block_table_max_model_len
-            )
-            # Preserve each cache type's alignment requirements after applying
-            # its topology-aware block-table width.
-            max_num_blocks = get_block_table_width(
-                max_num_blocks,
-                spec.block_size,
-                token_alignment=spec.block_table_token_alignment,
-            )
-            max_num_blocks_per_group.append(max_num_blocks)
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        max_num_blocks_per_group = [
+            g.block_table_width(self.vllm_config, block_table_max_model_len)
+            for g in kv_cache_groups
+        ]
 
         target_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -732,14 +707,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.block_tables = BlockTables(
-            block_sizes=block_sizes,
+            block_sizes=[g.block_size for g in kv_cache_groups],
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            slot_mapping_enabled=slot_mapping_enabled,
-            dcp_sharded=dcp_sharded,
-            sliding_window_reach=sliding_window_reach,
+            slot_mapping_enabled=[g.uses_slot_mapping for g in kv_cache_groups],
+            dcp_sharded=[g.dcp_sharded for g in kv_cache_groups],
+            sliding_window_reach=[
+                g.manager_config.params.num_retained_tokens
+                if isinstance(g.manager_config.params, SlidingWindowManager.Params)
+                else 0
+                for g in kv_cache_groups
+            ],
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,

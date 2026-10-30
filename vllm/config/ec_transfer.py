@@ -109,7 +109,7 @@ class ECTransferConfig:
     def is_encode_only(self) -> bool:
         """Whether this instance encodes but does not run the language model.
 
-        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_spec`
+        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_layer_configs`
         returns {} for it -- so it is the one role that can spend accelerator
         time and memory on frontend work.
         """

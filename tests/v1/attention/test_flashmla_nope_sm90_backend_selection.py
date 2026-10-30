@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -28,7 +29,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     KVQuantMode,
@@ -120,7 +120,7 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
                 block_stride=len(layers) * page_size,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+        kv_cache_groups=[new_kv_cache_group(layers, spec)],
     )
     groups = [[AttentionGroup(FlashMLASparseBackend, layers, spec, 0)]]
 

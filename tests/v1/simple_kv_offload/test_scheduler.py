@@ -11,6 +11,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.spec_decode.utils import attach_speculator_config
 from vllm import SamplingParams
 from vllm.config import (
@@ -44,19 +46,17 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
+    ChunkedLocalAttentionManager,
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -98,33 +98,24 @@ def _make_kv_cache_config(
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
-    register_all_kvcache_specs(
-        vllm_config=None
-    )  # Ensure specs are registered for tests
     total_size = _BYTES_PER_BLOCK * num_blocks * num_groups
     byte_offset = 0
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
-        spec = (
-            FullAttentionSpec(
-                block_size=BLOCK_SIZE,
-                num_kv_heads=NUM_KV_HEADS,
-                head_size=HEAD_SIZE,
-                dtype=DTYPE,
-            )
-            if g == 0
-            else SlidingWindowSpec(
-                block_size=BLOCK_SIZE,
-                num_kv_heads=NUM_KV_HEADS,
-                head_size=HEAD_SIZE,
-                dtype=DTYPE,
-                sliding_window=BLOCK_SIZE * 4,
-            )
+        spec = AttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
         )
         groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(layer_names, spec)
+            if g == 0
+            else make_kv_cache_group(
                 layer_names,
                 spec,
+                SlidingWindowManager,
+                SlidingWindowManager.config(sliding_window=BLOCK_SIZE * 4),
             )
         )
         tensors.append(
@@ -154,17 +145,19 @@ def _make_scratch_kv_cache_config(
     caching, so its block size neither divides nor is divided by the
     hash block size in general.
     """
-    register_all_kvcache_specs(vllm_config=None)
     fa_config = _make_kv_cache_config(num_blocks, num_groups=1)
     scratch_layers = ["layer_scratch"]
-    scratch_spec = CircularBufferSpec(
+    scratch_spec = AttentionSpec(
         block_size=scratch_block_size,
         num_kv_heads=2,
         head_size=HEAD_SIZE,
         head_size_v=0,
         dtype=DTYPE,
     )
-    assert not scratch_spec.prefix_cacheable
+    scratch_group = make_kv_cache_group(
+        scratch_layers, scratch_spec, CircularBufferManager
+    )
+    assert not scratch_group.prefix_cacheable
     scratch_bytes = scratch_spec.page_size_bytes * num_blocks
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -177,8 +170,7 @@ def _make_scratch_kv_cache_config(
                 block_stride=scratch_spec.page_size_bytes,
             )
         ],
-        kv_cache_groups=fa_config.kv_cache_groups
-        + [KVCacheGroupSpec(scratch_layers, scratch_spec)],
+        kv_cache_groups=fa_config.kv_cache_groups + [scratch_group],
     )
 
 
@@ -265,7 +257,8 @@ def test_connector_explicit_cpu_blocks_align_uneven_stages(
     """The same configured pool size must fit lighter and heavier PP stages."""
     config = _make_kv_cache_config(num_blocks=16)
     names = [f"layer_{i}" for i in range(num_layers)]
-    config.kv_cache_groups[0].layer_names = names
+    group = config.kv_cache_groups[0]
+    group.kv_cache_specs = dict.fromkeys(names, uniform_spec(group))
     config.kv_cache_tensors[0].layers = names
     config.kv_cache_tensors[0].size *= num_layers
     vllm_config = _make_vllm_config()
@@ -1150,13 +1143,8 @@ def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
     """Lazy: the walk covers what every group, offloaded or not, takes per step."""
     config = _make_kv_cache_config(num_blocks=32, num_groups=3)
     for group in config.kv_cache_groups[1:]:
-        group.kv_cache_spec = SlidingWindowMLASpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            sliding_window=BLOCK_SIZE * 4,
-            bounded_replay=True,
+        group.manager_config = SlidingWindowManager.config(
+            sliding_window=BLOCK_SIZE * 4, bounded_replay=True
         )
     fix = make_scheduler(
         num_cpu_blocks=32, num_gpu_blocks=32, lazy=True, kv_cache_config=config
@@ -1935,12 +1923,8 @@ def test_chunked_local_cpu_lookup_requires_chunk_aligned_prefix(
 ) -> None:
     """Recompute suffixes whose relative and absolute chunk boundaries differ."""
     config = _make_kv_cache_config(num_blocks=32, num_groups=2)
-    config.kv_cache_groups[1].kv_cache_spec = ChunkedLocalAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=DTYPE,
-        attention_chunk_size=64,
+    config.kv_cache_groups[1].manager_config = ChunkedLocalAttentionManager.config(
+        attention_chunk_size=64
     )
     fix = make_scheduler(num_cpu_blocks=32, kv_cache_config=config)
     scheduler = fix.scheduler
@@ -2600,7 +2584,7 @@ def _make_hybrid_attention_mamba_scheduler(
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
-    attention_spec = FullAttentionSpec(
+    attention_spec = AttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -2610,7 +2594,6 @@ def _make_hybrid_attention_mamba_scheduler(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode=mamba_cache_mode,
     )
     return _make_two_group_scheduler(
         attention_spec,
@@ -2627,7 +2610,7 @@ def _make_hybrid_attention_mamba_scheduler(
 
 
 def _make_two_group_scheduler(
-    attention_spec: FullAttentionSpec,
+    attention_spec: AttentionSpec,
     second_group: tuple[str, KVCacheSpec],
     *,
     num_cpu_blocks: int,
@@ -2642,8 +2625,15 @@ def _make_two_group_scheduler(
     """Build a scheduler for one attention group plus one named second group."""
     second_name, second_spec = second_group
     groups = [
-        KVCacheGroupSpec(["attention"], attention_spec),
-        KVCacheGroupSpec([second_name], second_spec),
+        make_kv_cache_group(["attention"], attention_spec),
+        make_kv_cache_group(
+            [second_name],
+            second_spec,
+            MambaManager,
+            MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+        )
+        if isinstance(second_spec, MambaSpec)
+        else make_kv_cache_group([second_name], second_spec),
     ]
     tensors = [
         KVCacheTensor(
@@ -2703,7 +2693,7 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     replicated_block_size = 4 * BLOCK_SIZE
     dcp_world_size = 2
     fix = _make_two_group_scheduler(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=attention_block_size,
             num_kv_heads=NUM_KV_HEADS,
             head_size=HEAD_SIZE,
@@ -2711,7 +2701,7 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
         ),
         (
             "replicated_attention",
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=replicated_block_size,
                 num_kv_heads=NUM_KV_HEADS,
                 head_size=HEAD_SIZE,
@@ -3333,14 +3323,13 @@ QSA_RING_BLOCK_SIZE = 4
 
 
 def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    register_all_kvcache_specs(vllm_config=None)
-    full_spec = FullAttentionSpec(
+    full_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    ring_spec = CircularBufferSpec(
+    ring_spec = AttentionSpec(
         block_size=QSA_RING_BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -3348,15 +3337,15 @@ def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         dtype=DTYPE,
     )
     groups = [
-        KVCacheGroupSpec(["layer_0"], full_spec),
-        KVCacheGroupSpec(["qsa_ring"], ring_spec),
+        make_kv_cache_group(["layer_0"], full_spec),
+        make_kv_cache_group(["qsa_ring"], ring_spec, CircularBufferManager),
     ]
     tensors = [
         KVCacheTensor(
-            size=group.kv_cache_spec.page_size_bytes * num_blocks,
+            size=group.page_size_bytes * num_blocks,
             layers=list(group.layer_names),
-            layer_stride=group.kv_cache_spec.page_size_bytes * num_blocks,
-            block_stride=group.kv_cache_spec.page_size_bytes,
+            layer_stride=group.page_size_bytes * num_blocks,
+            block_stride=group.page_size_bytes,
         )
         for group in groups
     ]
@@ -3468,27 +3457,37 @@ def test_eager_store_matches_gpu_cacheable_prefix(
     draft_block_size = scheduler_block_size if draft_sharded else block_size
     prompt_len = 16 * scheduler_block_size + draft_block_size + prefill_lookahead
     kv_cache_config = _make_kv_cache_config(256, num_groups=2)
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        group.kv_cache_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=NUM_KV_HEADS,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            dcp_sharded=group_id == 0 or draft_sharded,
+    groups = kv_cache_config.kv_cache_groups
+    for group_id, group in enumerate(groups):
+        groups[group_id] = make_kv_cache_group(
+            group.layer_names,
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=NUM_KV_HEADS,
+                head_size=HEAD_SIZE,
+                dtype=DTYPE,
+                dcp_sharded=group_id == 0 or draft_sharded,
+            ),
         )
     for tensor in kv_cache_config.kv_cache_tensors:
         tensor.size *= block_size // BLOCK_SIZE
         tensor.layer_stride *= block_size // BLOCK_SIZE
         tensor.block_stride *= block_size // BLOCK_SIZE
     if draft_sliding_window:
-        kv_cache_config.kv_cache_groups[1].kv_cache_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=NUM_KV_HEADS,
-            head_size=HEAD_SIZE,
-            dtype=DTYPE,
-            sliding_window=scheduler_block_size,
-            extra_retained_tokens=prefill_lookahead - 1,
-            dcp_sharded=False,
+        groups[1] = make_kv_cache_group(
+            groups[1].layer_names,
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=NUM_KV_HEADS,
+                head_size=HEAD_SIZE,
+                dtype=DTYPE,
+                dcp_sharded=False,
+            ),
+            SlidingWindowManager,
+            SlidingWindowManager.config(
+                sliding_window=scheduler_block_size,
+                extra_retained_tokens=prefill_lookahead - 1,
+            ),
         )
     kv_cache_config.kv_cache_groups[1].is_eagle_group = True
     kv_cache_config.prefix_cache_retention_interval = retention_interval

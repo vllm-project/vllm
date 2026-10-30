@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
@@ -21,7 +22,8 @@ from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -461,11 +463,10 @@ def test_pcp_query_tokens(rank):
 
 def _group(block_size: int, replay: int = 0, dcp_sharded: bool = False):
     return SimpleNamespace(
-        kv_cache_spec=SimpleNamespace(
-            block_size=block_size,
-            prefix_replay_tokens=replay,
-            dcp_sharded=dcp_sharded,
-        )
+        block_size=block_size,
+        prefix_replay_tokens=replay,
+        dcp_sharded=dcp_sharded,
+        manager_config=FullAttentionManager.config(),
     )
 
 
@@ -554,7 +555,7 @@ def test_bench_packed_kv_blocks():
     kernel_view = group.map_kv_cache_to_kernel_blocks(manager_view)
     batch = build_batch(
         parse_case("decode=1@129"),
-        [KVCacheGroupSpec(["cache"], spec)],
+        [new_kv_cache_group(["cache"], spec)],
         16,
         1000,
         np.random.default_rng(0),
@@ -575,17 +576,18 @@ def test_bench_speculative_mamba_blocks():
         block_size=16,
         shapes=((4,), (2, 2)),
         dtypes=(torch.float32, torch.float32),
-        num_speculative_blocks=5,
     )
+    num_speculative_blocks = 5
+    config = MambaManager.config(num_speculative_blocks=num_speculative_blocks)
     batch = build_batch(
         parse_case("verify=2*6@128:5"),
-        [KVCacheGroupSpec(["state"], spec)],
+        [new_kv_cache_group(["state"], spec, config)],
         13,
         1000,
         np.random.default_rng(0),
     )
     blocks = [req.block_ids[0] for req in batch.scheduler_output.scheduled_new_reqs]
-    assert all(len(ids) >= 1 + spec.num_speculative_blocks for ids in blocks)
+    assert all(len(ids) >= 1 + num_speculative_blocks for ids in blocks)
     assert set(blocks[0]).isdisjoint(blocks[1])
     group = AttentionGroup(
         MambaAttentionBackendEnum.MAMBA2.get_class(), ["state"], spec, 0

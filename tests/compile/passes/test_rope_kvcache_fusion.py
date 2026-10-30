@@ -44,7 +44,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
 )
 
@@ -161,7 +161,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         # Mirror the worker spec-collection loop: the backend publishes its
         # packing (e.g. ROCM_ATTN's separate K/V head groups).
         self.kv_cache_spec = self.attn_backend.customize_spec(
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,

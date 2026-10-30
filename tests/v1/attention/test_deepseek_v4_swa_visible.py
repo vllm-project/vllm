@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
 )
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 WINDOW = 8
 MAX_IMG = 6
@@ -534,7 +534,6 @@ def make_builder(
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
     deepseek_v4_config: bool = True,
-    bounded_replay: bool = False,
 ) -> DeepseekSparseSWAMetadataBuilder:
     vision_fields = dict(vision_n_layers=2, vision_max_n_token=max_image_tokens)
     vllm_config = create_vllm_config(
@@ -553,15 +552,13 @@ def make_builder(
             sliding_window=window,
             **vision_fields,
         )
-    spec = SlidingWindowMLASpec(
+    spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
-        bounded_replay=bounded_replay,
     )
     return builder_cls(
         kv_cache_spec=spec,
@@ -770,7 +767,7 @@ def test_builder_replay_start_bounds_prefill_window_and_gather():
 def test_builder_replaying_group_builds_without_replay_start():
     """Graph captures build without model-specific kwargs: a replaying group's
     metadata then bounds nothing."""
-    builder = make_builder(vision=False, bounded_replay=True)
+    builder = make_builder(vision=False)
     md = build_metadata(builder, [40, 12], [24, 12], None)
     assert not md.replay_start.any()
     assert md.prefill_swa_lens[0].item() == WINDOW

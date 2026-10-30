@@ -81,12 +81,12 @@ def _fits_in_memory_budget(nbytes: int, device: torch.device) -> bool:
     # activation peak and for KV of one max_model_len request (the floor the
     # engine enforces), else startup fails later with a generic KV-cache error.
     from vllm.v1.core.kv_cache_planning import max_memory_usage_bytes
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_layer_configs
 
     vllm_config = get_current_vllm_config()
     util = vllm_config.cache_config.gpu_memory_utilization
     min_kv_bytes = max_memory_usage_bytes(
-        vllm_config, get_kv_cache_spec(vllm_config).values()
+        vllm_config, get_kv_cache_layer_configs(vllm_config).values()
     )
     # Peak activation + CUDA graph pool measured on gfx1151 at max_model_len
     # 4096: 0.85 GiB (Qwen3-4B) to 3.27 GiB (Gemma-4-31B, MTP-3).

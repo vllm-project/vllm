@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     get_block_hash,
+    is_mamba_align_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_dcp_kv_block_size,
@@ -35,15 +36,10 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheSpec,
     MambaSpec,
     SparseCacheRole,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -73,12 +69,6 @@ def _rank_keys(
 ) -> tuple[str, ...]:
     """Reuse immutable object identities, not runtime residency."""
     return codec.keys_for_topology(block_hash, topology, (group_id,))
-
-
-def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
-    return spec
 
 
 @dataclass
@@ -191,7 +181,7 @@ class UMBPStoreConnectorScheduler:
         self._dcp_size = dcp_size
         self._retention_interval = kv_cache_config.prefix_cache_retention_interval
         self.group_block_sizes = {
-            group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            group_id: resolve_dcp_kv_block_size(group, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
         # Mamba "align" block tables are not append-only: a position may hold
@@ -202,8 +192,7 @@ class UMBPStoreConnectorScheduler:
         self._boundary_handoff_groups = frozenset(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
-            and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
+            if is_mamba_align_group(group)
         )
         self.runtime = runtime
         self.enable_kv_cache_events = bool(
@@ -222,7 +211,7 @@ class UMBPStoreConnectorScheduler:
                 isinstance(spec, MambaSpec)
                 or getattr(spec, "cache_role", None) == SparseCacheRole.INDEXER
                 for group in kv_cache_config.kv_cache_groups
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in group.kv_cache_specs.values()
             )
         ):
             # Core accepts only request-level load failures for several cache
@@ -297,13 +286,7 @@ class UMBPStoreConnectorScheduler:
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
             if lookup_groups
-            and (
-                len(lookup_groups) > 1
-                or not isinstance(
-                    _unwrap_store_spec(lookup_groups[0].kv_cache_spec),
-                    FullAttentionSpec,
-                )
-            )
+            and (len(lookup_groups) > 1 or not lookup_groups[0].is_full_attention)
             else None
         )
         self._lookup_pool = _LookupBlockPool(self.hash_block_size)
@@ -1125,10 +1108,6 @@ class UMBPStoreConnectorScheduler:
         if not indices:
             return []
         group = self.kv_cache_config.kv_cache_groups[group_id]
-        spec = _unwrap_store_spec(group.kv_cache_spec)
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-        if manager_cls is None:
-            return None
         num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
         reachable_boundaries = (
             ()
@@ -1137,11 +1116,12 @@ class UMBPStoreConnectorScheduler:
                 num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
             )
         )
-        mask = manager_cls.reachable_block_mask(
+        mask = group.manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
             alignment_tokens=self.block_size,
-            kv_cache_spec=spec,
+            block_size=group.block_size,
+            manager_config=group.manager_config,
             use_eagle=group_id in self._eagle_store_groups,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -1209,9 +1189,8 @@ class UMBPStoreConnectorScheduler:
         # Core hands off Mamba state pages. Include the matching FA tail page
         # so every group can resolve the same fine-grained prefix boundary.
         for group_id in prefix_groups:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if (
-                isinstance(spec, FullAttentionSpec)
+                self.kv_cache_config.kv_cache_groups[group_id].is_full_attention
                 and boundary % self.group_block_sizes[group_id]
             ):
                 index = boundary // self.group_block_sizes[group_id]
