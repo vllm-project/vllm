@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     ManagerConfig,
+    prefix_lookup_groups,
 )
 
 if TYPE_CHECKING:
@@ -166,29 +167,17 @@ class MooncakeStoreCoordinator:
         return length // alignment * alignment
 
     def _verify_and_split_kv_cache_groups(self) -> None:
-        """Group compatible specs using their registered cache managers."""
-        attention_groups: list[StoreSpecGroup] = []
-        for i, g in enumerate(self.kv_cache_groups):
-            if not g.prefix_cacheable:
-                continue
-            for idx, group in enumerate(attention_groups):
-                if (
-                    self.kv_cache_groups[group.group_ids[0]].block_table_key
-                    == g.block_table_key
-                ):
-                    group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
-                        attention_groups[idx] = group._replace(use_eagle=True)
-                    break
-            else:
-                attention_groups.append(
-                    StoreSpecGroup(
-                        g.block_size,
-                        [i],
-                        _coverage_config(g.manager_config),
-                        g.is_eagle_group,
-                    )
-                )
+        """Group the prefix-cacheable groups into joint cache-hit lookups."""
+        groups = self.kv_cache_groups
+        attention_groups = [
+            StoreSpecGroup(
+                g.block_size,
+                g.group_ids,
+                _coverage_config(g.manager_config),
+                any(groups[i].is_eagle_group for i in g.group_ids),
+            )
+            for g in prefix_lookup_groups(groups)
+        ]
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not g.manager_cls.is_full_attention)
         # Conservatively flag all groups when use_eagle is set but none is flagged.

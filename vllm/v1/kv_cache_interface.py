@@ -10,7 +10,7 @@ from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, NamedTuple, Self
 
 import torch
 
@@ -711,12 +711,6 @@ class KVCacheGroupSpec:
         return self.manager_config.manager_cls
 
     @property
-    def block_table_key(self) -> tuple:
-        """Groups with equal keys allocate blocks identically and can be looked
-        up together."""
-        return self.manager_config, self.block_size, self.dcp_sharded
-
-    @property
     def prefix_cacheable(self) -> bool:
         return self.manager_cls.prefix_cacheable(self.manager_config)
 
@@ -764,6 +758,53 @@ class KVCacheGroupSpec:
         return self.manager_cls.max_num_blocks_per_req(
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config, max_len
         )
+
+    def block_table_width(self, vllm_config: VllmConfig, max_len: int) -> int:
+        """``max_num_blocks_per_req`` (which accounts for DCP sharding: attention
+        KV is sharded, recurrent state replicated) padded to the manager's
+        block-table token alignment."""
+        from vllm.v1.worker.block_table import get_block_table_width
+
+        return get_block_table_width(
+            self.max_num_blocks_per_req(vllm_config, max_len),
+            self.block_size,
+            token_alignment=self.block_table_token_alignment,
+        )
+
+
+class PrefixLookupGroup(NamedTuple):
+    """KV cache groups looked up jointly for cache hits: they share a manager
+    policy, block size and DCP sharding."""
+
+    manager_config: ManagerConfig
+    block_size: int
+    dcp_sharded: bool
+    group_ids: list[int]
+
+
+def prefix_lookup_groups(
+    groups: Sequence[KVCacheGroupSpec],
+) -> list[PrefixLookupGroup]:
+    """Partition the prefix-cacheable groups into joint cache-hit lookups."""
+    lookups: dict[tuple, PrefixLookupGroup] = {}
+    for i, g in enumerate(groups):
+        if g.prefix_cacheable:
+            key = (g.manager_config, g.block_size, g.dcp_sharded)
+            lookup = lookups.setdefault(
+                (*key, _eagle_drop_layout_key(g)), PrefixLookupGroup(*key, [])
+            )
+            lookup.group_ids.append(i)
+    return list(lookups.values())
+
+
+def _eagle_drop_layout_key(group: KVCacheGroupSpec) -> object:
+    """Batch only groups with equal layouts, as before manager configs.
+
+    The lookup itself ignores layout, but a batch takes the EAGLE last-block
+    drop if any member does. TODO: remove once the drop is removed.
+    """
+    specs = set(group.kv_cache_specs.values())
+    return specs.pop() if len(specs) == 1 else tuple(group.kv_cache_specs)
 
 
 @dataclass
