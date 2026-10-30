@@ -67,6 +67,7 @@ use crate::config::{
     AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
 };
 use crate::lora::LoadLoraError;
+use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -778,7 +779,7 @@ fn test_render_app_with(
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
-        served_model_names: vec!["render-model".to_string()],
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
@@ -1800,7 +1801,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
     for exclude in [false, true] {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),
-            served_model_names: vec!["glm-test".into()],
+            served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::render_only(backend.clone())
@@ -3235,6 +3236,48 @@ async fn wrong_model_returns_not_found() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-skip-model-name",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                skip_model_name_validation: true,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "wrong-model",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["model"], "Qwen/Qwen1.5-0.5B-Chat");
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({"model": "wrong-model", "prompt": "hello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
