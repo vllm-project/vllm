@@ -6,6 +6,7 @@ import pytest
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import supports_trtllm_attention
 
 from ...utils import (
     assert_request_outputs_match,
@@ -147,3 +148,56 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
             context="after weight reload",
         )
         assert al == pytest.approx(ref_al, rel=0.03)
+
+
+def _draft_prefill_pruning_enabled(worker) -> bool:
+    return worker.model_runner.speculator.draft_prefill_attn_impl is not None
+
+
+@single_gpu_only
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not supports_trtllm_attention(),
+    reason="needs FlashInfer XQA or trtllm-gen decode",
+)
+def test_mtp_prune_draft_prefill_attention(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    vllm_runner,
+):
+    """Attending only the sampled draft prefill rows only changes drafting:
+    greedy outputs match full draft attention and acceptance stays within 10%."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # For the collective_rpc engagement check.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = get_test_prompts(mm_enabled=False)
+    results = {}
+    for prune in (False, True):
+        with vllm_runner(
+            "Qwen/Qwen3.5-0.8B-Base",
+            block_size=None,
+            enable_chunked_prefill=None,
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+                "attention_backend": "FLASHINFER",
+                "prune_draft_prefill_attention": prune,
+            },
+            disable_log_stats=False,
+        ) as runner:
+            # Guard against a vacuous comparison.
+            assert runner.llm.collective_rpc(_draft_prefill_pruning_enabled) == [prune]
+            outputs = runner.llm.chat(prompts, sampling_config)
+            results[prune] = (outputs, compute_acceptance_len(runner.llm.get_metrics()))
+
+    (ref_outputs, ref_al), (outputs, al) = results[False], results[True]
+    assert_request_outputs_match(
+        ref_outputs,
+        outputs,
+        # Not bit-exact: the sampled rows change reduction order, and a different
+        # acceptance length changes the target's verify batch shapes.
+        required_matches=int(0.8 * len(ref_outputs)) + 1,
+        context="prune_draft_prefill_attention",
+    )
+    assert al >= 0.9 * ref_al, f"acceptance length {al:.3f} vs {ref_al:.3f}"
