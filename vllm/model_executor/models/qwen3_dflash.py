@@ -111,6 +111,14 @@ def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     )
 
 
+def _refill(old: torch.Tensor | None, new: torch.Tensor) -> torch.Tensor:
+    """Write `new` into `old` when it fits: captured CUDA graphs keep reading
+    the tensor built at startup, so a reload must not replace it."""
+    if old is None or old.shape != new.shape or old.dtype != new.dtype:
+        return new
+    return old.copy_(new)
+
+
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     assert spec_config is not None
@@ -555,10 +563,14 @@ class DFlashQwen3Model(nn.Module):
         if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            self._fused_kv_weight: torch.Tensor | None = _refill(
+                getattr(self, "_fused_kv_weight", None), torch.cat(kv_weights, dim=0)
+            )
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+                self._fused_kv_bias: torch.Tensor | None = _refill(
+                    getattr(self, "_fused_kv_bias", None), torch.cat(kv_biases, dim=0)
+                )
             else:
                 self._fused_kv_bias = None
         else:
@@ -570,9 +582,10 @@ class DFlashQwen3Model(nn.Module):
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        self._k_norm_weights = _refill(
+            getattr(self, "_k_norm_weights", None),
+            torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0),
+        )
 
     def _make_mxfp8_context_kv_proj(
         self, layers_attn: list[nn.Module]
