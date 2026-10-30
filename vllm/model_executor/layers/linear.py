@@ -702,6 +702,7 @@ class StackedColumnParallelLinear(ColumnParallelLinear):
         raise NotImplementedError
 
     def validate_shard_id(self, shard_id: Any) -> bool:
+        """Check `shard_id` names shards of this layer and record them as loaded."""
         if shard_id is None:
             # Already stacked on disk, so one tensor fills every shard.
             shards = self.shard_ids
