@@ -107,7 +107,29 @@ def try_get_optimal_moe_lora_config(
     top_k: int,
     dtype: str | None,
     M: int,
+    num_slices: int = 1,
+    max_loras: int = 1,
 ) -> dict[str, int | None]:
+    from vllm.lora.ops.triton_ops.utils import (
+        FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS,
+        get_fused_moe_lora_two_kernel_config,
+    )
+
+    if M <= FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS:
+        w13 = op_type.startswith("fused_moe_lora_w13")
+        return dict(
+            get_fused_moe_lora_two_kernel_config(
+                op_type,
+                M,
+                top_k,
+                w1_shape[0],
+                max_loras,
+                num_slices,
+                w1_shape[2] if w13 else w2_shape[2],
+                w1_shape[1] // num_slices if w13 else w2_shape[1],
+                rank,
+            )
+        )
     # LoRA shrink/expand operates on bf16/fp16 adapters regardless of the
     # base MoE weight's block-wise quantization, so block_shape is omitted
     # from the config lookup — the non-quantized branch in get_default_config
