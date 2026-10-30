@@ -139,3 +139,50 @@ def test_native_decode_matches_bf16_unpack(num_splits: int, heads: int):
     ref = want[nonempty].abs()
     assert err.max() <= 0.05 * ref.max(), (err.max(), ref.max())
     assert err.mean() <= 0.02 * ref.mean(), (err.mean(), ref.mean())
+
+
+@pytest.mark.parametrize("topk", [128, 300])
+def test_native_on_prefill_rows_matches_prefill_kernel(topk: int):
+    """Causal prefill rows, as the backend now sends them: query t sees
+    min(t + 1, topk) of the first t + 1 slots. The native kernel at one split
+    stays within MXFP8 error of the prefill kernel's bf16 unpack."""
+    from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_sparse_attn_decode_bf16,
+        rocm_sparse_attn_prefill,
+    )
+
+    set_random_seed(0)
+    num_tokens, heads = 640, 16
+    lens = [min(t + 1, topk) for t in range(num_tokens)]
+    indices = torch.cat(
+        [torch.randperm(t + 1)[:n].sort().values for t, n in enumerate(lens)]
+    ).int()
+    indptr = torch.zeros(num_tokens + 1, dtype=torch.int32)
+    indptr[1:] = torch.cumsum(torch.tensor(lens), 0)
+    latent = torch.randn(num_tokens, LATENT, dtype=torch.bfloat16)
+    latent[:, ::97] *= 8.0
+    packed = torch.zeros(num_tokens, ROW, dtype=torch.uint8, device="cuda")
+    store_mxfp4_mla(latent.cuda(), torch.arange(num_tokens).cuda(), packed)
+    q = torch.randn(num_tokens, heads, LATENT, dtype=torch.bfloat16).cuda()
+    common = dict(
+        q=q,
+        kv=packed.unsqueeze(1),
+        scale=LATENT**-0.5,
+        head_dim=LATENT,
+        nope_head_dim=LATENT,
+        rope_head_dim=0,
+        attn_sink=None,
+        ragged_indices=indices.cuda(),
+        ragged_indptr=indptr.cuda(),
+        kv_cache_dtype="mxfp4_mla",
+    )
+    want = torch.zeros(num_tokens, heads, LATENT, dtype=torch.bfloat16).cuda()
+    rocm_sparse_attn_prefill(indices=None, topk_length=None, output=want, **common)
+    got = torch.zeros_like(want)
+    rocm_sparse_attn_decode_bf16(output=got, num_splits=1, native_mxfp4=True, **common)
+    got, want = got.float().cpu(), want.float().cpu()
+    assert torch.isfinite(got).all()
+    err = (got - want).abs()
+    assert err.max() <= 0.05 * want.abs().max(), (err.max(), want.abs().max())
+    assert err.mean() <= 0.02 * want.abs().mean(), (err.mean(), want.abs().mean())

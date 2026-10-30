@@ -868,8 +868,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
         from vllm.platforms.rocm import on_gfx950
 
-        # gfx950 decodes the packed rows on the scaled MFMA; elsewhere, and
-        # for other latent widths, they are unpacked to bf16 first.
+        # gfx950 reads the packed rows on the scaled MFMA in every step,
+        # prefill and mixed steps included; elsewhere, and for other latent
+        # widths, they are unpacked to bf16 first.
         self.native_mxfp4_decode: bool = (
             kv_cache_dtype == "mxfp4_mla"
             and on_gfx950()
@@ -1002,7 +1003,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
             decode_only = attn_metadata.num_decode_tokens == num_tokens
             sparse_len = min(attn_metadata.max_seq_len, attn_metadata.topk_tokens)
-            native = self.native_mxfp4_decode and decode_only
+            native = self.native_mxfp4_decode
             if native:
                 decode_num_splits = rocm_sparse_decode_mxfp4_native_num_splits(
                     num_tokens, q.shape[1], sparse_len
