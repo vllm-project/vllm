@@ -23,7 +23,7 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 | Backend | Use Case | Features | Best For |
 | ------- | -------- | -------- | -------- |
-| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP without elastic EP, with DP ≥ 8 on GB200/GB300 or DP = 8 on a single HGX B200 node launched by vLLM; `allgather_reducescatter` otherwise | Most deployments |
+| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP without elastic EP, with DP ≥ 8 on GB200/GB300 or DP = 8 on a single HGX B200 node launched by vLLM, for BF16/FP16, ModelOpt NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend; `allgather_reducescatter` otherwise | Most deployments |
 | `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |

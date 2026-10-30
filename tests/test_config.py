@@ -1926,6 +1926,56 @@ def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
         _clear_platform_probes()
 
 
+_MOE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+
+
+def _one_full_ep_node_config(**kwargs) -> VllmConfig:
+    kwargs.setdefault("model_config", ModelConfig(_MOE_MODEL))
+    return VllmConfig(
+        parallel_config=_parallel_config(
+            enable_expert_parallel=True,
+            data_parallel_size=8,
+            data_parallel_size_local=8,
+        ),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "quantization", "expected"),
+    [
+        (_MOE_MODEL, None, "flashinfer_nvlink_one_sided"),
+        (f"{_MOE_MODEL}-FP8", None, "flashinfer_nvlink_one_sided"),
+        # Online FP8 is per-tensor, which one-sided cannot dispatch.
+        (_MOE_MODEL, "fp8", "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_follows_dispatch_format(
+    hgx_b200_host, model, quantization, expected
+):
+    """FlashInfer's one-sided dispatch raises at model load for activation
+    formats it cannot carry, so "auto" must not pick it for those models."""
+    config = _one_full_ep_node_config(
+        model_config=ModelConfig(model, quantization=quantization)
+    )
+    assert config.parallel_config.all2all_backend == expected
+
+
+def test_one_sided_all2all_default_skips_lora(hgx_b200_host):
+    """Fused MoE LoRA with EP only supports allgather_reducescatter."""
+    config = _one_full_ep_node_config(lora_config=LoRAConfig())
+    assert config.parallel_config.all2all_backend == "allgather_reducescatter"
+
+
+def test_one_sided_all2all_default_yields_to_moe_ep_backend(hgx_b200_host):
+    """A MoE-EP megakernel dispatches itself and rejects any explicit all2all
+    backend, so the default must not count as one."""
+    config = _one_full_ep_node_config(
+        kernel_config=KernelConfig(moe_backend="flashinfer_moe_ep_cutedsl")
+    )
+    assert config.parallel_config.all2all_backend == "passthrough"
+
+
 def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
     monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
     config = ParallelConfig(cpu_distributed_timeout_seconds=30)

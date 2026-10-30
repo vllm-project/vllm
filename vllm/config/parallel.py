@@ -314,8 +314,9 @@ class ParallelConfig:
 
     - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
       elastic EP, with at least 8 data-parallel ranks on GB200/GB300 or exactly
-      8 on a single HGX B200 node launched by vLLM; "allgather_reducescatter"
-      otherwise
+      8 on a single HGX B200 node launched by vLLM, for BF16/FP16, ModelOpt
+      NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend;
+      "allgather_reducescatter" otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -329,6 +330,9 @@ class ParallelConfig:
     - "passthrough": No all2all at all: the MoE backend dispatches and combines
       itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
       such MoE backends; not selectable from the CLI."""
+    _all2all_backend_auto_one_sided: bool = Field(default=False, repr=False)
+    """Whether "auto" picked "flashinfer_nvlink_one_sided"; VllmConfig falls
+    back to "allgather_reducescatter" for models it does not support."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -651,7 +655,12 @@ class ParallelConfig:
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
 
+        picked_by_auto = self.all2all_backend == "auto"
         self.all2all_backend = _resolve_all2all_backend(self)
+        if picked_by_auto:
+            self._all2all_backend_auto_one_sided = (
+                self.all2all_backend == "flashinfer_nvlink_one_sided"
+            )
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
@@ -1061,6 +1070,8 @@ class ParallelConfig:
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
             "_numa_bind_auto",
+            # all2all_backend itself is hashed.
+            "_all2all_backend_auto_one_sided",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",
