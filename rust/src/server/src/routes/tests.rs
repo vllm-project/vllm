@@ -1762,6 +1762,44 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Python renders an assistant turn with null, missing, or `[]` content and no
+/// tool calls as an empty turn, the same as `content: ""`.
+#[tokio::test]
+async fn render_chat_accepts_assistant_turn_without_content() {
+    let mut app = test_render_app();
+    let mut token_ids = Vec::new();
+
+    for assistant in [
+        json!({"role": "assistant", "content": ""}),
+        json!({"role": "assistant", "content": null}),
+        json!({"role": "assistant"}),
+        json!({"role": "assistant", "content": []}),
+        json!({"role": "assistant", "content": null, "tool_calls": []}),
+        json!({"role": "assistant", "content": null, "reasoning": ""}),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    assistant,
+                    {"role": "user", "content": "hi"},
+                ],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{assistant}: {json}");
+        token_ids.push(json["token_ids"].clone());
+    }
+    assert!(
+        token_ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "{token_ids:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
