@@ -3370,6 +3370,44 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn openai_bad_words_reach_engine_core_as_token_ids() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                let bad_words_token_ids =
+                    params.bad_words_token_ids.as_ref().expect("bad words token ids");
+                assert!(!bad_words_token_ids.is_empty());
+            },
+        )
+        .await;
+
+        let mut body = json!({"max_tokens": 2, "bad_words": ["blocked"]});
+        if endpoint == "/v1/chat/completions" {
+            body["messages"] = json!([{"role": "user", "content": "hi"}]);
+        } else {
+            body["prompt"] = json!("hi");
+        }
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_structured_outputs_use_configured_backend() {
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 
