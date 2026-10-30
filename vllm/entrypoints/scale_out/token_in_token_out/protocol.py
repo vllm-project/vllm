@@ -846,7 +846,8 @@ class DerenderStreamState(BaseModel):
     ``_correct_decoded_token`` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
-    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    """Cumulative length of reported logprob tokens, including special tokens.
+    Seeds ``text_offset`` for completion
     streaming logprobs so offsets stay absolute across chunks, mirroring
     ``initial_text_offset`` in the generate streaming path."""
 

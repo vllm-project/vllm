@@ -9,6 +9,7 @@ Compares ``triton_pos_embed_interpolate`` against the pure-PyTorch
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -16,6 +17,8 @@ if HAS_TRITON:
         pos_embed_interpolate_native,
         triton_pos_embed_interpolate,
     )
+
+DEVICE = current_platform.device_type
 
 
 DTYPES = [torch.float32, torch.bfloat16]
@@ -43,7 +46,7 @@ def test_triton_matches_native(
 ) -> None:
     """Triton kernel output must match the native PyTorch implementation."""
     t, h, w = grid_thw
-    device = "cuda"
+    device = DEVICE
 
     # Scale to match real Qwen3-VL pos_embed weight distribution (std~0.23).
     torch.manual_seed(42)
@@ -81,7 +84,7 @@ def test_triton_matches_native(
 @pytest.mark.parametrize("dtype", DTYPES, ids=lambda d: str(d).split(".")[-1])
 def test_temporal_repeat(dtype: torch.dtype) -> None:
     """Verify temporal dimension t > 1 correctly repeats the spatial pattern."""
-    device = "cuda"
+    device = DEVICE
     h, w = 16, 16
     t_single, t_multi = 1, 3
 
