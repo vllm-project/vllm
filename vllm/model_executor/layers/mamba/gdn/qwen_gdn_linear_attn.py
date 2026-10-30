@@ -578,6 +578,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
         overlap_ba_proj: bool = False,
+        fused_gdn_gated_rms_norm: (
+            Callable[..., torch.Tensor | QuantizedActivation] | None
+        ) = None,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -734,13 +737,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        # Off by default; the Qwen3.5 NVIDIA variant installs a fused gated
+        # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated
         # RMS norm that reads z as a strided view of the packed qkvz
-        # projection, removing the z reshape copy (see Qwen3_5DecoderLayer).
-        # It returns the out_proj input: `out`, or a pre-quantized activation.
-        self._fused_gdn_gated_rms_norm: (
-            Callable[..., torch.Tensor | QuantizedActivation] | None
-        ) = None
+        # projection, removing the z reshape copy. It returns the out_proj
+        # input: `out`, or a pre-quantized activation.
+        self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
@@ -1278,6 +1279,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 z=z,
                 weight=self.norm.weight,
                 out=out2d,
+                out_proj=self.out_proj,
                 eps=self.norm.eps,
                 num_v_heads=self.num_v_heads // self.tp_size,
                 head_v_dim=self.head_v_dim,

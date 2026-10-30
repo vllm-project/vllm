@@ -64,15 +64,15 @@ def _gemma_add_rms_norm_quant_kernel(
     y_ptr,
     eps,
     H: tl.constexpr,
-    BLOCK_H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     QUANT_NVFP4: tl.constexpr,
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
+    TRIGGER_EARLY: tl.constexpr,
 ):
     # Index the row as [G, 8, 2]: G groups of 16 (one NVFP4 block each) of 8
     # (lo, hi) pairs, so block reductions and fp4 packing need no reshapes.
-    G: tl.constexpr = BLOCK_H // 16
+    G: tl.constexpr = triton.next_power_of_2(H) // 16
     row = tl.program_id(0).to(tl.int64)
     g = tl.arange(0, G)
     pair = tl.arange(0, 8)
@@ -83,6 +83,11 @@ def _gemma_add_rms_norm_quant_kernel(
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+        if TRIGGER_EARLY:
+            # Launch dependents before the loads: the consumer (e.g. the
+            # weight-loading GEMM) overlaps with this kernel. Gated by M in
+            # the wrapper — at large M the prelaunched grid steals SMs.
+            tl.extra.cuda.gdc_launch_dependents()
     x = tl.load(x_ptr + row * H + cols, mask=mask, other=0.0)
     if HAS_RESIDUAL:
         r = tl.load(res_ptr + row * H + cols, mask=mask, other=0.0)
@@ -131,7 +136,7 @@ def _gemma_add_rms_norm_quant_kernel(
         q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
         tl.store(q_ptr + row * H + cols, q, mask=mask)
 
-    if launch_pdl:
+    if launch_pdl and not TRIGGER_EARLY:
         tl.extra.cuda.gdc_launch_dependents()
 
 
@@ -186,11 +191,9 @@ def gemma_add_rms_norm_quant(
     if M == 0:
         return q, block_scale, y
 
-    block_h = triton.next_power_of_2(H)
     # Swept on GB300 at H=5120, M=1..8192: within 3% of the best of 2/4/8/16
     # warps at every swept M except NVFP4 M=129 (4%).
     max_m_16_warps = 128 if nvfp4 else 384
-    launch_pdl = current_platform.is_arch_support_pdl()
     _gemma_add_rms_norm_quant_kernel[(M,)](
         x,
         residual if residual is not None else x,
@@ -201,11 +204,14 @@ def gemma_add_rms_norm_quant(
         y if y is not None else x,
         eps,
         H=H,
-        BLOCK_H=block_h,
         HAS_RESIDUAL=residual is not None,
         QUANT_NVFP4=nvfp4,
         WRITE_Y=write_y,
-        num_warps=16 if x.shape[0] <= max_m_16_warps else 4,
-        launch_pdl=launch_pdl,
+        num_warps=16 if max_m_16_warps >= M else 4,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+        # Early dependent launch overlaps the consumer's weight load with
+        # this kernel; swept on GB300: ~2% chain win at M <= 128, but the
+        # prelaunched consumer grid steals SMs at M >= 192 (fp8 +4-7%).
+        TRIGGER_EARLY=M <= 128,
     )
     return q, block_scale, y

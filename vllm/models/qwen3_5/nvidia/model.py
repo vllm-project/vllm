@@ -25,7 +25,6 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from functools import partial
 from itertools import islice
 from typing import ClassVar, cast
 
@@ -153,17 +152,17 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
 
 
 def _fused_gdn_gated_rms_norm_quant(
-    gdn: QwenGatedDeltaNetAttention,
     *,
     x: torch.Tensor,
     out: torch.Tensor,
+    out_proj: LinearBase,
     **kwargs,
 ) -> torch.Tensor | QuantizedActivation:
     """GDN gated norm, quantized for out_proj when it takes static FP8."""
-    if get_input_quant_key(gdn.out_proj) != kFp8StaticTensorSym:
+    if get_input_quant_key(out_proj) != kFp8StaticTensorSym:
         fused_gdn_gated_rms_norm(x=x, out=out, **kwargs)
         return out
-    scale = gdn.out_proj.input_scale
+    scale = out_proj.input_scale
     q = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
     fused_gdn_gated_rms_norm(x=x, out=q, scale=scale, **kwargs)
     return QuantizedActivation(
@@ -278,12 +277,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 reduce_results=reduce_results,
                 # This path runs outside torch.compile, as the overlap requires.
                 overlap_ba_proj=True,
-            )
-            # Recover the inductor gated-norm fusion with a Triton kernel that
-            # also reads z strided from the packed qkvz projection, and fuse
-            # the out_proj input quantization into it.
-            self.linear_attn._fused_gdn_gated_rms_norm = partial(
-                _fused_gdn_gated_rms_norm_quant, self.linear_attn
+                # Recover the inductor gated-norm fusion with a Triton kernel
+                # that also reads z strided from the packed qkvz projection,
+                # and fuses the out_proj input quantization into it.
+                fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm_quant,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
