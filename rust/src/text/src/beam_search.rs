@@ -19,7 +19,7 @@ use vllm_llm::{
 };
 
 use crate::error::{Error, Result};
-use crate::lower::{PreparedTextRequest, resolve_max_tokens};
+use crate::lower::{EffectiveSampling, PreparedTextRequest, resolve_max_tokens};
 use crate::output::{TextDecodeOptions, decoded_text_event_stream};
 use crate::request::{SamplingParams, TextRequest};
 use crate::{TextLlm, TextOutputStream};
@@ -305,13 +305,14 @@ fn step_sampling_params(request: &SamplingParams, beam_width: NonZeroU32) -> Sam
 }
 
 impl TextLlm {
-    /// Return one finished stream per beam, best first, or one error stream if a
-    /// step fails. Dropping the future aborts the in-flight step requests.
+    /// Return the search's sampling values and one finished stream per beam, best
+    /// first, or one error stream if a step fails. Dropping the future aborts the
+    /// in-flight step requests.
     pub async fn beam_search(
         &self,
         mut request: TextRequest,
         params: BeamSearchParams,
-    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+    ) -> Result<(EffectiveSampling, Vec<impl TextOutputStream + use<>>)> {
         let BeamSearchParams {
             beam_width,
             length_penalty,
@@ -333,10 +334,12 @@ impl TextLlm {
         let ignore_eos = request.sampling_params.ignore_eos;
         request.sampling_params = step_sampling_params(&request.sampling_params, beam_width);
 
+        let prepared = self.processor.prepare(request)?;
+        let step_sampling = prepared.effective_sampling();
         let PreparedTextRequest {
             text_request,
             generate_request: step_template,
-        } = self.processor.prepare(request)?;
+        } = prepared;
         let prompt_token_ids: Arc<[u32]> = step_template.prompt_token_ids.as_slice().into();
         let max_tokens = resolve_max_tokens(
             user_max_tokens,
@@ -344,6 +347,10 @@ impl TextLlm {
             self.processor.max_model_len(),
             prompt_token_ids.len() as u32,
         )?;
+        let sampling = EffectiveSampling {
+            max_tokens,
+            ..step_sampling
+        };
         let selector = BeamSelector {
             beam_width: beam_width.get() as usize,
             length_penalty,
@@ -365,12 +372,15 @@ impl TextLlm {
                     finish_reason: Some(error),
                     ..BeamSequence::root()
                 };
-                return Ok(vec![self.beam_output_stream(
-                    &text_request,
-                    error_beam,
-                    &prompt_token_ids,
-                    requested_logprobs,
-                )]);
+                return Ok((
+                    sampling,
+                    vec![self.beam_output_stream(
+                        &text_request,
+                        error_beam,
+                        &prompt_token_ids,
+                        requested_logprobs,
+                    )],
+                ));
             }
             if step_outputs.iter().any(|output| output.finish_reason.is_abort()) {
                 for beam in &mut beams {
@@ -391,13 +401,12 @@ impl TextLlm {
             }
         }
 
-        Ok(selector
-            .finalize(completed, beams)
-            .into_iter()
+        let beams = (selector.finalize(completed, beams).into_iter())
             .map(|beam| {
                 self.beam_output_stream(&text_request, beam, &prompt_token_ids, requested_logprobs)
             })
-            .collect())
+            .collect();
+        Ok((sampling, beams))
     }
 
     async fn run_step(

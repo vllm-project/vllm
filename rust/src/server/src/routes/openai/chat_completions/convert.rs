@@ -7,16 +7,17 @@ use vllm_chat::{
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
     GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
+use vllm_text::BeamSearchParams;
 
 use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
 };
+use crate::routes::openai::utils::{resolve_beam_search, resolve_generation_prompt_truncation};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -32,6 +33,8 @@ pub(super) struct PreparedRequest {
     pub response_model: String,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
+    /// Set when the request uses beam search.
+    pub beam_search: Option<BeamSearchParams>,
     /// Lowered chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
 }
@@ -74,6 +77,8 @@ pub(super) fn prepare_chat_request(
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    let beam_search =
+        resolve_beam_search(request.use_beam_search, request.n, request.length_penalty)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
@@ -218,6 +223,7 @@ pub(super) fn prepare_chat_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
+        beam_search,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,

@@ -70,7 +70,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
+use vllm_text::{BeamSearchParams, Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -511,6 +511,52 @@ impl ChatLlm {
             ChatEventStream::new(request_id, sampling, structured_stream)
                 .with_prompt_text(prompt_text),
         )
+    }
+
+    /// Run beam search and return one finished chat stream per beam, best first.
+    pub async fn beam_search(
+        &self,
+        request: ChatRequest,
+        params: BeamSearchParams,
+    ) -> Result<Vec<ChatEventStream>> {
+        let requested_constraint = request.sampling_params.structured_outputs.is_some();
+        let grammar_param = match request.tool_context.tool_choice {
+            ChatToolChoice::Required | ChatToolChoice::Function { .. } => Some("tool_choice"),
+            _ if !request.tool_context.effective_tools.is_empty() => Some("tools"),
+            _ => None,
+        };
+        let (text_request, output_processors, prompt_text) = self
+            .processor
+            .prepare_for_outputs(
+                request,
+                self.text.request_processor(),
+                params.beam_width.get() as usize,
+            )
+            .await?;
+        // The engine cannot resume a tool output grammar from a beam's
+        // tokens. TODO: enforce it per beam with a frontend grammar matcher, as
+        // Python's offline `LLM.beam_search` does.
+        if !requested_constraint && text_request.sampling_params.structured_outputs.is_some() {
+            return Err(Error::OutputGrammarWithBeamSearch {
+                param: grammar_param,
+            });
+        }
+        let request_id = text_request.request_id.clone();
+        let (sampling, beams) = self.text.beam_search(text_request, params).await?;
+
+        // A failed search returns fewer streams than processors.
+        beams
+            .into_iter()
+            .zip(output_processors)
+            .map(|(beam, output_processor)| {
+                let structured_stream =
+                    output_processor.process(beam.map_err(Error::from).boxed())?;
+                Ok(
+                    ChatEventStream::new(request_id.clone(), sampling, structured_stream)
+                        .with_prompt_text(prompt_text.clone()),
+                )
+            })
+            .collect()
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
