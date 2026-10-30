@@ -610,18 +610,16 @@ class ParallelConfig:
                     f"DP={self.data_parallel_size}."
                 )
 
-        # When EPLB is disabled, num_redundant_experts must be None or 0
-        if (
-            not self.enable_eplb
-            and self.eplb_config.num_redundant_experts is not None
-            and self.eplb_config.num_redundant_experts != 0
-        ):
-            raise ValueError(
-                "num_redundant_experts is set to "
-                f"{self.eplb_config.num_redundant_experts} but EPLB is not "
-                "enabled. Either enable EPLB or unset "
-                "num_redundant_experts."
-            )
+        if not self.enable_eplb:
+            if self.eplb_config.num_redundant_experts not in (None, 0):
+                raise ValueError(
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts."
+                )
+            # Only EPLB needs the model's expert count to pick a default.
+            self.eplb_config.num_redundant_experts = 0
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
@@ -673,9 +671,6 @@ class ParallelConfig:
                 num_logical_experts,
                 ep_size,
             )
-        else:
-            # EPLB disabled, default to 0
-            self.eplb_config.num_redundant_experts = 0
 
     def set_dcp_defaults(
         self,

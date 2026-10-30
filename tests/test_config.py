@@ -3661,13 +3661,13 @@ def test_eplb_num_redundant_experts_default():
     eplb_config_explicit = EPLBConfig(num_redundant_experts=4)
     assert eplb_config_explicit.num_redundant_experts == 4
 
-    # Test ParallelConfig validation - EPLB disabled with None is OK
+    # Models read num_redundant_experts without a ModelConfig, so the
+    # disabled case must resolve to 0 at ParallelConfig construction.
     parallel_config = ParallelConfig(
         enable_eplb=False,
         enable_expert_parallel=False,
     )
-    # Should not raise - None is allowed when EPLB is disabled
-    assert parallel_config.eplb_config.num_redundant_experts is None
+    assert parallel_config.eplb_config.num_redundant_experts == 0
 
     # Test ParallelConfig validation - EPLB disabled with non-zero value
     with pytest.raises(ValidationError, match="EPLB is not enabled"):
@@ -3748,49 +3748,6 @@ def test_eplb_num_redundant_experts_auto_computation(
         f"Divisibility check failed: ({num_experts} + "
         f"{parallel_config.eplb_config.num_redundant_experts}) % {ep_size} != 0"
     )
-
-
-def test_eplb_num_redundant_experts_disabled():
-    """Test that num_redundant_experts defaults to 0 when EPLB is disabled."""
-    from vllm.config.parallel import ParallelConfig
-
-    with patch(
-        "vllm.config.parallel.current_platform.device_count",
-        return_value=2,
-    ):
-        parallel_config = ParallelConfig(
-            tensor_parallel_size=2,
-            data_parallel_size=1,
-            enable_expert_parallel=False,
-            enable_eplb=False,
-        )
-    # num_redundant_experts should be None before computation
-    assert parallel_config.eplb_config.num_redundant_experts is None
-
-    # Call the computation method
-    parallel_config.compute_eplb_num_redundant_experts(num_logical_experts=8)
-
-    # When EPLB is disabled, should default to 0
-    assert parallel_config.eplb_config.num_redundant_experts == 0
-
-
-def test_vllm_config_normalizes_eplb_num_redundant_experts_disabled():
-    """Test VllmConfig restores the runtime invariant for non-EPLB models."""
-    from vllm.config.parallel import ParallelConfig
-
-    model_config = ModelConfig("facebook/opt-125m")
-    parallel_config = ParallelConfig(
-        enable_expert_parallel=False,
-        enable_eplb=False,
-    )
-    assert parallel_config.eplb_config.num_redundant_experts is None
-
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        parallel_config=parallel_config,
-    )
-
-    assert vllm_config.parallel_config.eplb_config.num_redundant_experts == 0
 
 
 def test_eplb_num_redundant_experts_explicit_value_preserved():
