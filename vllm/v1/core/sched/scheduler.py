@@ -249,6 +249,9 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
+        # Preemptions since the last make_stats(), for the preemption counter.
+        self._num_preempted_reqs = 0
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -1845,6 +1848,7 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
+            self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
@@ -3361,10 +3365,12 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
+            num_preempted_reqs=num_preempted_reqs,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,

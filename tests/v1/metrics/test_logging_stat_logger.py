@@ -119,9 +119,8 @@ def test_preemptions_and_corrupted_render(manager, caplog_vllm, monkeypatch):
         "vllm.v1.metrics.loggers.envs.VLLM_COMPUTE_NANS_IN_LOGITS", True
     )
     it = _iteration(gen_tokens=10)
-    it.num_preempted_reqs = 5
     it.num_corrupted_reqs = 2
-    manager.record(None, it)
+    manager.record(SchedulerStats(num_preempted_reqs=5), it)
 
     line = _log_and_capture(manager, caplog_vllm).getMessage()
     assert "Preemptions: 5" in line

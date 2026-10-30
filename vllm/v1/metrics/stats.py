@@ -228,6 +228,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+    # requests preempted since the previous stats, counted at preemption time
+    num_preempted_reqs: int = 0
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
@@ -496,7 +498,6 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
-        self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
@@ -596,7 +597,6 @@ class IterationStats:
                     req_stats.scheduled_ts = event.timestamp
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
-                self.num_preempted_reqs += 1
                 req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
