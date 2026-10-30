@@ -37,14 +37,21 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
-from vllm.model_executor.kernels.linear.nvfp4.b12x import B12xNvFp4LinearKernel
+from vllm.model_executor.kernels.linear.nvfp4.b12x import (
+    B12xNvFp4LinearKernel,
+    B12xNvFp4W4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearKernel
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.humming import HummingNvFp4LinearKernel
+from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
@@ -80,6 +87,11 @@ PROVIDERS: dict[str, tuple[type[NvFp4LinearKernel], bool, bool]] = {
     "fi-cute-w4a4-tuned": (FlashInferCuteDslNvFp4LinearKernel, True, True),
     "fi-cute-w4a16": (FlashInferCuteDslNvFp4W4A16LinearKernel, False, False),
     "fi-cute-w4a16-tuned": (FlashInferCuteDslNvFp4W4A16LinearKernel, True, False),
+    "vllm-cutlass": (CutlassNvFp4LinearKernel, False, False),
+    "marlin-w4a16": (MarlinNvFp4LinearKernel, False, False),
+    "humming": (HummingNvFp4LinearKernel, False, False),
+    "b12x-w4a16": (B12xNvFp4W4A16LinearKernel, False, False),
+    "fi-cudnn": (FlashInferCudnnNvFp4LinearKernel, False, False),
 }
 
 DATASHEET_BW_GBPS = {"workstation": 1792.0, "server": 1597.0}
@@ -130,6 +142,9 @@ def make_layer(
     layer = torch.nn.Module()
     layer.input_size_per_partition = k
     layer.output_size_per_partition = n
+    layer.output_partition_sizes = [n]
+    layer.params_dtype = torch.bfloat16
+    layer.has_bias = False
     p = lambda t: torch.nn.Parameter(t, requires_grad=False)  # noqa: E731
     layer.weight = p(w_fp4)
     layer.weight_scale = p(w_sf)
