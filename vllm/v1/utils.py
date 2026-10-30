@@ -297,6 +297,7 @@ class RustFrontendProcessManager:
         data_parallel_size: int,
         stats_update_address: str | None = None,
         grpc_sock: Any | None = None,
+        rank_socks: dict[int, Any] | None = None,
     ):
         import os
         import subprocess
@@ -329,6 +330,12 @@ class RustFrontendProcessManager:
             os.set_inheritable(grpc_fd, True)
             cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
             inherited_fds.append(grpc_fd)
+        # Extra HTTP listeners, each serving one data-parallel rank.
+        for rank, rank_sock in sorted((rank_socks or {}).items()):
+            rank_fd = rank_sock.fileno()
+            os.set_inheritable(rank_fd, True)
+            cmd.extend(["--rank-listen-fd", f"{rank}={rank_fd}"])
+            inherited_fds.append(rank_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.common.startup import jsonify_non_default_args

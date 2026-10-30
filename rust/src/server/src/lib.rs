@@ -30,7 +30,7 @@ use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
-    OutputLogging, TlsConfig,
+    OutputLogging, RankListener, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -237,6 +237,18 @@ where
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr_display()?;
 
+    // One more HTTP listener per data-parallel rank, if configured: each serves
+    // the same router pinned to that rank.
+    let mut rank_listeners = Vec::with_capacity(config.rank_listeners.len());
+    for rank_listener in &config.rank_listeners {
+        let rank = rank_listener.rank;
+        let listener = Listener::bind(&rank_listener.mode)
+            .await
+            .with_context(|| format!("failed to bind listener for data-parallel rank {rank}"))?;
+        let bind_address = listener.local_addr_display()?;
+        rank_listeners.push((rank, listener, bind_address));
+    }
+
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
@@ -336,11 +348,31 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let listener = match tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
+            let wrap = |listener| match &tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context.clone()),
                 None => MaybeTlsListener::plain(listener),
             };
-            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
+            let mut servers = Vec::with_capacity(1 + rank_listeners.len());
+            for (rank, listener, bind_address) in rank_listeners {
+                let app = middleware::with_data_parallel_rank(app.clone(), rank);
+                servers.push(serve_connections(
+                    wrap(listener),
+                    app,
+                    shutdown.clone().cancelled_owned(),
+                    timeouts,
+                ));
+                info!(
+                    bind_address,
+                    rank, "data-parallel rank listener is ready to accept requests"
+                );
+            }
+            servers.push(serve_connections(
+                wrap(listener),
+                app,
+                shutdown.cancelled_owned(),
+                timeouts,
+            ));
+            let server = futures::future::try_join_all(servers);
 
             info!(
                 bind_address,
@@ -349,7 +381,7 @@ where
 
             let result = tokio::select! {
                 result = server => {
-                    result.context("HTTP server failed")
+                    result.map(drop).context("HTTP server failed")
                 }
                 _ = force_shutdown.cancelled() => {
                     warn!("HTTP graceful shutdown deadline elapsed; aborting server");
