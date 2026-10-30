@@ -8,8 +8,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.model_executor.models.utils import WeightsMapper, map_draft_quant_config
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -245,6 +247,32 @@ def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
             )
         graph.replay()
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_draft_quant_exclusions_alias_fp8_ignored_layers():
+    """fp8 skips live in ``ignored_layers`` and must alias to the draft root.
+
+    ``Fp8Config`` keeps checkpoint ``modules_to_not_convert`` entries in
+    ``ignored_layers`` and matches them exactly, so globally numbered draft
+    modules are only skipped when both the offset and the ``model.`` root
+    alias are present. Already-global entries are left untouched (#61003).
+    """
+    quant_config = Fp8Config(
+        ignored_layers=[
+            "layers.0.attention_conv.kernel_projection",
+            "layers.64.already_global",
+        ]
+    )
+
+    map_draft_quant_config(quant_config, WeightsMapper(), "model", 64, 5)
+
+    assert "layers.64.attention_conv.kernel_projection" in quant_config.ignored_layers
+    assert quant_config.ignored_layers.count("layers.64.already_global") == 1
+    assert (
+        "model.layers.64.attention_conv.kernel_projection"
+        in quant_config.ignored_layers
+    )
+    assert "model.layers.64.already_global" not in quant_config.ignored_layers
 
 
 def test_selector_edges_match_sequential_reference():
