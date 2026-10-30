@@ -406,7 +406,9 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
         output, lse, q8, qs, (k8, v8, ks, vs) = result
         assert k8.dtype == v8.dtype == torch.float8_e4m3fn
         # Keep the FP64 oracle independent of the GPU BLAS implementation.
-        latent = cache.cpu().double()[indices.cpu().long()] * cache_scale.cpu().double()
+        latent = (
+            cache.cpu().double()[indices.cpu().long()] * cache_scale.cpu().double()
+        )
         expanded = (
             latent[:, :512]
             @ (weight.cpu().double() * weight_scale.cpu().double()[:, None]).t()
@@ -494,18 +496,20 @@ def test_flydsl_fp8_native_weight_layout(default_vllm_config, dist_init):
         cache_scale = torch.tensor([0.125], dtype=torch.float32)
         indices = torch.arange(30, -1, -1, dtype=torch.int32)
         k, v = project(cache, cache_scale, indices, params, 12)
-        latent = cache.float()[indices.long()] * cache_scale
-        expected = (latent[:, :512] @ original.float().t()).view(-1, 12, 256)
+        latent = (
+            cache.cpu().double()[indices.cpu().long()] * cache_scale.cpu().double()
+        )
+        expected = (latent[:, :512] @ original.cpu().double().t()).view(-1, 12, 256)
         for value, reference in (
             (k[..., :128], expected[..., :128]),
             (v, expected[..., 128:]),
         ):
-            error = value.float() - reference
+            error = value.cpu().double() - reference
             assert (
                 error.square().mean().sqrt() / reference.square().mean().sqrt() < 0.04
             )
         torch.testing.assert_close(
-            k[..., 128:],
+            k[..., 128:].cpu(),
             latent[:, None, 512:].expand(-1, 12, -1).to(DTYPE),
             rtol=0,
             atol=0,
