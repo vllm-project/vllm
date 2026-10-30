@@ -33,8 +33,9 @@ vLLM is a Python library that supports the following GPU variants. Select your G
     On NVIDIA CUDA under WSL, vLLM uses CUDA-reported free GPU memory for startup
     memory profiling, including devices reported as integrated (UMA). This is
     automatic: WSL guest RAM availability does not represent CUDA's allocation
-    budget. On native Linux, NVIDIA integrated GPUs continue to account for
-    reclaimable system memory.
+    budget. On native Linux, NVIDIA integrated GPUs continue to use available
+    system memory, including reclaimable OS memory, instead of CUDA-reported
+    free memory.
 
 === "NVIDIA CUDA"
 
