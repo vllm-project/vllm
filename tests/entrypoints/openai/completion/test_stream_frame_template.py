@@ -31,8 +31,10 @@ def model_frame(request_id: str, model_name: str, index: int, text: str) -> str:
                 stop_reason=None,
                 prompt_token_ids=None,
                 token_ids=None,
+                weight_versions=None,
             )
         ],
+        kv_transfer_params=None,
     )
     return f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
 
@@ -58,7 +60,9 @@ def model_frame(request_id: str, model_name: str, index: int, text: str) -> str:
 def test_template_frame_matches_model_frame(
     request_id: str, model_name: str, index: int, text: str
 ):
-    prefix, infix, suffix = _delta_frame_template(request_id, CREATED, model_name)
+    template = _delta_frame_template(request_id, CREATED, model_name)
+    assert template is not None
+    prefix, infix, suffix = template
     frame = f"{prefix}{index}{infix}{json.dumps(text, ensure_ascii=False)}{suffix}"
     assert frame == model_frame(request_id, model_name, index, text)
 
@@ -78,4 +82,5 @@ def test_delta_chunk_fields_are_frozen():
         "stop_reason",
         "prompt_token_ids",
         "token_ids",
+        "weight_versions",
     }

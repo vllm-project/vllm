@@ -1,0 +1,27 @@
+{#- Minimal Step5-VL chat template modeled on the public stepfun-ai/step3 family template. -#}
+{%- macro render_content(content) %}
+    {%- if content is string %}
+        {{- content }}
+    {%- elif content is iterable %}
+        {%- for item in content %}
+            {%- if item.type == 'text' %}
+                {{- item.text }}
+            {%- elif item.type == 'image' %}
+                {{- '<im_patch>' }}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+{%- endmacro %}
+{{ bos_token }}
+{%- for message in messages %}
+    {%- if message.role == 'system' %}
+        {{- render_content(message['content']) }}
+    {%- else %}
+        {{- '<|BOT|>' + message.role + '\n' }}
+        {{- render_content(message['content']) }}
+        {{- '<|EOT|>' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|BOT|>assistant\n<think>\n' }}
+{%- endif %}

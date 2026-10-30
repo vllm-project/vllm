@@ -35,6 +35,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.config import VllmConfig
+
+
+def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
+    """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
+    parallel_config = vllm_config.parallel_config
+    return parallel_config.tensor_parallel_size > 1 and (
+        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
+    )
+
 
 # ---------------------------------------------------------------------------
 # Config

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -20,6 +21,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
+    completion_top_logprobs_limit,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
@@ -83,8 +85,10 @@ def _delta_frame_template(
                 stop_reason=None,
                 prompt_token_ids=None,
                 token_ids=None,
+                weight_versions=None,
             )
         ],
+        kv_transfer_params=None,
     )
     frame = f"data: {probe.model_dump_json(exclude_unset=True)}\n\n"
     index, text = str(_PROBE_INDEX), json.dumps(_PROBE_TEXT)
@@ -106,6 +110,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
         enable_per_request_metrics: bool = False,
     ):
         super().__init__(
@@ -118,6 +124,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_log_outputs = enable_log_outputs
+        self.enable_log_deltas = enable_log_deltas
         self.enable_per_request_metrics = enable_per_request_metrics
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -241,6 +249,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
                 )
             else:
                 generator = self.engine_client.generate(
@@ -303,6 +312,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 tokenizer,
                 request_metadata,
             )
+
+            if self.enable_log_outputs and self.request_logger:
+                for final_res in final_res_batch_checked:
+                    for output in final_res.outputs:
+                        self.request_logger.log_outputs(
+                            request_id=request_id,
+                            outputs=output.text,
+                            output_token_ids=output.token_ids,
+                            finish_reason=output.finish_reason,
+                            is_streaming=False,
+                            delta=False,
+                        )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
@@ -334,6 +355,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         num_choices = 1 if request.n is None else request.n
         next_text_offsets = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
+        previous_texts = [""] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
@@ -353,6 +375,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 not request.echo
                 and request.logprobs is None
                 and not request.return_token_ids
+                and not request.return_weight_versions
                 and not include_continuous_usage
             ):
                 delta_template = _delta_frame_template(
@@ -430,6 +453,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             not delta_text
                             and not delta_token_ids
                             and not previous_num_tokens[i]
+                            and finish_reason is None
                         ):
                             # Chunked prefill case, don't return empty chunks
                             continue
@@ -457,6 +481,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     previous_num_tokens[i] += len(output.token_ids)
                     stop_reason = output.stop_reason
 
+                    if self.enable_log_outputs and self.request_logger:
+                        delta_content = output.text
+                        previous_texts[i] += delta_content
+                        if delta_content and self.enable_log_deltas:
+                            self.request_logger.log_outputs(
+                                request_id=request_id,
+                                outputs=delta_content,
+                                output_token_ids=as_list(output.token_ids),
+                                finish_reason=finish_reason,
+                                is_streaming=True,
+                                delta=True,
+                            )
+
                     if delta_template is not None and finish_reason is None:
                         prefix, infix, suffix = delta_template
                         yield (
@@ -465,6 +502,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             f"{suffix}"
                         )
                         continue
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         object="text_completion",
@@ -483,8 +521,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                     if request.return_token_ids
                                     else None
                                 ),
+                                weight_versions=(
+                                    output.weight_versions
+                                    if request.return_weight_versions
+                                    else None
+                                ),
                             )
                         ],
+                        kv_transfer_params=(
+                            res.kv_transfer_params
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                     # Stamp on terminal chunk only when no trailing usage chunk
                     # will follow (that one is the true final message).
@@ -505,6 +553,17 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
+
+            if self.enable_log_outputs and self.request_logger:
+                for full_text in previous_texts:
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs=full_text,
+                        output_token_ids=None,
+                        finish_reason="streaming_complete",
+                        is_streaming=True,
+                        delta=False,
+                    )
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
@@ -656,6 +715,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    weight_versions=(
+                        output.weight_versions
+                        if request.return_weight_versions
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
@@ -785,8 +849,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
-                        for i, top_lp in enumerate(step_top_logprobs.items())
-                        if logprob_token_ids or num_output_top_logprobs >= i
+                        for top_lp in itertools.islice(
+                            step_top_logprobs.items(),
+                            completion_top_logprobs_limit(
+                                num_output_top_logprobs, bool(logprob_token_ids)
+                            ),
+                        )
                     }
                 )
 
