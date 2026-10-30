@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Distributed Comm Ops"
   key: distributed-comm-ops
+  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -21,6 +22,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI300) Distributed Comm Ops'
       dind: false
       device: mi300_2
@@ -40,6 +42,7 @@ steps:
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
+  automatic_shard: true
   device: l4
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
@@ -55,6 +58,7 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Sharded RDT Weight Transfer"
       dind: false
       device: mi355_dpx
@@ -130,6 +134,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Compile + RPC"
   key: distributed-compile-rpc-tests-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -144,14 +149,17 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
+  - tests/compile/test_aot_compile.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Distributed Compile + RPC"
       dind: false
       device: mi355_2
@@ -176,6 +184,7 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -200,6 +209,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI300) Distributed Torchrun + Shutdown'
       dind: false
       device: mi300_2
@@ -369,6 +379,7 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 70
@@ -392,6 +403,7 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
     amd:
+      automatic_shard: true
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ':amd: (MI355) Distributed Compile + Comm'
@@ -416,6 +428,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Distributed DP + EP"
   key: distributed-tests-8xh100
+  automatic_shard: true
   timeout_in_minutes: 20
   optional: true
   device: h100
@@ -430,14 +443,18 @@ steps:
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/test_mnnvl_alltoall.py
+  - tests/distributed/test_eplb_execute.py
 
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  # The L4 EPLB Execution job has no NVLink, so it skips symm_mem.
+  - pytest -v -s distributed/test_eplb_execute.py -k symm_mem
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Distributed DP + EP"
       dind: false
       device: mi355_8
@@ -574,6 +591,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
+  automatic_shard: true
   device: b200-k8s
   optional: true
   working_dir: "/vllm-workspace/"
@@ -586,6 +604,7 @@ steps:
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Distributed AgRs All2All"
       dind: false
       device: mi355_2
@@ -608,6 +627,7 @@ steps:
 
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   working_dir: "/vllm-workspace/"
@@ -620,6 +640,7 @@ steps:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) GEMM-RS-AR"
       dind: false
       device: mi355_4
@@ -776,11 +797,13 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
   source_file_dependencies:
+  - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
@@ -788,6 +811,7 @@ steps:
   - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Distributed Preload"
       dind: false
       device: mi355_2
@@ -796,6 +820,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
