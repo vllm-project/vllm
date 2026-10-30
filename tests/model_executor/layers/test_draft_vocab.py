@@ -18,7 +18,9 @@ def _head(vocab: int = VOCAB, device: str = "cpu") -> ParallelLMHead:
     head = ParallelLMHead(vocab, HIDDEN, disable_tp=True)
     gen = torch.Generator().manual_seed(0)
     head.weight.data.copy_(torch.randn(head.weight.shape, generator=gen))
-    return head.to(device)
+    head = head.to(device)
+    head.quant_method.process_weights_after_loading(head)
+    return head
 
 
 def _hidden(n: int = 64, device: str = "cpu") -> torch.Tensor:

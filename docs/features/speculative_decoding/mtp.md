@@ -91,8 +91,8 @@ vllm serve <mtp-model> \
 - The file is SGLang's `--speculative-token-map` format (a `.pt` list of ids)
   or a JSON list. EOS ids are always added.
 - The drafter must share the target's unquantized lm_head, at tensor parallel
-  size 1. Drafters whose model code builds a `DraftVocab` support it (Qwen3.5
-  and Qwen4Exp MTP); others raise an error.
+  size 1. Drafters whose model code builds a `DraftVocab` support it (Qwen3.5,
+  Qwen4Exp and NemotronH MTP); others raise an error.
 - Acceptance drops when the list misses tokens your traffic uses, so build it
   from representative text, ideally the model's own outputs, and include all
   special tokens. [`build_draft_token_map.py`](../../../examples/features/speculative_decoding/build_draft_token_map.py)
