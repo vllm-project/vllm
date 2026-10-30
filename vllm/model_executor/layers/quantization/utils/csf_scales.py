@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decoders for CSF-compressed NVFP4 block scales.
+"""Decoders and the `csf` encoder for CSF-compressed NVFP4 block scales.
 
 ModelOpt checkpoints declare ``weight_scale_encoding`` per layer and store each
 E4M3 block-scale matrix as several ``<name>.weight_scale.<stream>`` tensors.
@@ -147,3 +147,39 @@ def decode_csf_scale(encoding: str, streams: dict[str, torch.Tensor]) -> torch.T
     names, decode = CSF_SCALE_ENCODINGS[encoding]
     out = decode(*(streams[name].cpu() for name in names))
     return torch.from_numpy(out).view(torch.float8_e4m3fn)
+
+
+def encode_csf_scales(
+    scales: torch.Tensor,
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+    """Encode `[experts, rows, cols]` E4M3 block scales as `csf` streams.
+
+    A row's base is the lowest one whose 16-value window holds the most of the
+    row's bytes, which minimizes exceptions. Returns each expert's
+    `nvfp4_csf_fixed` and `nvfp4_csf_exceptions` stream on the CPU.
+    """
+    _, rows, cols = scales.shape
+    fixed: list[torch.Tensor] = []
+    exceptions: list[torch.Tensor] = []
+    # Bounds the per-row histograms to about 100 MB.
+    chunk_experts = max(1, (1 << 22) // (rows * cols))
+    for chunk in scales.view(torch.uint8).split(chunk_experts):
+        n = chunk.shape[0]
+        raw = chunk.reshape(-1, cols).long()
+        # below[:, k] counts the row's bytes smaller than k.
+        below = torch.zeros(raw.shape[0], 257, dtype=torch.int32, device=raw.device)
+        below.scatter_add_(1, raw + 1, torch.ones_like(raw, dtype=torch.int32))
+        below = below.cumsum(1)
+        bases = (below[:, 16:] - below[:, :241]).argmax(1, keepdim=True)
+        codes = raw - bases
+        outliers = (codes < 0) | (codes > 15)
+        codes = codes.masked_fill(outliers, 0).to(torch.uint8)
+        packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+        slabs = (bases.to(torch.uint8), packed)
+        fixed.extend(torch.cat([t.reshape(n, rows // 16, -1) for t in slabs], 2).cpu())
+        outliers = outliers.view(n, -1)
+        expert, position = outliers.nonzero(as_tuple=True)
+        words = chunk.reshape(n, -1)[expert, position].long() << 24 | position
+        words = torch.from_numpy(words.cpu().numpy().astype(np.uint32))
+        exceptions.extend(words.split(outliers.sum(1).tolist()))
+    return tuple(fixed), tuple(exceptions)

@@ -14,7 +14,10 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4FusedMoE,
 )
-from vllm.model_executor.layers.quantization.utils.csf_scales import decode_csf_scale
+from vllm.model_executor.layers.quantization.utils.csf_scales import (
+    decode_csf_scale,
+    encode_csf_scales,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
@@ -102,6 +105,18 @@ def test_csf_decode_matches_source_scales(shape):
 
     assert decoded.dtype == torch.float8_e4m3fn
     assert torch.equal(decoded.view(torch.uint8), raw)
+
+
+def test_csf_encode_round_trips_with_fewest_exceptions():
+    raw = _raw_scales((640, 160))
+    raw[::2, 0] = 0x10  # a low outlier that a row-min base would follow
+
+    fixed, exceptions = encode_csf_scales(raw.view(torch.float8_e4m3fn)[None])
+    streams = {"nvfp4_csf_fixed": fixed[0], "nvfp4_csf_exceptions": exceptions[0]}
+
+    assert torch.equal(decode_csf_scale("csf", streams).view(torch.uint8), raw)
+    reference = _encode(raw.view(torch.float8_e4m3fn))["nvfp4_csf_exceptions"]
+    assert exceptions[0].numel() < reference.numel()
 
 
 def test_csf_32x2_decode_matches_source_scales():
