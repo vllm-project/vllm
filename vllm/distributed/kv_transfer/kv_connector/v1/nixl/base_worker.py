@@ -2734,14 +2734,19 @@ class NixlBaseConnectorWorker:
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )
-        # Replicated KV with P_TP > D_TP is only supported in pull mode for GQA.
+        # A replicated remote with a larger TP is only supported when D pulls a
+        # GQA P. Push validates on P with D as the remote, so the assert below
+        # rejects D_TP > num_kv_heads with D_TP > P_TP.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         # MLA models do not need to handle kv replication.
         gqa_replicated_pull = self._is_gqa_replicated_pull(tp_ratio, remote_engine_id)
         if not self.use_mla and not self._has_mamba and not gqa_replicated_pull:
             assert not (
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
-            ), "P_TP > num_kv_heads with P_TP > D_TP requires the pull transfer mode."
+            ), (
+                "NIXL push mode does not support D_TP > num_kv_heads with "
+                "D_TP > P_TP; use pull mode."
+            )
         has_draft_regions = bool(self._head_sharded_draft_regions)
         draft_local_heads = draft_remote_heads = 1
         if has_draft_regions:
