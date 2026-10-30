@@ -1924,6 +1924,7 @@ def _remote_prefill_request(request_id: int, block_size: int):
         num_tokens=block_size * 2,
         do_remote_prefill=True,
     )
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": f"xfer-{request_id}",
@@ -2024,6 +2025,7 @@ async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
         worker = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         sock = mocks["mock_socket_object"]
         sock.recv.return_value = msgspec.msgpack.encode(
             MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
@@ -2067,6 +2069,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
 
         # Allocation, then prefill end, as the scheduler reports them.
         for block_ids in ([], [[1]]):
@@ -2119,6 +2122,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
             )
             response = await request(pull)
             assert response.status == MooncakeXferResponseStatus.ERROR
+            assert response.err_msg is not None
             assert "not paired" in response.err_msg
 
             assert await producer.fetch_finished_sending_reqs() == expired
@@ -2140,6 +2144,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
         producer.kv_caches_base_addr = [0x1000]
         producer.block_len_per_layer = [256]
         producer.kv_block_len_per_layer = [256]
