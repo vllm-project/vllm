@@ -88,7 +88,6 @@ MXFP8_BYTES_PER_TOKEN = MXFP8_DATA_BYTES + MXFP8_SCALE_BYTES
 
 BLOCK_SIZE = 256
 WARPS_PER_BLOCK = BLOCK_SIZE // 32
-NUM_TOKEN_CUTOFF = 1024
 
 _DUMMY_TENSORS: dict[tuple[Any, ...], torch.Tensor] = {}
 
@@ -550,7 +549,6 @@ class PagedCompileKey:
     is_q_interleaved: bool
     kv_mxfp8: bool
     has_kv_norm: bool
-    reduced_grid: bool
     eps: float
 
 
@@ -568,7 +566,6 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         Q_INTERLEAVED = compile_key.is_q_interleaved
         KV_MXFP8 = compile_key.kv_mxfp8
         HAS_KV_NORM = compile_key.has_kv_norm
-        REDUCED = compile_key.reduced_grid
         EPS = Float32(compile_key.eps)
         USE_PDL = current_platform.is_arch_support_pdl()
 
@@ -803,67 +800,6 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     block_size,
                 )
 
-        @cute.kernel
-        def device_kernel_reduced(
-            q_in: cute.Tensor,
-            q_out: cute.Tensor,
-            kv: cute.Tensor,
-            cache_fp8: cute.Tensor,
-            cache_bf16: cute.Tensor,
-            cache_scale: cute.Tensor,
-            slots: cute.Tensor,
-            pos_ids: cute.Tensor,
-            cos_sin: cute.Tensor,
-            norm_w: cute.Tensor,
-            load_atom: cute.CopyAtom,
-            store_atom: cute.CopyAtom,
-            cs_atom: cute.CopyAtom,
-            n_full: Int32,
-            n_insert: Int32,
-            block_size: Int32,
-        ):
-            # One CTA per token; each warp walks slots strided by
-            # WARPS_PER_BLOCK. Pays off above NUM_TOKEN_CUTOFF tokens in a
-            # single insert, where it is worth ~2x kernel-isolated.
-            bidx, _, _ = cute.arch.block_idx()
-            warp = cute.arch.warp_idx()
-            lane = cute.arch.lane_idx()
-            dim_base = lane * ELEMS_PER_LANE
-            token = bidx
-            if token < n_full:
-                slot_end = Int32(QP)
-                if token < n_insert:
-                    slot_end = Int32(QP + 1)
-                if warp < slot_end:
-                    if cutlass.const_expr(USE_PDL):
-                        cute.arch.griddepcontrol_wait()
-                    slot = warp
-                    while slot < slot_end:
-                        process_slot(
-                            token,
-                            slot,
-                            lane,
-                            dim_base,
-                            q_in,
-                            q_out,
-                            kv,
-                            cache_fp8,
-                            cache_bf16,
-                            cache_scale,
-                            slots,
-                            pos_ids,
-                            cos_sin,
-                            norm_w,
-                            load_atom,
-                            store_atom,
-                            cs_atom,
-                            n_insert,
-                            block_size,
-                        )
-                        slot = slot + WARPS_PER_BLOCK
-                    if cutlass.const_expr(USE_PDL):
-                        cute.arch.griddepcontrol_launch_dependents()
-
         @cute.jit
         def host_entrypoint(
             q_in: cute.Tensor,
@@ -890,58 +826,33 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             n = kv.shape[0]
             ni = slots.shape[0]
             bs = cache_fp8.shape[1]
-            if REDUCED:
-                device_kernel_reduced(
-                    q_in,
-                    q_out,
-                    kv,
-                    cache_fp8,
-                    cache_bf16,
-                    cache_scale,
-                    slots,
-                    pos_ids,
-                    cos_sin,
-                    norm_w,
-                    load_atom,
-                    store_atom,
-                    cs_atom,
-                    n,
-                    ni,
-                    bs,
-                ).launch(
-                    grid=(n, 1, 1),
-                    block=(BLOCK_SIZE, 1, 1),
-                    stream=stream,
-                    use_pdl=USE_PDL,
-                )
-            else:
-                device_kernel(
-                    q_in,
-                    q_out,
-                    kv,
-                    cache_fp8,
-                    cache_bf16,
-                    cache_scale,
-                    slots,
-                    pos_ids,
-                    cos_sin,
-                    norm_w,
-                    load_atom,
-                    store_atom,
-                    cs_atom,
-                    n,
-                    ni,
-                    bs,
-                ).launch(
-                    grid=(
-                        (n * (QP + 1) + WARPS_PER_BLOCK - 1) // WARPS_PER_BLOCK,
-                        1,
-                        1,
-                    ),
-                    block=(BLOCK_SIZE, 1, 1),
-                    stream=stream,
-                    use_pdl=USE_PDL,
-                )
+            device_kernel(
+                q_in,
+                q_out,
+                kv,
+                cache_fp8,
+                cache_bf16,
+                cache_scale,
+                slots,
+                pos_ids,
+                cos_sin,
+                norm_w,
+                load_atom,
+                store_atom,
+                cs_atom,
+                n,
+                ni,
+                bs,
+            ).launch(
+                grid=(
+                    (n * (QP + 1) + WARPS_PER_BLOCK - 1) // WARPS_PER_BLOCK,
+                    1,
+                    1,
+                ),
+                block=(BLOCK_SIZE, 1, 1),
+                stream=stream,
+                use_pdl=USE_PDL,
+            )
 
         return host_entrypoint
 
@@ -1070,7 +981,6 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         is_q_interleaved: bool,
         kv_mxfp8: bool,
         has_kv_norm: bool,
-        reduced_grid: bool,
         eps: float,
     ) -> CuTeDSLLaunchSpec[PagedCompileKey]:
         compile_key = self.dispatch(
@@ -1081,7 +991,6 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             is_q_interleaved=is_q_interleaved,
             kv_mxfp8=kv_mxfp8,
             has_kv_norm=has_kv_norm,
-            reduced_grid=reduced_grid,
             eps=eps,
         )
         return compile_key, (
@@ -1516,7 +1425,6 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         is_q_interleaved=is_q_interleaved,
         kv_mxfp8=kv_mxfp8,
         has_kv_norm=False,
-        reduced_grid=num_tokens_full >= NUM_TOKEN_CUTOFF and q_head_padded > 0,
         eps=eps if apply_q_norm else 0.0,
     )
     return q_out
@@ -1617,7 +1525,6 @@ def fused_deepseek_v4_kv_rope_insert(
             is_q_interleaved=False,
             kv_mxfp8=kv_mxfp8,
             has_kv_norm=has_kv_norm,
-            reduced_grid=False,
             eps=eps,
         )
     elif k_cache.dtype == torch.float8_e4m3fn:
