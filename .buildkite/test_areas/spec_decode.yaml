@@ -36,6 +36,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
+  automatic_shard: true
   timeout_in_minutes: 25
   device: h200_35gb
   source_file_dependencies:
@@ -46,6 +47,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode Eagle 1: DeepSeek + Qwen"
       dind: false
       device: mi355_dpx
@@ -63,6 +65,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
   key: spec-decode-eagle-2-llama3-qwen-vl-other
+  automatic_shard: true
   timeout_in_minutes: 25
   device: h200_35gb
   source_file_dependencies:
@@ -73,6 +76,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
       dind: false
       device: mi355_dpx
@@ -127,6 +131,7 @@ steps:
 # each job below runs whole directories.
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators"
   key: spec-decode-speculators
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
@@ -139,6 +144,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/speculators/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode Speculators"
       dind: false
       device: mi355_dpx
@@ -157,6 +163,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP Gemma4"
   key: spec-decode-mtp-gemma4
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
@@ -169,6 +176,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/gemma4/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode MTP Gemma4"
       dind: false
       device: mi355_dpx
@@ -187,6 +195,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo"
   key: spec-decode-mtp-deepseek-mimo
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
@@ -200,6 +209,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode MTP DeepSeek + MiMo"
       dind: false
       device: mi355_dpx
@@ -218,6 +228,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP Qwen3.5"
   key: spec-decode-mtp-qwen3-5
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
@@ -230,6 +241,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode MTP Qwen3.5"
       dind: false
       device: mi355_dpx
@@ -286,6 +298,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
@@ -298,6 +311,7 @@ steps:
     - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Spec Decode N-Gram + Suffix"
       dind: false
       device: mi355_dpx
@@ -352,8 +366,11 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
+    - pytest -v -s models/test_qwen3_dflash_mxfp8_context_kv.py
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Draft Model Nightly"
@@ -378,6 +395,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Speculators Correctness"
   key: speculators-correctness
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   optional: true
@@ -392,6 +410,7 @@ steps:
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Speculators Correctness Nightly"
       dind: false
       device: mi355_dpx
@@ -404,6 +423,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Spec Decode DeepSeek MTP Parallel Load"
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
@@ -419,6 +439,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
       device: mi355_2
@@ -450,7 +471,9 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
@@ -486,6 +509,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Spec Decode AL DFlash2"
   key: spec-decode-dflash2-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true
@@ -494,12 +518,15 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Spec Decode AL DFlash2 Nightly"
       dind: false
       device: mi355_1
@@ -519,7 +546,9 @@ steps:
       - vllm/v1/attention/
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dflash2.py
+      - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/quantization/
       - vllm/model_executor/kernels/linear/
@@ -527,6 +556,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Spec Decode AL XPress"
   key: spec-decode-xpress-nightly
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   optional: true
