@@ -78,10 +78,9 @@ class BaseSpeculator(ABC):
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
-    # [max_num_reqs, num_speculative_steps, vocab_size] draft logits for
-    # probabilistic rejection sampling, or None for greedy-draft verification
-    # and for speculators without a draft model.
-    draft_logits: torch.Tensor | None = None
+    # Draft logits for probabilistic rejection sampling, or None for
+    # greedy-draft verification and for speculators without a draft model.
+    draft_logits: DraftLogitsCache | None = None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

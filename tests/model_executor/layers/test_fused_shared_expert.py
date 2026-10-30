@@ -1260,6 +1260,7 @@ def _build_mtp_model(
     speculative_config: dict[str, object] = {
         "draft_model_config": SimpleNamespace(**draft_model_config),
         "method": "mtp",
+        "speculator_config": SimpleNamespace(speculator_class="MTP"),
         "parallel_drafting": False,
         "enable_adaptive_verification": False,
         "use_dspark": lambda: False,
@@ -1659,13 +1660,26 @@ def test_models_fse_init(
                     )
                     assert scheme.weight_dtype == expected_dtype
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    speculator_config=SimpleNamespace(speculator_class="MTP"),
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+            checkpoint = []
+            expected_weights = []
+            for idx, layer in enumerate(model.layers):
+                fused = expected_policy[f"layers.{idx}.{moe_attr}"]
+                if model_type == "deepseek_v4":
+                    dsv4_checkpoint, dsv4_expected = (
+                        _make_deepseek_v4_shared_expert_checkpoint(
+                            layer, idx, fused, exclude
+                        )
+                    )
+                    checkpoint.extend(dsv4_checkpoint)
+                    expected_weights.extend(dsv4_expected)
+                    continue
+                high_precision = idx == 1 and shared_expert_precision == "mixed"
+                dtype = (
+                    torch.bfloat16
+                    if exclude
+                    else torch.float8_e4m3fn
+                    if high_precision
+                    else torch.uint8
                 )
                 pack_factor = 1 if exclude or high_precision else 2
                 for projection in ("gate_proj", "up_proj", "down_proj"):

@@ -232,9 +232,9 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
-    model_cls = Qwen3DSparkModel
     # The speculator this is a draft model of (see SpeculativeDraftModel).
     speculator_config_class = DSparkSpeculatorConfig
+    model_cls = Qwen3DSparkModel
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

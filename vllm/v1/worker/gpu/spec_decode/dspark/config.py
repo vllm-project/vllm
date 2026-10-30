@@ -3,7 +3,9 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import (
+    _MINIMAX_M3_MODEL_TYPES,
     _QWEN3_OMNI_DSPARK_ARCHITECTURE,
+    _get_minimax_m3_dspark_draft,
     _validate_qwen3_omni_dspark,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
@@ -30,10 +32,15 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
-        # DeepSeek DSpark can ship the weights inside the target checkpoint
         target = spec.target_model_config
         if target is None:
             raise ValueError("target_model_config must be present for dspark")
+        if target.hf_config.model_type in _MINIMAX_M3_MODEL_TYPES:
+            load_config = spec.draft_load_config
+            return _get_minimax_m3_dspark_draft(
+                target, load_config.download_dir if load_config else None
+            )
+        # DeepSeek DSpark can ship the weights inside the target checkpoint
         if not spec.quantization:
             spec.quantization = target.quantization
         return target.model

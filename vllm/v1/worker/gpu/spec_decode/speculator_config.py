@@ -188,7 +188,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         target = spec.target_model_config
         # Callable target hf_overrides also apply to the draft; dict ones don't.
         draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-            target.hf_overrides
+            target.hf_overrides, cls.transformers_backend_hf_overrides(spec)
         )
         spec.draft_model_config = ModelConfig(
             model=spec.model,
@@ -247,6 +247,14 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             spec.draft_tensor_parallel_size,
             draft_model_config=spec.draft_model_config,
         )
+
+    @classmethod
+    def transformers_backend_hf_overrides(
+        cls, spec: "SpeculativeConfig"
+    ) -> dict[str, Any] | None:
+        """HF config updates for a draft built by the Transformers modeling
+        backend, which replace the usual draft config rewrites, or None."""
+        return None
 
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:

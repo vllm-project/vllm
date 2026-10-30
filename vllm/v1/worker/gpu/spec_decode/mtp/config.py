@@ -55,6 +55,28 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
         return target.model_weights or target.model
 
     @classmethod
+    def transformers_backend_hf_overrides(
+        cls, spec: "SpeculativeConfig"
+    ) -> dict[str, Any] | None:
+        target = spec.target_model_config
+        if (
+            target is None
+            or not target.using_transformers_backend()
+            or getattr(target.hf_text_config, "num_mtp_layers", None) is None
+        ):
+            return None
+        if target.hf_config is not target.hf_text_config:
+            raise NotImplementedError(
+                "The Transformers modeling backend does not support MTP for "
+                "multimodal models yet."
+            )
+        moe = "MoE" if target.is_moe else ""
+        return {
+            "architectures": [f"Transformers{moe}ForMTP"],
+            "n_predict": target.hf_text_config.num_mtp_layers,
+        }
+
+    @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         target = spec.target_model_config
         if target is not None and target.hf_config.model_type == "deepseek_v41":

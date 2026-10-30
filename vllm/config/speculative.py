@@ -1363,7 +1363,11 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        if self.model is None and self.num_speculative_tokens is not None:
+        # DSpark drafts carry their own width (block size), so the default
+        # draft is resolved even without num_speculative_tokens.
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.use_dspark()
+        ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
         # The draft checkpoint may have determined the speculator.

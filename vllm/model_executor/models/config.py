@@ -119,7 +119,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method != "mtp"
+                and spec_config.method not in ("mtp", "dspark")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
