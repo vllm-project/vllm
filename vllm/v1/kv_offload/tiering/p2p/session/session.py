@@ -149,6 +149,7 @@ class P2PSession:
         self._death_reason: str | None = None
         self._peer_fault_at: float | None = None
         self._abort_ack_fault: str | None = None
+        self._registration_fault: str | None = None
 
         now = time.monotonic()
         self._connected_at: float | None = None
@@ -218,13 +219,13 @@ class P2PSession:
     def data_plane_fault(self) -> str | None:
         """The data-plane fault that ended this session, if any.
 
-        Either the transport's peer fault (see server role) or an AbortAck
-        that never arrived, which leaves this side unable to tell whether
-        the peer's WRITE stopped.
+        The transport's peer fault (see server role), an AbortAck that never
+        arrived, which leaves this side unable to tell whether the peer's
+        WRITE stopped, or a failed registration of the peer's NIXL agent.
         """
         if self._server.peer_fault is not None:
             return self._server.peer_fault
-        return self._abort_ack_fault
+        return self._abort_ack_fault or self._registration_fault
 
     @property
     def last_activity_at(self) -> float:
@@ -671,7 +672,8 @@ class P2PSession:
         Called from poll() after message dispatch. A successful
         registration releases ConnectAckMsg — the peer treats that as
         permission to send, so it must not go out earlier. A failed one
-        marks the connection dead so the manager reaps the session.
+        sends a best-effort disconnect and marks the local connection dead
+        for the manager to reap.
         """
         registration = self._pending_registration
         if registration is None or not registration.done():
@@ -685,7 +687,11 @@ class P2PSession:
                 self.peer_id,
                 exc,
             )
-            self._mark_dead(f"peer registration failed: {exc}")
+            # The peer may have registered us and be waiting for our ack. A
+            # session it keeps would ack our next ConnectMsg without sending
+            # its own, so we would look it up without ever registering it.
+            self._registration_fault = f"peer registration failed: {exc}"
+            self._disconnect(self._registration_fault)
             return
         if self._conn is not None and self._conn.alive:
             self._do_send(
