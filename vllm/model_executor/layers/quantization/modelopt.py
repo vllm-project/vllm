@@ -137,6 +137,12 @@ logger = init_logger(__name__)
 # layout, so retain it as a checkpoint-compatibility alias.
 _BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
 
+# Shards of vLLM's fused projections, for configs that list the shard names.
+_FUSED_PROJECTION_SHARDS = {
+    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+    "gate_up_proj": ("gate_proj", "up_proj"),
+}
+
 # Single source of truth for the ModelOpt linear algos.
 #
 # Each entry is (owning config's name, mixed-precision sub-config attribute).
@@ -1811,6 +1817,24 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             raise ValueError(f"Mixed weight_scale_encoding under {prefix}: {encodings}")
         return next(iter(encodings), None)
 
+    def _reject_scale_encoding(self, prefix: str) -> None:
+        """Only the MoE method registers the CSF stream params, so reject an
+        encoding on any other layer, including the shards of a fused one."""
+        base, _, proj = prefix.rpartition(".")
+        shards = (
+            *self.packed_modules_mapping.get(proj, ()),
+            *_FUSED_PROJECTION_SHARDS.get(proj, ()),
+        )
+        for name in (prefix, *(f"{base}.{shard}" for shard in shards)):
+            for candidate in self._quantized_layer_prefix_candidates(name):
+                if self.quantized_layers.get(candidate, {}).get(
+                    "weight_scale_encoding"
+                ):
+                    raise ValueError(
+                        "weight_scale_encoding is only supported on routed "
+                        f"experts, got one on {candidate}"
+                    )
+
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
@@ -1970,11 +1994,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         # 4. Parent-prefix fallback for fused projections whose config lists
         # shard names instead of vLLM's packed module name.
-        fused_projection_shards = {
-            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
-            "gate_up_proj": ("gate_proj", "up_proj"),
-        }
-        shard_names = fused_projection_shards.get(proj_name)
+        shard_names = _FUSED_PROJECTION_SHARDS.get(proj_name)
         if shard_names is not None:
             for candidate in self._quantized_layer_prefix_candidates(prefix):
                 parent_dot = candidate.rsplit(".", 1)[0] + "."
@@ -2016,6 +2036,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         """Return quantize-method based on layer."""
+        if not isinstance(layer, RoutedExperts):
+            self._reject_scale_encoding(prefix)
+
         # KV-cache quantization
         if isinstance(layer, Attention):
             if self.kv_cache_quant_method:

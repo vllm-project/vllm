@@ -148,13 +148,15 @@ def test_invalid_csf_32x2_streams_are_rejected(stream, index, value):
         decode_csf_scale("csf_32x2_v1", streams)
 
 
-def _mixed_config(encoding: str) -> ModelOptMixedPrecisionConfig:
+def _mixed_config(
+    encoding: str, layer: str = "model.layers.0.mlp.experts"
+) -> ModelOptMixedPrecisionConfig:
     config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
                 "quant_algo": "MIXED_PRECISION",
                 "quantized_layers": {
-                    "model.layers.0.mlp.experts": {
+                    layer: {
                         "quant_algo": "NVFP4",
                         "weight_scale_encoding": encoding,
                     }
@@ -179,6 +181,23 @@ def test_config_maps_csf_streams_to_method_params():
     )
     with pytest.raises(ValueError, match="weight_scale_encoding"):
         _mixed_config("csf_64x1")
+
+    # Only the MoE method loads the streams: a parent of the experts is fine,
+    # but a linear, or one shard of a fused linear, must not be encoded.
+    assert config.get_quant_method(torch.nn.Linear(1, 1), "model.layers.0.mlp") is None
+    config = _mixed_config("csf", "model.layers.0.self_attn.k_proj")
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    for prefix in ("k_proj", "qkv_proj"):
+        with pytest.raises(ValueError, match="routed experts"):
+            config.get_quant_method(
+                torch.nn.Linear(1, 1), f"model.layers.0.self_attn.{prefix}"
+            )
+    # Excluding the layer must not skip the check.
+    config.exclude_modules = ["model.layers.0.self_attn.k_proj"]
+    with pytest.raises(ValueError, match="routed experts"):
+        config.get_quant_method(
+            torch.nn.Linear(1, 1), "model.layers.0.self_attn.k_proj"
+        )
 
 
 def test_stream_params_load_decoded_scale_once_streams_arrive(monkeypatch):
