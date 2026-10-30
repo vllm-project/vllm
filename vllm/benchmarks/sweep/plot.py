@@ -463,25 +463,26 @@ def plot(
         fig_groups,
         key=lambda item: _get_fig_path(fig_dir, item[0], fig_name),
     )
+    if filter_by and any(len(groups) > 1 for _, groups in path_groups):
+        try:
+            import pandas as pd
+        except ImportError:
+            pd = PlaceholderModule("pandas")
+
     for fig_path, groups in path_groups:
         if len(groups) < 2:
             continue
-        if filter_by:
-            try:
-                import pandas as pd
-            except ImportError:
-                pd = PlaceholderModule("pandas")
-
-            if (
-                sum(
-                    not filter_by.apply(
-                        pd.DataFrame.from_records(_convert_inf_nan_strings(data))
-                    ).empty
-                    for _, data in groups
-                )
-                < 2
-            ):
-                continue
+        if (
+            filter_by
+            and sum(
+                not filter_by.apply(
+                    pd.DataFrame.from_records(_convert_inf_nan_strings(data))
+                ).empty
+                for _, data in groups
+            )
+            < 2
+        ):
+            continue
         raise ValueError(
             f"Figure groups map to the same figure output path: {fig_path}. "
             "Change --fig-by or use group labels that remain distinct "
