@@ -1510,6 +1510,17 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
+                # Drafts sharing the target checkpoint (e.g. MTP) must load weights
+                # from the target's object-storage source, not the local cache dir.
+                if (
+                    not self.draft_model_config.model_weights
+                    and self.target_model_config.model_weights
+                    and self.draft_model_config.model == self.target_model_config.model
+                ):
+                    self.draft_model_config.model_weights = (
+                        self.target_model_config.model_weights
+                    )
+
                 # Automatically detect the method
                 if self.method in (
                     "eagle",
