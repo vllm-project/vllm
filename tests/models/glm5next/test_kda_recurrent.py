@@ -436,8 +436,21 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
 
 
+@pytest.mark.parametrize(
+    "heads,lengths,has_initial",
+    [
+        # 32 local heads: the default 64 KDA heads at tensor parallel size 2.
+        (32, [37, 100], [True, False]),
+        # Tensor parallel size 4, and a 4096-token sequence that starts from a
+        # cached state: long enough, with few enough heads, that AITER splits
+        # its recurrence into segments.
+        (16, [37, 4096], [False, True]),
+    ],
+)
 @torch.inference_mode()
-def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
+def test_aiter_flashkda_prefill_matches_triton(
+    monkeypatch, heads, lengths, has_initial
+):
     """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
     to bf16 precision (chunk size 32 vs 64)."""
@@ -448,13 +461,13 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
+    # VLLM_ROCM_USE_AITER is read at import, and CI does not set it.
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
-        pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
+        pytest.skip("requires gfx950 and AITER FlashKDA with paged state")
 
     torch.manual_seed(7)
     device = torch.device("cuda")
-    # 32 local heads: the default 64 KDA heads at tensor parallel size 2.
-    heads, lengths = 32, [37, 100]
     num_tokens, num_slots = sum(lengths), 4
     width, state_len, slot_size = 3 * heads * D, 3, heads * D * D
     layer = object.__new__(kda.Glm5NextLinearAttention)
@@ -495,7 +508,7 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
         num_spec_decodes=0,
         num_spec_decode_tokens=0,
         num_actual_tokens=num_tokens,
-        has_initial_state=torch.tensor([True, False], device=device),
+        has_initial_state=torch.tensor(has_initial, device=device),
         non_spec_query_start_loc=cu_cpu.to(device),
         non_spec_state_indices_tensor=torch.tensor(
             [1, 2], dtype=torch.int32, device=device
