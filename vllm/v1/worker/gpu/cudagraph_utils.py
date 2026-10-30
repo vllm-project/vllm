@@ -62,6 +62,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _flat_slices(t: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    # _foreach_copy_ runs each 64K-element chunk of a tensor on one CTA, so
+    # spread decode-sized tensors over up to 16 CTAs.
+    flat = t.view(-1)
+    return flat.split(max(4096, -(-flat.numel() // 16)))
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -657,13 +664,27 @@ class ModelCudaGraphManager(CudaGraphManager):
                     aux_hidden_states = []
                 if self.hidden_states is None:
                     self.hidden_states = torch.empty_like(hidden_states)
-                self.hidden_states[:num_tokens] = hidden_states
                 if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                     self.aux_hidden_states = [
                         torch.empty_like(x) for x in aux_hidden_states
                     ]
-                for i, aux in enumerate(aux_hidden_states):
-                    self.aux_hidden_states[i][:num_tokens] = aux
+                dsts = [
+                    self.hidden_states[:num_tokens],
+                    *(x[:num_tokens] for x in self.aux_hidden_states),
+                ]
+                srcs = [hidden_states, *aux_hidden_states]
+                # With mixed dtypes, _foreach_copy_ copies one slice at a time.
+                if aux_hidden_states and all(
+                    t.is_contiguous() and t.dtype == hidden_states.dtype for t in srcs
+                ):
+                    torch._foreach_copy_(
+                        [p for t in dsts for p in _flat_slices(t)],
+                        [p for t in srcs for p in _flat_slices(t)],
+                    )
+                else:
+                    self.hidden_states[:num_tokens] = hidden_states
+                    for i, aux in enumerate(aux_hidden_states):
+                        self.aux_hidden_states[i][:num_tokens] = aux
             else:
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
