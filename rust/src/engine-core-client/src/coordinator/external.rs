@@ -3,40 +3,18 @@
 
 use std::sync::Arc;
 
-use serde_tuple::Deserialize_tuple;
 use thiserror_ext::AsReport;
 use tracing::{debug, warn};
 use zeromq::prelude::SocketRecv;
 use zeromq::{XSubSocket, ZmqMessage};
 
 use crate::client::imp::ClientInner;
-use crate::coordinator::handle::CoordinatorState;
+use crate::coordinator::handle::{CoordinatorState, CoordinatorStateUpdate};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
-use crate::protocol::{OpaqueValue, decode_msgpack};
+use crate::protocol::decode_msgpack;
 
-/// Coordinator-to-frontend state publish received on the front-side coordinator
-/// socket.
-///
-/// This matches the msgpack tuple periodically published by Python
-/// `DPCoordinatorProc.run_coordinator` to all connected frontends.
-///
-/// Original Python definitions:
-/// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/coordinator.py#L282-L283>
-/// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/coordinator.py#L445-L447>
-#[derive(Debug, Clone, PartialEq, Deserialize_tuple)]
-struct CoordinatorStateUpdate {
-    /// Global per-engine request counts published by the coordinator.
-    ///
-    /// The Rust bootstrapped external-coordinator path preserves this field for
-    /// wire compatibility but intentionally ignores it for routing decisions.
-    counts: OpaqueValue,
-    /// Current global DP wave number stamped onto newly admitted requests.
-    wave: u32,
-    /// Whether engines are currently running (`true`) or paused (`false`).
-    engines_running: bool,
-}
-
-/// Background half of an external Python-owned coordinator connection.
+/// Background half of a connection to a coordinator in another process: a
+/// Python coordinator, or the in-process coordinator of another Rust frontend.
 ///
 /// This owns one frontend-facing XSUB socket. It mirrors the subset of Python's
 /// coordinator protocol needed by the Rust bootstrapped frontend: receive
