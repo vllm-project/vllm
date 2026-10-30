@@ -181,9 +181,29 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
         with pytest.raises(ValueError, match="one LSA team"):
             all2all.MoriEPv2All2AllManager(object())
     else:
+        cfg = dict(
+            scale_dim=0,
+            scale_type_size=4,
+            num_experts_per_token=8,
+            token_nbytes=4096,
+            combine_token_nbytes=4096,
+            effective_max_recv=1024,
+            dispatch_dtype=None,
+            combine_dtype=None,
+            schedule=None,
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "mori.ops.dispatch_combine_v2",
+            SimpleNamespace(
+                EpDispatchCombineConfig=lambda **kw: SimpleNamespace(**(cfg | kw)),
+                EpDispatchCombineOp=lambda config, comm: calls.op,
+            ),
+        )
         manager = all2all.MoriEPv2All2AllManager(object())
-        op = calls.op
-        assert manager.handle_cache.get_or_create({}, lambda: op) is op
+        assert manager.get_handle({}) is calls.op
+        # The cache holds ops weakly; the manager keeps them alive itself.
+        manager.handle_cache._cache.clear()
         manager.destroy()
         # Ops live in the communicator's window: they must go first.
         order = [c[0] for c in calls.mock_calls]

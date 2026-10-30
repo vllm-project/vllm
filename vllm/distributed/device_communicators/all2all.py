@@ -1048,14 +1048,22 @@ class MoriAll2AllManager(All2AllManagerBase):
 
 
 def _mori_epv2_arena_bytes(cfg) -> int:
-    """Upper bound of a MORI EPv2 gather-mode op's symmetric arena."""
+    """Upper bound of a MORI EPv2 gather-mode op's symmetric arena.
+
+    Mirrors the intranode regions of MORI's hip_backend: per received row
+    disp_out, out_tok, out_scales, out_idx + out_wts (topk * 4 each) and
+    recv_to_src_token (4); per rank recv_num (8 since MORI 1.2.4) and
+    cross_device_barrier (8); and tok_off (4). MORI allocates the arena inside
+    the window itself, so an underestimate fails there rather than overlapping.
+    """
     # The hip backend pads scale rows to 128 B; FlyDSL uses the unpadded row.
     scale_row = -(-cfg.scale_dim * cfg.scale_type_size // 128) * 128
     topk = cfg.num_experts_per_token
     per_recv_row = cfg.token_nbytes + cfg.combine_token_nbytes + scale_row
     per_recv_row += topk * 8 + 4
+    per_rank = cfg.world_size * 16
     # The arena aligns each of its (at most 12) regions to 256 B.
-    return cfg.effective_max_recv * per_recv_row + cfg.world_size * 12 + 12 * 256
+    return cfg.effective_max_recv * per_recv_row + per_rank + 4 + 12 * 256
 
 
 # cco reserves each rank's window in 4 GiB steps.
@@ -1074,6 +1082,9 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         from mori.cco import GDA_CONNECTION_NONE, CCODevCommRequirements
 
         self._windows: list[_MoriEPv2Window] = []
+        # The cache holds ops weakly; keep them alive with the windows their
+        # arenas were charged to, so a dropped op is never charged twice.
+        self._ops: list[Any] = []
         self.handle_cache = Cache()
         # Open the first window now so a wrong topology fails before the
         # weights load; ops that need more get their own window later.
@@ -1135,6 +1146,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             window = self._open_window(round_up(arena, _MORI_EPV2_WINDOW_ALIGN))
         window.free_bytes -= arena
         handle = EpDispatchCombineOp(config, window.comm)
+        self._ops.append(handle)
         window.comm.barrier()
         logger.debug(
             "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d "
@@ -1154,9 +1166,10 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
     def destroy(self):
         # Each op's arena lives in a cco window, so free the ops first.
         with self.handle_cache._lock:
-            for handle in list(self.handle_cache._cache.values()):
-                handle.close()
             self.handle_cache._cache.clear()
+        for handle in self._ops:
+            handle.close()
+        self._ops.clear()
         for window in self._windows:
             window.comm.destroy()
         self._windows.clear()
