@@ -39,12 +39,12 @@ def _write_sparse_block_table_row_from_values(
     ctx_ptr,  # int32, this query's attended context length
     abs_pos,  # absolute position of this query token, may be negative
     max_topk,
-    kv_head,  # which KV head's pages this row addresses
     SPARSE_BLOCK_SIZE_C: tl.constexpr,
     PAGES_PER_BLOCK: tl.constexpr,
     BLOCK_PAGE_STRIDE: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
-    KV_HEADS: tl.constexpr,
+    kv_head=0,
+    KV_HEADS: tl.constexpr = 1,
 ):
     """Compact one query's selected logical blocks into physical page-16 ids.
 
@@ -104,12 +104,12 @@ def _write_sparse_block_table_row(
     abs_pos,  # absolute position of this query token, may be negative
     max_topk,
     stride_topk_k,
-    kv_head,
     SPARSE_BLOCK_SIZE_C: tl.constexpr,
     PAGES_PER_BLOCK: tl.constexpr,
     BLOCK_PAGE_STRIDE: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
-    KV_HEADS: tl.constexpr,
+    kv_head=0,
+    KV_HEADS: tl.constexpr = 1,
 ):
     off_t = tl.arange(0, BLOCK_SIZE_T)
     blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
@@ -120,11 +120,11 @@ def _write_sparse_block_table_row(
         ctx_ptr,
         abs_pos,
         max_topk,
-        kv_head,
         SPARSE_BLOCK_SIZE_C,
         PAGES_PER_BLOCK,
         BLOCK_PAGE_STRIDE,
         BLOCK_SIZE_T,
+        kv_head,
         KV_HEADS,
     )
 
@@ -170,11 +170,11 @@ def _build_sparse_block_table_kernel(
         abs_pos,
         max_topk,
         stride_topk_k,
-        kv_head,
         SPARSE_BLOCK_SIZE_C,
         PAGES_PER_BLOCK,
         BLOCK_PAGE_STRIDE,
         BLOCK_SIZE_T,
+        kv_head,
         KV_HEADS,
     )
 
@@ -213,11 +213,11 @@ def _build_sparse_block_table_prefill_kernel(
         abs_pos,
         max_topk,
         stride_topk_k,
-        kv_head,
         SPARSE_BLOCK_SIZE_C,
         PAGES_PER_BLOCK,
         BLOCK_PAGE_STRIDE,
         BLOCK_SIZE_T,
+        kv_head,
         KV_HEADS,
     )
 
