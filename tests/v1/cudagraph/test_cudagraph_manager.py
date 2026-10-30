@@ -114,6 +114,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
 
     with (
         patch.object(gpu_cudagraph_utils, "graph_capture", fake_graph_capture),
+        patch.object(gpu_cudagraph_utils, "current_stream", return_value=MagicMock()),
         patch.object(gpu_cudagraph_utils, "get_offloader", lambda: fake_offloader),
         patch.object(gpu_cudagraph_utils.torch.cuda, "CUDAGraph"),
         patch.object(
@@ -362,6 +363,11 @@ def _create_decode_vllm_config(
 def _split_capture_sizes(vllm_config: MagicMock, legacy_sizes: bool) -> None:
     """Resolve the prefill and decode sizes, as config resolution does."""
     vllm_config.uniform_decode_query_len = vllm_config.num_speculative_tokens + 1
+    vllm_config.get_decode_cudagraph_query_lens = (
+        lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
+            vllm_config, decode_query_len
+        )
+    )
     vllm_config.get_varlen_decode_cudagraph_token_sizes = (
         lambda decode_query_len: VllmConfig.get_varlen_decode_cudagraph_token_sizes(
             vllm_config, decode_query_len
