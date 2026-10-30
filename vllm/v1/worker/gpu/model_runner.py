@@ -148,7 +148,7 @@ from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
-    all_to_all_logits,
+    all_to_all_vocab_shards,
     batch_sharded_sampling_enabled,
     gather_sampler_output,
 )
@@ -164,7 +164,6 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-    requires_aux_hidden_states,
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
@@ -207,7 +206,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self._draft_workspace_lane = int(
-            self.speculative_config is not None and self.speculative_config.use_dspark()
+            self.speculative_config is not None
+            and self.speculative_config.uses_separate_workspace_lane
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
@@ -278,7 +278,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
         use_dense_all_token_ids = (
-            self.speculative_config is not None and self.speculative_config.use_ngram()
+            self.speculative_config is not None
+            and self.speculative_config.speculator_config.prefer_dense_token_history
         )
 
         # General request states.
@@ -302,8 +303,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config, self.device, self.req_states
                 )
 
-            self.use_aux_hidden_state_outputs = requires_aux_hidden_states(
-                self.speculative_config
+            self.use_aux_hidden_state_outputs = (
+                self.speculative_config.uses_aux_hidden_states
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
@@ -1677,7 +1678,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # produces full-vocab logits for just the locally-owned requests.
             sample_hidden_states = hidden_states[sorted_logits_indices]
             local_logits = self.model.compute_logits_local(sample_hidden_states)
-            logits = all_to_all_logits(local_logits, shard_metadata)
+            logits = all_to_all_vocab_shards(
+                local_logits,
+                shard_metadata.num_logits_per_rank,
+                shard_metadata.num_local_logits,
+            )
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
