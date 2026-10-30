@@ -324,10 +324,8 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
-    # [EXPERIMENTAL] Unbounded streaming: req_id -> D (a multiple of block_size).
-    # The worker re-rotates the request's live cached keys by R(-D) so the RoPE
-    # clock can drop without reaching max_model_len. See
-    # Scheduler._reanchor_session / GPUModelRunner._reanchor_requests.
+    # req_id -> d: positions shifted down by d this step; the worker re-rotates
+    # the request's cached keys to match (--enable-unbounded-streaming).
     reanchor_reqs: dict[str, int] | None = None
 
     @classmethod

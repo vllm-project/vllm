@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""[EXPERIMENTAL] RoPE re-anchoring: re-rotate a live request's cached keys by
-the constant R(-d) so its position clock can drop by d while every relative
-position, and so every attention score, stays the same.
+"""Key re-rotation for --enable-unbounded-streaming.
 
-Model-agnostic: each attention layer is re-rotated with its own RoPE
-(frequencies, rotary dim, NeoX or GPT-J style), read from the model once at
-startup by ``collect_rotary_specs``. Shared by both model runners and their
-unit tests.
+When the scheduler shifts a session's positions down by d, its cached keys are
+re-rotated by R(-d). RoPE scores only depend on relative positions, so they do
+not change. Each layer uses its own RoPE, read from the model at startup.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -29,8 +26,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 class RotarySpec:
     """How one attention layer rotates its keys."""
 
-    # The layer's own RoPE frequencies (computed in float32 like its forward
-    # pass, stored in float64 so d * inv_freq stays exact at large d).
+    # The layer's RoPE frequencies: float32 like its forward pass, stored as
+    # float64 for d * inv_freq at large d.
     inv_freq: torch.Tensor
     rotary_dim: int
     is_neox: bool
@@ -70,8 +67,7 @@ def collect_rotary_specs(
             if layer_name is not None:
                 owners[layer_name] = (module, rope)
 
-    # Layers sharing a RoPE share one spec, so the worker computes each
-    # cos/sin table once per re-anchor instead of once per layer.
+    # Layers sharing a RoPE share a spec: cos/sin are computed once per shift.
     shared: dict[tuple[int, int], RotarySpec] = {}
     specs: dict[str, RotarySpec] = {}
     for layer_name in layer_names:
@@ -104,10 +100,8 @@ def collect_rotary_specs(
 def init_reanchor_rotary_specs(
     model: nn.Module, kv_cache_config: KVCacheConfig
 ) -> dict[str, RotarySpec]:
-    """Startup check for --enable-unbounded-streaming, run once the KV cache
-    groups are known: every group must be sliding-window (so re-anchoring can
-    drop what fell out of the window) and every layer must have a RoPE it can
-    invert. Returns the specs the worker re-rotates with."""
+    """Check that every KV cache group uses a sliding window and every layer a
+    supported RoPE. Returns the spec of each layer."""
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
@@ -131,13 +125,11 @@ def rerotate_cached_keys(
     d: int,
     specs: Mapping[str, RotarySpec],
 ) -> None:
-    """Re-rotate one request's cached keys by R(-d) in every KV group.
+    """Apply R(-d) to one request's cached keys in every KV cache group.
 
-    ``group_block_ids[g]`` is the request's block-table row in KV group ``g``
-    (long tensor on the KV cache device). The whole row is re-rotated: leading
-    null blocks and this step's freshly allocated blocks hold no live keys, so
-    rotating them is a harmless no-op, and R(-d) is position-independent, so a
-    uniform rotation of every key in the row is exactly right.
+    ``group_block_ids[g]`` is the request's block table row in group ``g``. The
+    null blocks and the blocks allocated for this step hold no live keys, so
+    rotating the whole row is fine.
     """
     cos_sin: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     for group, block_ids in zip(kv_cache_groups, group_block_ids):
@@ -148,12 +140,10 @@ def rerotate_cached_keys(
             kv = layer.kv_cache
             if isinstance(kv, (list, tuple)):
                 kv = kv[0]
-            # Standardized layer view (B, H, N, 2 * head_size): K is the first
-            # head_size channels, V the rest.
+            # Layer view (blocks, heads, block_size, 2 * head_size): K then V.
             head_size = layer.head_size
             assert kv.dim() == 4 and kv.shape[-1] == 2 * head_size, (
-                f"re-anchor: unexpected KV cache view {tuple(kv.shape)} "
-                f"for head_size {head_size}"
+                f"unexpected KV cache shape {tuple(kv.shape)} for head_size {head_size}"
             )
             assert kv.is_floating_point() and kv.element_size() >= 2, (
                 "RoPE re-anchoring requires a non-quantized KV cache"
@@ -174,12 +164,8 @@ def rerotate_cached_keys(
 def inverse_rotary_cos_sin(
     d: int, inv_freq: torch.Tensor, dtype: torch.dtype, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """cos/sin tables of the constant R(-d) re-rotation angles.
-
-    Computed in float64: at d ~ 1e5 a float32 angle accumulates ~1e-2 rad of
-    error, which compounds across the cached keys re-rotated at every
-    re-anchor.
-    """
+    """cos/sin of the R(-d) angles. In float64: in float32, d * inv_freq is off
+    by ~1e-2 rad at d ~ 1e5."""
     angle = float(d) * inv_freq.to(device, torch.float64)
     return torch.cos(angle).to(dtype), torch.sin(angle).to(dtype)
 
@@ -191,7 +177,7 @@ def apply_inverse_rotary_cos_sin(
     rotary_dim: int,
     is_neox: bool,
 ) -> torch.Tensor:
-    """Apply R(-d) to ``key`` given precomputed inverse_rotary_cos_sin tables."""
+    """Apply R(-d) to ``key`` with tables from inverse_rotary_cos_sin."""
     half = rotary_dim // 2
     rot, passthru = key[..., :rotary_dim], key[..., rotary_dim:]
     if is_neox:
@@ -205,10 +191,6 @@ def apply_inverse_rotary_cos_sin(
 
 
 def apply_inverse_rotary(key: torch.Tensor, d: int, spec: RotarySpec) -> torch.Tensor:
-    """Re-rotate an already position-rotated key by the constant R(-d).
-
-    cos(-d.f)=cos(d.f), sin(-d.f)=-sin(d.f) -> R(-d)=R(d)^T. ``key`` is
-    [..., head_size] with the leading ``spec.rotary_dim`` dims rotary.
-    """
+    """Apply R(-d) to ``key`` ([..., head_size], rotary dims first)."""
     cos, sin = inverse_rotary_cos_sin(d, spec.inv_freq, key.dtype, key.device)
     return apply_inverse_rotary_cos_sin(key, cos, sin, spec.rotary_dim, spec.is_neox)

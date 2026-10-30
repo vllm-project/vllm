@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import itertools
 import time
 from collections import defaultdict, deque
@@ -369,7 +368,7 @@ class Scheduler(SchedulerInterface):
             ),
         )
         if self.scheduler_config.enable_unbounded_streaming:
-            self._check_reanchor_headroom()
+            self._init_reanchor()
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -715,8 +714,6 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
-        # [EXPERIMENTAL] unbounded streaming: req_id -> D to re-anchor this step.
-        reanchor_reqs: dict[str, int] = {}
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -1309,11 +1306,8 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    # [EXPERIMENTAL] Unbounded streaming: re-anchor the position
-                    # clock down before it reaches max_model_len instead of
-                    # length-capping, then schedule this chunk at the rebased
-                    # positions (the worker re-rotates the live keys). The clock
-                    # and the token count both drop by D, so num_new_tokens holds.
+                    # Shift the session down before it reaches max_model_len.
+                    # num_tokens drops by the same amount: num_new_tokens holds.
                     if (
                         request.reanchor_stream
                         and num_computed_tokens + num_new_tokens
@@ -1656,14 +1650,12 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
-        # [EXPERIMENTAL] Ship each owed R(-D) key re-rotation to the worker, but
-        # only for requests that actually scheduled this step. A request whose
-        # rebase committed yet broke out unscheduled keeps its pending rotation
-        # (on request.pending_reanchor_d) and ships it on a later step it does
-        # schedule, so the rotation is never silently dropped.
+        # A shifted request that did not get scheduled keeps its pending
+        # rotation for the next step it is scheduled in.
+        reanchor_reqs: dict[str, int] = {}
         if self.scheduler_config.enable_unbounded_streaming:
-            for req in (
-                scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
+            for req in itertools.chain(
+                scheduled_new_reqs, scheduled_resumed_reqs, scheduled_running_reqs
             ):
                 if req.pending_reanchor_d:
                     reanchor_reqs[req.request_id] = req.pending_reanchor_d
@@ -1952,160 +1944,84 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
 
-    @functools.cached_property
-    def _reanchor_sliding_window(self) -> int | None:
-        """The decoder (largest) sliding window across KV groups, or None if the
-        model is not a pure sliding-window model. Cached after first lookup."""
-        sw = None
-        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
-            mgr_sw = getattr(mgr, "sliding_window", None)
-            if mgr_sw is None:
-                return None  # a non-sliding (full-attention) group is present
-            sw = mgr_sw if sw is None else max(sw, mgr_sw)
-        return sw
-
-    def _check_reanchor_headroom(self) -> None:
-        """Re-anchoring fires at max_model_len - margin and drops whole scheduler
-        blocks past the sliding window, so there must be at least one there.
-        Below that it fires late, inside the margin, and never at all if
-        max_model_len - sliding_window is under one block."""
-        sw = self._reanchor_sliding_window
-        if sw is None:
-            return
+    def _init_reanchor(self) -> None:
+        # The worker has already checked that every KV cache group uses a
+        # sliding window.
+        managers = self.kv_cache_manager.coordinator.single_type_managers
+        self.reanchor_window = max(mgr.sliding_window for mgr in managers)
+        # A shift drops whole blocks, so at least one block must fit between
+        # the window and the trigger point.
         margin = self.scheduler_config.reanchor_margin_tokens
-        headroom = self.max_model_len - margin - sw
+        headroom = self.max_model_len - margin - self.reanchor_window
         if headroom < self.block_size:
             raise ValueError(
-                "enable_unbounded_streaming: re-anchoring drops whole blocks of "
-                f"{self.block_size} tokens, so max_model_len - "
-                "reanchor_margin_tokens - sliding_window "
-                f"({self.max_model_len} - {margin} - {sw} = {headroom}) must be "
-                f"at least {self.block_size}. Raise --max-model-len or lower "
-                "the margin."
+                "--enable-unbounded-streaming: max_model_len - "
+                "reanchor_margin_tokens - sliding_window = "
+                f"{self.max_model_len} - {margin} - {self.reanchor_window} = "
+                f"{headroom}, must be at least the block size ({self.block_size})."
             )
 
     def _reanchor_session(self, request: Request) -> bool:
-        """[EXPERIMENTAL] Re-anchor a streaming session's RoPE clock down by D
-        tokens so it never reaches max_model_len (unbounded duration).
-
-        Drops the oldest D tokens (already evicted past the sliding window),
-        rebases the token/position bookkeeping and per-group block lists, and
-        accumulates the owed R(-D) key re-rotation on request.pending_reanchor_d.
-        The clock/block rebase commits here (allocation needs the rebased
-        positions); the worker applies the rotation once the request is in the
-        persistent batch (see schedule()'s reanchor_reqs build).
-
-        Returns True if a re-anchor was performed. Sliding-window models only,
-        with prefix caching disabled (no block hashes to rebase).
-        """
-        sw = self._reanchor_sliding_window
-        if sw is None or self.cache_config.enable_prefix_caching:
-            return False
-        # ``d`` is block-aligned to the scheduler block size = LCM of every KV
-        # group's block size, so it is also a whole multiple of EACH group's own
-        # block size. The number of leading blocks to drop is therefore computed
-        # PER manager as ``d // mgr.block_size``, not one shared count: with
-        # unequal text/audio sliding windows the decoder and encoder land in
-        # separate groups with DIFFERENT block sizes (the encoder's is enlarged to
-        # equalize page size), so a single ``d // self.block_size`` would
-        # under-drop the smaller-block group and leave its block table misaligned
-        # against the re-rotated keys.
-        bs = self.block_size
-        # Drop everything older than the (largest) window, block-aligned.
-        d = ((request.num_computed_tokens - sw) // bs) * bs
+        """Shift a streaming session's positions down by d, dropping its d
+        oldest tokens, which are already out of the sliding window. The worker
+        re-rotates the cached keys. Returns False if nothing can be dropped."""
+        # A multiple of the scheduler block size (the LCM of the group block
+        # sizes), so every group drops whole blocks.
+        d = (request.num_computed_tokens - self.reanchor_window) // self.block_size
+        d *= self.block_size
         if d <= 0:
             return False
-        # Safety tripwire: the leading (d // mgr.block_size) blocks of every group
-        # must already be null (evicted past the window by remove_skipped_blocks,
-        # run from allocate_slots every prior step). If any is not, deleting it
-        # would corrupt block accounting, so fail safe (no re-anchor, no mutation).
+
         managers = self.kv_cache_manager.coordinator.single_type_managers
+        null_block = self.kv_cache_manager.block_pool.null_block
         for mgr in managers:
-            blocks = mgr.req_to_blocks.get(request.request_id)
-            if not blocks:
-                continue
-            null_block = getattr(mgr, "_null_block", None)
-            if null_block is None:
-                # Fail safe: without a null block to compare against, the
-                # tripwire cannot prove the leading blocks are evicted, and the
-                # deletion pass below would drop live blocks unchecked.
-                logger.warning_once(
-                    "Re-anchor disabled: KV cache manager %s has no _null_block "
-                    "to validate evicted leading blocks against.",
-                    type(mgr).__name__,
+            blocks = mgr.req_to_blocks.get(request.request_id, [])
+            if any(b is not null_block for b in blocks[: d // mgr.block_size]):
+                logger.warning(
+                    "Not re-anchoring %s: a block below position %d is still "
+                    "allocated.",
+                    request.request_id,
+                    d,
                 )
                 return False
-            mgr_shift = d // mgr.block_size
-            for i in range(min(mgr_shift, len(blocks))):
-                if blocks[i] is not null_block:
-                    logger.warning(
-                        "Re-anchor aborted for %s: leading block %d not null "
-                        "in a KV group (window=%d, clock=%d).",
-                        request.request_id,
-                        i,
-                        sw,
-                        request.num_computed_tokens,
-                    )
-                    return False
-        # (1) token / position bookkeeping
+
         request.num_computed_tokens -= d
         del request._all_token_ids[:d]
         if request.prompt_token_ids is not None and len(request.prompt_token_ids) >= d:
             del request.prompt_token_ids[:d]
             request.num_prompt_tokens -= d
-        # (2) multimodal features: drop the dead leading features (those fully
-        # before the new origin -> beyond the window, audio long since
-        # transcribed and evicted) and shift the rest down by d. Dropping is
-        # required for unbounded duration: each audio chunk appends a feature
-        # whose ``data`` payload is non-trivial, so keeping them all leaks host
-        # RAM without bound. Features are referenced by LIST INDEX (input_id) by
-        # the encoder cache (request_cached_ids) and the per-step scheduler
-        # (get_mm_features_in_window binary-searches the monotonic offsets), so
-        # we release any still-cached dead input and reindex the survivors.
+
+        # Drop the mm features that end before d and shift the others. The
+        # encoder cache refers to features by list index, so reindex it.
         n_drop = 0
-        if request.mm_features:
-            for mm_feature in request.mm_features:
-                pos = mm_feature.mm_position
-                if pos.offset + pos.length <= d:
-                    n_drop += 1
-                else:
-                    break
-            if n_drop:
-                ecm = self.encoder_cache_manager
-                for i in list(ecm.get_cached_input_ids(request)):
-                    if i < n_drop:
-                        ecm.free_encoder_input(request, i)
-                rid = request.request_id
-                if rid in ecm.request_cached_ids:
-                    ecm.request_cached_ids[rid] = {
-                        i - n_drop for i in ecm.request_cached_ids[rid]
-                    }
-                del request.mm_features[:n_drop]
-            for mm_feature in request.mm_features:
-                pos = mm_feature.mm_position
-                mm_feature.mm_position = replace(pos, offset=pos.offset - d)
-        # (3) per-group block lists: drop the leading (d // mgr.block_size)
-        # already-null / evicted blocks. The count is PER manager (groups may have
-        # different block sizes under unequal windows), not one shared count.
-        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+        for mm_feature in request.mm_features:
+            pos = mm_feature.mm_position
+            if pos.offset + pos.length > d:
+                break
+            n_drop += 1
+        if n_drop:
+            ecm = self.encoder_cache_manager
+            for i in list(ecm.get_cached_input_ids(request)):
+                if i < n_drop:
+                    ecm.free_encoder_input(request, i)
+            cached_ids = ecm.request_cached_ids.get(request.request_id)
+            if cached_ids is not None:
+                ecm.request_cached_ids[request.request_id] = {
+                    i - n_drop for i in cached_ids
+                }
+            del request.mm_features[:n_drop]
+        for mm_feature in request.mm_features:
+            pos = mm_feature.mm_position
+            mm_feature.mm_position = replace(pos, offset=pos.offset - d)
+
+        for mgr in managers:
             blocks = mgr.req_to_blocks.get(request.request_id)
             if blocks:
-                mgr_shift = d // mgr.block_size
-                del blocks[: min(mgr_shift, len(blocks))]
-        # (4) Owe the worker an R(-D) key re-rotation; accumulate on the request
-        # so it survives an unscheduled step (shipped from schedule()).
+                del blocks[: d // mgr.block_size]
+
         request.pending_reanchor_d += d
-        request.reanchor_offset += d
         logger.info(
-            "Re-anchored streaming session %s by D=%d (clock now %d, total folded "
-            "%d; mm_features=%d dropped=%d all_tokens=%d).",
-            request.request_id,
-            d,
-            request.num_computed_tokens,
-            request.reanchor_offset,
-            len(request.mm_features) if request.mm_features else 0,
-            n_drop,
-            len(request._all_token_ids),
+            "Re-anchored %s: positions shifted down by %d.", request.request_id, d
         )
         return True
 
@@ -3125,9 +3041,6 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
-                # [EXPERIMENTAL] mark streaming-input sessions for unbounded
-                # re-anchoring (only effective for sliding-window models with
-                # prefix caching off; gated in _reanchor_session).
                 if self.scheduler_config.enable_unbounded_streaming:
                     request.reanchor_stream = True
             self._enqueue_waiting_request(request)

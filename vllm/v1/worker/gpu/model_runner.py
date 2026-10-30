@@ -846,8 +846,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
             if self.scheduler_config.enable_unbounded_streaming:
-                # [EXPERIMENTAL] Fail at startup, not mid-session, if a layer
-                # cannot be re-anchored.
+                # Raises if a layer cannot be re-anchored.
                 self.reanchor_rotary_specs = init_reanchor_rotary_specs(
                     self.model, kv_cache_config
                 )
@@ -1307,26 +1306,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.apply_staged_writes()
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded streaming.
-
-        The scheduler rebased each request's clock, tokens and block table, and
-        the re-added streaming request carries them here. Only the live cached
-        keys still sit at their old rotation: re-rotate them by R(-D) in every
-        KV group (see GPUModelRunner._reanchor_requests in the V1 runner).
-        """
+        """Re-rotate the cached keys of requests whose positions the scheduler
+        shifted down (--enable-unbounded-streaming)."""
         num_blocks = self.block_tables.num_blocks.np
         for req_id, d in reanchor_reqs.items():
-            req_index = self.req_states.req_id_to_index.get(req_id)
-            if req_index is None or d <= 0:
-                logger.error(
-                    "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
-                    "but not applicable (req_index=%s, D=%s). Key re-rotation "
-                    "dropped, so attention will be corrupted for this stream.",
-                    req_id,
-                    req_index,
-                    d,
-                )
-                continue
+            req_index = self.req_states.req_id_to_index[req_id]
             group_block_ids = [
                 table.gpu[req_index, : num_blocks[gid, req_index]].long()
                 for gid, table in enumerate(self.block_tables.block_tables)
@@ -1337,12 +1321,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 group_block_ids,
                 d,
                 self.reanchor_rotary_specs,
-            )
-            logger.info(
-                "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
-                req_id,
-                d,
-                int(self.req_states.num_computed_tokens_np[req_index]),
             )
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
@@ -1857,8 +1835,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
             if scheduler_output.reanchor_reqs:
-                # [EXPERIMENTAL] Unbounded streaming: the rebased block tables are
-                # written; re-rotate the live keys before the forward pass.
+                # After the block table writes, before the forward.
                 self._reanchor_requests(scheduler_output.reanchor_reqs)
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.

@@ -218,89 +218,67 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
 
-### Serving a sliding-window realtime model (Voxtral)
+### Serving Voxtral realtime
 
-For a sliding-window realtime model such as `Voxtral-Mini-4B-Realtime-2602`, per-stream
-KV memory is bounded by the attention window, not by `--max-model-len`. This gives two
-operator levers.
+`Voxtral-Mini-4B-Realtime-2602` uses a sliding window in every attention layer,
+in the text decoder and in the audio encoder. The KV cache of a session stops
+growing once both windows are full.
 
-**Concurrency: narrow the window.** The decoder's sliding window sets per-stream KV cost,
-so narrowing it lets more streams fit in KV:
+**Windows.** Both are set with `--hf-overrides`:
 
 ```bash
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
-  --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
-  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+  --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}'
 ```
 
-Per-stream KV (in blocks) plateaus at, per KV group (decoder + audio encoder):
+| Window | Key | Unit | Default |
+| ------ | --- | ---- | ------- |
+| Text (decoder) | `text_config.sliding_window` | token (80 ms of audio) | 8192 (~11 min) |
+| Audio (encoder) | `audio_config.sliding_window` | frame (20 ms of audio) | 750 (15 s) |
 
-```text
-blocks_per_stream = cdiv(min(sliding_window - 1 + max_num_batched_tokens, max_model_len), block_size) + 1
-```
-
-so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_stream`, and
-`num_gpu_blocks` scales with VRAM. vLLM logs this at startup as
-`Maximum concurrency for ... tokens per request: Nx`.
-
-!!! note
-    That `Nx` is a KV-admission ceiling (how many streams *fit* in KV), not measured
-    throughput, and it is computed for requests that fill `max_model_len` -- a realtime
-    session's KV plateaus at the sliding window instead, so for streaming the `Nx`
-    understates stream capacity and the per-stream formula above is the number to size
-    against. Real capacity is `min(KV at the window, compute, max_num_seqs)`; on small
-    GPUs compute saturates first (real-time falls behind) while VRAM stays flat.
-    Narrowing the window trades a little transcription fidelity for KV headroom, so
-    measure on your audio.
+Smaller windows use less KV cache per session, so more sessions fit in the same
+memory.
 
 !!! warning
-    Keep the decoder (text) window at 1024 or more. On long read speech, a 256 or 512
-    text window can drop punctuation and capitals for minutes at a time (up to ~3 min
-    in our tests); from 1024 up the model recovers within ~50 s, as with the default
-    window. A 256 window also lets the model lock into emitting only blanks over real
-    speech for minutes ([#47614](https://github.com/vllm-project/vllm/issues/47614)):
-    20 min of text lost over 8 streams in 90 min, none at 1024. Word accuracy barely
-    changes otherwise, and the audio window has no effect on either.
+    Keep the text window at 1024 or more. In our tests on long read speech, with a
+    256 text window the model dropped punctuation and capitals for up to 3 min at a
+    time, and over 8 streams in 90 min it output nothing over real speech for 20 min
+    in total ([#47614](https://github.com/vllm-project/vllm/issues/47614)). At 1024,
+    punctuation came back within 50 s, as with the default window, and 1.3 min was
+    lost. Changing the audio window (256 or 750) made no difference.
 
-!!! note
-    Narrowing the window also shrinks the encoder cache budget, so a server configured
-    this way rejects long **one-shot** clips on `/v1/audio/transcriptions` with a 400
-    (`exceeds the pre-allocated encoder cache size`) that the default config would accept.
-    Streaming sessions are unaffected (audio arrives in small chunks). Serve long offline
-    clips from a default (non-overridden) server, or raise the window.
+**Session length.** By default, `--max-model-len` caps a session: one text token
+per 80 ms of audio, so about 2 h 55 at 131072 (the default) and 11 min at 8192. At
+the cap, the server ends the session with `transcription.done`. The client has to
+reconnect, and the model starts again without context.
 
-**Duration: `--max-model-len` and unbounded streaming.** For realtime, `--max-model-len`
-also acts as a duration cap (about 1 text token per 80 ms of audio, so the 131072 default is ~2 h 55).
-A session that reaches it is finished gracefully (`FINISHED_LENGTH_CAPPED`) so the client can
-reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
+`--enable-unbounded-streaming` removes the cap. Before a session reaches
+`--max-model-len`, its positions are shifted down and its cached keys are
+re-rotated to match, so the attention scores do not change. The KV cache of the
+session stays bounded by the windows.
 
-```bash
-  --enable-unbounded-streaming --reanchor-margin-tokens 4096
-```
+- Requirements, checked at startup: every attention layer uses a sliding window
+  and RoPE (plain, Llama 3 or YaRN), the KV cache is not quantized, prefix caching
+  is off (`--no-enable-prefix-caching`), and the platform is CUDA. Nothing is
+  specific to Voxtral: any streaming-input session on such a model works the same
+  way, for example on Mistral-7B-v0.1.
+- `--reanchor-margin-tokens` (default 4096): the shift happens this many tokens
+  before `--max-model-len`. `max_model_len - margin - text window` must be at
+  least one KV cache block. It is also roughly the number of tokens between two
+  shifts: with 8192, 4096 and 1024, 3072 tokens, about 4 min.
 
-- `--enable-unbounded-streaming` (default off): periodically re-anchors the RoPE position clock
-  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache,
-  **prefix caching off** (`--no-enable-prefix-caching`), CUDA, and a model whose attention
-  layers all use a sliding window and RoPE (plain, Llama 3 or YaRN scaling); rejected at
-  startup otherwise. It is not specific to Voxtral: any streaming-input session on such a
-  model (for example Mistral-7B-v0.1) is re-anchored the same way.
-- `--reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
-  Must be smaller than `max_model_len - sliding_window`.
-
-**Fitting on a 16 GiB GPU.** The model plus a full `PIECEWISE` cudagraph capture leaves little
-room for KV on 16 GiB. The capture set scales with `--max-num-seqs`, so the default (256)
-captures large batch graphs you will never use and can OOM at startup. Set `--max-num-seqs` to
-your real concurrency (for example 16). `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also
-helps: it switches the allocator to growable segments, cuts fragmentation, and frees roughly
-1 GiB on a 16 GiB card, with no effect on results. A working unbounded config on a 16 GiB
-RTX 4090 Laptop, validated with 8 concurrent real-time streams (ramped in one every 10 min,
-90 min, no stream fell behind):
+**16 GiB GPU.** This command starts on an RTX 4090 Laptop (16 GiB):
 
 ```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
-  --max-model-len 8192 --no-enable-prefix-caching --max-num-seqs 12 \
-  --max-num-batched-tokens 256 --gpu-memory-utilization 0.82 \
-  --enable-unbounded-streaming \
-  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+  --max-model-len 8192 --max-num-batched-tokens 512 --max-num-seqs 12 \
+  --gpu-memory-utilization 0.82 --no-enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
+  --enable-unbounded-streaming
 ```
+
+CUDA graphs are captured for batches of up to 2 x `--max-num-seqs` tokens, so set
+`--max-num-seqs` to the number of sessions you need. `expandable_segments` reduces
+memory fragmentation and leaves about 1 GiB more for the KV cache on this card.

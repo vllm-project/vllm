@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Startup guard for --enable-unbounded-streaming: re-anchoring drops whole
-scheduler blocks past the sliding window, so max_model_len - margin -
-sliding_window must be at least one block."""
+"""--enable-unbounded-streaming: max_model_len - margin - sliding_window must
+be at least one block."""
 
 import pytest
 import torch
@@ -36,10 +35,10 @@ def _scheduler(margin: int):
 # 1024 - 640 - 256 = 128: exactly one block.
 @pytest.mark.parametrize("margin", [512, 640])
 def test_reanchor_headroom_ok(margin):
-    _scheduler(margin)._check_reanchor_headroom()
+    _scheduler(margin)._init_reanchor()
 
 
 @pytest.mark.parametrize("margin", [641, 700])
 def test_reanchor_headroom_too_small(margin):
-    with pytest.raises(ValueError, match="re-anchoring drops whole blocks"):
-        _scheduler(margin)._check_reanchor_headroom()
+    with pytest.raises(ValueError, match="must be at least the block size"):
+        _scheduler(margin)._init_reanchor()

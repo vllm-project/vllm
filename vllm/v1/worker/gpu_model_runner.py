@@ -1151,37 +1151,11 @@ class GPUModelRunner(
             self._kv_block_zeroer.zero_block_ids(block_ids)
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded streaming.
-
-        The scheduler has already rebased each request's clock and block table
-        (via _update_states re-adding the resumed session). The only thing left
-        here is to re-rotate the live cached keys by the constant R(-D) in every
-        KV group, dropping each key's effective RoPE position by D while every
-        in-window relative score is preserved exactly (proven in
-        tests/v1/worker/test_reanchor_rotary.py).
-
-        Runs at the between-steps barrier (after _update_states, before the
-        forward writes this step's keys).
-        """
+        """Re-rotate the cached keys of requests whose positions the scheduler
+        shifted down (--enable-unbounded-streaming)."""
         ib = self.input_batch
-        for req_id, D in reanchor_reqs.items():
-            idx = ib.req_id_to_index.get(req_id)
-            if idx is None or D <= 0:
-                # INVARIANT: reanchor_reqs only holds requests scheduled this
-                # step with a positive shift, so each must be in the persistent
-                # batch with D > 0. idx is None (absent from batch) or D <= 0
-                # both mean a scheduler bug; log and skip.
-                logger.error(
-                    "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
-                    "but not applicable (idx=%s, D=%s); expected it in the "
-                    "persistent batch with D > 0. Key re-rotation dropped, so "
-                    "attention will be corrupted for this stream. This should be "
-                    "unreachable; investigate schedule().",
-                    req_id,
-                    idx,
-                    D,
-                )
-                continue
+        for req_id, d in reanchor_reqs.items():
+            idx = ib.req_id_to_index[req_id]
             group_block_ids = [
                 torch.from_numpy(
                     bt.block_table.np[idx, : bt.num_blocks_per_row[idx]].copy()
@@ -1192,16 +1166,8 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context,
                 self.kv_cache_config.kv_cache_groups,
                 group_block_ids,
-                D,
+                d,
                 self.reanchor_rotary_specs,
-            )
-            # The persistent-batch row already carries the rebased (small) clock
-            # from full re-add.
-            logger.info(
-                "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
-                req_id,
-                D,
-                int(ib.num_computed_tokens_cpu[idx]),
             )
 
     # Note: used for model runner override.
@@ -4002,8 +3968,7 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
-            # [EXPERIMENTAL] Unbounded streaming: re-anchor requests at this
-            # between-steps barrier (no in-flight attention) before _prepare_inputs.
+            # Before this step's forward writes new keys.
             if scheduler_output.reanchor_reqs:
                 self._reanchor_requests(scheduler_output.reanchor_reqs)
 
@@ -7118,8 +7083,7 @@ class GPUModelRunner(
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         if self.scheduler_config.enable_unbounded_streaming and not is_profiling:
-            # [EXPERIMENTAL] Fail at startup, not mid-session, if a layer
-            # cannot be re-anchored.
+            # Raises if a layer cannot be re-anchored.
             self.reanchor_rotary_specs = init_reanchor_rotary_specs(
                 self.get_model(), kv_cache_config
             )

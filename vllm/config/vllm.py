@@ -1737,73 +1737,20 @@ class VllmConfig:
         if self.scheduler_config.enable_unbounded_streaming:
             from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
-            # Re-anchoring re-rotates cached keys in place; a quantized KV cache
-            # cannot be rotated. Reject at startup, not hours into a stream.
-            if self.cache_config is not None and is_quantized_kv_cache(
-                self.cache_config.cache_dtype
-            ):
+            # Cached keys are re-rotated in place.
+            if is_quantized_kv_cache(self.cache_config.cache_dtype):
                 raise ValueError(
-                    "enable_unbounded_streaming requires a non-fp8 KV cache; "
-                    f"got cache_dtype={self.cache_config.cache_dtype!r}."
+                    "--enable-unbounded-streaming does not support a quantized "
+                    f"KV cache (cache_dtype={self.cache_config.cache_dtype})."
                 )
-
-            # Re-anchoring rebases the per-group block lists in place; it cannot
-            # also rebase prefix-cache block hashes, so _reanchor_session is a
-            # silent no-op when prefix caching is on (scheduler.py). With prefix
-            # caching enabled (the default), the flag would be inert and the
-            # session still killed at max_model_len; worse, with the
-            # graceful-finish warning suppressed for re-anchor streams. Reject at
-            # startup rather than letting the feature silently do nothing.
-            if (
-                self.cache_config is not None
-                and self.cache_config.enable_prefix_caching
-            ):
+            # Block hashes would have to be rebased with the positions.
+            if self.cache_config.enable_prefix_caching:
                 raise ValueError(
-                    "enable_unbounded_streaming is incompatible with prefix "
-                    "caching (re-anchoring cannot rebase block hashes), but "
-                    "enable_prefix_caching is on. Pass --no-enable-prefix-caching."
+                    "--enable-unbounded-streaming requires --no-enable-prefix-caching."
                 )
-
-            # The worker re-rotation indexes the KV cache as (num_blocks, 2, ...)
-            # and reads head_size from the trailing dim; the layout shared by
-            # the CUDA attention family (FlashAttention/FlashInfer/Triton/
-            # FlexAttention). ROCm's default ROCM_ATTN backend uses
-            # (2, num_blocks, ...) and the CPU backend interleaves K/V into the
-            # trailing dim, so both would corrupt keys (CPU silently, since a
-            # 64-dim head's 2*head_size=128 trailing dim still passes the
-            # head_size assert). Restrict the experimental path to CUDA.
-            from vllm.platforms import current_platform
-
+            # Only tested with the KV cache layout of the CUDA backends.
             if not current_platform.is_cuda():
-                raise ValueError(
-                    "enable_unbounded_streaming is only supported on CUDA "
-                    "(the re-anchor key re-rotation assumes the CUDA "
-                    "attention-family KV layout); current platform is "
-                    f"{current_platform.device_name!r}."
-                )
-
-            if self.model_config is not None:
-                hf_config = self.model_config.hf_config
-                text_config = getattr(hf_config, "text_config", hf_config)
-                sliding_window = getattr(text_config, "sliding_window", None)
-                margin = self.scheduler_config.reanchor_margin_tokens
-                max_model_len = self.model_config.max_model_len
-                # Re-anchoring fires at max_model_len - margin. If the margin is
-                # not smaller than (max_model_len - sliding_window) that
-                # threshold collapses and re-anchoring thrashes or never engages.
-                if sliding_window is not None and (
-                    margin >= max_model_len - sliding_window
-                ):
-                    raise ValueError(
-                        "enable_unbounded_streaming needs head-room for "
-                        "re-anchoring: reanchor_margin_tokens "
-                        f"({margin}) must be smaller than max_model_len - "
-                        f"sliding_window ({max_model_len} - {sliding_window} = "
-                        f"{max_model_len - sliding_window}). Lower the margin or "
-                        "raise --max-model-len above sliding_window + margin."
-                    )
-            # Per-layer RoPE and sliding-window support is checked by the worker
-            # once the model and KV cache groups exist (reanchor_rotary.py).
+                raise ValueError("--enable-unbounded-streaming requires CUDA.")
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:

@@ -236,16 +236,10 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-        # [EXPERIMENTAL] Unbounded (re-anchored) streaming; set for streaming-input
-        # sessions under --enable-unbounded-streaming.
-        # reanchor_stream: the RoPE clock is periodically re-anchored down so the
-        #   session never reaches max_model_len. reanchor_offset: total tokens
-        #   folded by re-anchoring (log/diagnostic only). pending_reanchor_d:
-        #   tokens owed to the worker as an R(-D) key re-rotation, carried forward
-        #   if the rebased request fails to schedule a step so it is never lost.
-        #   See Scheduler._reanchor_session.
+        # --enable-unbounded-streaming: shift positions down before reaching
+        # max_model_len. pending_reanchor_d is the shift not yet sent to the
+        # worker (kept until the request is scheduled).
         self.reanchor_stream = False
-        self.reanchor_offset = 0
         self.pending_reanchor_d = 0
 
         # If True, request should be aborted immediately after being added to

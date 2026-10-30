@@ -77,19 +77,16 @@ class SchedulerConfig:
     """
 
     enable_unbounded_streaming: bool = False
-    """[EXPERIMENTAL] Let streaming-input sessions run without a duration limit
-    on sliding-window RoPE models (e.g. Voxtral realtime, Mistral-7B-v0.1).
-    Before a session's position clock reaches max_model_len, it is re-anchored:
-    the clock drops by D and the live cached keys are re-rotated by R(-D), so
-    every relative position is unchanged. The per-session KV cost stays bounded
-    by the sliding window. Requires a non-fp8 KV cache and prefix caching off.
-    Off by default."""
+    """[EXPERIMENTAL] Let streaming-input sessions run past max_model_len.
+    Before a session reaches max_model_len, its positions are shifted down and
+    its cached keys re-rotated to match. Requires every attention layer to use
+    a sliding window and RoPE, a non-quantized KV cache, prefix caching off and
+    CUDA."""
 
     reanchor_margin_tokens: int = Field(default=4096, ge=1)
-    """[EXPERIMENTAL] With `enable_unbounded_streaming`, re-anchor a streaming
-    session's sliding window this many tokens before its position clock would
-    reach max_model_len. Must be smaller than `(max_model_len - sliding_window)`;
-    a larger value leaves no head-room to re-anchor and is rejected at startup."""
+    """With `enable_unbounded_streaming`, shift a session's positions this many
+    tokens before it reaches max_model_len. max_model_len - margin - sliding
+    window must be at least one KV cache block."""
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
