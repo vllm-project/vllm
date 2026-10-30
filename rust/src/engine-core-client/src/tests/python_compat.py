@@ -597,10 +597,16 @@ mooncake_transfer_stats = {
     "num_failed_recvs": [],
     "num_kv_expired_reqs": [1],
 }
+# `UMBPStoreConnectorStats.data`: interval counters keyed by operation.
+umbp_stats = {
+    "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+    "store": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 4096},
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
+    "UMBPStoreConnector": umbp_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 
@@ -626,6 +632,7 @@ print(
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
+print(msgspec.msgpack.encode(umbp_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())

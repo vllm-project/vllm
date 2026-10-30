@@ -321,6 +321,44 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct MooncakeStats(pub BTreeMap<MooncakeOperation, Vec<MooncakeRecord>>);
 
+    /// UMBP store connector transfer operation name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum UmbpOperation {
+        Load,
+        Store,
+    }
+
+    impl UmbpOperation {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::Load => "load",
+                Self::Store => "store",
+            }
+        }
+    }
+
+    /// Interval counters of one UMBP store transfer operation.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct UmbpOperationCounts {
+        /// Objects submitted.
+        pub submitted: u64,
+        /// Objects completed.
+        pub completed: u64,
+        /// Objects failed.
+        pub failed: u64,
+        /// Bytes in successfully completed transfer ranges.
+        pub num_bytes: u64,
+    }
+
+    /// UMBP store connector telemetry grouped by operation.
+    ///
+    /// Original Python definition: `UMBPStoreConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/umbp/stats.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -335,6 +373,8 @@ pub mod kv_connector {
         pub mooncake_transfer: Option<MooncakeTransferStats>,
         #[serde(rename = "MooncakeStoreConnector")]
         pub mooncake: Option<MooncakeStats>,
+        #[serde(rename = "UMBPStoreConnector")]
+        pub umbp: Option<UmbpStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -355,6 +395,7 @@ pub mod kv_connector {
         Nixl(NixlStats),
         MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
+        Umbp(UmbpStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }
@@ -404,7 +445,7 @@ pub struct SchedulerStats {
 mod tests {
     use super::{
         CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
-        SchedulerStats,
+        SchedulerStats, UmbpOperation,
     };
 
     #[test]
@@ -454,14 +495,25 @@ mod tests {
             decode(mooncake_transfer.clone()),
             KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
         ));
+        let umbp = serde_json::json!({
+            "load": {"submitted": 2, "completed": 1, "failed": 1, "num_bytes": 4096,
+                     "future_counter": 1}
+        });
+        assert!(matches!(
+            decode(umbp.clone()),
+            KvConnectorStats::Umbp(stats)
+                if stats.0[&UmbpOperation::Load].num_bytes == 4096
+        ));
         // A newer child payload must not drop its siblings.
         assert!(matches!(
             decode(serde_json::json!({
                 "NixlConnector": nixl,
                 "MooncakeConnector": mooncake_transfer,
+                "UMBPStoreConnector": umbp,
             })),
             KvConnectorStats::Multi(stats)
                 if stats.nixl.is_some() && stats.mooncake_transfer.is_some()
+                    && stats.umbp.is_some()
         ));
     }
 
