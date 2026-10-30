@@ -15,6 +15,9 @@ eager execution does not guarantee. Everything else takes the usual path.
 into one kernel through an Inductor pass (``JartAllReduceRMSNormPass``).
 """
 
+import math
+import os
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -26,6 +29,9 @@ logger = init_logger(__name__)
 
 # Messages up to 128 rows x 8192 halves (the capture sizes this is built for).
 _MAX_ROWS, _MAX_COLS = 128, 8192
+# All-gather input limit in 16-bit words (kMaxNumel in jart_ar.cu).
+_MAX_GATHER_WORDS = 256 * 1024
+_GATHER_ENABLED = os.environ.get("VLLM_JART_AG", "1") == "1"
 
 
 class JartAllReduce:
@@ -70,6 +76,28 @@ class JartAllReduce:
             inp = inp.clone(memory_format=torch.contiguous_format)
         out = torch.empty_like(inp)
         self.ops.all_reduce(self.ctx, inp, out, self.algo)
+        return out
+
+    def should_gather(self, inp: torch.Tensor, eager: bool = False) -> bool:
+        """Same graph-capture contract as the all-reduce; ``eager`` is for call
+        sites that run in the same order on every rank outside capture."""
+        return (
+            _GATHER_ENABLED
+            and not self.disabled
+            and inp.device == self.device
+            and inp.is_contiguous()
+            and inp.element_size() % 2 == 0
+            and 0 < inp.numel() * inp.element_size() // 2 <= _MAX_GATHER_WORDS
+            and (eager or torch.cuda.is_current_stream_capturing())
+        )
+
+    def all_gather(self, inp: torch.Tensor, dim: int) -> torch.Tensor:
+        if dim < 0:
+            dim += inp.dim()
+        shape = list(inp.shape)
+        shape[dim] *= self.world
+        out = inp.new_empty(shape)
+        self.ops.all_gather(self.ctx, inp, out, math.prod(inp.shape[dim:]))
         return out
 
 

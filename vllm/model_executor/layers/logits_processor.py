@@ -10,9 +10,11 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
+from vllm.forward_context import has_thread_local_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -75,6 +77,20 @@ def _packed_topk_supported(logits: torch.Tensor, k: int, tp_size: int) -> bool:
     )
 
 
+def _all_gather_rows(x: torch.Tensor) -> torch.Tensor:
+    """The sampler runs eagerly but in the same order on every rank, so it can
+    take the jart all-gather outside graph capture (not from a prefill lane,
+    which runs concurrently with the main runner)."""
+    comm = getattr(get_tp_group().device_communicator, "jart_ar_comm", None)
+    if (
+        comm is not None
+        and not has_thread_local_forward_context()
+        and comm.should_gather(x, eager=True)
+    ):
+        return comm.all_gather(x, 0)
+    return tensor_model_parallel_all_gather(x, dim=0)
+
+
 def _packed_topk(
     logits: torch.Tensor, k: int, id_offset: int, tp_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -91,7 +107,7 @@ def _packed_topk(
     cand = torch.empty(rows * slices * k, dtype=torch.int64, device=device)
     local = torch.empty(rows, k, dtype=torch.int64, device=device)
     torch.ops._rocm_C.topk_local_packed(logits, k, id_offset, cand, counters, local)
-    gathered = tensor_model_parallel_all_gather(local, dim=0) if tp_size > 1 else local
+    gathered = _all_gather_rows(local) if tp_size > 1 else local
     ids = torch.empty(rows, k, dtype=torch.int64, device=device)
     values = torch.empty(rows, k, dtype=torch.float32, device=device)
     torch.ops._rocm_C.topk_merge_packed(gathered, tp_size, ids, values)
