@@ -65,8 +65,9 @@ pub enum CoordinatorMode {
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
-    /// Which generated outputs to log (`--enable-log-outputs`).
-    pub log_outputs: OutputLogging,
+    /// Which generated outputs to log (`--enable-log-outputs`), and how much
+    /// of each (`--max-log-len`).
+    pub log_outputs: OutputLogConfig,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
     /// Format logprob tokens as `token_id:{id}` unless the request sets
@@ -112,6 +113,29 @@ impl OutputLogging {
     /// Whether each streamed delta is logged.
     pub fn logs_deltas(self) -> bool {
         matches!(self, Self::CompleteAndDeltas)
+    }
+}
+
+/// Generated-output logging, like Python's `RequestLogger` used for
+/// `--enable-log-outputs`: which outputs to log and how much of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct OutputLogConfig {
+    /// Which generated outputs to log.
+    pub outputs: OutputLogging,
+    /// Maximum number of characters or token IDs of each logged output
+    /// (`--max-log-len`); `None` logs them in full.
+    pub max_log_len: Option<usize>,
+}
+
+impl OutputLogConfig {
+    /// Whether the complete output of each response is logged.
+    pub fn logs_complete(self) -> bool {
+        self.outputs.logs_complete()
+    }
+
+    /// Whether each streamed delta is logged.
+    pub fn logs_deltas(self) -> bool {
+        self.outputs.logs_deltas()
     }
 }
 
