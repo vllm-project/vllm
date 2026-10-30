@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import vllm.envs as envs
-import vllm.models.glm5next.nvidia.sparse_indexer as kpool_indexer
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_available,
@@ -373,6 +372,8 @@ def _kpool_inputs(pool_lens=(20000, 70000), q_rows=96, tail=2, seed=919):
 
 def _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk, budget_mb=512):
     """Run the GLM-5.3-Flash kpool indexer prefill on one packed chunk."""
+    import vllm.models.glm5next.nvidia.sparse_indexer as kpool_indexer
+
     q, k, scales, weights, starts, ends, positions = inputs
     rows, keys = q.shape[0], k.shape[0]
     chunk = DeepseekV32IndexerPrefillChunkMetadata(
