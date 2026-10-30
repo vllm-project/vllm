@@ -135,6 +135,13 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
     #pragma unroll
     for (int64_t k = 0; k < num_chunks; k++) {
+        // The last warp may own fewer chunks than num_chunks: loading the
+        // rest would read past the end of `a`. The cp.async.wait_group counts
+        // below already assume only real_num_chunks groups were committed.
+        if constexpr(enable_mask) {
+            if (k >= real_num_chunks)
+                break;
+        }
         size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
         #if (__CUDA_ARCH__ >= 900) // SM90
             asm volatile(

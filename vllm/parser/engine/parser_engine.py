@@ -147,6 +147,7 @@ class ParserEngine(Parser):
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
+        self._prompt_closes_reasoning: bool = False
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
 
@@ -157,6 +158,9 @@ class ParserEngine(Parser):
         self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
+        self._complete_tool_call_validator = (
+            parser_engine_config.complete_tool_call_validator
+        )
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
         self._arg_value_extender = parser_engine_config.arg_value_extender
         self._stream_arg_deltas = parser_engine_config.stream_arg_deltas
@@ -231,6 +235,18 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Start parsing in content when the prompt already closes reasoning,
+        as with continue_final_message or a template that switches thinking
+        off. Only configs with turn boundaries can tell a closed block in
+        this turn from one in an earlier turn, so others are left as is.
+        """
+        self._prompt_closes_reasoning = (
+            self.parser_engine_config.initial_state is ParserState.REASONING
+            and bool(self._turn_boundary_token_ids)
+            and self.is_reasoning_end(list(prompt_token_ids))
+        )
+
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
         return
@@ -242,8 +258,11 @@ class ParserEngine(Parser):
         return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
-        self._engine.reset(initial_state=initial_state)
-        self._reasoning_ended = not self._has_reasoning
+        prompt_closed = initial_state is None and self._prompt_closes_reasoning
+        self._engine.reset(
+            initial_state=ParserState.CONTENT if prompt_closed else initial_state
+        )
+        self._reasoning_ended = not self._has_reasoning or prompt_closed
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
@@ -342,8 +361,10 @@ class ParserEngine(Parser):
         their unterminated content instead of buffering long arguments until
         the closing tag arrives.
 
-        Also returns whether the prefix ends inside that streamed trailing
-        string value.
+        Also returns whether the returned prefix stops inside that trailing
+        string, so streamed text may be appended to it.  This holds even when
+        *json_str* closes the string: converters serialise an open raw value
+        as a closed JSON string.
         """
         last_colon = -1
         last_key: str | None = None
@@ -593,6 +614,15 @@ class ParserEngine(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
+        if (
+            self._complete_tool_call_validator is not None
+            and self._complete_tool_call_validator(model_output) is False
+        ):
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output,
+            )
         self._reset()
         self._streaming_initialized = True
         result = self.extract_tool_calls_streaming(
@@ -675,6 +705,11 @@ class ParserEngine(Parser):
     @property
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
+
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         """First reasoning end in `token_ids`, and if its token is content."""
@@ -761,6 +796,19 @@ class ParserEngine(Parser):
         Must be called as a unit — ``_events_to_delta`` populates tool
         state that ``_build_extracted_result`` reads.
         """
+        if (
+            self._complete_tool_call_validator is not None
+            and self._complete_tool_call_validator(text) is False
+        ):
+            return (
+                None,
+                text or None,
+                ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=text,
+                ),
+            )
         self._reset(initial_state=initial_state)
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
@@ -1053,11 +1101,8 @@ class ParserEngine(Parser):
         if not self._stream_arg_deltas:
             return None
 
-        structural = self._arg_structural_chars
-        if structural is not None and structural.isdisjoint(raw_delta):
-            return None
-
         slot = self._tool_slots[idx]
+        structural = self._arg_structural_chars
         if slot.extend_open_value is not None:
             diff = slot.extend_open_value(raw_delta)
             if diff is not None:
@@ -1066,6 +1111,8 @@ class ParserEngine(Parser):
                 slot.append_streamed(diff)
                 return diff
             slot.extend_open_value = None
+        elif structural is not None and structural.isdisjoint(raw_delta):
+            return None
 
         try:
             current_json = converter(slot.args, True)

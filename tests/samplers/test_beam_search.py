@@ -99,6 +99,7 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
 
     llm = LLM.__new__(LLM)
     llm.llm_engine = Mock()
+    llm.llm_engine.input_processor.generation_config_fields = {}
     tokenizer = SimpleNamespace(
         eos_token_id=0,
         decode=lambda tokens, skip_special_tokens=False: " ".join(

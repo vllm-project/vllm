@@ -196,6 +196,11 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        return None
+
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 
@@ -869,7 +874,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -1035,9 +1041,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1466,6 +1474,28 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the platform's KV cache
+        config builder.
+
+        .. note::
+            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
+
+        The builder supplies grouping (``get_kv_cache_groups``) and tensor
+        placement (``get_kv_cache_config_from_groups``). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
+        a builder that overrides ``get_kv_cache_groups`` owns grouping and
+        bypasses that model hook unless it calls ``super()``.
+
+        Returns:
+            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
+
+        """
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):
