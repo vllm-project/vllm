@@ -1,0 +1,32 @@
+model_name: "nvidia/DeepSeek-V4.1-Flash-NVFP4"
+accuracy_threshold: 0.88
+tolerance: 0.03
+# Adaptive verification intentionally trims drafts; require real acceptance.
+min_acceptance_length: 1.2
+num_questions: 1319
+num_fewshot: 5
+# Uneven owner batches exercise local graph dispatch and global input staging.
+max_concurrency: 17
+startup_max_wait_seconds: 1800
+# Match the real-weight TP4 DSpark baseline, including its checkpoint revision.
+# Exercise variable-length target graphs and fixed-length DSpark draft graphs.
+server_args: >-
+  --revision 3431dde3247c13b5957f682b1e3c6fcae2566079
+  --language-model-only
+  --tokenizer-mode deepseek_v41
+  --trust-remote-code
+  --max-model-len 8192
+  --max-num-seqs 32
+  --max-num-batched-tokens 4096
+  --prefill-context-parallel-size 4
+  --enable-expert-parallel
+  --all2all-backend allgather_reducescatter
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enable_adaptive_verification":true}'
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512,768,1024],"max_cudagraph_capture_size":1024}'
+  --enable-prefix-caching
+  --swa-bounded-replay
+  --cudagraph-metrics
+  --no-async-scheduling
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "1"

@@ -23,6 +23,9 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
 )
+from vllm.v1.worker.gpu.spec_decode.pcp_adaptive_verification import (
+    PCPAdaptiveVerification,
+)
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
@@ -214,13 +217,14 @@ def build_cost_tables_from_curves(
 class AdmittedDraftCounts:
     """Per-request admitted draft counts, in flight to the host."""
 
-    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event | None):
         self._cpu = cpu
         self._event = event
 
     def wait(self) -> np.ndarray:
-        with gpu_sync_allowed():
-            self._event.synchronize()
+        if self._event is not None:
+            with gpu_sync_allowed():
+                self._event.synchronize()
         return self._cpu.numpy()
 
 
@@ -232,8 +236,15 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
+        pcp_size: int = 1,
+        pcp_shard_decode_requests: bool = True,
     ):
         self.req_states = req_states
+        self.pcp = (
+            PCPAdaptiveVerification(pcp_size, pcp_shard_decode_requests)
+            if pcp_size > 1
+            else None
+        )
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
         self._copy_stream = torch.cuda.Stream(device)
@@ -400,6 +411,8 @@ class AdaptiveVerificationManager:
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
+        *,
+        has_prefill: bool = False,
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
@@ -459,6 +472,15 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        if self.pcp is not None:
+            draft_budget = self.pcp.plan(
+                survival_probability,
+                scheduled_drafts,
+                num_non_draft_tokens,
+                self.cost_tables,
+                max_draft_budget,
+                has_prefill,
+            )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -481,6 +503,15 @@ class AdaptiveVerificationManager:
         batch_budget = self._batch_budget
         assert batch_budget is not None
         _, _, draft_budget = batch_budget
+        if self.pcp is not None:
+            assert self.pcp.admitted_drafts is not None
+            assert self.pcp.num_tokens_per_req is not None
+            cu_num_logits_np = np.zeros_like(cu_num_logits_np)
+            np.cumsum(
+                self.pcp.admitted_drafts + self.num_bonus_tokens,
+                out=cu_num_logits_np[1:],
+            )
+            return self.pcp.num_tokens_per_req, cu_num_logits_np
         num_drafts = int(num_draft_tokens_per_req.sum())
         if draft_budget == num_drafts:
             return num_scheduled_tokens, cu_num_logits_np
@@ -532,7 +563,10 @@ class AdaptiveVerificationManager:
         # capacities enters holding each request's valid draft count (the kernel
         # uses it to bound eligible slots) and leaves holding the admitted count.
         capacities = self._batch_draft_capacity[:num_reqs]
-        if draft_budget == 0:
+        if self.pcp is not None:
+            assert self.pcp.admitted_drafts is not None
+            async_tensor_h2d(self.pcp.admitted_drafts, out=capacities)
+        elif draft_budget == 0:
             capacities.zero_()
         else:
             async_tensor_h2d(scheduled_drafts, out=capacities)
@@ -562,7 +596,11 @@ class AdaptiveVerificationManager:
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
 
         admitted_drafts = None
-        if self._copy_admitted_drafts_to_host and (
+        if self.pcp is not None:
+            admitted_drafts = AdmittedDraftCounts(
+                torch.from_numpy(self.pcp.admitted_drafts), None
+            )
+        elif self._copy_admitted_drafts_to_host and (
             0 < draft_budget < int(scheduled_drafts.sum())
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
@@ -594,6 +632,8 @@ def maybe_create_adaptive_verification_manager(
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
     copy_admitted_drafts_to_host: bool = False,
+    pcp_size: int = 1,
+    pcp_shard_decode_requests: bool = True,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
@@ -643,4 +683,6 @@ def maybe_create_adaptive_verification_manager(
         num_bonus_tokens,
         max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
+        pcp_size=pcp_size,
+        pcp_shard_decode_requests=pcp_shard_decode_requests,
     )

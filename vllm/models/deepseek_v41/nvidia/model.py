@@ -713,10 +713,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or self.parallel_config.use_ubatching
             or (
                 vllm_config.speculative_config is not None
-                and (
-                    not vllm_config.speculative_config.use_dspark()
-                    or vllm_config.speculative_config.enable_adaptive_verification
-                )
+                and not vllm_config.speculative_config.use_dspark()
             )
             or vllm_config.kv_transfer_config is not None
             or (
@@ -728,7 +725,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             raise NotImplementedError(
                 "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
                 "microbatching, KV transfer, or MegaMoE. "
-                "Speculative decoding requires fixed-length DSpark. "
+                "Speculative decoding requires DSpark. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
@@ -1111,7 +1108,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 hidden_states,
                 positions,
                 local_input_ids
-                if self.decoder_replay_layers.replay_batch is not None
+                if self.decoder_replay_layers.uses_replay_batch()
                 else input_ids,
                 pre_mix,
                 post_mix,
@@ -1255,11 +1252,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         """Layers ``decoder_replay_start``.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
         assert self.decoder_replay_layers is not None
+        # Outer PIECEWISE capture passes local ids before a replay batch is set.
         if (
             input_ids is not None
             and self.parallel_config.prefill_context_parallel_size > 1
             and not self.parallel_config.enable_expert_parallel
-            and self.decoder_replay_layers.replay_batch is not None
+            and (
+                self.decoder_replay_layers.replay_batch is not None
+                or self.decoder_replay_layers.uses_replay_batch()
+            )
         ):
             input_ids = get_pcp_group().all_gather(input_ids, dim=0)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
