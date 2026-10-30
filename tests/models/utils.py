@@ -556,6 +556,23 @@ def dummy_hf_overrides(
 
     text_config.update(update_dict)
 
+    if (
+        model_arch == "SenseNovaLoopForConditionalGeneration"
+        and not use_original_num_layers
+        and hasattr(hf_config, "loop_physical_layer_types")
+    ):
+        layer_types = list(dict.fromkeys(hf_config.loop_physical_layer_types))
+        num_physical_layers = len(layer_types)
+        hf_config.loop_physical_num_layers = num_physical_layers
+        hf_config.loop_physical_layer_types = layer_types
+        hf_config.loop_settings = {
+            "start": 0,
+            "end": num_physical_layers,
+            "eval_count": 2,
+        }
+        if hf_config.mhc is not None:
+            hf_config.mhc = dict(hf_config.mhc, start=0, end=num_physical_layers)
+
     # Keep per-layer metadata consistent with the reduced layer count.
     # HY V4 uses this to decide which sparse-attention indexers are shared.
     if indexer_types := getattr(text_config, "indexer_types", None):
