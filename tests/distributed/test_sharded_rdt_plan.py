@@ -35,6 +35,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
     _dtype_from_name,
+    _install_recording_stamps,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -383,15 +384,53 @@ class TestBakeRecording:
         assert (twos.fill, twos.offset) == (2.0, 0)
         assert rec.copied_names == set()
 
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda w: w.new_zeros(2, 6),
+            lambda w: w.new_zeros((2, 6)),
+            lambda w: w.new_ones(size=(2, 6)),
+            lambda w: w.new_full((2, 6), fill_value=3.0),
+        ],
+    )
+    def test_constants_take_the_tensor_call_forms(self, make):
+        rec, fake = self._recorder_and_fake()
+        constant = make(fake)
+        assert isinstance(constant, FakeRDTTensor)
+        assert tuple(constant.shape) == (2, 6)
+        assert constant.dtype is torch.bfloat16
+
+    def test_a_copy_into_a_fake_is_refused_at_bake(self):
+        """Padding through a constant buffer (copy the weight into a
+        ``new_zeros`` buffer, then the buffer into the param) cannot be
+        replayed: the buffer's region is not the param's."""
+        rec, fake = self._recorder_and_fake()
+        rec.current = (_FakeLayer("padded"), "weight")
+        buf = fake.new_zeros((8, 6))
+        with pytest.raises(_UnsupportedFakeOp, match="copy_ into fake"):
+            buf.narrow(0, 4, 4).copy_(fake)
+
     def test_a_copy_into_a_reinterpreting_view_is_refused_at_bake(self):
         """The replay writes ``param.data`` in the parameter's dtype, so a copy
-        recorded through a view of another dtype would land elsewhere."""
-        rec, fake = self._recorder_and_fake(shape=(4, 6))
-        rec.current = (_FakeLayer("fp8_rows"), "weight")
-        rec.current_dtype = torch.float8_e4m3fn
-        param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
+        recorded through a view of another dtype (FP8 bytes written into a BF16
+        weight) would land elsewhere."""
+        rec = BakeSink()
+        fake = FakeRDTTensor(
+            name="w",
+            shape=torch.Size((4, 6)),
+            dtype=torch.float8_e4m3fn,
+            device=META,
+            sink=rec,
+        )
+
+        def fp8_rows_loader(param, loaded_weight):
+            param.data.view(torch.float8_e4m3fn)[:, :6].copy_(loaded_weight)
+
+        layer = torch.nn.Linear(6, 4, bias=False, device=META, dtype=torch.bfloat16)
+        layer.weight.weight_loader = fp8_rows_loader
+        _install_recording_stamps(layer, rec)
         with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
-            param.copy_(fake)
+            layer.weight.weight_loader(layer.weight, fake)
 
     def test_a_broadcasting_copy_is_refused_at_bake(self):
         """The packed layout sizes each slice from the DESTINATION shape while

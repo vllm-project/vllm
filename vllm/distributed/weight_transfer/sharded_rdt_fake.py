@@ -12,7 +12,7 @@ Chains are built against meta tensors, so nothing here touches Ray or a GPU.
 """
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -245,6 +245,13 @@ class FakeRDTTensor(torch.Tensor):
         if func is torch.Tensor.copy_:
             dest = args[0]
             src = args[1] if len(args) > 1 else kwargs.get("src")
+            if isinstance(dest, cls):
+                # e.g. padding into a ``new_zeros`` buffer: the replay cannot
+                # compose the copies recorded into and out of the buffer.
+                raise _UnsupportedFakeOp(
+                    f"FakeRDTTensor: copy_ into fake {dest._name!r}; a fake can "
+                    "only be the source of a copy_ under the sharded RDT backend."
+                )
             if isinstance(src, cls) and src._sink is not None:
                 return src._sink.accept_copy(dest, src)
 
@@ -329,12 +336,17 @@ class FakeRDTTensor(torch.Tensor):
 
 
 def _constant(
-    like: FakeRDTTensor, size, value: float, dtype: torch.dtype | None = None, **_
+    like: FakeRDTTensor,
+    size: Sequence[int],
+    value: float,
+    dtype: torch.dtype | None = None,
+    **_,
 ) -> FakeRDTTensor:
-    shape = torch.Size(size if isinstance(size, (tuple, list, torch.Size)) else [size])
+    if len(size) == 1 and isinstance(size[0], (tuple, list, torch.Size)):
+        size = size[0]
     return FakeRDTTensor(
         name=f"<constant {value}>",
-        shape=shape,
+        shape=torch.Size(size),
         dtype=dtype or like.dtype,
         device=like.device,
         sink=like._sink,
@@ -342,10 +354,21 @@ def _constant(
     )
 
 
+def _new_ones(like, *size, **kwargs) -> FakeRDTTensor:
+    return _constant(like, size or (kwargs.pop("size"),), 1, **kwargs)
+
+
+def _new_zeros(like, *size, **kwargs) -> FakeRDTTensor:
+    return _constant(like, size or (kwargs.pop("size"),), 0, **kwargs)
+
+
+def _new_full(like, size, fill_value, **kwargs) -> FakeRDTTensor:
+    return _constant(like, (size,), fill_value, **kwargs)
+
+
+# Same call forms as ``Tensor.new_*``.
 _CONSTANTS: dict[Callable, Callable[..., FakeRDTTensor]] = {
-    torch.Tensor.new_ones: lambda like, size, **kw: _constant(like, size, 1, **kw),
-    torch.Tensor.new_zeros: lambda like, size, **kw: _constant(like, size, 0, **kw),
-    torch.Tensor.new_full: lambda like, size, value, **kw: _constant(
-        like, size, value, **kw
-    ),
+    torch.Tensor.new_ones: _new_ones,
+    torch.Tensor.new_zeros: _new_zeros,
+    torch.Tensor.new_full: _new_full,
 }
