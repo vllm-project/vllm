@@ -50,7 +50,7 @@
         "num_warps": 8,
         "num_stages": 2,
         "EXACT_M": true,
-        "N_STRIPE": 4
+        "N_STRIPE": 2
     },
     "1024": {
         "BLOCK_SIZE_M": 128,
@@ -76,6 +76,7 @@
         "num_warps": 8,
         "num_stages": 2,
         "EXACT_M": true,
+        "N_STRIPE": 16,
         "UNMASKED_LOADS": true
     },
     "8192": {
@@ -94,6 +95,7 @@
         "num_warps": 8,
         "num_stages": 2,
         "EXACT_M": true,
+        "GROUP_M": 2,
         "UNMASKED_LOADS": true
     },
     "32768": {
@@ -103,6 +105,7 @@
         "num_warps": 8,
         "num_stages": 2,
         "EXACT_M": true,
+        "GROUP_M": 2,
         "UNMASKED_LOADS": true
     }
 }
