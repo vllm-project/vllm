@@ -405,9 +405,11 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
     def check(result):
         output, lse, q8, qs, (k8, v8, ks, vs) = result
         assert k8.dtype == v8.dtype == torch.float8_e4m3fn
-        latent = cache.double()[indices.long()] * cache_scale.double()
+        # Keep the FP64 oracle independent of the GPU BLAS implementation.
+        latent = cache.cpu().double()[indices.cpu().long()] * cache_scale.cpu().double()
         expanded = (
-            latent[:, :512] @ (weight.double() * weight_scale.double()[:, None]).t()
+            latent[:, :512]
+            @ (weight.cpu().double() * weight_scale.cpu().double()[:, None]).t()
         ).view(-1, heads, 256)
         expected_k = torch.cat(
             (expanded[..., :128], latent[:, None, 512:].expand(-1, heads, -1)),
@@ -417,14 +419,14 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
             (k8, expected_k, ks),
             (v8, expanded[..., 128:], vs),
         ):
-            error = value.double() * descale.double() - expected
+            error = value.cpu().double() * descale.cpu().double() - expected
             assert torch.isfinite(error).all()
             assert error.square().mean().sqrt() / expected.square().mean().sqrt() < 0.04
             assert error.abs().max() / expected.abs().max() < 0.07
-            assert torch.all(expected.abs() <= 448 * descale.double())
-        qf = q8.float() * qs
-        kf = k8.float() * ks
-        vf = v8.float() * vs
+            assert torch.all(expected.abs() <= 448 * descale.cpu().double())
+        qf = q8.cpu().double() * qs.cpu().double()
+        kf = k8.cpu().double() * ks.cpu().double()
+        vf = v8.cpu().double() * vs.cpu().double()
         for qslice, kslice in (
             (slice(0, 7), slice(0, 129)),
             (slice(7, 20), slice(129, 386)),
@@ -432,10 +434,10 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
             logits = torch.einsum("qhd,khd->hqk", qf[qslice], kf[kslice]) * SCALE
             expected_out = torch.einsum("hqk,khd->qhd", logits.softmax(-1), vf[kslice])
             torch.testing.assert_close(
-                output[qslice].float(), expected_out, atol=2e-3, rtol=2e-3
+                output[qslice].cpu().double(), expected_out, atol=2e-3, rtol=2e-3
             )
             torch.testing.assert_close(
-                lse[:, qslice], logits.logsumexp(-1), atol=1e-3, rtol=0
+                lse[:, qslice].cpu().double(), logits.logsumexp(-1), atol=1e-3, rtol=0
             )
 
     for _ in range(2):
@@ -452,7 +454,7 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
 
 
 @requires_gfx950
-def test_flydsl_fp8_native_weight_layout(default_vllm_config):
+def test_flydsl_fp8_native_weight_layout(default_vllm_config, dist_init):
     """The native online layer's stored weight layout reaches the same matmul."""
     from vllm.config.model import ModelConfig
     from vllm.config.quantization import QuantizationConfigArgs
