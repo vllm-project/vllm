@@ -277,9 +277,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 reduce_results=reduce_results,
                 # This path runs outside torch.compile, as the overlap requires.
                 overlap_ba_proj=True,
-                # Recover the inductor gated-norm fusion with a Triton kernel
-                # that also reads z strided from the packed qkvz projection,
-                # and fuses the out_proj input quantization into it.
+                # Recover the inductor gated-norm fusion (z read strided
+                # from packed qkvz), with out_proj's input quant fused in.
                 fused_gdn_gated_rms_norm=_fused_gdn_gated_rms_norm_quant,
             )
         elif self.layer_type == "full_attention":
@@ -366,11 +365,9 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         if self.use_attn_reduce_scatter_for_moe:
             return super().forward(hidden_states, residual, positions, **kwargs)
 
-        # Each norm either absorbs the deferred all-reduce of the preceding
-        # row-parallel linear (use_fused_allreduce_norm), or quantizes its
-        # output for the linear it feeds when that linear's kernel takes a
-        # pre-quantized input. layer_scale is a per-channel multiply, which
-        # commutes with the deferred all-reduce.
+        # Each norm absorbs the preceding row-parallel linear's deferred
+        # all-reduce (use_fused_allreduce_norm), or quantizes for its
+        # consumer. layer_scale commutes with the deferred all-reduce.
         is_gdn = self.layer_type == "linear_attention"
         in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj
         in_proj_input = None

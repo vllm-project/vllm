@@ -737,10 +737,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated
-        # RMS norm that reads z as a strided view of the packed qkvz
-        # projection, removing the z reshape copy. It returns the out_proj
-        # input: `out`, or a pre-quantized activation.
+        # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
+        # norm that reads z strided from the packed qkvz projection and
+        # returns the out_proj input: `out`, or a pre-quantized activation.
         self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():

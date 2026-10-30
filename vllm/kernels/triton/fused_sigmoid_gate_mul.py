@@ -71,8 +71,8 @@ def fused_sigmoid_gate_mul(
         out = x * torch.sigmoid(gate)
         if scale is None:
             return out
-        # E.g. a strided gate view at num_heads == 1 per TP rank: quantize
-        # the eager result, matching the unfused chain.
+        # Strided gate view (num_heads == 1 per TP rank): quantize the eager
+        # result, matching the unfused chain.
         from vllm import _custom_ops as ops
 
         return ops.scaled_fp8_quant(out, scale, group_shape=(-1, -1))[0]

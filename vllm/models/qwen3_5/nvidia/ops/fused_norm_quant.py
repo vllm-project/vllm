@@ -85,8 +85,7 @@ def _gemma_add_rms_norm_quant_kernel(
         tl.extra.cuda.gdc_wait()
         if TRIGGER_EARLY:
             # Launch dependents before the loads: the consumer (e.g. the
-            # weight-loading GEMM) overlaps with this kernel. Gated by M in
-            # the wrapper — at large M the prelaunched grid steals SMs.
+            # weight-loading GEMM) overlaps with this kernel.
             tl.extra.cuda.gdc_launch_dependents()
     x = tl.load(x_ptr + row * H + cols, mask=mask, other=0.0)
     if HAS_RESIDUAL:
@@ -209,9 +208,9 @@ def gemma_add_rms_norm_quant(
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),
-        # Early dependent launch overlaps the consumer's weight load with
-        # this kernel; swept on GB300: ~2% chain win at M <= 128, but the
-        # prelaunched consumer grid steals SMs at M >= 192 (fp8 +4-7%).
+        # Overlaps the consumer's weight load with this kernel. Swept on
+        # GB300: ~2% win at M <= 128; the prelaunched consumer grid steals
+        # SMs at M >= 192 (fp8 +4-7%).
         TRIGGER_EARLY=M <= 128,
     )
     return q, block_scale, y
