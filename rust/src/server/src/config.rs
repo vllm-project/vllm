@@ -139,6 +139,26 @@ impl OutputLogConfig {
     }
 }
 
+/// HTTP access log settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessLogConfig {
+    /// Whether to log one line per HTTP response (`--disable-access-log`
+    /// turns it off).
+    pub enabled: bool,
+    /// Request paths whose responses are not logged, matched exactly against
+    /// the path without its query string (`--disable-access-log-for-endpoints`).
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            excluded_paths: Vec::new(),
+        }
+    }
+}
+
 /// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CorsConfig {
@@ -357,6 +377,8 @@ pub struct Config {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// HTTP access log settings.
+    pub access_log: AccessLogConfig,
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
     /// listener.
     pub tls: Option<TlsConfig>,

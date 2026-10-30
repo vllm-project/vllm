@@ -35,8 +35,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
     OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
@@ -584,6 +584,23 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// Disable the per-response HTTP access log.
+    #[arg(
+        long,
+        visible_alias = "disable-uvicorn-access-log",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default, alias = "disable_uvicorn_access_log")]
+    pub disable_access_log: bool,
+
+    /// Comma-separated request paths whose responses the HTTP access log
+    /// skips, such as "/health,/metrics" for frequent probes. Paths match
+    /// exactly, without the query string.
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_access_log_for_endpoints: Option<String>,
+
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     #[serde(default, flatten)]
@@ -737,6 +754,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
@@ -786,6 +804,7 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
@@ -820,6 +839,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
@@ -868,6 +888,7 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
@@ -906,6 +927,18 @@ impl SharedRuntimeArgs {
                 Some(0) => None,
                 Some(limit) => Some(limit),
             },
+        }
+    }
+
+    fn access_log_config(&self) -> AccessLogConfig {
+        AccessLogConfig {
+            enabled: !self.disable_access_log,
+            excluded_paths: (self.disable_access_log_for_endpoints.iter())
+                .flat_map(|paths| paths.split(','))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
