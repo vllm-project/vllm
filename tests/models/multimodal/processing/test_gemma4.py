@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,13 +21,13 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ImagePixelInputs,
     Gemma4ProcessingInfo,
 )
+from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.platforms import current_platform
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -359,33 +360,36 @@ def test_mm_device_do_normalize():
         torch.testing.assert_close(output, normalized_values.to(device))
 
 
+class _IdentityTower(torch.nn.Module):
+    dtype = torch.float32
+
+    def forward(self, pixel_values, encoder_metadata):
+        return pixel_values
+
+
 @pytest.mark.usefixtures("default_vllm_config")
-def test_embed_patches_normalizes_channel_last_patches():
+def test_embed_vision_normalizes_channel_last_patches():
     """Gemma 4 patches are (patch, patch, channel); per-channel parameters must
     reach the right pixels even when they differ across channels."""
+    device = current_platform.device_type
     mean, std = [0.1, 0.4, 0.7], [0.5, 0.25, 0.125]
     model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
     torch.nn.Module.__init__(model)
     model.vision_input_norm = FusedMMInputNorm(
         image_mean=mean, image_std=std, rescale_factor=1 / 255
-    )
-    model.vision_tower = SimpleNamespace(
-        config=SimpleNamespace(num_channels=3),
-        patch_embedder=SimpleNamespace(
-            input_proj=lambda pixel_values: pixel_values,
-            _position_embeddings=lambda *_: 0.0,
-        ),
-    )
-    model.model_dtype = torch.float32
+    ).to(device)
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(num_channels=3))
+    model.vision_tower = _IdentityTower()
+    model.embed_vision = torch.nn.Identity()
 
-    pixel_values = torch.randint(0, 256, (2, 6, 16 * 16 * 3), dtype=torch.uint8)
-    output = model._embed_patches(pixel_values, None, None)
+    pixel_values = torch.randint(
+        0, 256, (12, 16 * 16 * 3), dtype=torch.uint8, device=device
+    )
+    output = model._embed_vision(pixel_values, {})
 
-    # `_embed_patches` also applies the embedder's [0, 1] -> [-1, 1] rescale.
     expected = (
-        pixel_values.view(2, 6, -1, 3) / 255 - torch.tensor(mean)
-    ) / torch.tensor(std)
-    expected = 2 * (expected - 0.5)
+        pixel_values.view(12, -1, 3) / 255 - torch.tensor(mean, device=device)
+    ) / torch.tensor(std, device=device)
     torch.testing.assert_close(output, expected.view(pixel_values.shape))
 
 
@@ -421,125 +425,106 @@ def test_limit_mm_per_prompt(
         )
 
 
-# Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
-# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
-# allocating 2.43 GiB int64 inside
-# ``F.one_hot(num_classes=position_embedding_size)`` and OOMing because only
-# 2.41 GiB was actually free.  The fix sizes ``chunk`` from currently-free GPU
-# memory and counts the ``F.one_hot`` transient as the dominant cost.
-
-_encoder_chunk = Gemma4ForConditionalGeneration._encoder_chunk
-
-# Gemma4 vision config default (HF: configuration_gemma4.py).
-_POSITION_EMBEDDING_SIZE = 10240
-# Video frame: max_soft_tokens=70, pooling_kernel_size=2 -> 70 * 4 patches.
-_VIDEO_PATCHES_PER_FRAME = 280
-
-
-def test_encoder_chunk_tight_budget_fits_in_free():
-    free = 3 * GiB_bytes  # L4 22 GiB after 26B AWQ load.
-    total = 22 * GiB_bytes
-    chunk = _encoder_chunk(
-        _VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE
-    )
-    one_hot_bytes = chunk * _VIDEO_PATCHES_PER_FRAME * 2 * _POSITION_EMBEDDING_SIZE * 8
-    assert one_hot_bytes <= free // 2
-
-
-def test_encoder_chunk_roomy_gpu_keeps_batching():
-    chunk = _encoder_chunk(
-        _VIDEO_PATCHES_PER_FRAME,
-        60 * GiB_bytes,
-        80 * GiB_bytes,
-        _POSITION_EMBEDDING_SIZE,
-    )
-    assert chunk > 8
-
-
-def test_encoder_chunk_zero_patches_is_safe():
-    assert (
-        _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _POSITION_EMBEDDING_SIZE) == 1
-    )
-
-
-def test_encoder_chunk_zero_position_embedding_size_is_safe():
-    # Degenerate config: must not raise ZeroDivisionError.
-    assert (
-        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, 0) == 1
-    )
-
-
-def test_encoder_chunk_no_free_memory_falls_back_to_one():
-    assert (
-        _encoder_chunk(
-            _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _POSITION_EMBEDDING_SIZE
-        )
-        == 1
-    )
-
-
-def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
+def _gemma4_for_encoder_cudagraph(
+    attn_backend: AttentionBackendEnum = AttentionBackendEnum.TRITON_ATTN,
+) -> Gemma4ForConditionalGeneration:
     model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
     vision_config = SimpleNamespace(
-        patch_size=16, pooling_kernel_size=3, default_output_length=280
+        patch_size=16,
+        pooling_kernel_size=3,
+        default_output_length=280,
+        position_embedding_size=10240,
+        num_attention_heads=12,
+        head_dim=64,
     )
-    model.vision_tower = SimpleNamespace(config=vision_config)
+    vision_tower = SimpleNamespace(
+        config=vision_config,
+        attn_backend=attn_backend,
+        fp8_padded_hidden_size=None,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    vision_tower.prepare_encoder_metadata = partial(
+        Gemma4VisionModel.prepare_encoder_metadata, vision_tower
+    )
+    model.vision_tower = vision_tower
     model.vision_input_norm = SimpleNamespace(input_dtype=None)
-    model.config = SimpleNamespace(vision_config=vision_config)
+    model.config = SimpleNamespace(
+        vision_config=vision_config, text_config=SimpleNamespace(hidden_size=8)
+    )
     return model
 
 
-@pytest.mark.parametrize(
-    ("token_budget", "row_tokens"), [(4096, 70), (4096, 280), (70, 280)]
-)
-def test_encoder_cudagraph_capture_rows_fit_token_budget(
-    token_budget: int, row_tokens: int
-):
-    # Regression for #61045: rows were max_frames_per_batch (58 * 32) at
-    # 280 tokens each, so the 4096-token buffer alone was 6.69 GiB.
+def _padded_image(
+    columns: int, rows: int, max_patches: int = 2520
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Patches laid out like the processor's: row-major, padded at the end."""
+    grid = torch.meshgrid(torch.arange(columns), torch.arange(rows), indexing="xy")
+    positions = torch.full((max_patches, 2), -1, dtype=torch.long)
+    positions[: columns * rows] = torch.stack(grid, -1).reshape(-1, 2)
+    return torch.zeros(max_patches, 768), positions
+
+
+@pytest.mark.parametrize("token_budget", [70, 4480])
+def test_encoder_cudagraph_capture_buffers_fit_token_budget(token_budget: int):
+    # Regression for #61045: buffers sized by max_frames_per_batch rows
+    # instead of the token budget took 6.69 GiB at a 4096-token budget.
     model = _gemma4_for_encoder_cudagraph()
-    inputs = model.prepare_encoder_cudagraph_capture_inputs(
+    values = model.prepare_encoder_cudagraph_capture_inputs(
         token_budget=token_budget,
-        max_batch_size=58,
-        max_frames_per_batch=58 * 32,
-        device="meta",
+        max_batch_size=1,
+        max_frames_per_batch=32,
+        device=torch.device("cpu"),
         dtype=torch.bfloat16,
-        axis_keys=(row_tokens,),
-    )
+    ).values
 
-    num_rows, row_patches, _ = inputs.values["pixel_values"].shape
-    assert row_patches == row_tokens * 9
-    assert num_rows == max(1, token_budget // row_tokens)
+    assert values["pixel_values"].shape == (token_budget * 9, 768)
+    assert values["pixel_position_ids"].shape == (token_budget * 9, 2)
+    assert values["pool_gather_idx"].shape == (token_budget * 9,)
+    # A slot per image or frame that fits, each of at least 35 tokens: the
+    # manager does not bound frames, e.g. a 64-frame video in 4480 tokens.
+    assert values["cu_seqlens"].shape == (max(1, token_budget // 35) + 1,)
+    # The largest image of the configured max_soft_tokens (280).
+    assert values["max_seqlen"].item() == min(token_budget, 280) * 9
 
 
-def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
+def test_encoder_cudagraph_replay_packs_images_without_padding():
     model = _gemma4_for_encoder_cudagraph()
+    images = [
+        _padded_image(9, 6),
+        _padded_image(60, 42),
+        _padded_image(3, 3),
+        _padded_image(90, 42, max_patches=3780),
+    ]
     mm_kwargs = {
-        "pixel_values": [torch.zeros(2520, 768), torch.zeros(630, 768)],
-        "pixel_position_ids": [
-            torch.zeros(2520, 2, dtype=torch.long),
-            torch.zeros(630, 2, dtype=torch.long),
-        ],
+        "pixel_values": [pixel_values for pixel_values, _ in images],
+        "pixel_position_ids": [positions for _, positions in images],
     }
 
     specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
-    assert [spec.output_tokens for spec in specs] == [280, 70]
-    assert [spec.get_path_output_tokens("default") for spec in specs] == [280, 280]
+    assert [spec.output_tokens for spec in specs] == [6, 280, 1, 420]
+    # Below the 35 tokens the graphs' sequence slots assume, or above their
+    # max_seqlen (configured 280 tokens): eager.
+    assert [spec.eager_only for spec in specs] == [True, False, True, True]
 
-    selected = model.select_encoder_cudagraph_items(mm_kwargs, [1])
-    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
-    selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
-    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 2])
+    values = model.prepare_encoder_cudagraph_replay_buffers(
+        selected, max_batch_size=4, max_frames_per_batch=4
+    ).values
+    pixel_values = values["pixel_values"]
+    cu_seqlens = values["cu_seqlens"]
+    pool_gather_idx = values["pool_gather_idx"]
+    assert pixel_values is not None and pixel_values.shape == (54 + 9, 768)
+    assert cu_seqlens is not None and cu_seqlens.tolist() == [0, 54, 63]
+    # Each 3x3 block of the 9x6 image, then the 3x3 image.
+    assert pool_gather_idx is not None
+    assert pool_gather_idx[:9].tolist() == [0, 1, 2, 9, 10, 11, 18, 19, 20]
+    assert pool_gather_idx[9:18].tolist() == [3, 4, 5, 12, 13, 14, 21, 22, 23]
+    assert pool_gather_idx[54:].tolist() == list(range(54, 63))
 
 
-@pytest.mark.parametrize(
-    "mm_processor_kwargs",
-    [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],
-)
-def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
+def test_encoder_metadata_rejects_grids_not_divisible_by_pooling():
     model = _gemma4_for_encoder_cudagraph()
-    model.config.text_config = SimpleNamespace(hidden_size=8)
-    model.multimodal_config = SimpleNamespace(mm_processor_kwargs=mm_processor_kwargs)
-
-    config = model.get_encoder_cudagraph_config()
-    assert config.capture_axes == ((70, 140, 280, 560),)
+    _, positions = _padded_image(4, 3)
+    with pytest.raises(ValueError, match="multiples of 3"):
+        model.vision_tower.prepare_encoder_metadata([positions[:12].numpy()])

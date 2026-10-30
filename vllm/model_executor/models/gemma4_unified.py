@@ -17,6 +17,7 @@ embedding/forward path, and LoRA support are all inherited unchanged.
 
 import math
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -50,6 +51,9 @@ from vllm.model_executor.models.gemma4_mm import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
 from .utils import (
     AutoWeightsLoader,
@@ -268,7 +272,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
         # No towers — set to None so inherited load_weights / get_mm_mapping
         # and any tower-aware logic short-circuits.
-        self.vision_tower = None
+        self.vision_tower = None  # type: ignore[assignment]
         self.audio_tower = None
 
         # ---- Encoder-free vision embedder ----
@@ -416,6 +420,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             chunks.append(self.embed_vision(embedded.to(target_dtype)))
         return torch.cat(chunks, dim=0)
 
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        # No vision tower to capture: the embedder runs eager.
+        return EncoderCudaGraphConfig(
+            modalities=[],
+            buffer_keys=[],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
@@ -432,6 +446,11 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         else:
             lengths = None
 
+        # The processor keeps the positions on the host (Gemma 4's vision
+        # tower reads them there).
+        pixel_position_ids = pixel_position_ids.to(
+            pixel_values.device, non_blocking=True
+        )
         projected = self._embed_vision_patches(pixel_values, pixel_position_ids)
         padding_mask = (pixel_position_ids == -1).all(dim=-1)
 
@@ -475,6 +494,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         if pixel_values.shape[0] == 0:
             return []
 
+        pixel_position_ids = pixel_position_ids.to(
+            pixel_values.device, non_blocking=True
+        )
         projected = self._embed_vision_patches(pixel_values, pixel_position_ids)
         padding_mask = (pixel_position_ids == -1).all(dim=-1)
 
