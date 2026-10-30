@@ -79,8 +79,9 @@ For each item, its support in vLLM V1 falls into one of the following states:
 The V1 scheduler supports multiple scheduling policies, including First-Come,
 First-Served (FCFS), priority-based scheduling (where requests are processed
 based on assigned priority, with FCFS as a tie-breaker), and `residual_sjf`.
-`residual_sjf` is for decoder-only text generation: it orders waiting requests
-by their estimated remaining prefill work after prefix-cache hits. A
+`residual_sjf` is for decoder-only models: it orders waiting requests by their
+estimated remaining prefill work after prefix-cache hits (for multimodal
+requests the estimate counts placeholder tokens, not encoder work). A
 request that waits for `--residual-sjf-max-wait-ms` (10,000 by default) is
 promoted in FCFS order. KV-holding requests retain their admission priority.
 Ranking uses nonblocking connector estimates when available, including completed

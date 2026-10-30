@@ -163,8 +163,10 @@ class SchedulerConfig:
       of arrival.
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties).
-    - "residual_sjf" means decoder-only text requests are handled by their
-      remaining local prefill work, with FCFS max-wait aging."""
+    - "residual_sjf" means requests to decoder-only models are handled by
+      their remaining local prefill work, with FCFS max-wait aging. For
+      multimodal requests the estimate counts placeholder tokens, not encoder
+      work."""
 
     residual_sjf_max_wait_ms: int = Field(default=10_000, gt=0)
     """Maximum wait before a residual-SJF request receives FCFS priority.
@@ -303,12 +305,8 @@ class SchedulerConfig:
         return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
-        if self.policy == "residual_sjf" and (
-            self.is_multimodal_model or is_encoder_decoder
-        ):
-            raise ValueError(
-                "residual_sjf supports decoder-only text generation models only."
-            )
+        if self.policy == "residual_sjf" and is_encoder_decoder:
+            raise ValueError("residual_sjf does not support encoder-decoder models.")
         if self.policy == "residual_sjf" and self.runner_type != "generate":
             raise ValueError(
                 "residual_sjf requires the generate runner; "

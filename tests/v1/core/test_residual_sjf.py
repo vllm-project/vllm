@@ -171,13 +171,23 @@ def test_residual_sjf_config_and_cli_validation():
     )
     assert config.residual_sjf_max_wait_ms == 10_000
 
-    with pytest.raises(ValueError, match="residual_sjf"):
+    # Multimodal-capable decoder-only models (e.g. DeepSeek-V4.1-Flash) often
+    # serve text-only traffic, so they are accepted.
+    mm_config = SchedulerConfig(
+        max_model_len=32,
+        max_num_batched_tokens=32,
+        max_num_seqs=1,
+        is_encoder_decoder=False,
+        is_multimodal_model=True,
+        policy="residual_sjf",
+    )
+    assert mm_config.policy == "residual_sjf"
+    with pytest.raises(ValueError, match="encoder-decoder"):
         SchedulerConfig(
             max_model_len=32,
             max_num_batched_tokens=32,
             max_num_seqs=1,
-            is_encoder_decoder=False,
-            is_multimodal_model=True,
+            is_encoder_decoder=True,
             policy="residual_sjf",
         )
     with pytest.raises(ValueError):
