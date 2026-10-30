@@ -994,6 +994,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             per_act_token_quant=self.input_qscheme == "per_channel",
             per_out_ch_quant=self.weight_qscheme == "per_channel",
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply(

@@ -250,8 +250,7 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
         refill_derived(self, "_k_norm_weights", k_norm.contiguous())
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        if getattr(self, "_v_norm_weights", None) is None:
-            self._v_norm_weights = torch.ones_like(self._k_norm_weights)
+        refill_derived(self, "_v_norm_weights", torch.ones_like(self._k_norm_weights))
 
     def _project_context_kv(
         self,

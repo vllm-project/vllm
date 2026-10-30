@@ -5,7 +5,7 @@
 import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, overload
 
 import torch
 
@@ -127,6 +127,18 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
     return view.copy_(new)
 
 
+@overload
+def replace_parameter(
+    layer: torch.nn.Module, param_name: str, new_tensor: None
+) -> None: ...
+
+
+@overload
+def replace_parameter(
+    layer: torch.nn.Module, param_name: str, new_tensor: torch.Tensor
+) -> torch.Tensor: ...
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -225,6 +237,14 @@ def replace_parameter(
     return new_param
 
 
+@overload
+def refill_derived(obj: object, name: str, new: None) -> None: ...
+
+
+@overload
+def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: ...
+
+
 def refill_derived(
     obj: object, name: str, new: torch.Tensor | None
 ) -> torch.Tensor | None:
@@ -232,7 +252,8 @@ def refill_derived(
     tensor derived from the weights that kernels read. Post-load processing
     reruns on every weight reload: a held tensor of the same shape, dtype and
     device is refilled in place, so captured CUDA graphs keep its address.
-    Returns the tensor now held under ``name``."""
+    The held tensor must own its storage (not be a view of a weight), since
+    it is written in place. Returns the tensor now held under ``name``."""
     old = getattr(obj, name, None)
     if (
         isinstance(old, torch.Tensor)

@@ -88,7 +88,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
     """Muse draft backbone with independently cached context K/V."""
 
     # weight-derived, refilled in place on every reload
-    _stacked_kv_weight: torch.Tensor | None = None
+    _stacked_kv_weight: torch.Tensor
 
     def __init__(
         self,
@@ -203,7 +203,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         per_layer_context = torch.stack(
             [norm(fc_output) for norm in self._context_pre_norms], dim=0
         )
-        assert self._stacked_kv_weight is not None
         return torch.bmm(per_layer_context, self._stacked_kv_weight.transpose(1, 2))
 
     def precompute_and_store_context_kv(

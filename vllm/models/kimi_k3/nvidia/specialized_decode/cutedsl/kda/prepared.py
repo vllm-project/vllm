@@ -70,7 +70,7 @@ class PreparedKda:
     @torch.no_grad()
     def refresh_weights(self, attention):
         """Refill the derived conv weight and FP32 norm after a weight reload."""
-        conv_w, norm = self.weights[0], self.weights[5]
+        conv_w, *_, norm = self.weights
         conv_w.copy_(decode_conv_weight(attention.conv1d.weight))
         norm.copy_(attention.o_norm.weight)
 

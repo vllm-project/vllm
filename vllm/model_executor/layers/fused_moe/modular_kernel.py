@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -535,12 +536,11 @@ class FusedMoEExperts(ABC):
     kept_constants: tuple[str, ...] = ()
 
     def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
-        """Hand this object the ``kept_constants`` kept on ``layer``, refilled
-        with its fresh values. Quant methods build a new experts object on every
-        post-load rerun (each weight reload), while captured CUDA graphs keep
-        reading the tensors of the first one."""
-        from vllm.model_executor.utils import refill_derived
-
+        """Point this object's ``kept_constants`` at tensors kept on ``layer``
+        (as ``prefix + name.lstrip("_")``), refilled in place with this object's
+        fresh values. Quant methods build a new experts object on every
+        post-load rerun; captured CUDA graphs keep reading the first object's
+        tensors."""
         for name in self.kept_constants:
             value = getattr(self, name, None)
             if isinstance(value, torch.Tensor):

@@ -168,9 +168,7 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
         # A post-load rerun (weight reload) refills the registered shards in
         # place, so captured CUDA graphs keep their addresses.
         for name in _LOCALIZED_SHARD_PARAMS:
-            param = replace_parameter(layer, f"localized{i}_{name}", shard[name])
-            assert param is not None
-            shard[name] = param
+            shard[name] = replace_parameter(layer, f"localized{i}_{name}", shard[name])
 
         # Views preserve visibility of EPLB's in-place updates.
         shard["w13_weight_scale"] = nvfp4_swizzled_scale_to_cutedsl_mma_view(

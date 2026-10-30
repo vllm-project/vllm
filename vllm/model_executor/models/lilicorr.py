@@ -299,8 +299,6 @@ class LiLiCorrHead(nn.Module):
                 cached.copy_(split)
         else:
             self._factor_input_splits = tuple(s.contiguous() for s in splits)
-        if hasattr(self, "_rank_frac_col"):
-            return  # the rank constants depend on topk only
         if topk > 1:
             rank_frac = torch.arange(topk, device=device, dtype=torch.float32).view(
                 1, 1, topk
@@ -309,8 +307,8 @@ class LiLiCorrHead(nn.Module):
             rank_frac = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
         is_top1 = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
         is_top1[..., 0] = 1.0
-        self._rank_frac_col = rank_frac.contiguous()
-        self._is_top1_col = is_top1.contiguous()
+        refill_derived(self, "_rank_frac_col", rank_frac.contiguous())
+        refill_derived(self, "_is_top1_col", is_top1.contiguous())
 
     def _build_attention_bias(
         self, *, device: torch.device, dtype: torch.dtype

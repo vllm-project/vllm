@@ -1060,8 +1060,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
 
 def refresh_post_load_caches(model: nn.Module) -> None:
-    """Rebuild caches derived from loaded weights (KDA merged conv weight,
-    indexer fp32 head gate). Runs after every load and reload."""
+    """Rebuild the indexers' fp32 head gate from the loaded weights, in place.
+    Runs after every load and reload."""
     for module in model.modules():
         if callable(getattr(module, "refresh_post_load_cache", None)):
             module.refresh_post_load_cache()

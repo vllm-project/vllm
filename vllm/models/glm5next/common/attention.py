@@ -312,11 +312,10 @@ class Indexer(nn.Module):
         q = q.view(-1, self.n_head, self.head_dim)
 
         # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Cache it after weights are loaded.
+        # rankings on long-context tasks. Built after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:
-            self.refresh_post_load_cache()
+        assert self._wp_fp32 is not None, "refresh_post_load_cache() not run"
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(

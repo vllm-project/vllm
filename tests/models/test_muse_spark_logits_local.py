@@ -47,6 +47,7 @@ def test_nvidia_nvfp4_moe_constants_keep_addresses(monkeypatch):
     from vllm.models.muse_spark.nvidia import muse_moe_runner as mr
 
     def convert(**kw):
+        # the runner discards the converted scale_2 outputs: "" yields None
         return tuple(
             kw.get(k)
             for k in ("w13", "w13_scale", "", "a13_scale")

@@ -802,8 +802,8 @@ def make_fp8_moe_quant_config(
         assert a1_scale is not None and a2_scale is not None
         g1_alphas = w1_scale * a1_scale
         g2_alphas = w2_scale * a2_scale
-        a1_gscale: torch.Tensor | None = 1.0 / a1_scale
-        a2_gscale: torch.Tensor | None = 1.0 / a2_scale
+        a1_gscale = 1.0 / a1_scale
+        a2_gscale = 1.0 / a2_scale
         if layer is not None:  # kernels read these: a weight reload refills them
             g1_alphas = replace_parameter(layer, "g1_alphas", g1_alphas)
             g2_alphas = replace_parameter(layer, "g2_alphas", g2_alphas)

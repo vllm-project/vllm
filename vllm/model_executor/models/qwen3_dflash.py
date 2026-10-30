@@ -409,7 +409,7 @@ class DFlashQwen3Model(nn.Module):
     # weight-derived, refilled in place on every reload
     _fused_kv_weight: torch.Tensor | None = None
     _fused_kv_bias: torch.Tensor | None = None
-    _k_norm_weights: torch.Tensor | None = None
+    _k_norm_weights: torch.Tensor
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(

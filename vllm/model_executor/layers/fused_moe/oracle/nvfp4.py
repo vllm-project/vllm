@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.model_executor.utils import move_parameter
+from vllm.model_executor.utils import move_parameter, refill_derived
 
 logger = init_logger(__name__)
 
@@ -603,11 +603,9 @@ def make_nvfp4_moe_quant_config(
         w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
         w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
-    a1_gscale: torch.Tensor | None = 1.0 / a13_scale
-    a2_gscale: torch.Tensor | None = 1.0 / a2_scale
+    a1_gscale = 1.0 / a13_scale
+    a2_gscale = 1.0 / a2_scale
     if layer is not None:  # kernels read these: a weight reload refills them
-        from vllm.model_executor.utils import refill_derived
-
         a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
         a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
 
