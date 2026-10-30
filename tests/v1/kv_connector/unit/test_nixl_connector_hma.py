@@ -697,6 +697,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
@@ -724,6 +725,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
+    remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
