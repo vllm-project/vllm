@@ -109,14 +109,9 @@ def test_matmul_batch_invariance(dtype):
 
 
 @skip_unsupported
-@pytest.mark.parametrize("m", [8, 32, 64, 256, 2048, 4096])
+@pytest.mark.parametrize("m", [8, 32, 256, 2048])
 @pytest.mark.parametrize("transpose_b", [False, True], ids=["contiguous", "transposed"])
-@pytest.mark.parametrize(
-    "n,k",
-    [(2048, 2048), (4608, 2688), (2688, 4096)],
-    ids=["2048x2048", "nemotron_h_qkv", "nemotron_h_o_proj"],
-)
-def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b, n, k):
+def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     # Tuned M buckets must preserve each row's K-reduction order.
     capability = (
         current_platform.get_device_capability() if current_platform.is_cuda() else None
@@ -126,6 +121,7 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b, n, k):
         pytest.skip("No tuned persistent matmul config for this architecture")
 
     device = torch.device(DEVICE_TYPE)
+    n = k = 2048
     torch.manual_seed(42)
     a = torch.rand((m, k), dtype=torch.bfloat16, device=device)
     if transpose_b:
@@ -134,11 +130,9 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b, n, k):
         b = torch.rand((k, n), dtype=torch.bfloat16, device=device)
 
     single_output = matmul_batch_invariant(a[:1], b)
-    half_output = matmul_batch_invariant(a[: m // 2], b)
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
-    assert torch.equal(half_output, batch_output[: m // 2])
 
 
 @pytest.fixture

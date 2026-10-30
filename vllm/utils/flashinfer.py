@@ -1116,8 +1116,7 @@ def flashinfer_scaled_fp4_mm(
 
 
 def _bmm_fp8_backend() -> str:
-    # "auto" may pick a different backend per problem shape, so a row's
-    # result could depend on the number of rows. Pin one backend under BI.
+    # Autotuned "auto" can switch backends between M buckets and change row results.
     return "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto"
 
 
