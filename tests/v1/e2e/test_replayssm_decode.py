@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-level parity: ReplaySSM standard decode vs the baseline SSM kernel."""
 
+from functools import partial
+
 import pytest
 
 import vllm.envs as envs
@@ -37,7 +39,7 @@ FLASHINFER_PROMPTS = [
 
 @pytest.fixture(autouse=True)
 def _use_v1_model_runner_by_default(monkeypatch):
-    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    # Other Triton models still require V1. V2 tests override this locally.
     with monkeypatch.context() as patch:
         patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
         envs.disable_envs_cache()
@@ -91,6 +93,30 @@ def _check_replayssm_parity(
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name)
+
+
+@large_gpu_mark(min_gb=40)
+def test_replayssm_gdn_v2_decode_matches_baseline(vllm_runner, monkeypatch):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            patch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+            envs.disable_envs_cache()
+            _check_replayssm_parity(
+                partial(
+                    vllm_runner,
+                    compilation_config={"mode": 3, "cudagraph_capture_sizes": [4]},
+                    gpu_memory_utilization=0.8,
+                    max_num_seqs=8,
+                    enable_chunked_prefill=True,
+                    language_model_only=True,
+                ),
+                GDN_MODEL,
+                name_1="replayssm_gdn_v2",
+                expected_v2=True,
+            )
+    finally:
+        envs.disable_envs_cache()
 
 
 @multi_gpu_test(num_gpus=2)
