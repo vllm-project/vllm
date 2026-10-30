@@ -4324,7 +4324,7 @@ class GPUModelRunner(
                 )
 
         # Read before the drafter proposes for the next step.
-        num_drafted_tokens, num_verified_tokens = self._get_num_draft_tokens_per_req(
+        num_drafted_tokens, num_verified_tokens = self._get_num_drafted_and_verified(
             scheduler_output
         )
         self._draft_token_ids = None
@@ -4609,7 +4609,7 @@ class GPUModelRunner(
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)
 
-    def _get_num_draft_tokens_per_req(
+    def _get_num_drafted_and_verified(
         self, scheduler_output: "SchedulerOutput"
     ) -> tuple[list[int] | None, list[int] | None]:
         """Drafted and verified draft tokens per request, in req_ids order."""

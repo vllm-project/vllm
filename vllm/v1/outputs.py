@@ -310,7 +310,7 @@ class ModelRunnerOutput:
     num_drafted_tokens_per_req: list[int] | None = None
 
     # Drafted tokens per request that went into the target forward pass, in
-    # req_ids order. Set together with num_drafted_tokens_per_req.
+    # req_ids order.
     num_verified_tokens_per_req: list[int] | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
