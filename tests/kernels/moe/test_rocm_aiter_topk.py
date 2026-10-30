@@ -565,7 +565,7 @@ def test_biased_grouped_topk_substitutes_only_when_expected(
     )
 
     gating, bias, weights, ids = _routing_inputs(
-        8, 64, 6, torch.bfloat16, torch.float32
+        1, 64, 6, torch.bfloat16, torch.float32
     )
     # Compile the Triton kernel outside the graph.
     K.sigmoid_bias_flat_topk(

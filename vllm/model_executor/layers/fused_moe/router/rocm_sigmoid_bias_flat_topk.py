@@ -24,17 +24,19 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-# Shape bounds, not model bounds: no checkpoint is assumed. _MAX_TOKENS keeps
-# this to decode / spec-verify batches, where one wave per token wins; larger
-# (prefill) batches keep the AITER kernel, which has more parallelism per
-# launch. _MAX_EXPERTS and _MAX_TOPK are where this kernel stops beating AITER
-# on MI355X (gfx950), measured under CUDA graph replay with bf16 router logits:
+# Shape bounds, not model bounds: no checkpoint is assumed. _MAX_TOKENS limits
+# this to single-token batches, i.e. one request decoding without speculation.
+# That is where it shows end to end (+0.4% to +4.2% output throughput across
+# five models on MI355X); at larger batches the router is a smaller share of
+# the step and the gain is within noise, so those keep AITER.
+# _MAX_EXPERTS and _MAX_TOPK are where this kernel stops beating AITER on
+# MI355X (gfx950), measured under CUDA graph replay with bf16 router logits:
 # up to 512 experts and top-8 it averages 1.16-1.57x per shape, and no launch
 # falls below 0.92x even with a forced score tie. At top-16 one row with an
 # exactly tied score sends the launch through the fallback path at 0.62-0.78x
 # (512, 896 and 1024 experts), and from 896 experts tie-free launches gain at
 # most 1.09x, so those routers keep AITER.
-_MAX_TOKENS = 128
+_MAX_TOKENS = 1
 _MAX_EXPERTS = 512
 _MAX_TOPK = 8
 # One wave per token: every round's max is a pure in-wave reduction (no LDS
