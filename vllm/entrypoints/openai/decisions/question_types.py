@@ -62,13 +62,21 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
-    def prompt(self, question: Question) -> str:
-        """The question as the model reads it, after the state."""
-        lines = [f"Question: {question.instructions}"] if question.instructions else []
-        for label, o in zip(question.labels, question.options):
-            lines.append(self.reply_line(label, o))
+    def body(self, question: Question) -> str:
+        """The options and the reply instruction, after the question's heading."""
+        lines = [
+            self.reply_line(label, o)
+            for label, o in zip(question.labels, question.options)
+        ]
         lines.append(self.reply_instruction)
         return "\n".join(lines)
+
+    def prompt(self, question: Question) -> str:
+        """The question as the model reads it, after the state."""
+        body = self.body(question)
+        if not question.instructions:
+            return body
+        return f"Question: {question.instructions}\n{body}"
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -96,6 +104,7 @@ def build_question(
     instructions: Any,
     criteria: Any,
     max_options: int,
+    labeled: bool = True,
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
@@ -106,7 +115,7 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(max_options, len(qtype.label_set))
+    limit = min(max_options, len(qtype.label_set)) if labeled else max_options
     if len(options) > limit:
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
