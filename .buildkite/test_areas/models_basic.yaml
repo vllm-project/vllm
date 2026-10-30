@@ -349,6 +349,25 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":amd: (MI300) Qwen4 Exp"
+  key: qwen4-exp-unit-tests-mi300
+  timeout_in_minutes: 40
+  dind: false
+  device: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/model_executor/layers/mamba/checkpoint.py
+  - tests/models/qwen4_exp/
+  commands:
+  - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py
+  # PLE and QSA import conflicting HC registrations in a shared process.
+  - pytest -v -s models/qwen4_exp/test_ple.py
+
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
   depends_on:
@@ -378,6 +397,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
+  - tests/models/test_qwen3_5.py
   - tests/models/test_dory.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
@@ -400,6 +420,7 @@ steps:
       models/test_vision.py
       models/test_adapters.py
       models/test_qwen3_5_mtp_config.py
+      models/test_qwen3_5.py
       models/transformers/fusers/
       models/transformers/test_dynamic_rope.py
       model_executor/layers/test_activation.py
@@ -433,6 +454,29 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
+  key: dsv41-mono-decode-numerics-tp8-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/deepseek_v41/amd/
+  - vllm/models/deepseek_v41/nvidia/model_state.py
+  - tests/models/test_dsv41_mono_numerics.py
+  - tests/models/test_dsv41_mono_layers.py
+  commands:
+  # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
+  - pytest -v -s "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8]"
+  - >-
+    pytest -v -s
+    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
+    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-28]"
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
