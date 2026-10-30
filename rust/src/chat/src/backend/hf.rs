@@ -25,7 +25,7 @@ use crate::parser::unified::{HfTemplateError, ResponseTemplate};
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
+    Glm5NextChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -99,6 +99,11 @@ impl HfChatBackend {
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
             )),
+            RendererSelection::Glm5Next => Arc::new(
+                Glm5NextChatRenderer::new(options.default_chat_template_kwargs)
+                    .with_multimodal(model_type == "glm5_next")
+                    .with_tokenizer(tokenizer.clone())?,
+            ),
         };
 
         info!(

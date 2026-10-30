@@ -1762,6 +1762,75 @@ async fn render_rejects_max_tokens_above_max_model_len() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"glm_moe_dsa"}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let mut tokenizer = TestTokenizer::new();
+    for (index, token) in "[gMASK] <sop> <|system|> <|user|> <|assistant|> <|observation|> \
+        <think> </think> <tool_call> </tool_call> <arg_key> </arg_key> <arg_value> </arg_value> \
+        <tool_response> </tool_response> <|begin_of_image|> <|image|> <|end_of_image|> \
+        <|begin_of_video|> <|video|> <|end_of_video|> <|begin_of_audio|> <|end_of_audio|>"
+        .split_whitespace()
+        .enumerate()
+    {
+        tokenizer = tokenizer.with_regular_token(token, 256 + index as u32);
+    }
+    let backend = Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "glm-test".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                renderer: vllm_chat::RendererSelection::Glm5Next,
+                language_model_only: true,
+                ..Default::default()
+            },
+            Arc::new(tokenizer.clone()),
+        )
+        .unwrap(),
+    );
+    for exclude in [false, true] {
+        let mut app = build_render_router(Arc::new(RenderState {
+            model: "glm-test".into(),
+            served_model_names: vec!["glm-test".into()],
+            max_model_len: Some(4096),
+            text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
+            chat: ChatRequestProcessor::render_only(backend.clone())
+                .with_exclude_tools_when_tool_choice_none(exclude),
+        }));
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "glm-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "function": {
+                    "name": "get_weather", "parameters": {"type": "object"},
+                }}],
+                "tool_choice": "none",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let ids: Vec<u32> = serde_json::from_value(json["token_ids"].clone()).unwrap();
+        let prompt = tokenizer.decode(&ids, false).unwrap();
+        assert_eq!(
+            prompt.contains("get_weather"),
+            !exclude,
+            "exclude={exclude}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
     let mut render_app = test_render_app();
     let render_response = render_app
