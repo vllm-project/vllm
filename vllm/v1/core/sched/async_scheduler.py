@@ -6,6 +6,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -54,7 +55,6 @@ class AsyncScheduler(Scheduler):
                 request.next_decode_eligible_step = (
                     self.current_step + self.decode_stagger
                 )
-
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
