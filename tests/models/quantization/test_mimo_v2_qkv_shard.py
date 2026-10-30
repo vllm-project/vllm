@@ -634,32 +634,19 @@ def test_weight_and_scale_load_on_their_own(
 
 @requires_gpu
 @pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-@pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size, mode):
+def test_reload_equals_cold_start(model_config, geometry, tp_size):
     """A reload with weight and scale in separate calls ends with the bytes a
     cold start on the new checkpoint gives, at the same addresses."""
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        finish_direct_reload,
-    )
-
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     tp_rank = tp_size - 1
     model = _cold_start(
         geometry, tp_rank, tp_size, _fused_qkv_checkpoint(geometry, 1), model_config
     )
     ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
     new = _fused_qkv_checkpoint(geometry, 2)
-    if mode == "direct":
-        begin_direct_reload(model)
-    else:
-        initialize_layerwise_reload(model)
+    initialize_layerwise_reload(model)
     for item in new.items():
         model.load_weights([item])
-    if mode == "direct":
-        finish_direct_reload(model, model_config, torch.device("cuda"))
-    else:
-        finalize_layerwise_reload(model, model_config)
+    finalize_layerwise_reload(model, model_config)
     _assert_same_params(
         model, _cold_start(geometry, tp_rank, tp_size, new, model_config)
     )

@@ -441,7 +441,7 @@ class M2NWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Begin reloading, but only if some parameter needs it.
+        """Set up layerwise reloading, but only if some parameter needs it.
 
         Directly-resharded parameters are written in place and never go through
         `load_weights`, so a plan with no fallback entries has nothing to
@@ -449,17 +449,19 @@ class M2NWeightTransferEngine(
         """
         if not self._uses_load_weights:
             return
-        from vllm.model_executor.model_loader.reload import start_reload
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
 
-        start_reload(self.model)
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """Finish reloading when the plan uses fallback entries."""
+        """Finalize layerwise reloading when the plan uses fallback entries."""
         if not self._uses_load_weights:
             return
-        from vllm.model_executor.model_loader.reload import finish_reload
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
-        finish_reload(self.model, self.model_config, self.device)
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive each requested parameter using its initialization-time plan."""
