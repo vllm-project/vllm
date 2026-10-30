@@ -212,7 +212,6 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
-    VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT: str | None = None
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
@@ -1645,13 +1644,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
-    # Override Triton MoE naive block assignment path. None for auto-detection,
-    # "0" / "false" to disable naive path, "true" / "heuristic" to force standard
-    # discrete threshold, or a positive integer N to cap naive assignment at
-    # num_tokens <= N (e.g. "1" to enforce batch-1 only for A/B benchmarking).
-    "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT": lambda: os.getenv(
-        "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT", None
-    ),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(

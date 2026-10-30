@@ -617,7 +617,7 @@ def test_host_resident_weights_take_sorted_path(
     assert bool(aligned) == host_resident
 
 
-@pytest.mark.parametrize("m", [1, 2, 4])
+@pytest.mark.parametrize("m", [1, 2, 4, 8])
 @pytest.mark.parametrize("is_integrated", [False, True])
 def test_integrated_gpu_expert_assignment(
     m: int, is_integrated: bool, monkeypatch, workspace_init
@@ -651,50 +651,8 @@ def test_integrated_gpu_expert_assignment(
         ref = torch_moe(a, w1, w2, score, topk)
 
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-    expected_aligned = is_integrated and (m > 1)
+    expected_aligned = (m > 1) if is_integrated else (m * topk * 4 > e)
     assert bool(aligned) == expected_aligned
-
-
-@pytest.mark.parametrize(
-    "override,m,expected_naive",
-    [
-        ("0", 1, False),
-        ("0", 2, False),
-        ("1", 1, True),
-        ("1", 2, False),
-        ("2", 2, True),
-        ("true", 2, True),
-        ("heuristic", 2, True),
-        ("invalid_setting", 2, True),
-    ],
-)
-def test_naive_block_assignment_override(
-    override: str, m: int, expected_naive: bool, monkeypatch, workspace_init
-):
-    """Test environment variable override for naive block assignment."""
-    import vllm.envs as envs
-
-    monkeypatch.setattr(envs, "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT", override)
-    aligned: list[int] = []
-    align = fused_moe_module.moe_align_block_size
-
-    def counting_align(*args, **kwargs):
-        aligned.append(1)
-        return align(*args, **kwargs)
-
-    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
-
-    set_random_seed(7)
-    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
-    a = torch.randn((m, k), device="cuda", dtype=dtype)
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
-
-    with set_current_vllm_config(vllm_config):
-        fused_moe(a, w1, w2, score, topk, renormalize=False)
-
-    assert (not bool(aligned)) == expected_naive
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)

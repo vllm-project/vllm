@@ -1611,29 +1611,6 @@ def _weights_host_resident(*weights: torch.Tensor) -> bool:
     return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
 
 
-@functools.lru_cache(maxsize=4)
-def _parse_naive_block_assignment_override(
-    override: str | None,
-) -> int | bool | None:
-    if override is None:
-        return None
-    val = override.strip().lower()
-    if val in ("0", "false", "off", "disable", "disabled"):
-        return False
-    if val in ("true", "on", "enable", "enabled", "heuristic"):
-        return True
-    try:
-        max_tokens = int(val)
-        return max_tokens if max_tokens > 0 else False
-    except ValueError:
-        logger.warning_once(
-            "Invalid VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT value '%s'. "
-            "Falling back to architecture-aware auto-detection.",
-            override,
-        )
-        return None
-
-
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1655,42 +1632,23 @@ def _prepare_expert_assignment(
     # path of the fused_moe_kernel kernel, which reads an expert's weights once
     # per (token, expert) pair. Not for weights in host memory: there every
     # repeated read crosses PCIe, so group each expert's tokens instead.
-    naive_block_assignment = False
-    if (
+    # On integrated/unified-memory GPUs (e.g. GB10 / DGX Spark), naive block
+    # assignment re-reads shared expert weights across multi-token batches,
+    # saturating unified memory bandwidth and causing an 8-52% decode slowdown.
+    # Restrict naive assignment to num_tokens == 1 where no collision occurs.
+    device_idx = topk_ids.device.index if topk_ids.device.index is not None else 0
+    max_naive_tokens = 1 if current_platform.is_integrated_gpu(device_idx) else None
+    naive_block_assignment = (
         expert_map is None
         and not weights_host_resident
+        and (max_naive_tokens is None or num_tokens <= max_naive_tokens)
+        and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
             and block_shape is not None
             and block_shape[1] > 0
         )
-    ):
-        override_rule = _parse_naive_block_assignment_override(
-            envs.VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT
-        )
-        if override_rule is False:
-            naive_block_assignment = False
-        elif override_rule is True:
-            naive_block_assignment = num_tokens * top_k_num * 4 <= global_num_experts
-        elif isinstance(override_rule, int):
-            naive_block_assignment = (
-                num_tokens <= override_rule
-                and num_tokens * top_k_num * 4 <= global_num_experts
-            )
-        else:
-            device_idx = (
-                topk_ids.device.index if topk_ids.device.index is not None else 0
-            )
-            if current_platform.is_integrated_gpu(device_idx):
-                # On integrated / unified-memory GPUs (e.g. GB10 / DGX Spark),
-                # multiple tokens routing to the same expert cause redundant
-                # weight reads over shared/lower-bandwidth memory (LPDDR5x).
-                # Take the naive path only when tokens cannot collide (batch 1).
-                naive_block_assignment = num_tokens == 1
-            else:
-                naive_block_assignment = (
-                    num_tokens * top_k_num * 4 <= global_num_experts
-                )
+    )
 
     if naive_block_assignment:
         return (
