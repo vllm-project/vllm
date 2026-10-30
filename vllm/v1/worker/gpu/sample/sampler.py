@@ -298,8 +298,10 @@ class Sampler:
             seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
         )
-        top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
-            expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
+        top_k, top_p, has_topp_only_rows, max_top_k = (
+            self.sampling_states.get_top_k_top_p(
+                expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
+            )
         )
         # Don't use a fused sampler if no requests use top_k/top_p, if there are
         # any greedy requests or per-request seeds, or if post-processed
@@ -322,6 +324,7 @@ class Sampler:
             top_k,
             top_p,
             has_topp_only_rows,
+            max_top_k,
             use_fused_sampler,
         )
 
@@ -334,6 +337,7 @@ class Sampler:
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
         has_topp_only_rows: bool,
+        max_top_k: int | None,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_fused_sampler:
@@ -345,7 +349,11 @@ class Sampler:
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                processed_logits,
+                top_k,
+                top_p,
+                has_topp_only_rows=has_topp_only_rows,
+                max_top_k=max_top_k,
             )
             sampled = gumbel_sample(
                 processed_logits,
