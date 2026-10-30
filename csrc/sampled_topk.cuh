@@ -69,9 +69,8 @@ __device__ void select_bin(Storage& s) {
 
 // Find a coarse bin, then refine its full FP32 keys one byte at a time.
 // Read shared candidates normally, or the full row for exact fallback.
-template <bool Buffered>
-__device__ uint32_t threshold(Storage& s, const float* row, int count,
-                              int rank) {
+template <bool Buffered, typename InT>
+__device__ uint32_t threshold(Storage& s, const InT* row, int count, int rank) {
   const int tid = threadIdx.x;
   if (tid == 0) {
     s.remaining = rank;
@@ -81,7 +80,8 @@ __device__ uint32_t threshold(Storage& s, const float* row, int count,
   __syncthreads();
   for (int i = tid; i < count; i += kThreads) {
     const uint32_t key =
-        Buffered ? s.candidates[i].y : hist4096::convert_to_uint32_v2(row[i]);
+        Buffered ? s.candidates[i].y
+                 : hist4096::convert_to_uint32_v2(hist4096::to_float(row[i]));
     atomicAdd(&s.histogram[coarse(key)], 1);
   }
   __syncthreads();
@@ -94,7 +94,8 @@ __device__ uint32_t threshold(Storage& s, const float* row, int count,
     const uint32_t prefix = s.prefix;
     for (int i = tid; i < count; i += kThreads) {
       const uint32_t key =
-          Buffered ? s.candidates[i].y : hist4096::convert_to_uint32_v2(row[i]);
+          Buffered ? s.candidates[i].y
+                   : hist4096::convert_to_uint32_v2(hist4096::to_float(row[i]));
       if (coarse(key) == coarse_bin && (key & mask) == prefix) {
         atomicAdd(&s.histogram[(key >> shift) & 255], 1);
       }
@@ -118,8 +119,8 @@ __device__ __forceinline__ int reserve(bool hit, int* counter) {
   return base + __popc(mask & ((1u << lane) - 1));
 }
 
-template <bool Buffered>
-__device__ void emit(Storage& s, const float* row, int32_t* dst, int count,
+template <bool Buffered, typename InT>
+__device__ void emit(Storage& s, const InT* row, int32_t* dst, int count,
                      uint32_t cutoff) {
   const int tid = threadIdx.x;
   if (tid == 0) s.count = 0;
@@ -127,10 +128,10 @@ __device__ void emit(Storage& s, const float* row, int32_t* dst, int count,
   for (int base = 0; base < count; base += kThreads) {
     const int i = base + tid;
     const uint2 pair =
-        i < count
-            ? (Buffered ? s.candidates[i]
-                        : make_uint2(i, hist4096::convert_to_uint32_v2(row[i])))
-            : make_uint2(0, 0);
+        i < count ? (Buffered ? s.candidates[i]
+                              : make_uint2(i, hist4096::convert_to_uint32_v2(
+                                                  hist4096::to_float(row[i]))))
+                  : make_uint2(0, 0);
     bool keep = i < count && pair.y > cutoff;
     if (i < count && pair.y == cutoff) {
       keep = atomicSub(&s.remaining, 1) > 0;
@@ -140,9 +141,9 @@ __device__ void emit(Storage& s, const float* row, int32_t* dst, int count,
   }
 }
 
-template <int K>
+template <int K, typename InT>
 __global__ void __launch_bounds__(kThreads)
-    sampled_topk_kernel(const float* __restrict__ input,
+    sampled_topk_kernel(const InT* __restrict__ input,
                         const int32_t* __restrict__ lengths,
                         int32_t* __restrict__ output, int64_t stride,
                         int max_length) {
@@ -150,7 +151,7 @@ __global__ void __launch_bounds__(kThreads)
   auto& s = *reinterpret_cast<Storage*>(smem);
   const int tid = threadIdx.x;
   const int length = max(0, min(lengths[blockIdx.x], max_length));
-  const float* row = input + blockIdx.x * stride;
+  const InT* row = input + blockIdx.x * stride;
   int32_t* dst = output + blockIdx.x * K;
   // Graph allocations can hold rows much shorter than the host length bound.
   if (length < kMinSampledLength<K>) {
@@ -158,11 +159,11 @@ __global__ void __launch_bounds__(kThreads)
     bool selected;
     if ((stride & 3) == 0 && (reinterpret_cast<uintptr_t>(row) & 15) == 0) {
       selected =
-          filtered_topk::filtered_topk_row<float, int32_t, 4, K, false, true>(
+          filtered_topk::filtered_topk_row<InT, int32_t, 4, K, false, true>(
               row, dst, length, K, fallback_storage);
     } else {
       selected =
-          filtered_topk::filtered_topk_row<float, int32_t, 1, K, true, true>(
+          filtered_topk::filtered_topk_row<InT, int32_t, 1, K, true, true>(
               row, dst, length, K, fallback_storage);
     }
     if (!selected) {
@@ -177,7 +178,8 @@ __global__ void __launch_bounds__(kThreads)
   // Sample contiguous warps spread across the row to keep loads coalesced.
   for (int i = tid; i < kSample; i += kThreads) {
     const int index = (i / 32) * (length / (kSample / 32)) + i % 32;
-    atomicAdd(&s.histogram[coarse(hist4096::convert_to_uint32_v2(row[index]))],
+    atomicAdd(&s.histogram[coarse(hist4096::convert_to_uint32_v2(
+                  hist4096::to_float(row[index])))],
               1);
   }
   __syncthreads();
@@ -200,7 +202,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
       for (int j = 0; j < kItems / 4; ++j) {
         const float4 values =
-            reinterpret_cast<const float4*>(row + base)[tid + j * kThreads];
+            hist4096::load_score4(row + base + (tid + j * kThreads) * 4);
         keys[4 * j] = hist4096::convert_to_uint32_v2(values.x);
         keys[4 * j + 1] = hist4096::convert_to_uint32_v2(values.y);
         keys[4 * j + 2] = hist4096::convert_to_uint32_v2(values.z);
@@ -210,7 +212,10 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
       for (int j = 0; j < kItems; ++j) {
         const int i = base + tid * 4 + (j / 4) * kThreads * 4 + j % 4;
-        keys[j] = i < length ? hist4096::convert_to_uint32_v2(row[i]) : 0;
+        keys[j] =
+            i < length
+                ? hist4096::convert_to_uint32_v2(hist4096::to_float(row[i]))
+                : 0;
       }
     }
 #pragma unroll
