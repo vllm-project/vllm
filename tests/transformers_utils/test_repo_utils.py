@@ -10,7 +10,6 @@ import pytest
 from huggingface_hub import _CACHED_NO_EXIST
 
 from vllm.transformers_utils.repo_utils import (
-    _WEIGHT_FILE_PATTERNS,
     any_pattern_in_repo_files,
     get_hf_file_to_dict,
     is_mistral_model_repo,
