@@ -1614,14 +1614,9 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """RMSNormGated (norm before gate, one group per norm_weight slice), then
-    the Triton MXFP4 dynamic-quant linear (``gemm_with_dynamic_quant`` without
-    the ASM GEMM). x and z are (M, K).
-
-    AITER's fused gated-RMSNorm + MXFP4 quant writes the per-1x32 scales
-    column-major, as ``dynamic_mxfp4_quant`` does, so the Triton GEMM reads
-    them as it would after the separate activation quant.
-    """
+    """RMSNormGated (norm before gate) with the MXFP4 quant fused in, then the
+    Triton ``gemm_with_dynamic_quant``. x and z are (M, K). The scales are
+    column-major, as ``dynamic_mxfp4_quant`` returns them."""
     from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
 
     x_q, x_s = fused_rms_gated_mxfp4_quant(

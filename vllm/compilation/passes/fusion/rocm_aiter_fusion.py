@@ -976,10 +976,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        # The gated-norm MXFP4 pattern flattens heads with reshape(-1, hidden);
-        # GDN does it with flatten(-2), a reshape to the symbolic token count.
-        # Only rewrite when that pattern is registered: the FP8 patterns match
-        # the same graphs and are left as they were.
+        # GDN's flatten(-2) is a reshape to the symbolic token count; the
+        # pattern traces reshape(-1, hidden). Leaves FP8-only graphs alone.
         if self.fuse_mxfp4_gated_norm:
             reshape_symbolic_dim_to_minus_one(graph)
         self.matched_count = self.patterns.apply(graph)

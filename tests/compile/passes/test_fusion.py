@@ -887,11 +887,9 @@ class TestGatedMxfp4Model(torch.nn.Module):
         return self.out_proj(normed.reshape(-1, self.num_heads * self.head_dim))
 
 
-# K=2048. N=2560 is in neither AITER's ASM nor its preshuffled tables, so the
-# linear runs the Triton GEMM and the gated norm + quant fuses. N=8192 is in
-# both, so the linear runs the ASM GEMM and nothing fuses.
-# GDN flattens heads with flatten(-2), which compiles to a reshape to the
-# symbolic token count and needs the pass's reshape rewrite to match.
+# K=2048. N=2560 runs the Triton GEMM and fuses; N=8192 is in AITER's ASM
+# tables, so it runs the ASM GEMM and nothing fuses. flatten(-2) needs the
+# pass's symbolic-reshape rewrite to match.
 @pytest.mark.parametrize(
     "out_features, activation, out_flatten, expect_fused",
     [
@@ -911,10 +909,10 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
     expect_fused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    if not on_gfx950():
-        pytest.skip("The AITER MXFP4 GEMMs need gfx950")
+    if get_cdna_version() != 4:
+        pytest.skip("The fused gated-norm MXFP4 quant is validated on gfx950")
 
     num_heads, head_dim, eps, num_tokens = 16, 128, 1e-6, 64
     dtype = torch.bfloat16
