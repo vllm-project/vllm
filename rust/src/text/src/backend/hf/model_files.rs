@@ -9,12 +9,17 @@ use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use hf_hub::{Cache, Repo, RepoType};
 use serde::Serialize;
 use thiserror_ext::AsReport as _;
+use tokio::sync::OnceCell;
+use tracing::warn;
 
 use super::HfOverrides;
 use super::config::{HfTokenizerConfig, load_tokenizer_config};
 use crate::error::{Error, Result};
 
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
+/// How long to wait for the Hub when a cached snapshot is missing a file, matching the
+/// default `HF_HUB_ETAG_TIMEOUT` of Python's `huggingface_hub`.
+const HUB_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The tokenizer source selected for a model.
 #[derive(Debug, Clone)]
@@ -207,14 +212,29 @@ impl std::fmt::Display for RequiredFile {
 enum SourceFiles {
     /// A local model directory given by path.
     Dir(PathBuf),
-    /// A cached Hub snapshot of `model_id`.
-    Snapshot { dir: PathBuf, model_id: String },
+    /// A cached Hub snapshot of `model_id` at `commit`. Files missing from it are
+    /// looked up on the Hub at the same commit.
+    Snapshot {
+        dir: PathBuf,
+        model_id: String,
+        commit: String,
+        cache: Cache,
+        /// The Hub listing at `commit`, fetched at most once; `None` when the Hub
+        /// could not be reached.
+        hub: OnceCell<Option<HubListing>>,
+    },
     /// A Hub repo with its listed files.
     Remote {
         model_id: String,
         repo: ApiRepo,
         siblings: BTreeSet<String>,
     },
+}
+
+/// The files of a Hub repo at one commit.
+struct HubListing {
+    repo: ApiRepo,
+    siblings: BTreeSet<String>,
 }
 
 impl SourceFiles {
@@ -235,7 +255,7 @@ impl SourceFiles {
             .map(|path| Cache::new(path.into()))
             .unwrap_or_else(Cache::from_env);
         if let Some(dir) = cached_snapshot_dir(&cache, &repo) {
-            let snapshot = Self::snapshot(model_id, dir);
+            let snapshot = Self::snapshot(model_id, dir, &cache);
             if snapshot.contains(required).await? {
                 return Ok(snapshot);
             }
@@ -265,9 +285,39 @@ impl SourceFiles {
         })
     }
 
-    /// Return the path of `filename`, downloading it if the source lists it.
+    /// Return the path of `filename`, downloading it if the source lists it. A cached
+    /// snapshot that lacks the file looks it up on the Hub at the snapshot's commit.
     async fn get(&self, filename: &str) -> Result<Option<PathBuf>> {
-        self.probe(filename).await
+        let Self::Snapshot {
+            dir,
+            model_id,
+            commit,
+            cache,
+            hub,
+        } = self
+        else {
+            return self.probe(filename).await;
+        };
+
+        if let Some(path) = local_file_if_exists(dir, filename) {
+            return Ok(Some(path));
+        }
+        let marker = no_exist_marker(dir, commit, filename);
+        if marker.as_ref().is_some_and(|marker| marker.exists()) || is_hf_hub_offline() {
+            return Ok(None);
+        }
+        let listing =
+            hub.get_or_init(|| fetch_hub_listing(cache, model_id, commit, filename)).await;
+        let Some(listing) = listing else {
+            return Ok(None);
+        };
+        if listing.siblings.contains(filename) {
+            return download_known_file(&listing.repo, model_id, filename).await.map(Some);
+        }
+        if let Some(marker) = marker {
+            record_no_exist(&marker);
+        }
+        Ok(None)
     }
 
     /// Look for `filename` without treating its absence as a cache miss: a
@@ -361,11 +411,15 @@ impl SourceFiles {
         }
     }
 
-    /// A cached snapshot of `model_id`.
-    fn snapshot(model_id: &str, dir: PathBuf) -> Self {
+    /// A cached snapshot of `model_id`, at the commit its directory is named after.
+    fn snapshot(model_id: &str, dir: PathBuf, cache: &Cache) -> Self {
+        let commit = dir.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
         Self::Snapshot {
             dir,
             model_id: model_id.to_string(),
+            commit,
+            cache: cache.clone(),
+            hub: OnceCell::new(),
         }
     }
 }
@@ -424,6 +478,64 @@ async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> 
             error.as_report()
         ))
     })
+}
+
+/// List the files of `model_id` at `commit` on the Hub, or `None` when the Hub can't
+/// be reached in time.
+async fn fetch_hub_listing(
+    cache: &Cache,
+    model_id: &str,
+    commit: &str,
+    missing_file: &str,
+) -> Option<HubListing> {
+    let unreachable = |reason: String| {
+        warn!(
+            model_id,
+            commit,
+            missing_file,
+            reason,
+            "cached snapshot is missing a file and the Hugging Face Hub could not be \
+             reached, so it is treated as absent; download the model files again or set \
+             HF_HUB_OFFLINE=1 to skip this lookup"
+        );
+        None
+    };
+    let api = match build_api(cache) {
+        Ok(api) => api,
+        Err(error) => return unreachable(error.to_report_string()),
+    };
+    let repo = api.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        commit.to_string(),
+    ));
+    match tokio::time::timeout(HUB_LOOKUP_TIMEOUT, repo.info()).await {
+        Ok(Ok(info)) => Some(HubListing {
+            siblings: info.siblings.into_iter().map(|sibling| sibling.rfilename).collect(),
+            repo,
+        }),
+        Ok(Err(error)) => unreachable(error.to_report_string()),
+        Err(_) => unreachable(format!("timed out after {HUB_LOOKUP_TIMEOUT:?}")),
+    }
+}
+
+/// Where Python's `huggingface_hub` records that `filename` does not exist at
+/// `commit`: `<repo>/.no_exist/<commit>/<filename>`, beside `<repo>/snapshots/`.
+fn no_exist_marker(snapshot_dir: &Path, commit: &str, filename: &str) -> Option<PathBuf> {
+    let repo_dir = snapshot_dir.parent()?.parent()?;
+    Some(repo_dir.join(".no_exist").join(commit).join(filename))
+}
+
+/// Record that a file does not exist, so later startups skip the Hub lookup. A failure
+/// only costs a lookup next time, so it is logged and ignored, as Python does.
+fn record_no_exist(marker: &Path) {
+    let result = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::File::create(marker).map(drop));
+    if let Err(error) = result {
+        warn!(path = %marker.display(), error = %error.as_report(), "failed to record a missing Hub file");
+    }
 }
 
 fn is_hf_hub_offline() -> bool {
