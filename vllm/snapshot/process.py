@@ -3,8 +3,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 from pathlib import Path
+
+# pidfd_getfd(2) is syscall 438 on the generic Linux syscall table used by
+# x86_64 and aarch64. Some CPython builds omit os.pidfd_getfd, so use the
+# raw syscall as a fallback when the wrapper is unavailable.
+_SYS_PIDFD_GETFD = 438
 
 
 def process_starttime(pid: int) -> int:
@@ -15,17 +22,30 @@ def process_starttime(pid: int) -> int:
     return int(fields[19])
 
 
+def _pidfd_getfd(pidfd: int, target_fd: int) -> int:
+    getter = getattr(os, "pidfd_getfd", None)
+    if getter is not None:
+        return getter(pidfd, target_fd)
+    if os.uname().machine not in ("x86_64", "aarch64"):
+        raise OSError(errno.ENOSYS, "pidfd_getfd syscall is unavailable")
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(_SYS_PIDFD_GETFD, pidfd, target_fd, 0)
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"pidfd_getfd: {os.strerror(error)}")
+    return result
+
+
 def _duplicate_fd(source_pid: int, target_fd: int) -> int:
     # /proc/<pid>/fd open creates a new file description, which drops O_APPEND
     # and fails with ENXIO for socket-backed stdio (systemd journal). pidfd_getfd
     # duplicates the real description when ptrace access is available.
     pidfd_open = getattr(os, "pidfd_open", None)
-    pidfd_getfd = getattr(os, "pidfd_getfd", None)
-    if pidfd_open is not None and pidfd_getfd is not None:
+    if pidfd_open is not None:
         try:
             pidfd = pidfd_open(source_pid)
             try:
-                return pidfd_getfd(pidfd, target_fd)
+                return _pidfd_getfd(pidfd, target_fd)
             finally:
                 os.close(pidfd)
         except OSError:
