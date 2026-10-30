@@ -2530,10 +2530,11 @@ def test_redo_recompute_survives_a_second_preemption():
     assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
 
 
-def test_redo_marker_cleared_on_v2_resume():
+def test_v2_resume_suppresses_directive_but_keeps_recompute_marker():
     """The V2 runner re-registers prompt logprobs for resumed requests on its
-    new-request path, so the scheduler must clear the redo marker instead of
-    sending a directive (#61490)."""
+    new-request path, so the scheduler sends no redo directive; the recompute
+    marker is kept so the whole-prompt recompute survives later preemptions
+    (#61490)."""
     scheduler = create_scheduler(enable_prefix_caching=True, async_scheduling=True)
     assert scheduler.use_v2_model_runner
     request = create_requests(num_requests=1, prompt_logprobs=5)[0]
@@ -2559,7 +2560,7 @@ def test_redo_marker_cleared_on_v2_resume():
     assert any(r.req_id == request.request_id for r in out.scheduled_new_reqs)
     cached = out.scheduled_cached_reqs
     assert request.request_id not in cached.redo_prompt_logprobs_req_ids
-    assert not request.prompt_logprobs_dropped
+    assert request.prompt_logprobs_dropped
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
     scheduler = create_scheduler(enable_prefix_caching=False)

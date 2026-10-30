@@ -1636,10 +1636,11 @@ class Scheduler(SchedulerInterface):
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
-            # The V2 runner re-registers prompt logprobs for resumed requests
-            # on its new-request path, so a redo marker is moot there.
-            for req in scheduled_resumed_reqs:
-                req.prompt_logprobs_dropped = False
+            # The V2 runner re-registers prompt logprobs for resumed requests on
+            # its new-request path, so no separate redo directive is sent (the
+            # resumed requests become new-request entries below). The
+            # prompt_logprobs_dropped marker is kept so the recompute forcing
+            # survives repeated preemptions (#61490).
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
             new_reqs_data = [
