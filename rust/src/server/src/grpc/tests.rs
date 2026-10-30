@@ -438,9 +438,10 @@ where
     )
     .await
     .expect("connect client");
-    let engine_health = EngineHealth::subscribe(&client);
+    let llm = EngineCoreLlm::new(client);
+    let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(EngineCoreLlm::new(client), backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
