@@ -81,8 +81,11 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
         if m:
             name = m.group(1)
             value = m.group(2)
-            if name:
-                params[name] = _trim_wrapping_newlines(value)
+            # A closing tag swallowed into the name means the opener was never
+            # closed; the non-partial converter drops this malformed parameter.
+            if name and "</" not in name:
+                stable, _ = _split_open_value(value, trim_newlines=True)
+                params[name] = stable
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -100,6 +103,26 @@ def _param_value_end_window(text: str) -> str:
     return tail if _PARAM_VALUE_END_RE.fullmatch(tail, partial=True) else ""
 
 
+def _split_open_value(value: str, trim_newlines: bool) -> tuple[str, str]:
+    """Split an open value into stream-stable text and a pending suffix.
+
+    A suffix that can still grow into a closing tag or the next parameter
+    opener is not stable: emitting it would leak text that the converter drops
+    when the tag completes. With *trim_newlines*, a trailing newline of the
+    stable part moves into the pending suffix, so it is emitted only if the
+    suffix turns out not to be a tag.
+    """
+    pending = _param_value_end_window(value)
+    stable = value if not pending else value[: len(value) - len(pending)]
+    if trim_newlines:
+        if stable.startswith("\n"):
+            stable = stable[1:]
+        if stable.endswith("\n"):
+            stable = stable[:-1]
+            pending = "\n" + pending
+    return stable, pending
+
+
 def _param_value_extender(
     raw_args: str, trim_newlines: bool
 ) -> ArgValueExtender | None:
@@ -113,30 +136,32 @@ def _param_value_extender(
     if match is None:
         return None
     name, value = match.group(1), match.group(2)
+    if "</" in name:
+        return None
     # A repeated key keeps its first position, so its value is not last.
     if any(m.group(1) == name for m in _PARAM_RE.finditer(raw_args)):
         return None
 
-    window = _param_value_end_window(value)
+    _, pending = _split_open_value(value, trim_newlines)
     started = bool(value)
-    held = "\n" if trim_newlines and value.endswith("\n") and value != "\n" else ""
 
     def extend(delta: str) -> str | None:
-        nonlocal window, started, held
-        text = window + delta
+        nonlocal pending, started
+        text = pending + delta
         if _PARAM_VALUE_END_RE.search(text):
             return None
-        window = _param_value_end_window(text)
+        pending = _param_value_end_window(text)
+        stable = text[: len(text) - len(pending)]
         if trim_newlines:
-            text = held + delta
-            if not started and text:
+            if not started and stable:
                 started = True
-                text = text.removeprefix("\n")
-            held = "\n" if text.endswith("\n") else ""
-            text = text[: len(text) - len(held)]
-        else:
-            text = delta
-        return json.dumps(text, ensure_ascii=False)[1:-1]
+                stable = stable.removeprefix("\n")
+            if stable.endswith("\n"):
+                stable = stable[:-1]
+                pending = "\n" + pending
+        if not stable:
+            return ""
+        return json.dumps(stable, ensure_ascii=False)[1:-1]
 
     return extend
 

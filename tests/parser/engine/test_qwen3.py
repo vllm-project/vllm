@@ -23,6 +23,7 @@ from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -914,7 +915,7 @@ class TestArgValueExtender:
         extend = _qwen3_arg_value_extender("<parameter=k>")
         assert extend is not None
         deltas = ["\n", 'a"\n', "b", "\n", "</param", "eter>"]
-        expected = ["", 'a\\"', "\\nb", "", "\\n</param", None]
+        expected = ["", 'a\\"', "\\nb", "", "", None]
         assert [extend(d) for d in deltas] == expected
 
     def test_extender_stops_at_split_next_parameter(self):
@@ -922,7 +923,43 @@ class TestArgValueExtender:
 
         extend = _qwen3_arg_value_extender("<parameter=k>x")
         assert extend is not None
-        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", None]
+        assert [extend(d) for d in ["< para", "meter ="]] == ["", None]
+
+    @pytest.mark.parametrize("parser_name", ["qwen3", "mimo"])
+    @pytest.mark.parametrize(
+        "value",
+        ["a<parameter=b", "a<parameter =b", "a<parameter\t=b", "a<param<parameter=b"],
+    )
+    def test_streaming_holds_partial_next_parameter(
+        self, mock_tokenizer, mock_request, parser_name, value
+    ):
+        from vllm.parser.mimo import MiMoParser
+
+        cls = MiMoParser if parser_name == "mimo" else Qwen3Parser
+        text = (
+            "<tool_call>\n<function=f>\n"
+            f"<parameter=k>{value}</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        expected = cls(
+            mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+        ).extract_tool_calls(text, mock_request)
+        assert expected.tool_calls[0].function.arguments
+
+        for chunk_size in (1, 2, 3, 5):
+            parser = cls(
+                mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+            )
+            chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+            streamed = ""
+            for i, chunk in enumerate(chunks):
+                delta = parser.parse_delta(
+                    chunk, [], mock_request, finished=i == len(chunks) - 1
+                )
+                for tool_call in (delta.tool_calls if delta else None) or []:
+                    if tool_call.function and tool_call.function.arguments:
+                        streamed += tool_call.function.arguments
+            assert streamed == expected.tool_calls[0].function.arguments
 
     @pytest.mark.parametrize(
         "raw_args",
