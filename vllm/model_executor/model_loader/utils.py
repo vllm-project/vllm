@@ -183,6 +183,12 @@ def process_weights_after_loading(
                 else nullcontext()
             )
             with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
