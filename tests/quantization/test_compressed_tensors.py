@@ -1166,14 +1166,30 @@ def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
 
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
-    reason="Requires CUDA CUTLASS FP8 kernels",
+    reason="Requires CUDA FP8 kernels",
 )
 @pytest.mark.parametrize("strategy", ["tensor", "channel"])
 @pytest.mark.parametrize("static_input", [False, True])
 @pytest.mark.parametrize("output_sizes", [[32, 32], [17, 32]])
+@pytest.mark.parametrize(
+    "backend,dtype_name,bias",
+    [
+        ("cutlass", "bfloat16", False),
+        ("marlin", "float16", True),
+        ("marlin", "bfloat16", True),
+    ],
+)
 @torch.inference_mode()
 def test_compressed_fp8_preprocessed_shared_weights(
-    strategy, static_input, output_sizes, dist_init, workspace_init, monkeypatch
+    strategy,
+    static_input,
+    output_sizes,
+    backend,
+    dtype_name,
+    bias,
+    dist_init,
+    workspace_init,
+    monkeypatch,
 ):
     """Two attachments preserve fused/padded FP8 tensors and their outputs."""
     from vllm.config import ModelConfig
@@ -1182,10 +1198,11 @@ def test_compressed_fp8_preprocessed_shared_weights(
     from vllm.model_executor.utils import replace_parameter, weights_already_processed
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0" if backend == "marlin" else "1")
+    dtype = getattr(torch, dtype_name)
     config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
-        kernel_config=KernelConfig(linear_backend="cutlass"),
+        model_config=ModelConfig(model="facebook/opt-125m", dtype=dtype_name),
+        kernel_config=KernelConfig(linear_backend=backend),
     )
     quant_config = CompressedTensorsConfig.from_config(
         {
@@ -1214,18 +1231,22 @@ def test_compressed_fp8_preprocessed_shared_weights(
 
     with (
         set_current_vllm_config(config),
-        set_default_torch_dtype(torch.bfloat16),
+        set_default_torch_dtype(dtype),
         torch.device("cuda"),
     ):
         source = MergedColumnParallelLinear(
             64,
             output_sizes,
-            bias=False,
-            params_dtype=torch.bfloat16,
+            bias=bias,
+            params_dtype=dtype,
             quant_config=quant_config,
         )
         torch.manual_seed(0)
+        if backend == "marlin":
+            assert isinstance(source.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel)
         source.weight.copy_(torch.randn(source.weight.shape).to(source.weight.dtype))
+        if bias:
+            source.bias.copy_(torch.randn_like(source.bias))
         source.weight_scale.copy_(
             torch.linspace(0.01, 0.03, source.weight_scale.numel()).reshape(
                 source.weight_scale.shape
@@ -1234,7 +1255,9 @@ def test_compressed_fp8_preprocessed_shared_weights(
         if static_input:
             source.input_scale.copy_(torch.tensor([0.01, 0.02]))
         process_weights_after_loading(source, config.model_config, torch.device("cuda"))
-        x = torch.randn(3, 64, dtype=torch.bfloat16)
+        if backend == "marlin":
+            assert source.weight.dtype == torch.int32
+        x = torch.randn(3, 64, dtype=dtype)
         expected, _ = source(x)
         shared = dict(source.named_parameters())
         snapshots = {name: param.detach().clone() for name, param in shared.items()}
@@ -1243,8 +1266,8 @@ def test_compressed_fp8_preprocessed_shared_weights(
                 attached = MergedColumnParallelLinear(
                     64,
                     output_sizes,
-                    bias=False,
-                    params_dtype=torch.bfloat16,
+                    bias=bias,
+                    params_dtype=dtype,
                     quant_config=quant_config,
                 )
             for name, param in shared.items():
@@ -1261,6 +1284,70 @@ def test_compressed_fp8_preprocessed_shared_weights(
                 torch.testing.assert_close(
                     param.float(), snapshots[name].float(), rtol=0, atol=0
                 )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="Requires CUDA FP8 kernels",
+)
+def test_compressed_fp8_preprocessed_marlin_rejects_block(dist_init, monkeypatch):
+    """Tensor/channel support must not admit Marlin's block-scale layout."""
+    from vllm.config import ModelConfig
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import weights_already_processed
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        kernel_config=KernelConfig(linear_backend="marlin"),
+    )
+    quant_config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": {
+                "weights": QuantizationArgs(
+                    num_bits=8,
+                    type="float",
+                    strategy="block",
+                    block_structure=[128, 128],
+                    symmetric=True,
+                    dynamic=False,
+                ),
+                "input_activations": QuantizationArgs(
+                    num_bits=8,
+                    type="float",
+                    strategy="group",
+                    group_size=128,
+                    symmetric=True,
+                    dynamic=True,
+                ),
+                "format": "float-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="float-quantized",
+    )
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("meta"),
+    ):
+        layer = MergedColumnParallelLinear(
+            256,
+            [128, 256],
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+        )
+        assert isinstance(layer.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        with (
+            weights_already_processed(),
+            pytest.raises(RuntimeError, match="does not support pre-processed weights"),
+        ):
+            process_weights_after_loading(
+                layer, config.model_config, torch.device("cuda")
+            )
 
 
 @pytest.mark.skipif(

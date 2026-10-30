@@ -14,6 +14,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
+    MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -84,8 +85,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        return isinstance(
-            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        kernel = getattr(self, "fp8_linear", None)
+        return isinstance(kernel, CutlassFP8ScaledMMLinearKernel) or (
+            self.strategy != QuantizationStrategy.BLOCK
+            and isinstance(kernel, MarlinFP8ScaledMMLinearKernel)
         )
 
     @classmethod
