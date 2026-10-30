@@ -12,7 +12,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    finalize_model_weights,
+)
 
 from .meta import (
     SKIP_LOAD_TENSORS,
@@ -284,8 +287,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     LOADING_LAYERS.clear()
 
 
-def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_processing(*args, **kwargs)
+def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
+    finalize_layerwise_processing(model, model_config)
+    finalize_model_weights(model)
 
 
 def _finalize_attention_layer(
