@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 import torch
 
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 
@@ -34,7 +35,7 @@ def _get_draft_toks(handler: DraftTokensHandler) -> dict[str, list[int]]:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_draft_tokens_follow_request_lifecycle() -> None:
-    handler = DraftTokensHandler(torch.device("cuda"))
+    handler = DraftTokensHandler(max_concurrent_batches=2, device=torch.device("cuda"))
 
     # The worker samples two structured-output requests
     _set_draft_toks(
@@ -72,6 +73,17 @@ def test_draft_tokens_follow_request_lifecycle() -> None:
         "b": [23, 24],
         "plain": [-1, -1],
     }
+
+    # Deferred grammar validation only fetches the requests in the latest
+    # scheduler output.
+    deferred_output = SchedulerOutput.make_empty()
+    deferred_output.pending_structured_output_tokens = True
+    deferred_output.scheduled_spec_decode_tokens = {"a": [-1, -1]}
+    handler.begin_step(deferred_output)
+    assert _get_draft_toks(handler) == {"a": [13, 14]}
+
+    # Subsequent reads return all retained drafts again.
+    handler.begin_step(SchedulerOutput.make_empty())
 
     # Requests finish independently, and the handler is empty once all are gone
     handler.discard("a")
