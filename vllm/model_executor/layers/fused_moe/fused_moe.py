@@ -3,7 +3,6 @@
 """Fused MoE Triton kernels."""
 
 import functools
-import json
 import os
 from typing import Any
 
@@ -34,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.warmup.triton_autotune import (
     atomic_write_json,
     get_autotune_cache_dir,
+    read_config_json,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1192,18 +1192,16 @@ def get_moe_configs(
     config_file_paths.append(default_config_file_path)
 
     for config_file_path in config_file_paths:
-        if os.path.exists(config_file_path):
-            with open(config_file_path) as f:
-                logger.info_once(
-                    "Using configuration from %s for MoE layer.",
-                    config_file_path,
-                    scope="global",
-                )
-                # If a configuration has been found, return it
-                tuned_config = json.load(f)
-                # Delete triton_version from tuned_config
-                tuned_config.pop("triton_version", None)
-                return {int(key): val for key, val in tuned_config.items()}
+        tuned_config = read_config_json(config_file_path)
+        if tuned_config is not None:
+            logger.info_once(
+                "Using configuration from %s for MoE layer.",
+                config_file_path,
+                scope="global",
+            )
+            # Delete triton_version from tuned_config
+            tuned_config.pop("triton_version", None)
+            return {int(key): val for key, val in tuned_config.items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
@@ -1227,11 +1225,9 @@ def get_moe_autotune_config_file_path(
 def load_moe_autotune_configs(
     E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> dict[int, dict[str, Any]]:
-    path = get_moe_autotune_config_file_path(E, N, dtype, block_shape)
-    if not os.path.exists(path):
+    raw = read_config_json(get_moe_autotune_config_file_path(E, N, dtype, block_shape))
+    if raw is None:
         return {}
-    with open(path) as f:
-        raw = json.load(f)
     return {int(k): v for k, v in raw.items() if k.isdigit()}
 
 
