@@ -1116,6 +1116,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiMoV2OmniForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
     ),
+    "MingV3ASRForConditionalGeneration": _HfExamplesInfo(
+        "inclusionAI/Ming-3.0-asr-tiny",
+        trust_remote_code=True,
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 4,
+                "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+            }
+        },
+    ),
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
         trust_remote_code=True,
@@ -1253,9 +1264,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
-    # TODO: Change repo id once pertinent archs are public.
     "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
+        "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        min_transformers_version="5.18.0",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {"layers_block_type": ["linear_attention", "full_attention"]}
+        },
     ),
     "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
@@ -1578,6 +1594,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "DSparkMiniMaxDraftModel": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        is_available_online=False,
+        use_original_num_layers=True,
     ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
