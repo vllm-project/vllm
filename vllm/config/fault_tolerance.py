@@ -21,6 +21,13 @@ class FaultToleranceConfig:
     If vLLM does not recover during this time, the original error is raised.
     """
 
+    enable_nan_fault_tolerance: bool = False
+    """Abort requests producing NaN logits, zero newly allocated KV blocks, and
+    delay GPU prefix-cache insertion and CPU offloading until each chunk is
+    checked. Previously validated prefixes remain reusable on abort. This adds
+    GPU memory writes and logit checks, and concurrent cold-prefix requests may
+    repeat prefill work. Implies --enable-detect-nans-in-logits."""
+
 
 def ft_tp_barrier_required(parallel_config: "ParallelConfig") -> bool:
     """Whether the per-step FT barrier over the TP cpu group is armed.
