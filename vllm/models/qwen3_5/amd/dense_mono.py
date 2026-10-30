@@ -16,10 +16,12 @@ batches, and wider decode call the original compiled model, which is not
 wrapped. TP1's graph folds the norms into K1/K2. TP2's graph keeps the norms
 and the full-attention block visible to mode 3, and all-reduces each rank's
 K1 and K2 partial with the same collective ``RowParallelLinear`` uses, so
-FlyDSL QuickReduce still sees that op. Prefill, mixed batches, spec decode,
-pipeline parallel, and TP other than 1 or 2 stay on the stock path. A set
-flag on a shape, quant, or parallel setup these kernels cannot run raises
-and lists the reason.
+FlyDSL QuickReduce still sees that op. Prefill, mixed batches,
+pipeline parallel, and TP other than 1 or 2 stay on the stock path. An MTP
+verify step keeps K1 on vLLM's GDN core, which can roll a rejected draft
+back, and runs K2 when the step fits the K2 cap. A set flag on a shape,
+quant, or parallel setup these kernels cannot run raises and lists the
+reason.
 
 The launches are custom ops, as in vLLM #60833's split between the compiled
 model and the mono step. ``torch.compile`` (compilation mode 3) traces the
@@ -143,8 +145,8 @@ def _unsupported(model, vllm_config) -> str | None:
         return "layer scale"
     if any(layer.use_attn_reduce_scatter_for_moe for layer in model.layers):
         return "sequence parallel"
-    if any(_is_gdn(layer) and layer.linear_attn.num_spec for layer in model.layers):
-        return "speculative tokens widen the GDN conv state"
+    # MTP verify steps are accepted later. K1 cannot roll back a rejected
+    # draft, so only K2 runs there. _pure_decode() still keeps K1 off.
     return None
 
 
@@ -423,6 +425,16 @@ def _ffn_op_fake(hidden: torch.Tensor, index: int) -> torch.Tensor:
     return torch.empty_like(hidden)
 
 
+def _ffn_verify_op(hidden: torch.Tensor, index: int) -> torch.Tensor:
+    """This rank's down-proj partial on an MTP verify step."""
+    mono = _BOUND
+    return mono._ffn_verify(index, hidden)
+
+
+def _ffn_verify_op_fake(hidden: torch.Tensor, index: int) -> torch.Tensor:
+    return torch.empty_like(hidden)
+
+
 def _layer_op(
     hidden: torch.Tensor,
     residual: torch.Tensor,
@@ -486,6 +498,11 @@ def _register_ops() -> None:
         op_name="qwen38_dense_mono_ffn",
         op_func=_ffn_op,
         fake_impl=_ffn_op_fake,
+    )
+    direct_register_custom_op(
+        op_name="qwen38_dense_mono_ffn_verify",
+        op_func=_ffn_verify_op,
+        fake_impl=_ffn_verify_op_fake,
     )
     direct_register_custom_op(
         op_name="qwen38_dense_mono_layer",
@@ -610,6 +627,37 @@ class DenseMonoGraph(nn.Module):
         return hidden
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "inputs_embeds": 0,
+    }
+)
+class DenseMonoVerifyGraph(nn.Module):
+    """A separately compiled entry for an MTP verify step.
+
+    The mixer stays on vLLM's GDN core, which rolls a rejected draft back,
+    and K2 runs the FFN. Tracing the step keeps it on a CUDA graph like the
+    stock verify step, instead of an eager loop over every layer: the loop
+    is what the K2 rows were paying for.
+    """
+
+    def __init__(self, mono, *, vllm_config):
+        super().__init__()
+        # Do not register the serving model a second time as a child module.
+        object.__setattr__(self, "_mono", mono)
+
+    @staticmethod
+    def _ffn(index, x):
+        return torch.ops.vllm.qwen38_dense_mono_ffn_verify(x, index)
+
+    def forward(self, input_ids, positions, inputs_embeds=None):
+        return self._mono._verify_body(
+            input_ids, positions, inputs_embeds, self._ffn
+        )
+
+
 def _oproj_forward(mono, stock, x, *args, **kwargs):
     if mono._skip_o:
         return x, None
@@ -636,6 +684,9 @@ class DenseMono:
         self._skip_o = False
         self._gdn_step = False
         self._ffn_step = False
+        spec = getattr(vllm_config, "speculative_config", None)
+        drafts = getattr(spec, "num_speculative_tokens", 0) or 0
+        self.mtp_q = drafts + 1 if getattr(spec, "method", None) == "mtp" and drafts else 0
         self._prepared = False
         self._logged: set = set()
         self.w13 = []
@@ -666,6 +717,17 @@ class DenseMono:
         self.graph = (
             DenseMonoGraph(self, vllm_config=vllm_config) if self.tp in (1, 2) else None
         )
+        # An MTP verify step cannot enter self.graph: K1 reads a conv state
+        # one token wide. This second entry runs the same stock-mixer-plus-K2
+        # step the eager path runs, traced, so it is captured like any other
+        # decode width.
+        self.verify_graph = (
+            DenseMonoVerifyGraph(self, vllm_config=vllm_config)
+            if self.graph is not None
+            and self.mtp_q > 1
+            and (self.whole_step or self.k2)
+            else None
+        )
 
     def _k1_key(self, dense_gdn, s: int, *, first: bool, eps=1e-6, norm_eps=1e-6):
         if self.whole_step:
@@ -677,6 +739,14 @@ class DenseMono:
     def _k2_key(self, dense_ffn, s: int, eps=1e-6):
         if self.whole_step:
             return dense_ffn.FfnBuild(tokens=s, eps=eps, shuffled=True, oproj=self.oproj)
+        return dense_ffn.FfnBuild(tokens=s, shuffled=True, tp=self.tp, normed=True)
+
+    def _k2_verify_key(self, dense_ffn, s: int):
+        """K2 after the stock attention block, at TP1 and TP2.
+
+        The hidden state is already the post-attention norm output, so
+        out_proj is not folded in again. ``FGeo`` follows ``tp``.
+        """
         return dense_ffn.FfnBuild(tokens=s, shuffled=True, tp=self.tp, normed=True)
 
     def prepare(self) -> None:
@@ -721,11 +791,12 @@ class DenseMono:
                 f"(they are on {dev})"
             )
         if self.whole_step or self.k2:
+            widths = range(1, self.k2_rows + 1)
+            keys = [self._k2_key(D, s) for s in widths]
+            if self.mtp_q > 1:
+                keys.extend(self._k2_verify_key(D, s) for s in widths)
             self.scratch = torch.zeros(
-                max(
-                    D.scratch_bytes(self._k2_key(D, s))
-                    for s in range(1, self.k2_rows + 1)
-                ),
+                max(D.scratch_bytes(key) for key in keys),
                 dtype=torch.uint8,
                 device=dev,
             )
@@ -768,7 +839,13 @@ class DenseMono:
                     )
         self._allocate()
         self._shuffle_weights()
-        return self._self_check()
+        why = self._self_check()
+        if why is None and self.mtp_q > 1 and self.whole_step:
+            from vllm.models.qwen3_5.amd.mono import dense_ffn as D
+
+            for s in self._check_widths(self.k2_rows):
+                D.build(self._k2_verify_key(D, s))
+        return why
 
     def _agree(self, why: str | None) -> str | None:
         ok = torch.tensor([int(why is None)], dtype=torch.int32)
@@ -1086,6 +1163,35 @@ class DenseMono:
             return self._skip("spec decode")
         return True
 
+    def _verify_k2(self, rows: int) -> bool:
+        """A pure MTP verify step whose token rows fit K2.
+
+        K1 stays off: its conv state is one token wide and it cannot roll a
+        rejected draft back. vLLM's GDN core does that. Same rule as the open
+        Qwen mono PRs: stock GDN between the input norm and K2.
+        """
+        if self.mtp_q <= 1 or not self._prepared or not 1 <= rows <= self.k2_rows:
+            return False
+        if self.model.aux_hidden_state_layers:
+            return False
+        attn = next(
+            (layer.linear_attn for layer in self.model.layers if _is_gdn(layer)),
+            None,
+        )
+        if attn is None:
+            return False
+        meta = self._metadata(attn)
+        if meta is None or meta.num_prefills != 0 or meta.num_decodes != 0:
+            return False
+        if meta.spec_sequence_masks is None or meta.num_spec_decodes < 1:
+            return False
+        idx = meta.spec_state_indices_tensor
+        if idx is None or idx.ndim != 2 or idx.size(-1) != self.mtp_q:
+            return False
+        if meta.num_spec_decodes * self.mtp_q > rows:
+            return False
+        return True
+
     def _skip(self, why: str) -> bool:
         if why not in self._logged:
             self._logged.add(why)
@@ -1126,6 +1232,24 @@ class DenseMono:
         if self.graph is None or intermediate_tensors is not None:
             return None
         rows = positions.shape[-1]
+        # MTP allocates the GDN conv cache at width CONV_W-1+drafts for every
+        # step, including a CUDA-graph capture whose metadata still looks like
+        # a plain decode. K1 only reads width 3, so it stays off for the run.
+        if self.mtp_q > 1:
+            if not (self._verify_k2(rows) or self._pure_decode(rows)):
+                return None
+            self.epoch.add_(1)
+            if ("verify", rows) not in self._logged:
+                self._logged.add(("verify", rows))
+                logger.info(
+                    "Qwen3.8 dense mono MTP verify at width %d "
+                    "(K1 off, K2 on, %s)",
+                    rows,
+                    "compiled" if self.verify_graph is not None else "eager",
+                )
+            if self.verify_graph is not None:
+                return self.verify_graph(input_ids, positions, inputs_embeds)
+            return self._verify_forward(input_ids, positions, inputs_embeds)
         if not self._pure_decode(rows):
             return None
         if not self.whole_step:
@@ -1273,6 +1397,62 @@ class DenseMono:
             layer=index,
         )
         return out, res_out
+
+    def _verify_forward(self, input_ids, positions, inputs_embeds):
+        """MTP verify, eager. ``verify_graph`` is the compiled entry."""
+        return self._verify_body(
+            input_ids, positions, inputs_embeds, self._ffn_verify
+        )
+
+    def _verify_body(self, input_ids, positions, inputs_embeds, ffn):
+        """MTP verify: stock attention, including GDN draft rollback, then K2."""
+        model = self.model
+        hidden = (
+            inputs_embeds
+            if inputs_embeds is not None
+            else model.embed_input_ids(input_ids)
+        )
+        residual = None
+        for index, layer in enumerate(model.layers):
+            if residual is None:
+                residual = hidden
+                x = layer.input_layernorm(hidden)
+            else:
+                x, residual = layer.input_layernorm(hidden, residual)
+            if _is_gdn(layer):
+                hidden = layer.linear_attn(x)
+            else:
+                hidden = layer.self_attn(positions=positions, hidden_states=x)
+            if getattr(layer, "layer_scale", False):
+                hidden = hidden * (layer.attn_layer_scale.to(hidden.dtype)[0] + 1)
+            x, residual = layer.post_attention_layernorm(hidden, residual)
+            partial = ffn(index, x)
+            hidden = _reduce(layer.mlp.down_proj, partial)
+            if getattr(layer, "layer_scale", False):
+                hidden = hidden * (layer.ffn_layer_scale.to(hidden.dtype)[0] + 1)
+        hidden, _ = model.norm(hidden, residual)
+        return hidden
+
+    def _ffn_verify(self, index, x):
+        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
+
+        out = torch.empty_like(x)
+        D.dense_ffn(
+            self._k2_verify_key(D, x.size(0)),
+            hidden=x.contiguous(),
+            residual=None,
+            ln_w=None,
+            w13=self.w13[index],
+            w13s=self.ws[index]["gate_up"],
+            w2=self.w2[index],
+            w2s=self.ws[index]["down"],
+            out=out,
+            res_out=None,
+            scratch=self.scratch,
+            epoch=self.epoch,
+            layer=index,
+        )
+        return out
 
     def _ffn_partial(self, index, layer, x):
         from vllm.models.qwen3_5.amd.mono import dense_ffn as D

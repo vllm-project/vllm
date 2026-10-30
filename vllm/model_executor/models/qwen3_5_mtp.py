@@ -90,9 +90,34 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
         # Ref: https://github.com/vllm-project/vllm/pull/38650
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        # Quark MXFP4 checkpoints list mtp.* under quantization_config.exclude
+        # and store those tensors as BF16. The GPTQ "-:" check below does not
+        # see that list, so the draft linears were built packed and the BF16
+        # load asserted. Treat an mtp exclude entry as unquantized too.
+        def _mtp_left_in_bf16(hf_config) -> bool:
+            configs = [hf_config, getattr(hf_config, "text_config", None)]
+            for cfg in configs:
+                if cfg is None:
+                    continue
+                hf_qc = getattr(cfg, "quantization_config", None)
+                if not isinstance(hf_qc, dict):
+                    continue
+                dynamic = hf_qc.get("dynamic") or {}
+                exclude = hf_qc.get("exclude") or []
+                if any(
+                    isinstance(key, str) and key.startswith("-:") and "mtp" in key
+                    for key in dynamic
+                ):
+                    return True
+                if any("mtp" in str(item) for item in exclude):
+                    return True
+            return False
+
+        mtp_bf16 = _mtp_left_in_bf16(model_config.hf_config)
         fc_quant = (
             None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            if mtp_bf16
+            or (quant_config and quant_config.get_name() == "modelopt_fp4")
             else quant_config
         )
         self.fc = ColumnParallelLinear(
@@ -109,7 +134,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # quantization_config.dynamic with "-:pattern" entries. When detected,
         # disable quantization for MTP layers so they use unquantized params.
         original_quant = vllm_config.quant_config
-        if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
+        if mtp_bf16:
+            vllm_config.quant_config = None
+        elif quant_config and quant_config.get_name() not in ("modelopt_fp4",):
             hf_qc = getattr(model_config.hf_config, "quantization_config", None)
             if isinstance(hf_qc, dict):
                 dynamic = hf_qc.get("dynamic", {})

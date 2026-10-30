@@ -1085,8 +1085,9 @@ def build(key: FfnBuild):
         return _BUILDS[key]
     s = key.tokens
     assert key.tp in TP_SIZES and 1 <= s <= max_tokens(key.tp)
-    # TP2 runs from the stock norm's output only
-    assert key.normed == (key.tp > 1) and not (key.normed and key.oproj)
+    # MTP verify starts from the stock post-attention norm at TP1 and TP2.
+    # That entry does not fold o_proj. The in-kernel norm is the TP1 decode entry.
+    assert not (key.normed and key.oproj)
     geo = FGeo(key.tp)
     lay = scratch_layout(key)
 
