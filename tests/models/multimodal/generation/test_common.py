@@ -697,7 +697,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
-        get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
+        get_stop_token_ids=lambda tok: [getattr(tok, "eos_id"), getattr(tok, "eot_id")],  # noqa: B009
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_25_patch_hf_runner,
     ),
@@ -927,7 +927,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
+        **COMMON_BROADCAST_SETTINGS,
     ),
     "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -936,7 +936,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
+        **COMMON_BROADCAST_SETTINGS,
     ),
     ### Custom input edge-cases for specific models
     "intern_vl-diff-patches": VLMTestInfo(
