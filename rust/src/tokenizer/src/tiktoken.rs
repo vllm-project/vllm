@@ -183,8 +183,7 @@ impl RiptokenBackend {
 
     fn decode(&self, token_ids: &[u32]) -> String {
         let bytes = self.inner.decode_bytes(token_ids);
-        // TODO: use `from_utf8_lossy_owned` once it's stabilized.
-        String::from_utf8_lossy(&bytes).into_owned()
+        String::from_utf8_lossy_owned(bytes)
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
@@ -210,8 +209,7 @@ impl TiktokenRsBackend {
             })
             .collect();
         let bytes: Vec<u8> = self.inner._decode_native_and_split(safe_ids).flatten().collect();
-        // TODO: use `from_utf8_lossy_owned` once it's stabilized.
-        String::from_utf8_lossy(&bytes).into_owned()
+        String::from_utf8_lossy_owned(bytes)
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
