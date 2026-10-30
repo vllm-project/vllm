@@ -211,7 +211,7 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.reanchor_rotary import (
-    audio_position_factor,
+    init_reanchor_rotary_specs,
     rerotate_cached_keys,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -1151,20 +1151,19 @@ class GPUModelRunner(
             self._kv_block_zeroer.zero_block_ids(block_ids)
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded realtime.
+        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded streaming.
 
         The scheduler has already rebased each request's clock and block table
         (via _update_states re-adding the resumed session). The only thing left
         here is to re-rotate the live cached keys by the constant R(-D) in every
         KV group, dropping each key's effective RoPE position by D while every
         in-window relative score is preserved exactly (proven in
-        benchmarks/voxtral_realtime/test_reanchor_math.py).
+        tests/v1/worker/test_reanchor_rotary.py).
 
         Runs at the between-steps barrier (after _update_states, before the
         forward writes this step's keys).
         """
         ib = self.input_batch
-        audio_factor = audio_position_factor(self.model_config.hf_config)
         for req_id, D in reanchor_reqs.items():
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
@@ -1194,7 +1193,7 @@ class GPUModelRunner(
                 self.kv_cache_config.kv_cache_groups,
                 group_block_ids,
                 D,
-                audio_factor,
+                self.reanchor_rotary_specs,
             )
             # The persistent-batch row already carries the rebased (small) clock
             # from full re-add.
@@ -4003,7 +4002,7 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
-            # [EXPERIMENTAL] Unbounded realtime: re-anchor requests at this
+            # [EXPERIMENTAL] Unbounded streaming: re-anchor requests at this
             # between-steps barrier (no in-flight attention) before _prepare_inputs.
             if scheduler_output.reanchor_reqs:
                 self._reanchor_requests(scheduler_output.reanchor_reqs)
@@ -7117,6 +7116,13 @@ class GPUModelRunner(
             kv_transfer_group = get_kv_transfer_group()
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+        if self.scheduler_config.enable_unbounded_streaming and not is_profiling:
+            # [EXPERIMENTAL] Fail at startup, not mid-session, if a layer
+            # cannot be re-anchored.
+            self.reanchor_rotary_specs = init_reanchor_rotary_specs(
+                self.get_model(), kv_cache_config
+            )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """Add encoder-only layers to the KV cache config."""

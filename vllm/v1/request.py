@@ -236,8 +236,8 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-        # [EXPERIMENTAL] Unbounded (re-anchored) streaming; set only for realtime
-        # sliding-window models under --enable-realtime-unbounded.
+        # [EXPERIMENTAL] Unbounded (re-anchored) streaming; set for streaming-input
+        # sessions under --enable-unbounded-streaming.
         # reanchor_stream: the RoPE clock is periodically re-anchored down so the
         #   session never reaches max_model_len. reanchor_offset: total tokens
         #   folded by re-anchoring (log/diagnostic only). pending_reanchor_d:

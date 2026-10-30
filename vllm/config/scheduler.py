@@ -76,17 +76,17 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
-    enable_realtime_unbounded: bool = False
-    """[EXPERIMENTAL] Enable unbounded-duration realtime streaming for
-    sliding-window realtime models (e.g. Voxtral realtime). When True, a
-    streaming session's RoPE position clock is periodically re-anchored (the
-    live sliding window is shifted down) so the session can run indefinitely
-    without the absolute position counter ever reaching max_model_len. The
-    per-stream KV cost stays constant (bounded by the sliding window). Requires
-    a non-fp8 KV cache. Off by default."""
+    enable_unbounded_streaming: bool = False
+    """[EXPERIMENTAL] Let streaming-input sessions run without a duration limit
+    on sliding-window RoPE models (e.g. Voxtral realtime, Mistral-7B-v0.1).
+    Before a session's position clock reaches max_model_len, it is re-anchored:
+    the clock drops by D and the live cached keys are re-rotated by R(-D), so
+    every relative position is unchanged. The per-session KV cost stays bounded
+    by the sliding window. Requires a non-fp8 KV cache and prefix caching off.
+    Off by default."""
 
-    realtime_reanchor_margin_tokens: int = Field(default=4096, ge=1)
-    """[EXPERIMENTAL] With `enable_realtime_unbounded`, re-anchor a streaming
+    reanchor_margin_tokens: int = Field(default=4096, ge=1)
+    """[EXPERIMENTAL] With `enable_unbounded_streaming`, re-anchor a streaming
     session's sliding window this many tokens before its position clock would
     reach max_model_len. Must be smaller than `(max_model_len - sliding_window)`;
     a larger value leaves no head-room to re-anchor and is rejected at startup."""

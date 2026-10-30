@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Startup guard for --enable-realtime-unbounded: re-anchoring drops whole
+"""Startup guard for --enable-unbounded-streaming: re-anchoring drops whole
 scheduler blocks past the sliding window, so max_model_len - margin -
 sliding_window must be at least one block."""
 
@@ -28,8 +28,8 @@ def _scheduler(margin: int):
             sliding_window=SLIDING_WINDOW,
         ),
     )
-    scheduler.scheduler_config.enable_realtime_unbounded = True
-    scheduler.scheduler_config.realtime_reanchor_margin_tokens = margin
+    scheduler.scheduler_config.enable_unbounded_streaming = True
+    scheduler.scheduler_config.reanchor_margin_tokens = margin
     return scheduler
 
 

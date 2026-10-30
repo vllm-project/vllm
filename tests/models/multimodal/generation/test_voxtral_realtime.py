@@ -314,8 +314,8 @@ async def test_voxtral_realtime_reanchor_parity(audio_assets, tokenizer):
         **{
             **ENGINE_CONFIG,
             "max_model_len": _REANCHOR_TEST_MML,
-            "enable_realtime_unbounded": True,
-            "realtime_reanchor_margin_tokens": 24,
+            "enable_unbounded_streaming": True,
+            "reanchor_margin_tokens": 24,
             "enable_prefix_caching": False,
             "hf_overrides": _REANCHOR_WINDOW,
         }

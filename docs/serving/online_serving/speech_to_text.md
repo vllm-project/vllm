@@ -275,14 +275,16 @@ A session that reaches it is finished gracefully (`FINISHED_LENGTH_CAPPED`) so t
 reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
 
 ```bash
-  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 4096
+  --enable-unbounded-streaming --reanchor-margin-tokens 4096
 ```
 
-- `--enable-realtime-unbounded` (default off): periodically re-anchors the RoPE position clock
-  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache, a
-  sliding-window decoder, **prefix caching off** (`--no-enable-prefix-caching`), CUDA, and
-  plain RoPE with `rope_theta=1e6` (Voxtral/Ministral); rejected at startup otherwise.
-- `--realtime-reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
+- `--enable-unbounded-streaming` (default off): periodically re-anchors the RoPE position clock
+  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache,
+  **prefix caching off** (`--no-enable-prefix-caching`), CUDA, and a model whose attention
+  layers all use a sliding window and RoPE (plain, Llama 3 or YaRN scaling); rejected at
+  startup otherwise. It is not specific to Voxtral: any streaming-input session on such a
+  model (for example Mistral-7B-v0.1) is re-anchored the same way.
+- `--reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
   Must be smaller than `max_model_len - sliding_window`.
 
 **Fitting on a 16 GiB GPU.** The model plus a full `PIECEWISE` cudagraph capture leaves little
@@ -299,6 +301,6 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
   --max-model-len 8192 --no-enable-prefix-caching --max-num-seqs 12 \
   --max-num-batched-tokens 256 --gpu-memory-utilization 0.82 \
-  --enable-realtime-unbounded \
+  --enable-unbounded-streaming \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 ```

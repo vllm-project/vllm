@@ -619,10 +619,8 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
-    enable_realtime_unbounded: bool = SchedulerConfig.enable_realtime_unbounded
-    realtime_reanchor_margin_tokens: int = (
-        SchedulerConfig.realtime_reanchor_margin_tokens
-    )
+    enable_unbounded_streaming: bool = SchedulerConfig.enable_unbounded_streaming
+    reanchor_margin_tokens: int = SchedulerConfig.reanchor_margin_tokens
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
@@ -1786,12 +1784,12 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
         scheduler_group.add_argument(
-            "--enable-realtime-unbounded",
-            **scheduler_kwargs["enable_realtime_unbounded"],
+            "--enable-unbounded-streaming",
+            **scheduler_kwargs["enable_unbounded_streaming"],
         )
         scheduler_group.add_argument(
-            "--realtime-reanchor-margin-tokens",
-            **scheduler_kwargs["realtime_reanchor_margin_tokens"],
+            "--reanchor-margin-tokens",
+            **scheduler_kwargs["reanchor_margin_tokens"],
         )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
@@ -2692,8 +2690,8 @@ class EngineArgs:
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
             ),
-            enable_realtime_unbounded=self.enable_realtime_unbounded,
-            realtime_reanchor_margin_tokens=self.realtime_reanchor_margin_tokens,
+            enable_unbounded_streaming=self.enable_unbounded_streaming,
+            reanchor_margin_tokens=self.reanchor_margin_tokens,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

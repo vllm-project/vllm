@@ -78,7 +78,7 @@ class OpenAIServingRealtime(GenerateBaseServing):
         # [EXPERIMENTAL] Unbounded sessions re-anchor instead of stopping at
         # max_model_len, so the model must not cap its input stream.
         kwargs = {}
-        if self.engine_client.vllm_config.scheduler_config.enable_realtime_unbounded:
+        if self.engine_client.vllm_config.scheduler_config.enable_unbounded_streaming:
             kwargs["unbounded"] = True
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],

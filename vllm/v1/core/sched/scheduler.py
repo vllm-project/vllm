@@ -368,7 +368,7 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
-        if self.scheduler_config.enable_realtime_unbounded:
+        if self.scheduler_config.enable_unbounded_streaming:
             self._check_reanchor_headroom()
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -715,7 +715,7 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
-        # [EXPERIMENTAL] unbounded realtime: req_id -> D to re-anchor this step.
+        # [EXPERIMENTAL] unbounded streaming: req_id -> D to re-anchor this step.
         reanchor_reqs: dict[str, int] = {}
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -1309,7 +1309,7 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    # [EXPERIMENTAL] Unbounded realtime: re-anchor the position
+                    # [EXPERIMENTAL] Unbounded streaming: re-anchor the position
                     # clock down before it reaches max_model_len instead of
                     # length-capping, then schedule this chunk at the rebased
                     # positions (the worker re-rotates the live keys). The clock
@@ -1318,7 +1318,7 @@ class Scheduler(SchedulerInterface):
                         request.reanchor_stream
                         and num_computed_tokens + num_new_tokens
                         >= self.max_model_len
-                        - self.scheduler_config.realtime_reanchor_margin_tokens
+                        - self.scheduler_config.reanchor_margin_tokens
                         and self._reanchor_session(request)
                     ):
                         num_computed_tokens = request.num_computed_tokens
@@ -1661,7 +1661,7 @@ class Scheduler(SchedulerInterface):
         # rebase committed yet broke out unscheduled keeps its pending rotation
         # (on request.pending_reanchor_d) and ships it on a later step it does
         # schedule, so the rotation is never silently dropped.
-        if self.scheduler_config.enable_realtime_unbounded:
+        if self.scheduler_config.enable_unbounded_streaming:
             for req in (
                 scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
             ):
@@ -1972,13 +1972,13 @@ class Scheduler(SchedulerInterface):
         sw = self._reanchor_sliding_window
         if sw is None:
             return
-        margin = self.scheduler_config.realtime_reanchor_margin_tokens
+        margin = self.scheduler_config.reanchor_margin_tokens
         headroom = self.max_model_len - margin - sw
         if headroom < self.block_size:
             raise ValueError(
-                "enable_realtime_unbounded: re-anchoring drops whole blocks of "
+                "enable_unbounded_streaming: re-anchoring drops whole blocks of "
                 f"{self.block_size} tokens, so max_model_len - "
-                "realtime_reanchor_margin_tokens - sliding_window "
+                "reanchor_margin_tokens - sliding_window "
                 f"({self.max_model_len} - {margin} - {sw} = {headroom}) must be "
                 f"at least {self.block_size}. Raise --max-model-len or lower "
                 "the margin."
@@ -2097,7 +2097,7 @@ class Scheduler(SchedulerInterface):
         request.pending_reanchor_d += d
         request.reanchor_offset += d
         logger.info(
-            "Re-anchored realtime session %s by D=%d (clock now %d, total folded "
+            "Re-anchored streaming session %s by D=%d (clock now %d, total folded "
             "%d; mm_features=%d dropped=%d all_tokens=%d).",
             request.request_id,
             d,
@@ -3125,10 +3125,10 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
-                # [EXPERIMENTAL] mark resumable realtime sessions for unbounded
+                # [EXPERIMENTAL] mark streaming-input sessions for unbounded
                 # re-anchoring (only effective for sliding-window models with
                 # prefix caching off; gated in _reanchor_session).
-                if self.scheduler_config.enable_realtime_unbounded:
+                if self.scheduler_config.enable_unbounded_streaming:
                     request.reanchor_stream = True
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request

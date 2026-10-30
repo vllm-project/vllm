@@ -185,7 +185,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.reanchor_rotary import (
-    audio_position_factor,
+    init_reanchor_rotary_specs,
     rerotate_cached_keys,
 )
 from vllm.v1.worker.utils import (
@@ -845,6 +845,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
+            if self.scheduler_config.enable_unbounded_streaming:
+                # [EXPERIMENTAL] Fail at startup, not mid-session, if a layer
+                # cannot be re-anchored.
+                self.reanchor_rotary_specs = init_reanchor_rotary_specs(
+                    self.model, kv_cache_config
+                )
+
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
         self.kv_block_zeroer = KVBlockZeroer(
@@ -1300,14 +1307,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.apply_staged_writes()
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded realtime.
+        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded streaming.
 
         The scheduler rebased each request's clock, tokens and block table, and
         the re-added streaming request carries them here. Only the live cached
         keys still sit at their old rotation: re-rotate them by R(-D) in every
         KV group (see GPUModelRunner._reanchor_requests in the V1 runner).
         """
-        audio_factor = audio_position_factor(self.model_config.hf_config)
         num_blocks = self.block_tables.num_blocks.np
         for req_id, d in reanchor_reqs.items():
             req_index = self.req_states.req_id_to_index.get(req_id)
@@ -1330,7 +1336,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config.kv_cache_groups,
                 group_block_ids,
                 d,
-                audio_factor,
+                self.reanchor_rotary_specs,
             )
             logger.info(
                 "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
@@ -1851,7 +1857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
             if scheduler_output.reanchor_reqs:
-                # [EXPERIMENTAL] Unbounded realtime: the rebased block tables are
+                # [EXPERIMENTAL] Unbounded streaming: the rebased block tables are
                 # written; re-rotate the live keys before the forward pass.
                 self._reanchor_requests(scheduler_output.reanchor_reqs)
             if self.aux_output_connector is not None:

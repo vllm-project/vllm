@@ -474,6 +474,10 @@ class WhisperCausalAttention(nn.Module):
         assert block_pool_size > 1, (
             f"Causal attention only supports block_pool_size>1, not {block_pool_size}."
         )
+        # RoPE re-anchoring: encoder positions advance block_pool_size per
+        # decoder token, so a decoder shift of d moves these keys by
+        # block_pool_size * d (see vllm/v1/worker/reanchor_rotary.py).
+        self.reanchor_position_scale = block_pool_size
         self.attn = WhisperCausalAttentionWithBlockPooling(
             self.num_heads,
             self.head_dim,

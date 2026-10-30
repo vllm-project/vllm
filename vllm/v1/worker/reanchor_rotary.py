@@ -1,41 +1,127 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""[EXPERIMENTAL] RoPE re-anchoring key re-rotation, shared between both model
-runners (V1 and V2 ``_reanchor_requests``) and their unit tests
-(benchmarks/voxtral_realtime/test_reanchor_math.py) so the tests exercise the
-*production* op rather than a hand-copied duplicate.
+"""[EXPERIMENTAL] RoPE re-anchoring: re-rotate a live request's cached keys by
+the constant R(-d) so its position clock can drop by d while every relative
+position, and so every attention score, stays the same.
 
-Kept dependency-light (torch only, no worker graph) so the benchmark test can
-import it without pulling the GPU model runner.
+Model-agnostic: each attention layer is re-rotated with its own RoPE
+(frequencies, rotary dim, NeoX or GPT-J style), read from the model once at
+startup by ``collect_rotary_specs``. Shared by both model runners and their
+unit tests.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+from torch import nn
 
-# Voxtral/Ministral rope_theta. Startup validation (VllmConfig) rejects any model
-# whose text/audio rope_theta != 1e6, that carries a real RoPE scaling, or whose
-# decoder/encoder head_dim is not the validated 128-NeoX / 64-GPT-J pairing that
-# rerotate_cached_keys keys off.
-ROPE_THETA = 1.0e6
+from vllm.model_executor.layers.rotary_embedding import (
+    Llama3RotaryEmbedding,
+    RotaryEmbedding,
+    YaRNScalingRotaryEmbedding,
+)
+from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 
 
-def audio_position_factor(hf_config: Any) -> int:
-    """How many audio encoder positions one decoder position spans.
+@dataclass(frozen=True, eq=False)
+class RotarySpec:
+    """How one attention layer rotates its keys."""
 
-    The audio encoder's RoPE positions run at this factor x the decoder (whisper
-    positions are expanded by it), so its constant shift is factor * D. It lives
-    on audio_config (the Mistral adapter writes it there, not top-level).
-    Startup validation rejects a non-derivable factor, so the trailing ``or 1``
-    is unreachable on the re-anchor path.
+    # The layer's own RoPE frequencies (computed in float32 like its forward
+    # pass, stored in float64 so d * inv_freq stays exact at large d).
+    inv_freq: torch.Tensor
+    rotary_dim: int
+    is_neox: bool
+    # Positions this layer advances per scheduled token. 1 for a decoder;
+    # Voxtral's block-pooled audio encoder runs at block_pool_size.
+    position_scale: int = 1
+
+
+# RoPE classes whose angle at position p is exactly p * inv_freq. YaRN scales
+# cos and sin by the same mscale, which leaves the rotation itself unchanged.
+_STATIC_ROPE_INV_FREQ = {
+    RotaryEmbedding: lambda rope: rope._compute_inv_freq(rope.base),
+    Llama3RotaryEmbedding: lambda rope: rope._compute_inv_freq(rope.base),
+    YaRNScalingRotaryEmbedding: lambda rope: rope._compute_inv_freq(
+        rope.scaling_factor
+    ),
+}
+
+
+def collect_rotary_specs(
+    model: nn.Module, layer_names: Iterable[str]
+) -> dict[str, RotarySpec]:
+    """Map each attention layer to the RoPE that rotated its cached keys.
+
+    Follows the usual vLLM layout, where the module holding an attention layer
+    (any child with a ``layer_name``) also holds its ``rotary_emb``. Raises if a
+    layer has no RoPE, or one whose rotation is not a plain function of the
+    position (dynamic NTK, M-RoPE, ...).
     """
-    audio_cfg = getattr(hf_config, "audio_config", None)
-    return (
-        getattr(audio_cfg, "block_pool_size", None)
-        or getattr(audio_cfg, "downsample_factor", None)
-        or 1
-    )
+    owners: dict[str, tuple[nn.Module, Any]] = {}
+    for module in model.modules():
+        rope = getattr(module, "rotary_emb", None)
+        if rope is None:
+            continue
+        for child in module.children():
+            layer_name = getattr(child, "layer_name", None)
+            if layer_name is not None:
+                owners[layer_name] = (module, rope)
+
+    # Layers sharing a RoPE share one spec, so the worker computes each
+    # cos/sin table once per re-anchor instead of once per layer.
+    shared: dict[tuple[int, int], RotarySpec] = {}
+    specs: dict[str, RotarySpec] = {}
+    for layer_name in layer_names:
+        if layer_name not in owners:
+            raise ValueError(
+                f"RoPE re-anchoring: no rotary embedding found for attention "
+                f"layer {layer_name!r}."
+            )
+        module, rope = owners[layer_name]
+        get_inv_freq = _STATIC_ROPE_INV_FREQ.get(type(rope))
+        if get_inv_freq is None:
+            supported = ", ".join(cls.__name__ for cls in _STATIC_ROPE_INV_FREQ)
+            raise ValueError(
+                f"RoPE re-anchoring does not support {type(rope).__name__} "
+                f"(layer {layer_name!r}). Supported: {supported}."
+            )
+        scale = int(getattr(module, "reanchor_position_scale", 1))
+        key = (id(rope), scale)
+        if key not in shared:
+            shared[key] = RotarySpec(
+                inv_freq=get_inv_freq(rope).to("cpu", torch.float64),
+                rotary_dim=rope.rotary_dim,
+                is_neox=rope.is_neox_style,
+                position_scale=scale,
+            )
+        specs[layer_name] = shared[key]
+    return specs
+
+
+def init_reanchor_rotary_specs(
+    model: nn.Module, kv_cache_config: KVCacheConfig
+) -> dict[str, RotarySpec]:
+    """Startup check for --enable-unbounded-streaming, run once the KV cache
+    groups are known: every group must be sliding-window (so re-anchoring can
+    drop what fell out of the window) and every layer must have a RoPE it can
+    invert. Returns the specs the worker re-rotates with."""
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = spec.first_spec
+        if getattr(spec, "sliding_window", None) is None:
+            raise ValueError(
+                "--enable-unbounded-streaming needs every attention layer to "
+                f"use a sliding window; layers {group.layer_names[:3]}... use "
+                f"{type(spec).__name__}."
+            )
+    layer_names = [
+        name for group in kv_cache_config.kv_cache_groups for name in group.layer_names
+    ]
+    return collect_rotary_specs(model, layer_names)
 
 
 def rerotate_cached_keys(
@@ -43,7 +129,7 @@ def rerotate_cached_keys(
     kv_cache_groups: Sequence[Any],
     group_block_ids: Sequence[torch.Tensor],
     d: int,
-    audio_factor: int,
+    specs: Mapping[str, RotarySpec],
 ) -> None:
     """Re-rotate one request's cached keys by R(-d) in every KV group.
 
@@ -53,10 +139,7 @@ def rerotate_cached_keys(
     rotating them is a harmless no-op, and R(-d) is position-independent, so a
     uniform rotation of every key in the row is exactly right.
     """
-    # At most two distinct rotations per re-anchor (decoder 128-dim NeoX shifted
-    # by d, audio encoder 64-dim GPT-J shifted by audio_factor * d); compute each
-    # cos/sin table once instead of per layer (~60x).
-    cos_sin: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+    cos_sin: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     for group, block_ids in zip(kv_cache_groups, group_block_ids):
         if block_ids.numel() == 0:
             continue
@@ -66,52 +149,38 @@ def rerotate_cached_keys(
             if isinstance(kv, (list, tuple)):
                 kv = kv[0]
             # Standardized layer view (B, H, N, 2 * head_size): K is the first
-            # head_size channels, V the rest. head_size comes from the layer,
-            # not the tensor, and per layer: equal text/audio windows merge the
-            # decoder and the audio encoder into one group.
+            # head_size channels, V the rest.
             head_size = layer.head_size
-            assert head_size in (64, 128), (
-                f"re-anchor: unexpected rotary head_size {head_size}"
-            )
             assert kv.dim() == 4 and kv.shape[-1] == 2 * head_size, (
                 f"re-anchor: unexpected KV cache view {tuple(kv.shape)} "
                 f"for head_size {head_size}"
             )
             assert kv.is_floating_point() and kv.element_size() >= 2, (
-                "realtime re-anchoring requires a non-quantized KV cache"
+                "RoPE re-anchoring requires a non-quantized KV cache"
             )
-            is_neox = head_size == 128
-            shift = d if is_neox else audio_factor * d
-            cs = cos_sin.get((shift, head_size))
+            spec = specs[layer_name]
+            cs = cos_sin.get(id(spec))
             if cs is None:
                 cs = inverse_rotary_cos_sin(
-                    shift, head_size, ROPE_THETA, kv.dtype, kv.device
+                    spec.position_scale * d, spec.inv_freq, kv.dtype, kv.device
                 )
-                cos_sin[(shift, head_size)] = cs
+                cos_sin[id(spec)] = cs
             key = kv[block_ids, ..., :head_size]
             kv[block_ids, ..., :head_size] = apply_inverse_rotary_cos_sin(
-                key, cs[0], cs[1], head_size, is_neox
+                key, cs[0], cs[1], spec.rotary_dim, spec.is_neox
             )
 
 
 def inverse_rotary_cos_sin(
-    d: int, rotary_dim: int, base: float, dtype: torch.dtype, device: torch.device
+    d: int, inv_freq: torch.Tensor, dtype: torch.dtype, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """cos/sin tables of the constant R(-d) re-rotation angles.
 
-    Computed in fp64: at re-anchor distances d ~ 1e5 a fp32 angle accumulates
-    ~1e-2 rad of error, which compounds across the cached keys re-rotated at
-    every re-anchor. Split out from apply_inverse_rotary so the worker can
-    compute the (at most two) tables once per re-anchor instead of per layer.
+    Computed in float64: at d ~ 1e5 a float32 angle accumulates ~1e-2 rad of
+    error, which compounds across the cached keys re-rotated at every
+    re-anchor.
     """
-    inv_freq = 1.0 / (
-        base
-        ** (
-            torch.arange(0, rotary_dim, 2, dtype=torch.float64, device=device)
-            / rotary_dim
-        )
-    )
-    angle = float(d) * inv_freq
+    angle = float(d) * inv_freq.to(device, torch.float64)
     return torch.cos(angle).to(dtype), torch.sin(angle).to(dtype)
 
 
@@ -135,16 +204,11 @@ def apply_inverse_rotary_cos_sin(
     return torch.cat([out, passthru], dim=-1) if passthru.numel() else out
 
 
-def apply_inverse_rotary(
-    key: torch.Tensor, d: int, rotary_dim: int, base: float, is_neox: bool
-) -> torch.Tensor:
+def apply_inverse_rotary(key: torch.Tensor, d: int, spec: RotarySpec) -> torch.Tensor:
     """Re-rotate an already position-rotated key by the constant R(-d).
 
-    Used by RoPE re-anchoring (unbounded realtime). cos(-d.f)=cos(d.f),
-    sin(-d.f)=-sin(d.f) -> R(-d)=R(d)^T. Validated to ~1e-6 against the vLLM
-    rotary convention for both NeoX and GPT-J styles in
-    benchmarks/voxtral_realtime/test_reanchor_math.py. ``key`` is
-    [..., head_size] with the leading ``rotary_dim`` dims rotary.
+    cos(-d.f)=cos(d.f), sin(-d.f)=-sin(d.f) -> R(-d)=R(d)^T. ``key`` is
+    [..., head_size] with the leading ``spec.rotary_dim`` dims rotary.
     """
-    cos, sin = inverse_rotary_cos_sin(d, rotary_dim, base, key.dtype, key.device)
-    return apply_inverse_rotary_cos_sin(key, cos, sin, rotary_dim, is_neox)
+    cos, sin = inverse_rotary_cos_sin(d, spec.inv_freq, key.dtype, key.device)
+    return apply_inverse_rotary_cos_sin(key, cos, sin, spec.rotary_dim, spec.is_neox)
