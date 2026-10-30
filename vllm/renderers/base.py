@@ -555,7 +555,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
@@ -576,7 +578,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return await asyncio.gather(
             *(self._render_prompt_async(prompt) for prompt in prompts)
@@ -884,24 +888,27 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if data_items is None:
                 if uuid_items is None:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
+                        f"multi_modal_uuids[{modality!r}] is missing.",
+                        parameter="multi_modal_uuids",
                     )
 
             elif uuid_items is not None:
                 if len(data_items) != len(uuid_items):
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
-                        f"got {len(uuid_items)} vs {len(data_items)}."
+                        f"got {len(uuid_items)} vs {len(data_items)}.",
+                        parameter="multi_modal_uuids",
                     )
 
                 for i, item in enumerate(data_items):
                     if item is None and uuid_items[i] is None:
-                        raise ValueError(
+                        raise VLLMValidationError(
                             f"multi_modal_data[{modality!r}][{i}] is empty but "
-                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                            f"multi_modal_uuids[{modality!r}][{i}] is missing.",
+                            parameter="multi_modal_uuids",
                         )
 
     def _process_mm_uuids(
@@ -1015,8 +1022,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            raise VLLMValidationError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
+                parameter="prompt_embeds",
             )
 
         prompt_embeds = prompt["prompt_embeds"]
@@ -1029,7 +1037,10 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt_embeds = prompt_embeds.squeeze(dim=0)
 
         if prompt_embeds.ndim != 2:
-            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
+            raise VLLMValidationError(
+                "prompt_embeds must be of shape (seq_len, hidden_size).",
+                parameter="prompt_embeds",
+            )
 
         # Tensors must be on CPU for serialization between processes
         # in the MsgpackEncoder. Casting to CPU here ensures that there is no

@@ -6,18 +6,19 @@ from typing import Any
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ToolCall,
 )
 from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     completion_top_logprobs_limit,
     decode_token_ids,
 )
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    assemble_chat_message_fields,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -43,17 +44,14 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
-    maybe_filter_parallel_tool_calls,
     resolve_finish_reason,
 )
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
-from vllm.renderers.chat_utils import (
-    ChatTemplateContentFormatOption,
-    make_tool_call_id,
-)
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
@@ -82,6 +80,7 @@ class OnlineDerenderer:
         reasoning_parser: str | None = None,
         tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -120,6 +119,7 @@ class OnlineDerenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
 
         self.log_error_stack = log_error_stack
@@ -150,7 +150,7 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
         )
@@ -261,7 +261,7 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> list[ChatCompletionResponseChoice]:
+    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
 
@@ -356,7 +356,10 @@ class OnlineDerenderer:
                 )
             )
 
-        return choices
+        prompt_logprobs = _resolve_prompt_logprobs(
+            generate_response.prompt_logprobs, tokenizer
+        )
+        return choices, prompt_logprobs
 
     async def derender_text_choices(
         self,
@@ -419,6 +422,7 @@ class OnlineDerenderer:
             chat_request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -470,30 +474,19 @@ class OnlineDerenderer:
             model_output_token_ids=token_ids,
         )
 
-        if not getattr(chat_request, "include_reasoning", True):
-            reasoning = None
-
-        tc_items = (
-            [
-                ToolCall(id=tc.id or make_tool_call_id(), function=tc)
-                for tc in maybe_filter_parallel_tool_calls(tool_calls, chat_request)
-            ]
-            if tool_calls
-            else []
+        fields = assemble_chat_message_fields(
+            chat_request,
+            reasoning,
+            content,
+            tool_calls,
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=self.parser,
         )
-
-        is_named_tool_choice = (
-            type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
-        )
-        is_required_tool_choice = chat_request.tool_choice == "required"
-        if is_named_tool_choice or is_required_tool_choice:
-            content = content or ""
-
         return ChatMessage(
             role="assistant",
-            reasoning=reasoning,
-            content=content,
-            tool_calls=tc_items,
+            reasoning=fields.reasoning,
+            content=fields.content,
+            tool_calls=fields.tool_calls,
         )
 
     def _detokenize_delta(
@@ -759,6 +752,8 @@ class OnlineDerenderer:
                 chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
                 model_config=self.model_config,
             ),
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=parser_cls,
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded
@@ -965,6 +960,7 @@ class OnlineDerenderer:
             seed_state = _seed_stream_state(
                 tokenizer, seed_ids, skip_special_tokens=skip_special
             )
+            prompt_logprobs = _resolve_prompt_logprobs(gen.prompt_logprobs, tokenizer)
             for choice in gen.choices:
                 if not choice.token_ids:
                     raise ValueError(
@@ -1003,6 +999,7 @@ class OnlineDerenderer:
                             gen.prompt_token_ids if return_token_ids else None
                         ),
                         token_ids=choice.token_ids if return_token_ids else None,
+                        prompt_logprobs=prompt_logprobs,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
@@ -1291,6 +1288,56 @@ def _completion_top_logprobs_limit(
     return completion_top_logprobs_limit(
         completion_request.logprobs, bool(completion_request.logprob_token_ids)
     )
+
+
+def _resolve_prompt_logprobs(
+    prompt_logprobs: PromptLogprobs | None, tokenizer: TokenizerLike
+) -> PromptLogprobs | None:
+    """Fill missing ``decoded_token`` values in prompt logprobs.
+
+    A ``--tokens-only`` generate server has no tokenizer, so it returns
+    ``decoded_token=None``. Mirrors LogprobsProcessor._update_prompt_logprobs
+    in v1/engine/logprobs.py: decode each token id, then fix U+FFFD using the
+    preceding prompt tokens (the first entry of each earlier position).
+    """
+    if prompt_logprobs is None:
+        return None
+
+    missing = list(
+        dict.fromkeys(
+            tid
+            for entry in prompt_logprobs
+            if entry is not None
+            for tid, lp in entry.items()
+            if lp.decoded_token is None
+        )
+    )
+    if not missing:
+        return prompt_logprobs
+    # Ids with no vocab entry decode to "", as for output logprobs.
+    decoded = {
+        tid: text
+        for tid, (text, _) in zip(missing, decode_token_ids(missing, tokenizer))
+    }
+
+    resolved: PromptLogprobs = []
+    context_token_ids: list[int] = []
+    for entry in prompt_logprobs:
+        if not entry:
+            resolved.append(entry)
+            continue
+        new_entry: dict[int, Logprob] = {}
+        for tid, lp in entry.items():
+            if lp.decoded_token is None:
+                text = decoded[tid]
+                if text.endswith("\ufffd"):
+                    text = _correct_decoded_token(tid, context_token_ids, tokenizer)
+                lp = Logprob(lp.logprob, lp.rank, text)
+            new_entry[tid] = lp
+        resolved.append(new_entry)
+        # The prompt token is always inserted first by the engine.
+        context_token_ids.append(next(iter(entry)))
+    return resolved
 
 
 def _resolve_logprobs(

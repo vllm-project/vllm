@@ -220,6 +220,12 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata], SharedTopkIndices
         self.softmax_scale = scale
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
+    def record_logical_topk_ready(self) -> None:
+        # Called unconditionally by MLAAttention.forward for sparse layers. This
+        # impl shares the top-k buffer via SharedTopkIndicesBuffer but does not
+        # participate in sparse-MLA index groups (same as ROCm).
+        pass
+
     def _forward_bf16_kv(
         self,
         q: torch.Tensor,  # [sq, heads, d_qk]

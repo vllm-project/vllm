@@ -106,6 +106,11 @@ class Config:
     hidden_dim_unpadded: int | None = None
     intermediate_size_per_partition_unpadded: int | None = None
 
+    # Opt into AITER's DeepSeek-V4.1 a4w4 (DSV4) kernel path (SEPARATED
+    # gate/up layout instead of INTERLEAVE); see
+    # VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 in config.py.
+    use_mxfp4_w4a4_dsv4: bool = False
+
     def __post_init__(self):
         if self.quant_config is None:
             self.quant_config = TestMoEQuantConfig(None, False, False, None)
@@ -153,6 +158,42 @@ class Config:
         return wd if wd is not None else self.quant_dtype
 
     @property
+    def activation_situ_beta(self) -> float | None:
+        """SituGLU gate beta (Kimi-K3 convention); None for non-SITU
+        activations, matching FusedMoEConfig's own default."""
+        return 4.0 if self.activation == MoEActivation.SITU else None
+
+    @property
+    def activation_situ_linear_beta(self) -> float | None:
+        """SituGLU up linear_beta (Kimi-K3 convention); None for non-SITU
+        activations, matching FusedMoEConfig's own default."""
+        return 25.0 if self.activation == MoEActivation.SITU else None
+
+    @property
+    def swiglu_limit(self) -> float | None:
+        """Clamp limit for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3 convention,
+        see vllm/transformers_utils/configs/minimax_m3.py); None otherwise,
+        matching FusedMoEConfig's own default."""
+        return 7.0 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+
+    @property
+    def swiglu_alpha(self) -> float | None:
+        """Sigmoid scale for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3 convention);
+        chosen to match SWIGLUOAI's own fixed alpha so both activations
+        produce identical math, differing only in gate/up layout. None
+        otherwise, matching FusedMoEConfig's own default."""
+        return (
+            1.702 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+        )
+
+    @property
+    def swiglu_beta(self) -> float | None:
+        """Up-projection bias for SWIGLUOAI_UNINTERLEAVE (MiniMax-M3
+        convention); chosen to match SWIGLUOAI's own fixed up bias. None
+        otherwise, matching FusedMoEConfig's own default."""
+        return 1.0 if self.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE else None
+
+    @property
     def is_per_act_token_quant(self) -> bool:
         assert self.quant_config is not None
         return self.quant_config.per_act_token_quant
@@ -196,6 +237,14 @@ class Config:
         env_dict = {
             "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
         }
+
+        if self.use_mxfp4_w4a4_dsv4:
+            # model_type must pass FusedMoEConfig.__post_init__'s validation
+            # gate for this env var.
+            vllm_config.model_config.hf_config = SimpleNamespace(
+                model_type="deepseek_v41"
+            )
+            env_dict["VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"] = "1"
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
@@ -373,6 +422,12 @@ class Config:
                 f"per_act_token={self.is_per_act_token_quant}, "
                 f"block={self.quant_block_shape})"
             )
+
+        # use_mxfp4_w4a4_dsv4 is only reached through the W4A16 mxfp4 quant
+        # key pair (see mxfp4_quant_key_pair); catch it desyncing from
+        # is_w4a16_mxfp4 here instead of failing deep in weight conversion.
+        if self.use_mxfp4_w4a4_dsv4 and not self.is_w4a16_mxfp4:
+            return False, "use_mxfp4_w4a4_dsv4 requires the W4A16 mxfp4 quant scheme."
 
         # Check activation support; NotImplementedError means no opinion.
         try:
@@ -603,6 +658,7 @@ class RankTensors:
 def reference_moe_impl(
     config: Config, weights: WeightTensors, rank_tensors: RankTensors
 ) -> torch.Tensor:
+    reference_activation = config.activation
     if config.quant_dtype == "nvfp4":
         quant_blocksize = 16
         dtype = config.dtype
@@ -679,15 +735,25 @@ def reference_moe_impl(
         dtype = config.dtype
         a = rank_tensors.hidden_states
         w1_q, w1_scale_q = weights.w1, weights.w1_scale
-        if config.is_w4a16_mxfp4:
-            assert config.activation == MoEActivation.SWIGLUOAI
-            # SwigluOAIAndMul expects gate/up interleaved row order
-            # (x[..., ::2], x[..., 1::2]), not the contiguous [gate; up]
-            # halves that `weights.w1` is generated in. Mirror the same
-            # reorder `_maybe_convert_weights_for_experts()` applies before
-            # the real MK-path AITER kernel call.
+        if not config.use_mxfp4_w4a4_dsv4 and config.activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            # rocm_aiter_moe.py checks use_mxfp4_w4a4_dsv4 before activation:
+            # DSV4 always forces gate_mode=SEPARATED, and only when DSV4 is
+            # off does gate_mode depend on activation (INTERLEAVE, same for
+            # both SwigluOAI variants since rocm_aiter_moe.py forces the same
+            # "swiglu" activation_method for either one). SwigluOAIAndMul
+            # expects gate/up interleaved row order (x[..., ::2], x[...,
+            # 1::2]), not the contiguous [gate; up] halves that `weights.w1`
+            # is generated in -- mirror the same reorder
+            # `_maybe_convert_weights_for_experts()` applies before the real
+            # MK-path AITER kernel call. DSV4's SEPARATED layout (default
+            # SiluAndMul activation) keeps the contiguous halves as-is and
+            # needs no reorder.
             w1_q = _interleave_gate_up_rows(w1_q)
             w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
+            reference_activation = MoEActivation.SWIGLUOAI
         w1 = upcast_from_mxfp(w1_q, w1_scale_q, dtype, axis=-1)
         w2 = upcast_from_mxfp(weights.w2, weights.w2_scale, dtype, axis=-1)
         a_scale = None
@@ -715,7 +781,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
-        activation=config.activation,
+        activation=reference_activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -724,6 +790,11 @@ def reference_moe_impl(
         block_shape=block_shape,
         apply_router_weights_on_input=config.topk == 1
         and config.supports_apply_weight_on_input(),
+        activation_situ_beta=config.activation_situ_beta,
+        activation_situ_linear_beta=config.activation_situ_linear_beta,
+        swiglu_limit=config.swiglu_limit,
+        swiglu_alpha=config.swiglu_alpha,
+        swiglu_beta=config.swiglu_beta,
     )
 
 
@@ -766,6 +837,11 @@ def make_modular_kernel(
         intermediate_size_per_partition_unpadded=(
             config.intermediate_size_per_partition_unpadded
         ),
+        activation_situ_beta=config.activation_situ_beta,
+        activation_situ_linear_beta=config.activation_situ_linear_beta,
+        swiglu_limit=config.swiglu_limit,
+        swiglu_alpha=config.swiglu_alpha,
+        swiglu_beta=config.swiglu_beta,
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
@@ -835,6 +911,27 @@ def _maybe_convert_weights_for_experts(
         # The converter mutates its w13/w2 weight and scale args in place, and
         # rank_weights is a view into the shared master WeightTensors, so
         # everything passed in must be a fresh tensor.
+        if config.use_mxfp4_w4a4_dsv4:
+            # DSV4's SEPARATED layout needs the real production converter
+            # (not the gpt-oss one below), on un-interleaved weights.
+            from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+                convert_weight_to_mxfp4_moe_kernel_format,
+            )
+
+            w1, w2, w1_scale, w2_scale, _, _ = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=config.mxfp4_backend,
+                    layer=torch.nn.Module(),
+                    w13_weight=rank_weights.w1.clone(),
+                    w2_weight=rank_weights.w2.clone(),
+                    w13_weight_scale=rank_weights.w1_scale.clone(),
+                    w2_weight_scale=rank_weights.w2_scale.clone(),
+                    activation=config.activation,
+                    use_separated_a4w4=True,
+                )
+            )
+            return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
         if config.is_w4a16_mxfp4:
             w1 = _interleave_gate_up_rows(rank_weights.w1)
             w1_scale = _interleave_gate_up_rows(rank_weights.w1_scale)
