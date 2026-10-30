@@ -159,6 +159,10 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             return embeddings
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
+    def bind_file_shards(self) -> None:
+        """Bind the checkpoint files of a disk-offloaded table after loading."""
+        return None
+
     @abstractmethod
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Start an asynchronous lookup when supported."""
@@ -282,6 +286,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             BLOCK_D=triton.next_power_of_2(row_bytes),
         )
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Bind disk-offloaded tables once every checkpoint shard is loaded."""
+        if isinstance(layer, Qwen4ExpPLEEmbedding):
+            layer.bind_file_shards()
+
     @abstractmethod
     def dequantize(
         self,
@@ -371,6 +380,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def dequantize(
         self,
@@ -454,6 +464,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale_2 == sentinel):
             raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
         return layer.params_dtype
@@ -474,20 +485,41 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             dtype=layer.params_dtype,
             device=input_.device,
         )
+        # Device rows are already local, so every ID in range is owned.
+        self.decode_rows(
+            layer.weight,
+            layer.weight_scale,
+            layer.weight_scale_2,
+            ids,
+            output,
+            0,
+            layer.weight.shape[0],
+        )
+        return output
+
+    @staticmethod
+    def decode_rows(
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_scale_2: torch.Tensor,
+        ids: torch.Tensor,
+        output: torch.Tensor,
+        vocab_start: int,
+        vocab_end: int,
+    ) -> None:
+        """Decode the rows of `ids` in `[vocab_start, vocab_end)` into `output`."""
         if ids.numel():
-            # Device rows are already local, so every ID in range is owned.
             _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
-                layer.weight,
-                layer.weight_scale.view(torch.uint8),
-                layer.weight_scale_2,
+                weight,
+                weight_scale.view(torch.uint8),
+                weight_scale_2,
                 ids,
                 output,
-                layer.embedding_dim,
-                0,
-                layer.weight.shape[0],
-                BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+                output.shape[-1],
+                vocab_start,
+                vocab_end,
+                BLOCK_D=triton.next_power_of_2(output.shape[-1]),
             )
-        return output
 
     def lookup_from_pinned(
         self,
@@ -495,16 +527,14 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+        self.decode_rows(
             layer._uva_weight,
-            self._uva_weight_scale.view(torch.uint8),
+            self._uva_weight_scale,
             layer.weight_scale_2,
             ids,
             output,
-            layer.embedding_dim,
             layer.shard_indices.org_vocab_start_index,
             layer.shard_indices.org_vocab_end_index,
-            BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
         )
 
     def dequantize(

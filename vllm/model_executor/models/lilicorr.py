@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMetho
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.utils import refill_derived
+from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
 from .nemotron_h import NemotronHMLP
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
@@ -472,6 +473,9 @@ class LiLiCorr(DFlashQwen3Model):
 
 
 class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = LiLiCorrSpeculatorConfig
+
     model_cls = LiLiCorr
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

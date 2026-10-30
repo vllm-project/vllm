@@ -46,6 +46,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -446,6 +447,9 @@ class Gemma4MTP(nn.Module):
     the draft-dim lm_head) and backbone_hidden_states for the
     hidden-state feedback buffer.
     """
+
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = Gemma4MTPSpeculatorConfig
 
     has_own_lm_head = True
 
