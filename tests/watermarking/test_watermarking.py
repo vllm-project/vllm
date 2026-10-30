@@ -35,6 +35,8 @@ from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
     philox_gumbel_sample,
     repeated_context_mask,
+    watermark_contexts,
+    watermark_skip_mask,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -1929,3 +1931,32 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4]))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_watermark_context_and_skip_kernels_match_torch():
+    """The CUDA sampler builds contexts and skip masks in kernels."""
+    all_token_ids = torch.arange(40, dtype=torch.int32, device="cuda").view(4, 10)
+    prompt_len = torch.tensor([2, 8, 0, 5], dtype=torch.int32, device="cuda")
+    total_len = torch.tensor([7, 9, 10, 5], dtype=torch.int32, device="cuda")
+    expanded_idx_mapping = torch.tensor([3, 0, -1, 1, 2], device="cuda").int()
+
+    contexts = watermark_contexts(
+        expanded_idx_mapping, all_token_ids, prompt_len, total_len, 3
+    )
+
+    assert contexts.tolist() == [
+        [-1, -1, -1],
+        [4, 5, 6],
+        [-1, -1, -1],
+        [-1, -1, 18],
+        [27, 28, 29],
+    ]
+
+    watermarking = torch.tensor([True, False, True, True], device="cuda")
+    temperature = torch.tensor([1.0, 1.0, 0.0, 0.5], device="cuda")
+    repeated = torch.tensor([True, False, False, False, False], device="cuda")
+    skip_mask = watermark_skip_mask(
+        expanded_idx_mapping, watermarking, temperature, repeated
+    )
+    assert skip_mask.tolist() == [True, False, True, True, True]
