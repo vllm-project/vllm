@@ -19,13 +19,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from vllm.logger import init_logger
 from vllm.snapshot.protocol import SnapshotControlError, _read_message
 from vllm.snapshot.providers import (
     CriuCudaSnapshotProvider,
     SnapshotProvider,
     make_snapshot_provider,
 )
-from vllm.snapshot.resources import parse_snapshot_resource_policy
+
+logger = init_logger(__name__)
 
 
 class SnapshotState(str, Enum):
@@ -66,6 +68,8 @@ class SnapshotProcessManager(Protocol):
 
     def cancel_snapshot(self) -> None: ...
 
+    def fail_snapshot(self, reason: str) -> None: ...
+
     def wait_for_snapshot_exit(self, timeout: float = 30) -> None: ...
 
     def adopt_restored_process(self, pid: int) -> None: ...
@@ -75,6 +79,7 @@ class SnapshotProcessManager(Protocol):
 
 _MAX_CONTROL_CONNECTIONS = 8
 _CONTROL_REQUEST_TIMEOUT_SECONDS = 5.0
+_ATTACH_TIMEOUT_SECONDS = 300.0
 
 
 class EngineSnapshotManager:
@@ -87,7 +92,6 @@ class EngineSnapshotManager:
         provider: str | SnapshotProvider = "fake",
         config_hash: str = "",
         snapshot_config: dict[str, Any] | None = None,
-        resource_policy: str = "full",
         persistence: str = "durable",
         integrity: str = "optimistic",
         process_manager: SnapshotProcessManager | None = None,
@@ -102,7 +106,6 @@ class EngineSnapshotManager:
             else make_snapshot_provider(provider)
         )
         self.snapshot_config = _json_value(snapshot_config or {})
-        self.resource_policy = parse_snapshot_resource_policy(resource_policy)
         self.persistence = self._parse_persistence(persistence)
         self.integrity = self._parse_integrity(integrity)
         self.compatibility = self._runtime_compatibility()
@@ -116,19 +119,26 @@ class EngineSnapshotManager:
         self._thread: threading.Thread | None = None
         self._ticket: SnapshotTicket | None = None
         self._previous_snapshot_id: str | None = None
+        self._attach_started_at: float | None = None
 
     def start(self) -> None:
         self.snapshot_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        entries = list(self.snapshot_root.iterdir())
+        self.snapshot_root.chmod(0o700)
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self.socket_path.unlink(missing_ok=True)
+        entries = []
+        for entry in self.snapshot_root.iterdir():
+            name = entry.name
+            if name == self.socket_path.name or ".detached.json" in name:
+                entry.unlink(missing_ok=True)
+                continue
+            entries.append(entry)
         if entries:
             names = ", ".join(sorted(entry.name for entry in entries))
             raise RuntimeError(
                 "engine snapshot directory is not empty; inspect or explicitly "
                 f"remove its contents before cold start: {names}"
             )
-        self.snapshot_root.chmod(0o700)
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        self.socket_path.unlink(missing_ok=True)
         self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server.bind(str(self.socket_path))
         os.chmod(self.socket_path, 0o600)
@@ -294,7 +304,14 @@ class EngineSnapshotManager:
                 )
                 phase_started = time.monotonic()
                 if previous_snapshot_id is not None:
-                    shutil.rmtree(self.snapshot_root / previous_snapshot_id)
+                    try:
+                        shutil.rmtree(self.snapshot_root / previous_snapshot_id)
+                    except OSError as cleanup_exc:
+                        with self._state_lock:
+                            self.status.last_error = (
+                                "previous snapshot cleanup failed: "
+                                f"{cleanup_exc}"
+                            )
                 manager_timings["previous_snapshot_cleanup_seconds"] = (
                     time.monotonic() - phase_started
                 )
@@ -328,6 +345,8 @@ class EngineSnapshotManager:
                             )
                     except BaseException as rollback_exc:
                         rollback_error = rollback_exc
+                        if self.process_manager is not None:
+                            self.process_manager.fail_snapshot(str(rollback_exc))
                 elif self.process_manager is not None:
                     self.process_manager.cancel_snapshot()
                 resume_succeeded = False
@@ -352,11 +371,10 @@ class EngineSnapshotManager:
                     else:
                         self.status.root_pid = None
                         self.status.state = SnapshotState.FAILED
-                cleanup_error = None
-                if rollback_result is not None or (
-                    result is None and resume_succeeded
-                ):
-                    cleanup_error = self._remove_snapshot_trees(staging, committed)
+                cleanup_paths = [staging]
+                if rollback_result is not None or resume_succeeded:
+                    cleanup_paths.append(committed)
+                cleanup_error = self._remove_snapshot_trees(*cleanup_paths)
                 if cleanup_error is not None:
                     with self._state_lock:
                         self.status.last_error = (
@@ -538,18 +556,23 @@ class EngineSnapshotManager:
                 SnapshotState.VERIFYING,
             ):
                 raise SnapshotControlError(
-                    f"fail restore requires VERIFYING, got {self.status.state}",
+                    f"fail restore requires ATTACHING or VERIFYING, "
+                    f"got {self.status.state}",
                     code="invalid_state",
                 )
-            cleanup_error = None
             root_pid = self.status.root_pid
-            try:
-                if self.process_manager is not None:
-                    self.process_manager.discard_restored_process()
-                elif root_pid is not None and self._pid_alive(root_pid):
-                    self._discard_provider_process(root_pid)
-            except BaseException as exc:
-                cleanup_error = exc
+            self.status.state = SnapshotState.FAILED
+            self.status.last_error = error
+            self.status.operation_finished_at = time.time()
+        cleanup_error = None
+        try:
+            if self.process_manager is not None:
+                self.process_manager.discard_restored_process()
+            elif root_pid is not None and self._pid_alive(root_pid):
+                self._discard_provider_process(root_pid)
+        except BaseException as exc:
+            cleanup_error = exc
+        with self._state_lock:
             self.status.state = (
                 SnapshotState.HIBERNATED
                 if self.provider.restore_is_retriable and cleanup_error is None
@@ -562,36 +585,55 @@ class EngineSnapshotManager:
                 and self._pid_alive(root_pid)
                 else None
             )
-            self.status.last_error = error
             if cleanup_error is not None:
                 self.status.last_error += (
                     f"; restored Engine cleanup failed: {cleanup_error}"
                 )
-            self.status.operation_finished_at = time.time()
             return self._status_dict()
 
     def fail_capture(self, error: str) -> dict[str, Any]:
         with self._state_lock:
-            if self.status.state not in (
+            previous_state = self.status.state
+            if previous_state not in (
                 SnapshotState.DRAINING,
                 SnapshotState.ATTACHING,
                 SnapshotState.VERIFYING,
             ):
                 raise SnapshotControlError(
                     "fail capture requires DRAINING, ATTACHING, or VERIFYING, "
-                    f"got {self.status.state}",
+                    f"got {previous_state}",
                     code="invalid_state",
                 )
-            cleanup_error = None
             root_pid = self.status.root_pid
-            try:
-                if self.process_manager is not None:
-                    self.process_manager.discard_restored_process()
-                elif root_pid is not None and self._pid_alive(root_pid):
-                    self._discard_provider_process(root_pid)
-            except BaseException as exc:
-                cleanup_error = exc
             self.status.state = SnapshotState.FAILED
+            self.status.last_error = error
+            self.status.operation_finished_at = time.time()
+            self._clear_ticket()
+
+        if previous_state is SnapshotState.DRAINING:
+            # The source process has not necessarily exited, so it must not be
+            # discarded as if it were a restored process.
+            if self.process_manager is not None:
+                self.process_manager.cancel_snapshot()
+            with self._state_lock:
+                if root_pid is not None and self._signal_snapshot_resume(root_pid):
+                    self.status.root_pid = root_pid
+                    self.status.state = SnapshotState.ATTACHING
+                else:
+                    self.status.root_pid = None
+            return self._status_dict()
+
+        cleanup_error = None
+        try:
+            if self.process_manager is not None:
+                self.process_manager.discard_restored_process()
+            elif root_pid is not None and self._pid_alive(root_pid):
+                self._discard_provider_process(root_pid)
+        except BaseException as exc:
+            cleanup_error = exc
+            if self.process_manager is not None:
+                self.process_manager.fail_snapshot(str(exc))
+        with self._state_lock:
             self.status.root_pid = (
                 root_pid
                 if cleanup_error is not None
@@ -599,16 +641,32 @@ class EngineSnapshotManager:
                 and self._pid_alive(root_pid)
                 else None
             )
-            self.status.last_error = error
             if cleanup_error is not None:
                 self.status.last_error += f"; Engine cleanup failed: {cleanup_error}"
-            self.status.operation_finished_at = time.time()
-            self._clear_ticket()
             return self._status_dict()
+
+    def _check_deadlines(self) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            if self.status.state is not SnapshotState.ATTACHING:
+                self._attach_started_at = None
+                return
+            if self._attach_started_at is None:
+                self._attach_started_at = now
+                return
+            if now - self._attach_started_at < _ATTACH_TIMEOUT_SECONDS:
+                return
+        try:
+            self.fail_restore("timed out waiting for EngineCore attach")
+        except SnapshotControlError:
+            pass
+        except Exception:
+            logger.exception("Failed to expire the EngineCore attach deadline")
 
     def _serve(self) -> None:
         assert self._server is not None
         while not self._stop.is_set():
+            self._check_deadlines()
             try:
                 conn, _ = self._server.accept()
             except (TimeoutError, OSError):
@@ -681,7 +739,6 @@ class EngineSnapshotManager:
     def _status_dict(self) -> dict[str, Any]:
         return asdict(self.status) | {
             "state": self.status.state.value,
-            "resource_policy": self.resource_policy.to_wire(),
             "persistence": self.persistence,
             "integrity": self.integrity,
         }
@@ -701,7 +758,6 @@ class EngineSnapshotManager:
             "snapshot_config": self.snapshot_config,
             "root_pid": self.status.root_pid,
             "created_at": time.time(),
-            "resource_policy": self.resource_policy.to_wire(),
             "persistence": self.persistence,
             "integrity": self.integrity,
             "compatibility": self.compatibility,
@@ -736,8 +792,6 @@ class EngineSnapshotManager:
             raise RuntimeError("snapshot config hash mismatch")
         if manifest.get("snapshot_config") != self.snapshot_config:
             raise RuntimeError("snapshot config mismatch")
-        if manifest.get("resource_policy") != self.resource_policy.to_wire():
-            raise RuntimeError("snapshot resource policy mismatch")
         if manifest.get("persistence") != self.persistence:
             raise RuntimeError("snapshot persistence mode mismatch")
         if manifest.get("integrity") != self.integrity:
@@ -939,6 +993,12 @@ class EngineSnapshotManager:
                     ) from exc
                 time.sleep(0.05)
                 continue
+            if marker.get("state") == "detach_failed":
+                stage = marker.get("stage")
+                stage_detail = f" while stopping the {stage} thread" if stage else ""
+                raise RuntimeError(
+                    f"EngineCore I/O detach failed{stage_detail}"
+                )
             expected = {
                 "pid": ticket.root_pid,
                 "nonce": ticket.nonce,

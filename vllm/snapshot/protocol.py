@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _READ_CHUNK_BYTES = 65536
 
@@ -26,12 +25,17 @@ class SnapshotControlClient:
     timeout: float = 1800.0
 
     def request(
-        self, command: str, payload: Mapping[str, Any] | None = None
+        self,
+        command: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         request = {"command": command, "payload": dict(payload or {})}
+        effective_timeout = self.timeout if timeout is None else timeout
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self.timeout)
+                sock.settimeout(effective_timeout)
                 sock.connect(self.path)
                 sock.sendall(json.dumps(request).encode() + b"\n")
                 response = _read_message(sock)
@@ -39,7 +43,8 @@ class SnapshotControlClient:
             raise
         except TimeoutError as exc:
             raise SnapshotControlError(
-                f"snapshot control request timed out after {self.timeout} seconds",
+                "snapshot control request timed out after "
+                f"{effective_timeout} seconds",
                 code="timeout",
             ) from exc
         except OSError as exc:

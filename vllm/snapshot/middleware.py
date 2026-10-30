@@ -82,6 +82,14 @@ class EngineSnapshotMiddleware:
         self.app = app
         self.gate = gate
 
+    @staticmethod
+    def _route_path(scope: Scope) -> str:
+        path = scope["path"]
+        root_path = scope.get("root_path", "")
+        if root_path and path.startswith(root_path):
+            return path[len(root_path) :] or "/"
+        return path
+
     async def __call__(
         self,
         scope: Scope,
@@ -90,7 +98,7 @@ class EngineSnapshotMiddleware:
     ) -> None:
         if (
             scope["type"] not in ("http", "websocket")
-            or scope["path"] in self._allowed_paths
+            or self._route_path(scope) in self._allowed_paths
         ):
             await self.app(scope, receive, send)
             return

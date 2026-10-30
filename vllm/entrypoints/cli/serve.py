@@ -349,22 +349,14 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    if args.enable_engine_snapshot:
-        from vllm.snapshot.resources import parse_snapshot_resource_policy
-
-        resource_policy = parse_snapshot_resource_policy(
-            args.engine_snapshot_resource_policy
+    if args.enable_engine_snapshot and not (
+        vllm_config.model_config.enable_sleep_mode
+        or vllm_config.model_config.enable_cumem_allocator
+    ):
+        raise ValueError(
+            "Engine snapshots require --enable-sleep-mode "
+            "or --enable-cumem-allocator"
         )
-        if (
-            resource_policy.requires_allocator
-            and not vllm_config.model_config.enable_sleep_mode
-            and not vllm_config.model_config.enable_cumem_allocator
-        ):
-            raise ValueError(
-                "Engine snapshot resource policies that offload or discard "
-                "allocations require "
-                "--enable-sleep-mode or --enable-cumem-allocator"
-            )
 
     if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         raise ValueError(
@@ -489,7 +481,6 @@ def run_multi_api_server(args: argparse.Namespace):
                 provider=snapshot_provider,
                 config_hash=config_digest(snapshot_config),
                 snapshot_config=snapshot_config,
-                resource_policy=args.engine_snapshot_resource_policy,
                 persistence=args.engine_snapshot_persistence,
                 integrity=args.engine_snapshot_integrity,
                 process_manager=local_engine_manager,

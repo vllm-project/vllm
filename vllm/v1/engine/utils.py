@@ -311,6 +311,7 @@ class CoreEngineProcManager:
         self._snapshot_exit_event = threading.Event()
         self._expected_exit_pids: set[int] = set()
         self._snapshot_pid: int | None = None
+        self._snapshot_failed: str | None = None
 
         # All ranks share this config object: capture the user-provided
         # --device-ids list before the per-rank shard overwrites it. Mutating
@@ -383,6 +384,11 @@ class CoreEngineProcManager:
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""
         while not self.manager_stopped.is_set():
+            if self._snapshot_failed is not None:
+                self.failed_proc_name = (
+                    self.processes[0].name if self.processes else "EngineCore"
+                )
+                break
             with self._process_lock:
                 sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
                 self._monitor_ready.set()
@@ -414,6 +420,8 @@ class CoreEngineProcManager:
                 break
 
             while not self.manager_stopped.is_set():
+                if self._snapshot_failed is not None:
+                    break
                 with self._process_lock:
                     replacement_ready = any(
                         proc.sentinel not in sentinel_to_proc and proc.is_alive()
@@ -443,6 +451,7 @@ class CoreEngineProcManager:
                 raise RuntimeError("EngineCore root is not alive")
             self._snapshot_pid = proc.pid
             self._expected_exit_pids.add(proc.pid)
+            self._snapshot_failed = None
             self._replacement_event.clear()
             self._snapshot_exit_event.clear()
             return proc.pid
@@ -452,6 +461,12 @@ class CoreEngineProcManager:
             if self._snapshot_pid is not None:
                 self._expected_exit_pids.discard(self._snapshot_pid)
             self._snapshot_pid = None
+            self._replacement_event.set()
+
+    def fail_snapshot(self, reason: str) -> None:
+        with self._process_lock:
+            self._snapshot_pid = None
+            self._snapshot_failed = reason
             self._replacement_event.set()
 
     def wait_for_snapshot_exit(self, timeout: float = 30) -> None:

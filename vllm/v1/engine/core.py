@@ -37,7 +37,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
@@ -1252,6 +1251,7 @@ class EngineCoreProc(EngineCore):
         self._snapshot_output_stopped = threading.Event()
         self._snapshot_io_lock = threading.Lock()
         self._snapshot_io_active = False
+        self._snapshot_detach_thread: threading.Thread | None = None
         self._snapshot_parent_pid: int | None = None
         self._snapshot_parent_starttime: int | None = None
         if enable_engine_snapshot:
@@ -2028,21 +2028,15 @@ class EngineCoreProc(EngineCore):
     def _begin_snapshot_io_detach(self) -> None:
         self._snapshot_io_stop.set()
         self.output_queue.put_nowait(self.ENGINE_CORE_IO_DETACH)
-        threading.Thread(
+        thread = threading.Thread(
             target=self._finish_snapshot_io_detach,
             daemon=True,
             name="engine-snapshot-io-detach",
-        ).start()
+        )
+        self._snapshot_detach_thread = thread
+        thread.start()
 
-    def _finish_snapshot_io_detach(self) -> None:
-        if not self._snapshot_input_stopped.wait(timeout=30):
-            logger.error("Timed out stopping EngineCore input socket thread")
-            return
-        if not self._snapshot_output_stopped.wait(timeout=30):
-            logger.error("Timed out stopping EngineCore output socket thread")
-            return
-        with self._snapshot_io_lock:
-            self._snapshot_io_active = False
+    def _write_snapshot_marker(self, state: str, stage: str | None = None) -> None:
         marker_path = self._snapshot_marker_path
         if marker_path is None:
             logger.error("EngineCore snapshot marker path is missing")
@@ -2053,8 +2047,10 @@ class EngineCoreProc(EngineCore):
             "generation": self._snapshot_generation,
             "snapshot_id": self._snapshot_id,
             "config_hash": self._snapshot_config_hash,
-            "state": "detached",
+            "state": state,
         }
+        if stage is not None:
+            marker["stage"] = stage
         temporary = f"{marker_path}.tmp-{os.getpid()}"
         with open(temporary, "w") as marker_file:
             json.dump(marker, marker_file)
@@ -2064,20 +2060,57 @@ class EngineCoreProc(EngineCore):
                 os.fsync(marker_file.fileno())
         os.replace(temporary, marker_path)
 
+    def _finish_snapshot_io_detach(self) -> None:
+        input_stopped = self._snapshot_input_stopped.wait(timeout=30)
+        output_stopped = self._snapshot_output_stopped.wait(timeout=30)
+        if not (input_stopped and output_stopped):
+            stage = "input" if not input_stopped else "output"
+            self._write_snapshot_marker("detach_failed", stage)
+            logger.error(
+                "Timed out stopping EngineCore %s socket thread; exiting", stage
+            )
+            os._exit(1)
+        with self._snapshot_io_lock:
+            self._snapshot_io_active = False
+        if self._snapshot_marker_path is None:
+            logger.error("EngineCore snapshot marker path is missing; exiting")
+            os._exit(1)
+        self._write_snapshot_marker("detached")
+
     def _snapshot_io_control_loop(self) -> None:
         while self.is_running():
             signal.sigwait({signal.SIGUSR2})
             if not self.is_running():
                 return
+            detach_thread = self._snapshot_detach_thread
+            if detach_thread is not None:
+                detach_thread.join(timeout=35)
             try:
                 self._restore_snapshot_stdio()
-                logger.info("Reattaching EngineCore business I/O")
-                self._start_snapshot_io_threads()
-                logger.info("EngineCore business I/O reattached")
             except Exception:
-                logger.exception("Failed to reattach EngineCore business I/O")
+                logger.warning(
+                    "Failed to rebind EngineCore stdio; continuing reattach",
+                    exc_info=True,
+                )
+            logger.info("Reattaching EngineCore business I/O")
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    self._start_snapshot_io_threads()
+                    break
+                except Exception as exc:
+                    if (
+                        "already attached" not in str(exc)
+                        or time.monotonic() >= deadline
+                    ):
+                        logger.exception("Failed to reattach EngineCore business I/O")
+                        return
+                    time.sleep(0.1)
+            logger.info("EngineCore business I/O reattached")
 
     def _restore_snapshot_stdio(self) -> None:
+        if self._snapshot_parent_pid is None or self._snapshot_parent_starttime is None:
+            raise RuntimeError("snapshot parent identity is unavailable")
         rebind_stdio(
             self._snapshot_parent_pid,
             expected_starttime=self._snapshot_parent_starttime,
@@ -2219,9 +2252,9 @@ class EngineCoreProc(EngineCore):
                                 continue
                             except VLLMValidationError as exc:
                                 # Note(arpera):
-                                # Currently we validate in engine core
-                                # only if request uses the same structured output backend
-                                # as engine core latched
+                                # Currently we validate in engine core only if
+                                # the request uses the same structured output
+                                # backend as engine core latched.
                                 self._handle_request_validation_error(req, exc)
                                 continue
                             except Exception:

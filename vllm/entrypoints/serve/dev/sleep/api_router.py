@@ -4,9 +4,7 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, TypeVar, cast
-
-from typing import Annotated, Any, TypeVar, cast
+from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -15,11 +13,13 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.snapshot.protocol import SnapshotControlClient
 from vllm.v1.engine import PauseMode
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from .metrics import sleep_mode_operation_metrics
 
 logger = init_logger(__name__)
 _T = TypeVar("_T")
+_STATUS_TIMEOUT_SECONDS = 5.0
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -37,7 +37,6 @@ async def _attach_engine(
     raw_request: Request,
     client: SnapshotControlClient,
     ticket: Mapping[str, Any],
-    resource_policy: dict[str, str],
     *,
     rollback: bool = False,
 ) -> tuple[dict[str, float], list[dict[str, float]]]:
@@ -70,7 +69,7 @@ async def _attach_engine(
     )
     timings["manager_confirm_attach_seconds"] = time.monotonic() - phase_started
     phase_started = time.monotonic()
-    worker_timings = await engine.checkpoint_restore(resource_policy)
+    worker_timings = await engine.snapshot_restore()
     timings["worker_restore_seconds"] = time.monotonic() - phase_started
     phase_started = time.monotonic()
     await engine.resume_generation()
@@ -181,7 +180,6 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
     if status["state"] != "READY":
         raise HTTPException(409, f"Engine snapshot state is {status['state']}")
     engine = engine_client(raw_request)
-    resource_policy = status["resource_policy"]
     gate = raw_request.app.state.engine_snapshot_gate
     phase_started = time.monotonic()
     active_requests = await gate.close()
@@ -196,7 +194,7 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
         await gate.open()
         raise HTTPException(409, "Engine has in-flight requests")
     manager_prepared = False
-    checkpoint_prepare_started = False
+    snapshot_prepare_started = False
     paused = False
     ticket: Mapping[str, Any] | None = None
     detached = False
@@ -212,9 +210,7 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
         if not still_idle:
             raise HTTPException(409, "Engine became busy during capture")
         phase_started = time.monotonic()
-        await engine.pause_generation(
-            mode=mode, clear_cache=resource_policy["kv"] == "discard"
-        )
+        await engine.pause_generation(mode=mode, clear_cache=True)
         timings["pause_generation_seconds"] = time.monotonic() - phase_started
         paused = True
         phase_started = time.monotonic()
@@ -223,8 +219,8 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
         if not barrier_idle:
             raise HTTPException(409, "Engine did not reach the idle barrier")
         phase_started = time.monotonic()
-        checkpoint_prepare_started = True
-        worker_timings = await engine.checkpoint_prepare(resource_policy)
+        snapshot_prepare_started = True
+        worker_timings = await engine.snapshot_prepare()
         timings["worker_prepare_seconds"] = time.monotonic() - phase_started
         phase_started = time.monotonic()
         await engine.snapshot_detach_io(
@@ -254,7 +250,6 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
                     raw_request,
                     client,
                     {**ticket, "root_pid": status["root_pid"]},
-                    resource_policy,
                     rollback=True,
                 )
             elif detached and status["state"] == "DRAINING":
@@ -264,15 +259,14 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
                     raw_request,
                     client,
                     rollback["ticket"],
-                    resource_policy,
                     rollback=True,
                 )
             elif detached and status["state"] != "HIBERNATED":
                 raise RuntimeError(
                     f"cannot roll back capture from state {status['state']}"
                 )
-            elif checkpoint_prepare_started:
-                await engine.checkpoint_abort()
+            elif snapshot_prepare_started:
+                await engine.snapshot_abort()
 
             if not detached and paused:
                 await engine.resume_generation()
@@ -298,24 +292,40 @@ async def _sleep_level3(raw_request: Request, mode: PauseMode) -> JSONResponse:
         raise RuntimeError(f"{exc}; capture rollback failed: {rollback_error}") from exc
 
 
+async def _fail_wake(client: SnapshotControlClient, error: BaseException) -> None:
+    try:
+        status = await asyncio.to_thread(
+            client.request, "status", timeout=_STATUS_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.exception("Failed to read snapshot state after wake failure")
+        return
+    if status.get("state") not in ("ATTACHING", "VERIFYING"):
+        return
+    try:
+        await asyncio.to_thread(
+            client.request, "fail_restore", {"error": str(error)}
+        )
+    except Exception:
+        logger.exception("Failed to mark snapshot restore as failed")
+
+
 async def _wake_level3(
     raw_request: Request,
     client: SnapshotControlClient,
-    status: Mapping[str, Any],
 ) -> JSONResponse:
     started = time.monotonic()
     timings: dict[str, float] = {}
-    phase_started = time.monotonic()
-    result = await asyncio.to_thread(client.request, "restore")
-    timings["manager_restore_seconds"] = time.monotonic() - phase_started
     try:
+        phase_started = time.monotonic()
+        result = await asyncio.to_thread(client.request, "restore")
+        timings["manager_restore_seconds"] = time.monotonic() - phase_started
         provider_result = result["provider_result"]
         manager_timings = result["manager_timings"]
         attach_timings, worker_timings = await _attach_engine(
             raw_request,
             client,
             result["ticket"],
-            status["resource_policy"],
         )
         result = await asyncio.to_thread(client.request, "status")
         timings.update(
@@ -328,7 +338,7 @@ async def _wake_level3(
         await raw_request.app.state.engine_snapshot_gate.open()
         timings["gate_open_seconds"] = time.monotonic() - phase_started
     except (Exception, asyncio.CancelledError) as exc:
-        await asyncio.to_thread(client.request, "fail_restore", {"error": str(exc)})
+        await _fail_wake(client, exc)
         raise
     timings["total_seconds"] = time.monotonic() - started
     return JSONResponse(
@@ -373,7 +383,7 @@ async def _wake_with_snapshot(
     if status["state"] == "HIBERNATED":
         if tags is not None:
             raise HTTPException(400, "tags are not supported for level 3 wake")
-        return await _wake_level3(raw_request, client, status)
+        return await _wake_level3(raw_request, client)
     if status["state"] != "READY":
         raise HTTPException(409, f"Engine snapshot state is {status['state']}")
     logger.info("wake up the engine with tags: %s", tags)
@@ -388,7 +398,9 @@ async def _wake_with_snapshot(
 async def is_sleeping(raw_request: Request) -> JSONResponse:
     client = snapshot_client(raw_request)
     if client is not None:
-        status = await asyncio.to_thread(client.request, "status")
+        status = await asyncio.to_thread(
+            client.request, "status", timeout=_STATUS_TIMEOUT_SECONDS
+        )
         if status["state"] == "FAILED":
             return JSONResponse(
                 content={
@@ -413,7 +425,35 @@ async def snapshot_status(raw_request: Request) -> JSONResponse:
     client = snapshot_client(raw_request)
     if client is None:
         raise HTTPException(404, "Engine snapshots are not enabled")
-    return JSONResponse(content=await asyncio.to_thread(client.request, "status"))
+    return JSONResponse(
+        content=await asyncio.to_thread(
+            client.request, "status", timeout=_STATUS_TIMEOUT_SECONDS
+        )
+    )
+
+
+@router.get("/ready")
+async def ready(raw_request: Request) -> Response:
+    client = snapshot_client(raw_request)
+    if client is not None:
+        try:
+            status = await asyncio.to_thread(
+                client.request,
+                "status",
+                timeout=_STATUS_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return Response(status_code=503)
+        if status["state"] != "READY":
+            return JSONResponse(status_code=503, content=status)
+    engine = engine_client(raw_request)
+    if engine is None:
+        return Response(status_code=200)
+    try:
+        await engine.check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)
 
 
 def attach_router(app: FastAPI) -> None:
