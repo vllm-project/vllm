@@ -49,6 +49,32 @@ impl CachedTokensBySource {
     }
 }
 
+/// Waiting requests with an async KV load, per load stage. Python sends a
+/// `dict[str, int]` keyed by stage, so absent stages default to zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvFetchReqsByStage {
+    /// Needs an async KV load that has not started.
+    pub waiting_to_start: u64,
+    /// Load started and not yet reported finished.
+    pub in_progress: u64,
+    /// Load finished, request not running yet.
+    pub completed_waiting: u64,
+}
+
+impl KvFetchReqsByStage {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const STAGES: [&'static str; 3] = ["waiting_to_start", "in_progress", "completed_waiting"];
+
+    pub fn counts(&self) -> [u64; 3] {
+        [
+            self.waiting_to_start,
+            self.in_progress,
+            self.completed_waiting,
+        ]
+    }
+}
+
 /// Stores prefix cache hit statistics.
 /// - `reset`: Whether `reset_prefix_cache` was invoked.
 /// - `queries`: Refers to the number of tokens that were queried.
@@ -295,6 +321,44 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct MooncakeStats(pub BTreeMap<MooncakeOperation, Vec<MooncakeRecord>>);
 
+    /// UMBP store connector transfer operation name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum UmbpOperation {
+        Load,
+        Store,
+    }
+
+    impl UmbpOperation {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::Load => "load",
+                Self::Store => "store",
+            }
+        }
+    }
+
+    /// Interval counters of one UMBP store transfer operation.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct UmbpOperationCounts {
+        /// Objects submitted.
+        pub submitted: u64,
+        /// Objects completed.
+        pub completed: u64,
+        /// Objects failed.
+        pub failed: u64,
+        /// Bytes in successfully completed transfer ranges.
+        pub num_bytes: u64,
+    }
+
+    /// UMBP store connector telemetry grouped by operation.
+    ///
+    /// Original Python definition: `UMBPStoreConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/umbp/stats.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -309,6 +373,8 @@ pub mod kv_connector {
         pub mooncake_transfer: Option<MooncakeTransferStats>,
         #[serde(rename = "MooncakeStoreConnector")]
         pub mooncake: Option<MooncakeStats>,
+        #[serde(rename = "UMBPStoreConnector")]
+        pub umbp: Option<UmbpStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -329,6 +395,7 @@ pub mod kv_connector {
         Nixl(NixlStats),
         MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
+        Umbp(UmbpStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }
@@ -349,6 +416,9 @@ pub struct SchedulerStats {
     /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Waiting requests with an async KV load, by load stage.
+    #[serde(default)]
+    pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
     /// Internal DP load-balancing step counter.
     pub step_counter: u64,
     /// Internal DP load-balancing wave number.
@@ -373,7 +443,10 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedTokensBySource, KvConnectorStats, PrefixCacheStats};
+    use super::{
+        CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
+        SchedulerStats, UmbpOperation,
+    };
 
     #[test]
     fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
@@ -422,14 +495,52 @@ mod tests {
             decode(mooncake_transfer.clone()),
             KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
         ));
+        let umbp = serde_json::json!({
+            "load": {"submitted": 2, "completed": 1, "failed": 1, "num_bytes": 4096,
+                     "future_counter": 1}
+        });
+        assert!(matches!(
+            decode(umbp.clone()),
+            KvConnectorStats::Umbp(stats)
+                if stats.0[&UmbpOperation::Load].num_bytes == 4096
+        ));
         // A newer child payload must not drop its siblings.
         assert!(matches!(
             decode(serde_json::json!({
                 "NixlConnector": nixl,
                 "MooncakeConnector": mooncake_transfer,
+                "UMBPStoreConnector": umbp,
             })),
             KvConnectorStats::Multi(stats)
                 if stats.nixl.is_some() && stats.mooncake_transfer.is_some()
+                    && stats.umbp.is_some()
         ));
+    }
+
+    #[test]
+    fn scheduler_stats_kv_fetch_reqs_by_stage_defaults_and_decodes() {
+        let mut payload = serde_json::json!({
+            "num_running_reqs": 1, "num_waiting_reqs": 2,
+            "step_counter": 0, "current_wave": 0, "kv_cache_usage": 0.5,
+            "prefix_cache_stats": {
+                "reset": false, "requests": 0, "queries": 0, "hits": 0,
+                "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+            },
+            "kv_cache_eviction_events": []
+        });
+
+        // Engines before vllm-project/vllm#58874 omit the field entirely.
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(
+            stats.num_kv_fetch_reqs_by_stage,
+            KvFetchReqsByStage::default()
+        );
+
+        payload["num_kv_fetch_reqs_by_stage"] =
+            serde_json::json!({"waiting_to_start": 3, "in_progress": 1});
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
     }
 }
