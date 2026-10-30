@@ -367,6 +367,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         if self._use_aiter_decode:
             logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
+        # AITER's HIP prefill conv takes a width-4 conv with bf16 inputs, weights
+        # and states; _forward checks the dtypes per step.
+        self._use_aiter_conv1d = self.conv_size == 4 and bool(
+            rocm_aiter_ops.is_causal_conv1d_prefill_available()
+        )
+        if self._use_aiter_conv1d:
+            logger.info_once("GLM-5.3-Flash KDA prefill conv: AITER HIP kernel.")
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -760,18 +767,38 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
-            qkv_ns = causal_conv1d_fn(
-                qkv_ns.transpose(0, 1),
-                conv_weights,
-                conv_bias,
-                activation="silu",
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
+            if (
+                self._use_aiter_conv1d
+                and qkv_ns.dtype
+                == conv_state.dtype
+                == conv_weights.dtype
+                == torch.bfloat16
+            ):
+                q_ns, k_ns, v_ns = rocm_aiter_ops.causal_conv1d_prefill_split_qkv(
+                    qkv_ns.transpose(0, 1),
+                    conv_weights,
+                    conv_bias,
+                    conv_state,
+                    non_spec_query_start_loc,
+                    self.local_projection_size,
+                    self.local_projection_size,
+                    cache_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    metadata=attn_metadata_narrowed,
+                )
+            else:
+                qkv_ns = causal_conv1d_fn(
+                    qkv_ns.transpose(0, 1),
+                    conv_weights,
+                    conv_bias,
+                    activation="silu",
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata_narrowed,
+                ).transpose(0, 1)
+                q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[

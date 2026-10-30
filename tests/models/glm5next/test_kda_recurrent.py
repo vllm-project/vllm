@@ -513,6 +513,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.kda_lower_bound = -5.0
     layer.kda_prefill_backend = "flashkda"
     layer._conv_state_dim_first = dim_first
+    layer._use_aiter_conv1d = False
     layer._merged_conv_weight = torch.randn(width, 4, device=device) * 0.1
     layer.q_conv1d = SimpleNamespace(bias=None)
     layer.A_log = torch.randn(1, 1, heads, 1, device=device) * 0.1
@@ -642,13 +643,15 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
 
 
+@pytest.mark.parametrize("aiter_conv1d", [False, True])
 @pytest.mark.parametrize("num_decodes", [0, 3])
 @torch.inference_mode()
-def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes):
+def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_conv1d):
     """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
     to bf16 precision (chunk size 32 vs 64). Decodes in the same step take
-    the recurrent kernel, so FlashKDA sees the prefills only."""
+    the recurrent kernel, so FlashKDA sees the prefills only. Both paths run
+    with either prefill conv."""
     from types import SimpleNamespace
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -658,6 +661,8 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes):
 
     if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
         pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
+    if aiter_conv1d and not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+        pytest.skip("requires AITER's HIP prefill conv")
 
     torch.manual_seed(7)
     device = torch.device("cuda")
@@ -675,7 +680,10 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes):
     layer.kda_safe_gate = True
     layer.kda_lower_bound = LOWER_BOUND
     layer._conv_state_dim_first = False
-    layer._merged_conv_weight = 0.5 * torch.randn(width, 4, device=device)
+    layer._use_aiter_conv1d = aiter_conv1d
+    layer._merged_conv_weight = 0.5 * torch.randn(
+        width, 4, device=device, dtype=torch.bfloat16
+    )
     layer.q_conv1d = SimpleNamespace(bias=None)
     layer.A_log = 0.5 * torch.randn(1, 1, heads, 1, device=device)
     layer.dt_bias = 0.1 * torch.randn(heads * D, device=device)
@@ -762,3 +770,96 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes):
         actual, expected = actual.float(), expected.float()
         error = (actual - expected).norm() / expected.norm()
         assert error < 2e-2, f"relative L2 error {error:.2e}"
+
+
+@pytest.mark.parametrize("prefill_len", [700, 5000])
+@pytest.mark.parametrize("dim_first", [False, True])
+@torch.inference_mode()
+def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
+    """AITER's HIP prefill conv, called as the layer calls it, matches
+    ``causal_conv1d_fn``: q|k|v to bf16 rounding and the conv state exactly.
+    The step takes 16-token tiles below 4096 tokens and 32-token tiles from
+    there, each scheduled from vLLM's 8-token schedule."""
+    from types import SimpleNamespace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    if not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+        pytest.skip("requires AITER's HIP prefill conv (VLLM_ROCM_USE_AITER=1, gfx950)")
+
+    torch.manual_seed(3)
+    device = torch.device("cuda")
+    proj = 16 * D
+    width = 3 * proj
+    # Decodes lead the batch; the last prefill starts without a state.
+    lengths = [1, 1, 1, prefill_len, 37]
+    has_initial_state = torch.tensor([True] * 4 + [False], device=device)
+    num_tokens, num_lines = sum(lengths), len(lengths) + 3
+    # q|k|v is a column block of the wider in_proj output, as in the layer.
+    projected = torch.randn(
+        num_tokens, width + 272, device=device, dtype=torch.bfloat16
+    )
+    x = projected[:, :width].transpose(0, 1)
+    weight = 0.5 * torch.randn(width, 4, device=device, dtype=torch.bfloat16)
+    shape = (num_lines, width, 3) if dim_first else (num_lines, 3, width)
+    pool = torch.randn(shape, device=device, dtype=torch.bfloat16)
+    state = pool if dim_first else pool.transpose(-1, -2)
+    cache_indices = (torch.randperm(num_lines - 1, device=device)[:5] + 1).int()
+    cu_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    cu = cu_cpu.to(device)
+
+    def metadata():
+        nums, batch_ptr, offsets = compute_causal_conv1d_metadata(cu_cpu, device=device)
+        return SimpleNamespace(
+            nums_dict=nums, batch_ptr=batch_ptr, token_chunk_offset_ptr=offsets
+        )
+
+    initial = pool.clone()
+    expected = causal_conv1d_fn(
+        x,
+        weight,
+        None,
+        activation="silu",
+        conv_states=state,
+        has_initial_state=has_initial_state,
+        cache_indices=cache_indices,
+        query_start_loc=cu,
+        metadata=metadata(),
+    ).transpose(0, 1)
+    expected_pool = pool.clone()
+    pool.copy_(initial)
+    step = metadata()
+    q, k, v = rocm_aiter_ops.causal_conv1d_prefill_split_qkv(
+        x,
+        weight,
+        None,
+        state,
+        cu,
+        proj,
+        proj,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        metadata=step,
+    )
+    assert all(t.is_contiguous() for t in (q, k, v))
+    torch.testing.assert_close(
+        torch.cat([q, k, v], dim=-1), expected, atol=2e-2, rtol=2e-2
+    )
+    assert torch.equal(pool, expected_pool)
+
+    block_m = 32 if num_tokens >= 4096 else 16
+    schedule = step.nums_dict[block_m]
+    chunks = [
+        (seq, chunk)
+        for seq, length in enumerate(lengths)
+        for chunk in range(-(-length // block_m))
+    ]
+    assert schedule["tot"] == len(chunks)
+    assert chunks == list(
+        zip(
+            schedule["batch_ptr"].tolist(),
+            schedule["token_chunk_offset_ptr"].tolist(),
+        )
+    )

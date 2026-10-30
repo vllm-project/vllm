@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch._ops import OpOverload
@@ -15,7 +16,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -2692,6 +2693,32 @@ class rocm_aiter_ops:
             and cls._kda_flashkda_paged_prefill_importable()
         )
 
+    @staticmethod
+    @functools.cache
+    def _causal_conv1d_prefill_importable() -> bool:
+        try:
+            from aiter.ops.causal_conv1d_fwd_split_qkv import (  # noqa: F401
+                causal_conv1d_split_qkv_hip_fn,
+            )
+        except ImportError:
+            return False
+        return True
+
+    @classmethod
+    @if_aiter_supported
+    def is_causal_conv1d_prefill_available(cls) -> bool:
+        """Whether AITER's HIP prefill causal conv1d with split q/k/v can run here.
+
+        Limited to gfx950, the only arch it has been checked on.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            cls._AITER_ENABLED
+            and on_gfx950()
+            and cls._causal_conv1d_prefill_importable()
+        )
+
     @classmethod
     def get_aiter_allreduce(cls):
         """Return the TP device communicator's AITER custom-allreduce if it has
@@ -5323,6 +5350,66 @@ class rocm_aiter_ops:
                 has_initial_state=has_initial_state,
             )
         return out
+
+    @staticmethod
+    def causal_conv1d_prefill_split_qkv(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        conv_states: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        k_dim: int,
+        v_dim: int,
+        cache_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run AITER's HIP prefill causal conv1d (width 4, SiLU) on q|k|v.
+
+        Takes what ``causal_conv1d_fn`` takes: ``x`` is bf16 ``[dim, tokens]``
+        with the channels contiguous and ordered q|k|v, and ``conv_states`` the
+        bf16 ``[lines, dim, 3]`` cache, updated in place. ``metadata`` is the
+        step's GDN attention metadata. Returns contiguous ``q``, ``k`` and ``v``,
+        ``[tokens, k_dim]``, ``[tokens, k_dim]`` and ``[tokens, v_dim]``.
+        """
+        from aiter.ops.causal_conv1d_fwd_split_qkv import (
+            causal_conv1d_split_qkv_hip_fn,
+        )
+
+        # Tiles of 32 tokens for long steps and 16 for short ones.
+        block_m = 32 if x.shape[1] >= 4096 else 16
+        nums_dict = metadata.nums_dict
+        if block_m not in nums_dict:
+            # The metadata builder makes the 8-token chunk schedule on the host.
+            # The coarser one follows from its chunk counts, as
+            # ceil(ceil(n / 8) / r) = ceil(n / (8 * r)), so AITER need not copy
+            # query_start_loc back. Built once per step, for all its layers.
+            nums = (-(-nums_dict[8]["nums"] // (block_m // 8))).numpy()
+            tot = int(nums.sum())
+            chunk_ids = np.arange(tot) - np.repeat(np.cumsum(nums) - nums, nums)
+            nums_dict[block_m] = {
+                "tot": tot,
+                "batch_ptr": async_tensor_h2d(
+                    np.repeat(np.arange(nums.size), nums), x.device, torch.int32
+                ),
+                "token_chunk_offset_ptr": async_tensor_h2d(
+                    chunk_ids, x.device, torch.int32
+                ),
+            }
+        return causal_conv1d_split_qkv_hip_fn(
+            x,
+            weight,
+            bias,
+            conv_states,
+            query_start_loc,
+            k_dim,
+            v_dim,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation="silu",
+            block_m=block_m,
+            metadata=metadata,
+        )
 
 
 rocm_aiter_ops.register_ops_once()
