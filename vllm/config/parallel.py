@@ -118,7 +118,7 @@ def _resolve_all2all_backend(
 
         if not has_flashinfer_nvlink_one_sided():
             logger.warning_once(
-                "FlashInfer trtllm_moe_alltoall is unavailable; falling "
+                "FlashInfer NVLink one-sided all2all is unavailable; falling "
                 "back to the 'allgather_reducescatter' all2all backend."
             )
             return "allgather_reducescatter"
