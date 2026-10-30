@@ -124,6 +124,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("shared_expert_gate_rdna3", torch::kCUDA,
                 &shared_expert_gate_rdna3);
 
+  // MoE decode tail: top-k routing, gated shared expert, workspace zeroing.
+  rocm_ops.def(
+      "moe_decode_tail_rdna3(Tensor logits, Tensor gate_up, Tensor x, "
+      "Tensor w_gate, Tensor w_down, Tensor! out, Tensor! topk_w, "
+      "Tensor! topk_ids, Tensor! zero_buf, bool renormalize) -> ()");
+  rocm_ops.impl("moe_decode_tail_rdna3", torch::kCUDA, &moe_decode_tail_rdna3);
+  rocm_ops.def(
+      "moe_octw3_gemm_f32_rdna3(Tensor a, Tensor! c, Tensor! out16, "
+      "Tensor! counters, Tensor w, Tensor scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, int top_k, bool mul_topk_weight, "
+      "int output_topk, int had) -> ()");
+  rocm_ops.impl("moe_octw3_gemm_f32_rdna3", torch::kCUDA,
+                &moe_octw3_gemm_f32_rdna3);
+
   // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
   rocm_ops.def(
       "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "

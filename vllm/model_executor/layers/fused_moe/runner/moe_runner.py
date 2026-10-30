@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.rdna3_decode_tail import (
+    Rdna3MoEDecodeTail,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -214,6 +217,43 @@ direct_register_custom_op(
 )
 
 
+def _moe_forward_decode_tail(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: _layer_name_type,
+) -> torch.Tensor:
+    """Shared + routed output, before the final all-reduce."""
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
+    assert isinstance(layer, MoERunner) and layer._decode_tail is not None
+    layer._decode_tail.ensure_fused_weight()
+    if layer._decode_tail.supports(hidden_states):
+        return layer._decode_tail(hidden_states)
+    assert hidden_states.shape[-1] == layer.moe_config.hidden_dim
+    shared_output, fused_output = _unpack(
+        layer._forward_impl(hidden_states, router_logits, hidden_states)
+    )
+    assert isinstance(fused_output, torch.Tensor)
+    if shared_output is None:
+        return fused_output
+    return shared_output + fused_output
+
+
+def _moe_forward_decode_tail_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: _layer_name_type,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="moe_forward_decode_tail",
+    op_func=_moe_forward_decode_tail,
+    fake_impl=_moe_forward_decode_tail_fake,
+    tags=(torch.Tag.needs_exact_strides,),
+)
+
+
 def _unpack(
     result: torch.Tensor
     | UnfinalizedMoEOutput
@@ -294,6 +334,7 @@ class MoERunner(MoERunnerInterface):
         self.layer_name = layer_name
 
         self._forward_entry = self._select_forward()
+        self._decode_tail = Rdna3MoEDecodeTail.maybe_create(self)
 
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
@@ -712,6 +753,12 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
+        if self._decode_tail is not None and shared_experts_input is None:
+            result = torch.ops.vllm.moe_forward_decode_tail(
+                hidden_states, router_logits, self._encode_layer_name()
+            )
+            return self._maybe_reduce_final_output(result, None)
+
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it

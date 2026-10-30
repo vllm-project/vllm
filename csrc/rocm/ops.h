@@ -79,6 +79,22 @@ void qsa_norm_rope_rdna3(torch::Tensor x, torch::Tensor out,
 void shared_expert_gate_rdna3(torch::Tensor out, torch::Tensor x,
                               torch::Tensor weight);
 
+void moe_octw3_gemm_f32_rdna3(torch::Tensor a, torch::Tensor c,
+                              torch::Tensor out16, torch::Tensor counters,
+                              torch::Tensor w, torch::Tensor scales,
+                              torch::Tensor topk_weights,
+                              torch::Tensor sorted_token_ids,
+                              torch::Tensor expert_ids,
+                              torch::Tensor num_tokens_post_padded,
+                              int64_t top_k, bool mul_topk_weight,
+                              int64_t output_topk, int64_t had);
+
+void moe_decode_tail_rdna3(torch::Tensor logits, torch::Tensor gate_up,
+                           torch::Tensor x, torch::Tensor w_gate,
+                           torch::Tensor w_down, torch::Tensor out,
+                           torch::Tensor topk_w, torch::Tensor topk_ids,
+                           torch::Tensor zero_buf, bool renormalize);
+
 std::vector<torch::Tensor> qwen4_hc_combine_mix(
     const torch::Tensor& h, const torch::Tensor& block_out,
     const torch::Tensor& inj, const torch::Tensor& norm_w,
