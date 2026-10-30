@@ -1026,11 +1026,14 @@ def test_multi_example_connector_consistency():
     storage2_scheduler_events = _events_from_request(
         _ignore_event_collection(events["storage2-SCHEDULER"])
     )
-    assert storage1_scheduler_events[:4] == [
+    assert storage1_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -1067,11 +1070,14 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    assert storage2_scheduler_events[:4] == [
+    assert storage2_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
 

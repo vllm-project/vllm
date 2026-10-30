@@ -215,6 +215,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, load_range
         )
 
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_loadable_window_group_ids(
+            request, end_token
+        )
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,

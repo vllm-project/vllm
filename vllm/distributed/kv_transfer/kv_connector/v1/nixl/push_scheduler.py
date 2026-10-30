@@ -155,11 +155,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if load_range is not None:
             load_start_token = load_range.start_token
             load_end_token = load_range.end_token
-        elif num_external_tokens > 0:
-            # Carry the window for ordinary NIXL loads too: range and
-            # non-range requests share the same remote engine and handshake.
-            load_start_token = request.num_computed_tokens
-            load_end_token = load_start_token + num_external_tokens
         else:
             load_start_token = load_end_token = 0
         logger.debug(
@@ -188,7 +183,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not params.get("do_remote_prefill"):
             return
 
-        if num_external_tokens <= 0:
+        if num_external_tokens <= 0 and not (
+            load_range and load_range.window_group_ids
+        ):
             # Nothing to receive: full prefix-cache hit on D, no
             # registration to stage.
             return

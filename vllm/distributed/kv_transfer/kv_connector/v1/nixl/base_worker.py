@@ -129,8 +129,6 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
-    _prefix_caching_enabled = False
-
     # Transfer mode included in the NIXL compatibility hash so that a push
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
@@ -992,8 +990,6 @@ class NixlBaseConnectorWorker:
         # Map of pull peer (host, port) -> engine_id currently serving it.
         self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
-        self.block_size = vllm_config.cache_config.block_size
-        self._prefix_caching_enabled = vllm_config.cache_config.enable_prefix_caching
         self.model_config = vllm_config.model_config
 
         self.use_mla = self.model_config.use_mla
@@ -2811,37 +2807,13 @@ class NixlBaseConnectorWorker:
             != self._physical_blocks_per_logical_kv_block
             and self.vllm_config.cache_config.enable_prefix_caching
         ):
-            base_err = (
+            raise RuntimeError(
                 "Prefix caching with heterogeneous physical_blocks_per_logical "
                 "is not supported for Mamba hybrid models. "
                 f"Local: {self._physical_blocks_per_logical_kv_block}, "
                 f"Remote: {remote_physical_per_logical}. "
                 "Disable prefix caching with --disable-prefix-caching."
             )
-            if self.use_host_buffer:
-                raise RuntimeError(
-                    base_err + "requires a supported device-buffer transfer path."
-                )
-            if block_size_ratio != 1:
-                raise RuntimeError(
-                    base_err + "requires matching kernel block sizes. "
-                    f"Local: {self.block_size}, remote: {nixl_agent_meta.block_size}."
-                )
-            if self.dcp_size > 1 or remote_info.remote_dcp_size > 1:
-                raise RuntimeError(
-                    base_err + "is not supported with decode context parallelism."
-                )
-            if any(
-                _is_attention_spec(t) and not _is_full_attention_spec(t)
-                for t in self._group_spec_types
-            ):
-                raise RuntimeError(
-                    base_err + "is not supported with sliding-window attention groups."
-                )
-            if self.vllm_config.cache_config.mamba_cache_mode == "all":
-                raise RuntimeError(
-                    base_err + "requires a non-positional Mamba cache mode."
-                )
 
         if block_size_ratio != 1:
             # Heterogeneous block sizes transfer at remote-block granularity;
@@ -3838,6 +3810,7 @@ class NixlBaseConnectorWorker:
                 list(prefill_region[-len(decode_region) :]) if decode_region else []
             )
         return decode_block_ids, trimmed_prefill
+
     def _kernel_block_window(
         self,
         load_start_token: int,
@@ -3856,21 +3829,6 @@ class NixlBaseConnectorWorker:
         start = load_start_token // transfer_block_size
         return start, cdiv(load_end_token, transfer_block_size) - start
 
-    def _slice_attention_to_load_window(
-        self,
-        decode_blocks: list[int],
-        prefill_blocks: list[int],
-        load_start_token: int,
-        load_end_token: int,
-        block_size_ratio: int = 1,
-    ) -> tuple[list[int], list[int]]:
-        start, count = self._kernel_block_window(
-            load_start_token, load_end_token, block_size_ratio
-        )
-        assert len(decode_blocks) >= count
-        assert len(prefill_blocks) >= start + count
-        return decode_blocks[:count], prefill_blocks[start : start + count]
-
     def _apply_prefix_caching(
         self,
         decode_block_ids: BlockIds,
@@ -3888,30 +3846,22 @@ class NixlBaseConnectorWorker:
         """
         prefill_block_ids = list(prefill_block_ids)
         has_window = load_end_token > load_start_token
-        if (
-            self._has_mamba
-            and decode_physical_per_logical != prefill_physical_per_logical
-            and not has_window
-            and self._prefix_caching_enabled
-        ):
-            raise RuntimeError(
-                "Hybrid prefix caching with heterogeneous logical block sizes "
-                "requires an explicit token load range."
-            )
         if not self._has_mamba:
             decode_block_ids = list(decode_block_ids)
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
-                if has_window and _is_full_attention_spec(self._group_spec_types[i]):
-                    decode_block_ids[i], prefill_block_ids[i] = (
-                        self._slice_attention_to_load_window(
-                            decode_block_ids[i],
-                            prefill_group,
-                            load_start_token,
-                            load_end_token,
-                            block_size_ratio,
-                        )
+                if (
+                    num_decode_blocks
+                    and has_window
+                    and _is_full_attention_spec(self._group_spec_types[i])
+                ):
+                    start, count = self._kernel_block_window(
+                        load_start_token, load_end_token, block_size_ratio
                     )
+                    assert num_decode_blocks >= count
+                    assert len(prefill_group) >= start + count
+                    decode_block_ids[i] = decode_block_ids[i][:count]
+                    prefill_block_ids[i] = prefill_group[start : start + count]
                     continue
                 assert num_decode_blocks <= len(prefill_group)
                 if num_decode_blocks < len(prefill_group):
@@ -3937,12 +3887,7 @@ class NixlBaseConnectorWorker:
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
                 num_prefill_blocks = len(prefill_group)
-                if num_decode_blocks == num_prefill_blocks == 0:
-                    continue
                 if _is_ssm_spec(self._group_spec_types[i]):
-                    if num_decode_blocks == 0:
-                        prefill_block_ids[i] = []
-                        continue
                     if num_decode_blocks == num_prefill_blocks:
                         continue
                     # Only state-bearing slots reach here, normally just one
@@ -3960,24 +3905,12 @@ class NixlBaseConnectorWorker:
                         prefill_block_ids[i] = prefill_group[-num_blocks:]
                     else:
                         decode_block_ids[i] = decode_block_ids[i][:num_blocks]
-                elif has_window and _is_full_attention_spec(self._group_spec_types[i]):
-                    decode_block_ids[i], prefill_block_ids[i] = (
-                        self._slice_attention_to_load_window(
-                            decode_block_ids[i],
-                            prefill_group,
-                            load_start_token,
-                            load_end_token,
-                            block_size_ratio,
-                        )
-                    )
                 elif (
                     decode_physical_per_logical == prefill_physical_per_logical
                     and num_decode_blocks < num_prefill_blocks
                 ):
                     # Partial prefix cache hit for FA group.
-                    prefill_block_ids[i] = (
-                        prefill_group[-num_decode_blocks:] if num_decode_blocks else []
-                    )
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
                 else:
                     # TODO Handle prefix caching with different block_sizes
                     # Allocation rounding legitimately leaves up to

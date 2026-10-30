@@ -39,7 +39,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -169,7 +168,7 @@ class TestPushScheduler:
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
         assert reg["remote_engine_id"] == "prefill-engine"
-        assert (reg["load_start_token"], reg["load_end_token"]) == (64, 112)
+        assert (reg["load_start_token"], reg["load_end_token"]) == (0, 0)
 
         # Watchdog deadline set in the future.
         deadline = sched._push_registration_deadlines[request.request_id]
@@ -178,24 +177,6 @@ class TestPushScheduler:
         assert request.kv_transfer_params["do_remote_prefill"] is False
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
-
-    def test_d_side_range_load_registers_only_owned_suffix(self):
-        sched = make_nixl_push_scheduler()
-        sched.get_range_block_ids = MagicMock(return_value=([12, 13],))
-        request = _make_request(request_id="req-d-range")
-        blocks = _BlocksMock(block_ids=([10, 11, 12, 13],))
-
-        sched.update_state_after_alloc_for_range(
-            request,
-            blocks,
-            KVLoadRange(32, 64),
-        )
-
-        registration = sched._push_pending_registrations[request.request_id]
-        assert registration["local_block_ids"] == ([12, 13],)
-        assert registration["load_start_token"] == 32
-        assert registration["load_end_token"] == 64
-        sched.get_range_block_ids.assert_called_once_with(blocks, KVLoadRange(32, 64))
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
@@ -1745,16 +1726,12 @@ class TestPushPrefixCaching:
         # ("WRITE", local_handle, local_descs, remote_handle, remote_descs)
         return list(args[2]), list(args[4])
 
+    @pytest.mark.cpu_test
     def test_partial_prefix_hit_end_trims_producer_blocks(self):
         """D registered only its 2 uncomputed suffix blocks; P finished the
         full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
         w, _ = self._worker_driving_xfer()
-        reg = _registration_data(
-            "req-pc",
-            local_block_ids=([500, 501],),
-            load_start_token=48,
-            load_end_token=80,
-        )
+        reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 
         NixlPushConnectorWorker._do_start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
@@ -1764,6 +1741,57 @@ class TestPushPrefixCaching:
         # End-trim (suffix), NOT front-trim: [13, 14], not [10, 11].
         assert local == [13, 14]
         assert remote == [500, 501]
+
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize(
+        "start,end,expected", [(16, 48, [11, 12]), (48, 80, [13, 14])]
+    )
+    def test_explicit_range_selects_producer_blocks(
+        self, nixl_worker_factory, start, end, expected
+    ):
+        """An explicit interior range must not be interpreted as a suffix."""
+        import torch
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+
+        producer = nixl_worker_factory(NixlPushConnectorWorker, "prefill-engine")
+        consumer = nixl_worker_factory(NixlPushConnectorWorker, "decode-engine")
+        for worker in (producer, consumer):
+            worker.register_kv_caches(
+                {
+                    name: torch.zeros((512, 16, 4, 32), dtype=torch.float16)
+                    for name in ("layer0", "layer2")
+                }
+            )
+        payload = consumer.xfer_handshake_metadata
+        assert payload is not None
+        remote_agent = msgspec.msgpack.decode(
+            payload.agent_metadata_bytes, type=NixlAgentMetadata
+        )
+        producer.add_remote_agent(remote_agent)
+        blocks = ([10, 11, 12, 13, 14],)
+        meta = ReqMeta(
+            local_block_ids=blocks,
+            local_physical_block_ids=blocks,
+            tp_size=1,
+            load_start_token=start,
+            load_end_token=end,
+            remote=RemoteMeta(
+                block_ids=([500, 501],),
+                host="localhost",
+                port=1,
+                engine_id=consumer.engine_id,
+                request_id="range-request",
+            ),
+        )
+        producer._xfer_blocks_for_req("range-request", meta)
+
+        local, remote = self._written_block_ids(producer)
+        assert local == expected + [512 + block for block in expected]
+        assert remote == [500, 501, 1012, 1013]
 
     def test_no_prefix_hit_leaves_blocks_untrimmed(self):
         """Equal counts (no prefix cache hit on D): nothing is trimmed."""
@@ -1778,7 +1806,7 @@ class TestPushPrefixCaching:
 
     def test_heterogeneous_logical_pages_use_token_window(self):
         w, _ = self._worker_driving_xfer()
-        w._has_mamba = True
+        w._has_mamba = False
         w._physical_blocks_per_logical_kv_block = 10
         remote_info = w.transfer_topo.get_engine_info.return_value
         remote_info.remote_physical_blocks_per_logical = 6
@@ -1800,7 +1828,6 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [6, 7, 8, 9]
         assert remote == [500, 501, 502, 503]
-
 
     @pytest.mark.parametrize("layer_name_routing", [False, True])
     def test_different_region_groups_require_layer_routing(self, layer_name_routing):

@@ -6,6 +6,22 @@ For feature compatibility details (supported model architectures, TP configurati
 
 ## Prerequisites
 
+### Piecewise prefix loading
+
+With `MultiConnector`'s `load_policy="range_aware"`, NIXL pull and push can
+load scheduler-aligned full-attention ranges from different sources.
+The transfer carries token offsets, including when the scheduler shortens
+the final endpoint. SWA groups are assigned separately: a source must
+provide the whole window at its original prefill endpoint, even if it
+supplies no full-attention range.
+
+This path supports ordinary full-attention and SWA groups with
+PCP=DCP=PP=1. Recurrent state, packed/MLA layouts, context parallelism,
+pipeline parallelism, and incomplete window coverage use the existing
+single-source path. Both peers must use the same NIXL connector protocol
+version. These restrictions apply to piecewise loading, not to ordinary
+NIXL transfers.
+
 ### Installation
 
 Install the NIXL library: `uv pip install nixl`, as a quick start on Nvidia platform.

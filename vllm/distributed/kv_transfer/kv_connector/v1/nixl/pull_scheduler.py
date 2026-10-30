@@ -132,12 +132,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         if load_range is not None:
             load_start_token = load_range.start_token
             load_end_token = load_range.end_token
-        elif num_external_tokens > 0:
-            # Legacy single-source loads still need an explicit window. A P
-            # engine can serve Store misses and piecewise Store hits in any
-            # order, so transfer semantics cannot be cached per engine.
-            load_start_token = request.num_computed_tokens
-            load_end_token = load_start_token + num_external_tokens
         else:
             load_start_token = load_end_token = 0
         logger.debug(
@@ -209,7 +203,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         local_num_computed_blocks,
                         # Parked in WAITING_FOR_REMOTE_KVS only when there is
                         # something to pull; a full local hit stays RUNNING.
-                        num_external_tokens > 0,
+                        num_external_tokens > 0
+                        or bool(load_range and load_range.window_group_ids),
                         load_start_token,
                         load_end_token,
                     )
