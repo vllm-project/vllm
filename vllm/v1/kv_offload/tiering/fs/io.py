@@ -196,16 +196,14 @@ def batch_store_block(
     """
     _validate_offsets(view, offsets, block_size)
 
-    to_write = [(p, o) for p, o in zip(paths, offsets) if not os.path.exists(p)]
     if _HAS_FSIO_C:
         view_B = view.cast("B")
-        view_slices = [view_B[o : o + block_size] for _, o in to_write]
-        dest_paths = [p for p, _ in to_write]
-        tmp_paths = [p + _get_tmp_suffix() for p in dest_paths]
-        return batch_store_block_C(tmp_paths, dest_paths, view_slices, use_o_direct)
+        view_slices = [view_B[x : x + block_size] for x in offsets]
+        tmp_paths = [p + _get_tmp_suffix() for p in paths]
+        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
     return sum(
         _store_block(path, view, offset, block_size, use_o_direct)
-        for path, offset in to_write
+        for path, offset in zip(paths, offsets)
     )
 
 

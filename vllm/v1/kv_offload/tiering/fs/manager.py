@@ -161,8 +161,10 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
-        # Per store job: blocks written (already published blocks are skipped).
-        self._store_progress: dict[JobId, int] = {}
+        # Block count per in-flight job, used to report transfer_bytes. Loads
+        # count their keys; stores count the blocks actually written (set by
+        # the pool worker, same ordering as _load_progress).
+        self._job_block_counts: dict[JobId, int] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -228,7 +230,7 @@ class FileSystemTierManager(SecondaryTierManager):
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def store_task() -> None:
-            self._store_progress[job_id] = batch_store_block(
+            self._job_block_counts[job_id] = batch_store_block(
                 paths,
                 self._primary_kv_view,
                 offsets,
@@ -245,6 +247,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
+        self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
@@ -283,9 +286,11 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
-            num_written = self._store_progress.pop(job_id, None)
+            block_count = self._job_block_counts.pop(job_id, None)
             transfer_bytes = (
-                num_written * self._block_size if num_written is not None else None
+                block_count * self._block_size
+                if success and block_count is not None
+                else None
             )
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
