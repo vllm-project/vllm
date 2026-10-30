@@ -12,8 +12,8 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -26,11 +26,11 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
-    get_kv_cache_configs,
     get_kv_cache_groups,
     is_kv_cache_spec_uniform,
     kv_cache_groups_tp_replicas,
@@ -58,7 +58,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -71,7 +70,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch, gpu_block_size, shared_host_pool
 ):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -191,7 +192,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
@@ -229,10 +232,10 @@ def test_hisparse_pool_must_fit_max_model_len(
     }
 
     if ok:
-        kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+        get_kv_cache_configs(config, [specs], [2**34])
     else:
         with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+            get_kv_cache_configs(config, [specs], [2**34])
 
 
 def new_chunked_local_attention_spec(
@@ -675,6 +678,42 @@ def test_project_kv_cache_groups_to_worker():
     proj_spec = projected[0].kv_cache_spec
     assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
+
+
+def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
+    """A PP stage that owns none of a uniform-type group's layers keeps the
+    global spec, but must not allocate cache for the other stage's layers."""
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+    global_groups = [
+        KVCacheGroupSpec(
+            ["layer1", "layer2"],
+            UniformTypeKVCacheSpecs(
+                block_size=16, kv_cache_specs={"layer1": spec_a, "layer2": spec_a}
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer3"],
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer3": spec_b}),
+        ),
+    ]
+    groups = kv_cache_planning._project_kv_cache_groups_to_worker(
+        global_groups, {"layer2": spec_a}
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=2**20
+    )
+    assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
+        ["layer2"]
+    ]
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
@@ -1945,247 +1984,102 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_grouping_config(method="dspark", model_type=None):
-    """Grouping config with an EAGLE-family speculative method enabled."""
-    return SimpleNamespace(
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
-                is_block_outermost=True
-            )
-        ),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
-        speculative_config=SimpleNamespace(
-            method=method,
-            use_eagle=lambda: True,
-            use_eagle_block_drop=lambda: True,
-        ),
+def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
+    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = SimpleNamespace(
+        method="dflash",
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: use_eagle_block_drop,
+        use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
     )
+    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
+    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
 
 
-def _hybrid_specs_with_draft(draft: bool, draft_shares_target_spec: bool = False):
-    """A K3-shaped hybrid: MLA full attention + Mamba, optionally plus a
-    DSpark-style draft MLA layer marked non_causal_multi_token_decode.
+def _as_draft(spec):
+    return replace(spec, is_draft=True)
 
-    The target's fp8 KV dtype is one difference from the draft on Kimi-K3
-    (target `--kv-cache-dtype fp8_e4m3`, draft `auto`). Pass
-    draft_shares_target_spec to match that dtype while retaining the draft
-    marker as a group boundary.
-    """
-    target_dtype = None if draft_shares_target_spec else "fp8_e4m3"
-    specs = {
-        "target.attn.0": new_mla_spec(block_size=64, cache_dtype_str=target_dtype),
-        "target.attn.1": new_mla_spec(block_size=64, cache_dtype_str=target_dtype),
-        "target.mamba.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
-        "target.mamba.1": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
-    }
+
+def _hybrid_specs(draft=True):
+    """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
+    specs = {}
+    for i in range(8):
+        specs[f"layers.{i}"] = (
+            new_kv_cache_spec()
+            if i % 4 == 3
+            else new_mamba_spec(mamba_cache_mode="align")
+        )
     if draft:
-        draft_spec = new_mla_spec(block_size=64)
-        specs["draft.attn.0"] = replace(draft_spec, non_causal_multi_token_decode=True)
+        specs["mtp.0"] = _as_draft(new_kv_cache_spec())
     return specs
 
 
-def test_draft_group_annotated_on_hybrid_general_path():
-    # A drafter's MLA layer carries non_causal_multi_token_decode, so its group
-    # is identifiable without keying off a model version.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
-    )
-
-    flagged = [g for g in groups if g.is_eagle_group]
-    assert len(flagged) == 1
-    assert "draft.attn.0" in flagged[0].layer_names
-
-
-def test_mamba_groups_never_flagged_even_when_draft_shares_a_group():
-    # Packed uniform-type groups can contain distinct target and draft layer
-    # specs; the combined group still holds volatile draft KV and must be
-    # flagged. What must never happen is a Mamba group being flagged: that
-    # widens its lookup window to two consecutive chunks, which align-mode
-    # checkpointing never produces, zeroing every lookup.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(),
-        _hybrid_specs_with_draft(draft=True, draft_shares_target_spec=True),
-    )
-
-    for group in groups:
-        if "draft.attn.0" in group.layer_names:
-            assert group.is_eagle_group
-        if isinstance(group.kv_cache_spec, MambaSpec):
-            assert not group.is_eagle_group
-
-
-def test_draft_group_not_annotated_without_spec_decode():
-    # The marker alone must not flag anything; the eagle semantics only apply
-    # when a speculative method is actually enabled.
-    config = _spec_decode_grouping_config()
-    config.speculative_config = None
-    groups = get_kv_cache_groups(config, _hybrid_specs_with_draft(draft=True))
-
-    assert not any(g.is_eagle_group for g in groups)
-
-
-def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so consumers fall back to
-    # conservative behavior that silently breaks reuse for Mamba groups.
-    # That must at least be visible.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
-    )
-
-    assert not any(g.is_eagle_group for g in groups)
-    assert "no KV cache group could be identified as the draft model's" in (
-        caplog_vllm.text
-    )
-
-
-def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
-    # Pure-attention models degrade gracefully under the consumers'
-    # conservative fallback (a one-block hit drop at most), so the warning
-    # stays silent to avoid noise on every unannotated EAGLE deployment.
-    specs = {
-        "target.attn.0": new_mla_spec(block_size=64),
-        "target.attn.1": new_mla_spec(block_size=64),
-    }
-    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
-
-    assert not any(g.is_eagle_group for g in groups)
-    assert "could be identified as the draft model's" not in caplog_vllm.text
-
-
-def test_no_warning_when_draft_group_is_identified(caplog_vllm):
-    get_kv_cache_groups(
-        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
-    )
-
-    assert "could be identified as the draft model's" not in caplog_vllm.text
-
-
-def _deepseek_v4_specs(model_version="deepseek_v4"):
-    """DeepseekV4-shaped specs: full MLA layers plus sliding-window MLA layers
-    at differing page sizes, with the MTP draft layer registered last."""
-    return {
-        "model.layers.0.self_attn.attn": new_mla_spec(),
-        "model.layers.1.self_attn.attn": new_mla_spec(),
-        "model.layers.2.self_attn.attn": new_swa_mla_spec(
-            head_size=1024, model_version=model_version
-        ),
-        # The MTP block registers last, and its sliding-window size differs, so
-        # it lands in a group of its own.
-        "model.layers.3.self_attn.attn": new_swa_mla_spec(
-            head_size=1024, sliding_window=256, model_version=model_version
-        ),
-    }
+_DRAFT_SPEC_SHAPES = {
+    "uniform": lambda: {
+        "layers.0": new_kv_cache_spec(),
+        "draft.0": _as_draft(new_kv_cache_spec()),
+    },
+    "hybrid": _hybrid_specs,
+    "draft_spans_groups": lambda: {
+        "layers.0": new_mla_spec(),
+        "layers.1": new_swa_mla_spec(head_size=1024),
+        "mtp.0": _as_draft(new_mla_spec()),
+        "mtp.1": _as_draft(new_swa_mla_spec(head_size=1024)),
+    },
+}
 
 
 @pytest.mark.parametrize(
-    ("method", "model_type"),
-    [("mtp", "deepseek_v4"), ("dspark", "deepseek_v4"), ("dspark", "deepseek_v41")],
+    "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
 )
-def test_deepseek_v4_draft_group_annotated_on_packed_path(method, model_type):
-    # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
-    # carries no draft marker and only the positional rule can find it. This
-    # pins the pre-existing behaviour that the unified annotator must preserve.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method=method, model_type=model_type),
-        _deepseek_v4_specs(model_version=None),
-    )
-
-    flagged = [g for g in groups if g.is_eagle_group]
-    assert len(flagged) == 1
-    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
-
-
-def test_trailing_layer_fallback_applies_to_any_mtp_model():
-    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
-    # MTP blocks reuse the target's decoder layer (no spec marker) and always
-    # register after every target layer. The model_type must not gate it.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="other"),
-        _deepseek_v4_specs(),
-    )
-
-    flagged = [g for g in groups if g.is_eagle_group]
-    assert len(flagged) == 1
-    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
-
-
-def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
-    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
-    the MTP drafter's full-attn layer (spec-identical to the target's)
-    registered last."""
-    specs = {}
-    idx = 0
-    for _ in range(2):
-        for _ in range(3):
-            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
-                mamba_cache_mode="align"
-            )
-            idx += 1
-        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
-        idx += 1
-    if with_mtp_layer:
-        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
-    return specs
-
-
-def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
-    # A hybrid mamba + full-attention model with an MTP drafter that is
-    # spec-indistinguishable from the target reaches the general multi-group
-    # path. The trailing-layer rule must locate the draft group there so the
-    # Mamba groups are not swept up by the flag-all consumer fallback.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
-        _qwen3_5_hybrid_specs(with_mtp_layer=True),
-    )
-
-    flagged = [g for g in groups if g.is_eagle_group]
-    assert len(flagged) == 1
-    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
-    for group in groups:
-        if any(
-            isinstance(spec, MambaSpec)
-            for spec in iter_layer_specs(group.kv_cache_spec)
-        ):
-            assert not group.is_eagle_group
-    assert "could be identified as the draft model's" not in caplog_vllm.text
-
-
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
-def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
-    # Other drafters are not covered by the trailing-layer rule, so an
-    # unidentifiable hybrid draft must still warn.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method=method, model_type="qwen3_5"),
-        _qwen3_5_hybrid_specs(with_mtp_layer=True),
-    )
-
-    assert not any(g.is_eagle_group for g in groups)
-    assert "could be identified as the draft model's" in caplog_vllm.text
-
-
-def test_trailing_layer_fallback_requires_exact_partition():
-    # If the groups do not partition the layers exactly (e.g. a caller that
-    # dropped or duplicated layers), the positional rule is meaningless and
-    # must not fire.
-    from vllm.v1.core.kv_cache_planning import _annotate_eagle_groups
-
-    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
-    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
-    groups = get_kv_cache_groups(config, specs)
-    for g in groups:
-        g.is_eagle_group = False
-    # Remove one layer from its group: no longer an exact partition.
-    trimmed = [
-        KVCacheGroupSpec(
-            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
-            g.kv_cache_spec,
-        )
-        for g in groups
+@pytest.mark.parametrize("pp", [1, 2])
+def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
+    specs = make_specs()
+    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
+    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
+    groups = _spec_decode_kv_cache_groups([specs])
+    assert [(g.layer_names, g.kv_cache_spec) for g in groups] == [
+        (g.layer_names, g.kv_cache_spec)
+        for g in _spec_decode_kv_cache_groups([untagged])
     ]
-    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
 
-    assert not any(g.is_eagle_group for g in trimmed)
+    worker_specs = [
+        {n: s for n, s in specs.items() if n not in draft_layers},
+        {n: s for n, s in specs.items() if n in draft_layers},
+    ]
+    scheduler_groups = _spec_decode_kv_cache_groups(
+        [specs] if pp == 1 else worker_specs
+    )
+    assert [g.is_eagle_group for g in scheduler_groups] == [
+        bool(draft_layers & set(g.layer_names)) for g in groups
+    ]
+
+
+def test_no_eagle_groups_without_eagle_block_drop():
+    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
+    assert not any(g.is_eagle_group for g in groups)
+
+
+@pytest.mark.parametrize(
+    "make_specs,warns",
+    [
+        (lambda: _hybrid_specs(draft=False), True),
+        (
+            lambda: {
+                "layers.0": new_kv_cache_spec(),
+                "draft.0": new_kv_cache_spec(),
+            },
+            False,
+        ),
+    ],
+    ids=["untagged_hybrid", "untagged_uniform_attention"],
+)
+def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
+    _spec_decode_kv_cache_groups([make_specs()])
+    warned = "could be identified as the draft model's" in caplog_vllm.text
+    assert warned == warns
 
 
 _GQA_SPEC = FullAttentionSpec(

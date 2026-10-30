@@ -14,6 +14,7 @@ import torch
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -38,6 +39,26 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 EEP_NOTIFICATION_CALL_ID = -1
 
 FT_STATUS_CALL_ID = -2
+
+
+class CheckpointState(enum.StrEnum):
+    """Process checkpoint lifecycle of an engine. It serves only while
+    RUNNING, and may go through the cycle any number of times."""
+
+    RUNNING = "running"
+    # Draining, then releasing what a checkpoint must not contain.
+    PREPARING = "preparing"
+    # Safe to capture.
+    PREPARED = "prepared"
+    # Bringing back what preparing released.
+    RESTORING = "restoring"
+    FAILED = "failed"
+
+    @property
+    def is_restored(self) -> bool:
+        """Whether released state is back or coming back, so memory may wake and
+        scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESTORING)
 
 
 class EEPNotificationType(enum.Enum):
@@ -107,6 +128,10 @@ class EngineCoreReadyResponse:
     coord_store_port: int = 0
     coordinator_input_address: str | None = None
     coordinator_output_address: str | None = None
+    # JSON-mode dump of this engine's VllmConfig, for frontends that serve
+    # `/server_info` without holding the config themselves (the Rust frontend).
+    # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
+    vllm_config: dict[str, Any] | None = None
 
 
 class EngineCoreRequest(
@@ -241,6 +266,9 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+
+    # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
+    error: RequestError | None = None
 
     @property
     def finished(self) -> bool:

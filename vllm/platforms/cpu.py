@@ -21,7 +21,12 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import CpuArchEnum, Platform, PlatformEnum
+from .interface import (
+    CpuArchEnum,
+    Platform,
+    PlatformEnum,
+    get_assigned_physical_gpu_ids,
+)
 
 logger = init_logger(__name__)
 
@@ -148,7 +153,13 @@ class CpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if attn_selector_config.use_mla:
+            if kv_cache_dtype not in (None, "auto", "bfloat16", "float16"):
+                raise ValueError(
+                    f"--kv-cache-dtype {kv_cache_dtype} is not supported by "
+                    "MLA attention on CPU."
+                )
             amx_available = (
                 cls.get_cpu_architecture() == CpuArchEnum.X86
                 and torch.cpu._is_amx_tile_supported()
@@ -176,6 +187,13 @@ class CpuPlatform(Platform):
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if not AttentionBackendEnum.CPU_ATTN.get_class().supports_kv_cache_dtype(
+            kv_cache_dtype
+        ):
+            raise ValueError(
+                f"--kv-cache-dtype {kv_cache_dtype} is not supported by the CPU "
+                "attention backend on this host."
+            )
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
@@ -289,10 +307,9 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 256
-        elif not cache_config.user_specified_block_size:
-            cache_config.block_size = 128
-
-        if not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
+        elif (
+            cache_config.user_specified_block_size and cache_config.block_size % 32 != 0
+        ):
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -532,15 +549,24 @@ class CpuPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         model_config = vllm_config.model_config
-        if model_config is None or not model_config.is_hybrid:
+        if model_config is None:
             return
-
-        # reconcile attention and mamba page sizes
         backend_classes = cls._find_non_ssm_backends(vllm_config)
         if not backend_classes:
             return
 
-        pre_block_size = vllm_config.cache_config.block_size
+        # Not in check_and_update_config(), which reruns with every
+        # VllmConfig.__post_init__ and would undo the hybrid alignment below.
+        cache_config = vllm_config.cache_config
+        if not cache_config.user_specified_block_size:
+            cache_config.block_size = cls._preferred_block_size_for_backends(
+                backend_classes, 128, vllm_config
+            )
+        if not model_config.is_hybrid:
+            return
+
+        # reconcile attention and mamba page sizes
+        pre_block_size = cache_config.block_size
         cls._align_hybrid_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 
@@ -780,7 +806,7 @@ class CpuPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        allowed_mem_node_list = get_visible_memory_node()
+        allowed_mem_node_list = get_visible_memory_node(get_assigned_physical_gpu_ids())
         mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
         memory_usage = 0
         for s in mem_status_list:

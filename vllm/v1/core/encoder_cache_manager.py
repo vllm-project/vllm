@@ -86,6 +86,9 @@ class EncoderCacheManager:
         self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
         self.request_cached_ids: dict[str, set[int]] = {}
+        # request_id => mm_hash => number of that request's cached input_ids
+        # with the mm_hash
+        self.request_hash_refs: dict[str, dict[str, int]] = {}
 
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
@@ -100,6 +103,7 @@ class EncoderCacheManager:
         self.cached.clear()
         self.num_embeds_by_hash.clear()
         self.request_cached_ids.clear()
+        self.request_hash_refs.clear()
         self.freeable.clear()
         self.freed.clear()
         self.num_free_slots = self.cache_size
@@ -132,7 +136,7 @@ class EncoderCacheManager:
             self.num_freeable_slots -= num_encoder_embeds
 
         self.cached[mm_hash].add(request.request_id)
-        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
+        self._add_cached_input_id(request.request_id, input_id, mm_hash)
         return True
 
     def get_cached_num_encoder_embeds(
@@ -235,9 +239,19 @@ class EncoderCacheManager:
         assert self.num_freeable_slots >= num_encoder_embeds
 
         self.cached[mm_hash].add(request_id)
-        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
+        self._add_cached_input_id(request_id, input_id, mm_hash)
         self.num_free_slots -= num_encoder_embeds
         self.num_freeable_slots -= num_encoder_embeds
+
+    def _add_cached_input_id(
+        self, request_id: str, input_id: int, mm_hash: str
+    ) -> None:
+        cached_ids = self.request_cached_ids.setdefault(request_id, set())
+        if input_id in cached_ids:
+            return
+        cached_ids.add(input_id)
+        hash_refs = self.request_hash_refs.setdefault(request_id, {})
+        hash_refs[mm_hash] = hash_refs.get(mm_hash, 0) + 1
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request."""
@@ -257,10 +271,16 @@ class EncoderCacheManager:
         mm_hash = request.mm_features[input_id].identifier
         # Always clean up request_cached_ids, even if the mm_hash was
         # already evicted from cache (e.g. by can_allocate).
-        if req_id in self.request_cached_ids:
-            self.request_cached_ids[req_id].discard(input_id)
-            if not self.request_cached_ids[req_id]:
+        cached_ids = self.request_cached_ids.get(req_id)
+        if cached_ids is not None and input_id in cached_ids:
+            cached_ids.remove(input_id)
+            hash_refs = self.request_hash_refs[req_id]
+            hash_refs[mm_hash] -= 1
+            if not hash_refs[mm_hash]:
+                del hash_refs[mm_hash]
+            if not cached_ids:
                 del self.request_cached_ids[req_id]
+                del self.request_hash_refs[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -270,10 +290,7 @@ class EncoderCacheManager:
         # occurrence is freed: dropping it at the first makes the entry
         # evictable while the request still needs it, and the encoder then
         # recomputes an item it already has.
-        if any(
-            request.mm_features[other_id].identifier == mm_hash
-            for other_id in self.request_cached_ids.get(req_id, ())
-        ):
+        if mm_hash in self.request_hash_refs.get(req_id, ()):
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:

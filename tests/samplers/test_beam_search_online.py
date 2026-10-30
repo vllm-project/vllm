@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+import itertools
 from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
+from vllm import (
+    CompletionOutput,
+    PromptType,
+    RequestOutput,
+    SamplingParams,
+    TokensPrompt,
+)
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
@@ -17,9 +26,10 @@ from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchSequence,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
@@ -48,8 +58,10 @@ class _Renderer:
 
 
 class _VllmConfig:
+    use_v2_model_runner = True
     watermark_config = object()
     speculative_config = None
+    model_config = SimpleNamespace(is_diffusion=False)
 
     def _check_supports_watermarking(self, params: BeamSearchParams) -> bool:
         return VllmConfig._check_supports_watermarking(cast(VllmConfig, self), params)
@@ -57,6 +69,7 @@ class _VllmConfig:
 
 class _InputProcessor:
     vllm_config = _VllmConfig()
+    generation_config_fields: dict[str, Any] = {}
 
     def resolve_watermarking(self, params):
         return self.vllm_config._check_supports_watermarking(params)
@@ -118,7 +131,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
-        eos_token_id: int | None,
+        eos_token_ids: set[int],
         ignore_eos: bool,
         beam_width: int,
         sort_beams_key: Callable[..., Any],
@@ -128,6 +141,278 @@ class _OfflineServing(BeamSearchOfflineMixin):
     ) -> bool:
         assert base_sampling_params.watermarking is False
         return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("config_eos", [None, 11, [0, 11]])
+@pytest.mark.parametrize("ignore_eos", [False, True])
+async def test_beam_search_respects_generation_config_eos(
+    monkeypatch, offline: bool, config_eos: int | list[int] | None, ignore_eos: bool
+) -> None:
+    """Model-specific end-of-turn tokens must finish beams like tokenizer EOS."""
+    monkeypatch.setattr(
+        _InputProcessor, "generation_config_fields", {"eos_token_id": config_eos}
+    )
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=1,
+        max_tokens=3,
+        ignore_eos=ignore_eos,
+        include_stop_str_in_output=True,
+        watermarking=False,
+    )
+    result = await anext(
+        _EngineClient().generate(prompt, SamplingParams(watermarking=False))
+    )
+    result.outputs[0].logprobs = [{11: Logprob(-0.1)}]
+    should_stop = config_eos is not None and not ignore_eos
+    expected_tokens = [11] if should_stop else [11, 11, 11]
+    engine_params: list[SamplingParams] = []
+
+    if offline:
+        offline_serving = _OfflineServing()
+        monkeypatch.setattr(
+            _OfflineServing,
+            "_beam_search_step",
+            BeamSearchOfflineMixin._beam_search_step,
+        )
+
+        def render_and_run_requests(*, params, **kwargs):
+            engine_params.extend(params)
+            return [result]
+
+        monkeypatch.setattr(
+            offline_serving, "_render_and_run_requests", render_and_run_requests
+        )
+        beam = offline_serving.beam_search(cast(list, [prompt]), params)[0].sequences[0]
+        assert beam.tokens == [1, *expected_tokens]
+    else:
+
+        async def generate(engine_prompt, sampling_params, *args, **kwargs):
+            engine_params.append(sampling_params)
+            yield result
+
+        online_serving = _AsyncServing()
+        monkeypatch.setattr(online_serving.engine_client, "generate", generate)
+        output = (
+            await anext(online_serving.beam_search(prompt, "request", params))
+        ).outputs[0]
+        assert output.token_ids == expected_tokens
+        assert output.finish_reason == ("stop" if should_stop else "length")
+        assert output.stop_reason == (11 if should_stop else None)
+
+    # The engine validates stop_token_ids against the vocab before it applies
+    # the generation config, so the config EOS ids must not be copied into them.
+    assert engine_params
+    assert all(not p.stop_token_ids for p in engine_params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+async def test_beam_search_score_ignores_prompt_length(
+    monkeypatch, offline: bool
+) -> None:
+    """Beams are ranked by generated length only, as in Transformers."""
+    # Long enough that counting the prompt would let the EOS beam win.
+    prompt_len = 50
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1] * prompt_len}
+    params = BeamSearchParams(
+        beam_width=1, max_tokens=2, length_penalty=1.0, watermarking=False
+    )
+    eos = _Tokenizer.eos_token_id
+    # Mean logprobs: [eos] -1.0, [11, eos] -0.85, [11, 11] -0.8.
+    results = []
+    for logprobs in (
+        {eos: Logprob(-1.0), 11: Logprob(-1.5)},
+        {11: Logprob(-0.1), eos: Logprob(-0.2)},
+    ):
+        result = await anext(
+            _EngineClient().generate(prompt, SamplingParams(watermarking=False))
+        )
+        result.outputs[0].logprobs = [logprobs]
+        results.append(result)
+
+    def step_result(engine_prompt) -> RequestOutput:
+        return results[len(engine_prompt["prompt_token_ids"]) - prompt_len]
+
+    if offline:
+        offline_serving = _OfflineServing()
+        monkeypatch.setattr(
+            _OfflineServing,
+            "_beam_search_step",
+            BeamSearchOfflineMixin._beam_search_step,
+        )
+
+        def render_and_run_requests(*, prompts, **kwargs):
+            return [step_result(p) for p in prompts]
+
+        monkeypatch.setattr(
+            offline_serving, "_render_and_run_requests", render_and_run_requests
+        )
+        beam = offline_serving.beam_search(cast(list, [prompt]), params)[0].sequences[0]
+        assert beam.tokens[prompt_len:] == [11, 11]
+    else:
+
+        async def generate(engine_prompt, *args, **kwargs):
+            yield step_result(engine_prompt)
+
+        online_serving = _AsyncServing()
+        monkeypatch.setattr(online_serving.engine_client, "generate", generate)
+        output = (
+            await anext(online_serving.beam_search(prompt, "request", params))
+        ).outputs[0]
+        assert output.token_ids == [11, 11]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priority", [None, -9, 12])
+async def test_beam_search_preserves_priority_for_every_step(monkeypatch, priority):
+    """All beam expansion requests retain the caller's scheduling priority."""
+    priorities = []
+    original_generate = _EngineClient().generate
+
+    async def generate(prompt, *args, priority=0, **kwargs):
+        priorities.append(priority)
+        async for output in original_generate(prompt, *args, **kwargs):
+            yield output
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=2, max_tokens=2, ignore_eos=True, watermarking=False
+    )
+    kwargs = {} if priority is None else {"priority": priority}
+    outputs = [
+        output
+        async for output in serving.beam_search(prompt, "request", params, **kwargs)
+    ]
+
+    assert len(outputs) == 1
+    assert priorities == [priority or 0] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency_limit", [None, 1])
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"priority": None},
+        {"priority": -7},
+        {"priority": [-9, 12]},
+        {"priority": (0, -5)},
+    ],
+)
+async def test_offline_beam_search_preserves_prompt_priorities(
+    monkeypatch, concurrency_limit, structured, kwargs
+):
+    """Expanded beams retain prompt priority through real request submission."""
+    serving = _OfflineServing()
+    monkeypatch.setattr(serving, "request_counter", itertools.count(), raising=False)
+    submitted = []
+    pending = []
+    template = await anext(
+        _EngineClient().generate(
+            {"type": "token", "prompt_token_ids": [1]},
+            SamplingParams(watermarking=False),
+        )
+    )
+
+    def add_request(request_id, prompt, params, *, priority=0, **unused):
+        submitted.append((prompt["prompt_token_ids"].copy(), priority))
+        output = copy.deepcopy(template)
+        output.request_id = request_id
+        output.prompt_token_ids = prompt["prompt_token_ids"]
+        if prompt["prompt_token_ids"][0] == 1 and len(prompt["prompt_token_ids"]) > 1:
+            output.outputs[0].logprobs = [{0: Logprob(-0.1)}]
+        pending.append(output)
+        return request_id
+
+    def step():
+        outputs = pending.copy()
+        pending.clear()
+        return outputs
+
+    engine = SimpleNamespace(
+        input_processor=_InputProcessor(),
+        add_request=add_request,
+        has_unfinished_requests=lambda: bool(pending),
+        step=step,
+    )
+    monkeypatch.setattr(serving, "llm_engine", engine)
+    monkeypatch.setattr(
+        _OfflineServing, "_beam_search_step", BeamSearchOfflineMixin._beam_search_step
+    )
+    monkeypatch.setattr(serving, "_resolve_mm_lora", lambda prompt, lora: lora)
+    if structured:
+        monkeypatch.setattr(
+            serving,
+            "_init_beam_search_structured_output",
+            lambda params, tokenizer: (
+                MagicMock(),
+                ("regex", ".*"),
+                torch.zeros((1, 1)),
+            ),
+        )
+
+        def build_params(beams, params, *args):
+            return [
+                None
+                if beam.tokens[0] == 1 and len(beam.tokens) > 1
+                else (params, [11, 12])
+                for beam in beams
+            ]
+
+        monkeypatch.setattr(serving, "_build_beam_sampling_params", build_params)
+    prompts = [{"type": "token", "prompt_token_ids": [i]} for i in (1, 2)]
+    outputs = serving.beam_search(
+        cast(list, prompts),
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=3,
+            watermarking=False,
+            structured_outputs=StructuredOutputsParams(regex=".*")
+            if structured
+            else None,
+        ),
+        concurrency_limit=concurrency_limit,
+        **kwargs,
+    )
+
+    priority = kwargs.get("priority")
+    expected = (
+        list(priority) if isinstance(priority, (list, tuple)) else [priority or 0] * 2
+    )
+    assert len(outputs) == 2
+    assert all(len(output.sequences) == 2 for output in outputs)
+    assert submitted
+    assert all(p == expected[tokens[0] - 1] for tokens, p in submitted)
+    assert (
+        any(tokens[0] == 1 and len(tokens) == 2 for tokens, _ in submitted)
+        is not structured
+    )
+    assert any(tokens[0] == 2 and len(tokens) == 3 for tokens, _ in submitted)
+    assert not any(tokens[0] == 1 and len(tokens) == 3 for tokens, _ in submitted)
+
+
+def test_offline_beam_search_rejects_mismatched_priorities():
+    serving = _OfflineServing()
+    with pytest.raises(VLLMValidationError, match="lengths of prompts"):
+        serving.beam_search(
+            [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}],
+            BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False),
+            priority=[-9],
+        )
 
 
 @pytest.mark.asyncio
@@ -322,3 +607,89 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     assert beam_params.watermarking is False
     assert beam_params.allowed_token_ids == [0]
     assert base_params.allowed_token_ids is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
+    base = SamplingParams(watermarking=False)
+    template = [r async for r in _EngineClient().generate(prompt, base)][0]
+    template.outputs[0].logprobs[0] = dict(
+        reversed(list(template.outputs[0].logprobs[0].items()))
+    )
+    calls = []
+    if exhausted:
+        for logprob in template.outputs[0].logprobs[0].values():
+            logprob.logprob = float("-inf")
+
+    def score(params):
+        assert params.logprob_token_ids == [13, 14]
+        assert params.logprobs is None and params.allowed_token_ids is None
+        calls.append(params)
+        return template
+
+    class Client(_EngineClient):
+        async def generate(self, prompt, params, *args, **kwargs):
+            yield score(params)
+
+    class Offline(_OfflineServing):
+        _beam_search_step = BeamSearchOfflineMixin._beam_search_step
+
+        def _render_and_run_requests(self, prompts, params, output_type, **kwargs):
+            return [score(p) for p in params]
+
+    params = BeamSearchParams(beam_width=2, max_tokens=2, allowed_token_ids=[13, 14])
+    ids: list[Sequence[int]]
+    scores: list[float | None]
+    if offline:
+        result = (
+            Offline().beam_search([cast(TokensPrompt, prompt)], params)[0].sequences
+        )
+        ids = [b.tokens[1:] for b in result]
+        scores = [b.cum_logprob for b in result]
+        step_scores = [step for b in result for step in b.logprobs]
+    else:
+        serving = _AsyncServing()
+        serving.engine_client = Client()
+        online_result = [r async for r in serving.beam_search(prompt, "test", params)][
+            0
+        ]
+        ids = [b.token_ids for b in online_result.outputs]
+        scores = [b.cumulative_logprob for b in online_result.outputs]
+        step_scores = [
+            step for b in online_result.outputs for step in (b.logprobs or [])
+        ]
+    if exhausted:
+        assert len(calls) == 1
+        assert ids == scores == []
+        return
+    assert len(calls) == 3
+    assert ids[0] == [13, 13] and all(set(x) <= {13, 14} for x in ids)
+    assert scores == [-6.0, -7.0]
+    assert all(list(step) == [13, 14] for step in step_scores)
+    assert all(score.rank is None for step in step_scores for score in step.values())
+
+
+@pytest.mark.parametrize(
+    "case", ["empty", "grammar", "spec", "diffusion", "v1", "size", "id"]
+)
+def test_beam_allowlist_rejects_unsupported_requests(case):
+    config = SimpleNamespace(
+        use_v2_model_runner=case != "v1",
+        speculative_config=object() if case == "spec" else None,
+        model_config=SimpleNamespace(
+            is_diffusion=case == "diffusion",
+            max_logprobs=20,
+            get_vocab_size=lambda: 256,
+        ),
+    )
+    ids = {"empty": [], "size": list(range(129)), "id": [256]}.get(case, [13])
+    params = BeamSearchParams(2, 1, allowed_token_ids=ids)
+    if case == "grammar":
+        params.structured_outputs = StructuredOutputsParams(regex="a")
+    sampling = SamplingParams(logprobs=4)
+    with pytest.raises((ValueError, VLLMValidationError)):
+        params.configure_logprobs(sampling, config)
+        sampling._validate_logprobs(config.model_config)
