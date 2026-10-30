@@ -657,6 +657,25 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     """Rows split over three shm files mapped back to back: each worker sees
     the other's writes in every file, and the creator removes every file."""
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    map_segments = SharedOffloadRegion._map_segments
+
+    def check_reservation(region):
+        base = ctypes.addressof(ctypes.c_char.from_buffer(region.mmap_obj))
+        in_reservation = False
+        with open("/proc/self/smaps") as smaps:
+            for line in smaps:
+                fields = line.split()
+                if "-" in fields[0]:
+                    start, end = (int(value, 16) for value in fields[0].split("-"))
+                    in_reservation = start <= base < end
+                elif in_reservation and fields[0] == "VmFlags:":
+                    assert "ac" not in fields[1:]
+                    break
+            else:
+                pytest.fail("Reservation mapping was absent from smaps")
+        map_segments(region)
+
+    monkeypatch.setattr(SharedOffloadRegion, "_map_segments", check_reservation)
     regions = [
         SharedOffloadRegion(
             engine_id=iid,

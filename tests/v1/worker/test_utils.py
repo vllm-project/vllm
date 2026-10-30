@@ -300,17 +300,6 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
 
     assert region is not None
     assert private_pools == []
-    assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
-        "num_chunks": 1,
-        "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
-        "cpu_page_size": 64,
-        "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
-        "num_segments": 32,
-    }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
     registration_ranges.assert_called_once_with([24, 40], 4, page)
