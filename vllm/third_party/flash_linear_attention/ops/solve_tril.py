@@ -235,7 +235,12 @@ def merge_16x16_to_64x64_inverse_kernel(
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    PARALLEL_DIAGONALS: tl.constexpr = False,
+    FUSE_ZERO_OUTPUT: tl.constexpr = False,
+    N: tl.constexpr = 0,
 ):
+    output_base = Ai
+    capacity = T
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -287,26 +292,49 @@ def merge_16x16_to_64x64_inverse_kernel(
     b_Ai_33 = -tl.where(m_A, b_Ai_33, 0)
     b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
 
-    for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
-        b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
-        b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
-        b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
-        b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
-    for i in range(32 + 2, min(48, T - i_t * BT)):
-        b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
-        b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
-        b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
-    for i in range(48 + 2, min(64, T - i_t * BT)):
-        b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
-        b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
-        b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
-    b_Ai_11 += m_I
-    b_Ai_22 += m_I
-    b_Ai_33 += m_I
-    b_Ai_44 += m_I
+    if PARALLEL_DIAGONALS:
+        pairs_02 = tl.join(b_Ai_11, b_Ai_33)
+        pairs_13 = tl.join(b_Ai_22, b_Ai_44)
+        pairs = tl.join(pairs_02, pairs_13)
+        diagonals = tl.permute(tl.reshape(pairs, (16, 16, 4)), (2, 0, 1))
+        block = tl.arange(0, 4)
+        for i in range(2, min(16, T - i_t * BT)):
+            valid = block * 16 + i < T - i_t * BT
+            row = (i_t * BT + block * 16 + i).to(tl.int64)
+            values = -tl.load(
+                A + row[:, None] * H * BT + block[:, None] * 16 + o_i[None, :],
+                mask=valid[:, None],
+                other=0,
+            ).to(tl.float32)
+            values += tl.sum(values[:, :, None] * diagonals, 1)
+            update = (o_i[None, :] == i) & valid[:, None]
+            diagonals = tl.where(update[:, :, None], values[:, None, :], diagonals)
+        diagonals += m_I[None, :, :]
+        pairs = tl.reshape(tl.permute(diagonals, (1, 2, 0)), (16, 16, 2, 2))
+        pairs_02, pairs_13 = tl.split(pairs)
+        b_Ai_11, b_Ai_33 = tl.split(pairs_02)
+        b_Ai_22, b_Ai_44 = tl.split(pairs_13)
+    else:
+        for i in range(2, min(16, T - i_t * BT)):
+            b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+            b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
+            b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
+        for i in range(16 + 2, min(32, T - i_t * BT)):
+            b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+            b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
+            b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
+        for i in range(32 + 2, min(48, T - i_t * BT)):
+            b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
+            b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
+            b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
+        for i in range(48 + 2, min(64, T - i_t * BT)):
+            b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
+            b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
+            b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
+        b_Ai_11 += m_I
+        b_Ai_22 += m_I
+        b_Ai_33 += m_I
+        b_Ai_44 += m_I
 
     if not USE_TMA:
         p_A_21 = A + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
@@ -458,6 +486,24 @@ def merge_16x16_to_64x64_inverse_kernel(
             [i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne")
         )
 
+    if FUSE_ZERO_OUTPUT:
+        tl.static_assert(IS_VARLEN and not USE_TMA and BT == 64)
+        for row in tl.static_range(3):
+            for col in tl.static_range(row + 1, 4):
+                rows = o_t + row * 16
+                ptr = Ai + rows[:, None] * H * BT + col * 16 + o_i[None, :]
+                tl.store(ptr, 0, mask=rows[:, None] < T)
+        if tl.program_id(0) == 0:
+            last = tl.load(cu_seqlens + N).to(tl.int64)
+            for start in range(last, capacity, 16):
+                rows = start + o_i
+                cols = tl.arange(0, BT)
+                tl.store(
+                    output_base + (rows[:, None] * H + i_h) * BT + cols[None, :],
+                    0,
+                    mask=rows[:, None] < capacity,
+                )
+
 
 @input_guard
 def solve_tril(
@@ -469,6 +515,10 @@ def solve_tril(
     """
     Compute the inverse of the matrix I + A
     A should be strictly lower triangular, i.e., A.triu() == 0.
+
+    ``FLA_TRIL_PARALLEL_DIAGONALS=1`` opts into parallel diagonal solves
+    and fused zero stores for non-TMA varlen FP32 inputs with 32 heads,
+    block size 64, BF16 output, and IEEE dot precision.
 
     Args:
         A (torch.Tensor):
@@ -492,7 +542,20 @@ def solve_tril(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
-    Ai = torch.zeros_like(A, dtype=output_dtype)
+    # Opt in only for the BF16, non-TMA varlen configuration measured so far.
+    parallel = (
+        os.environ.get("FLA_TRIL_PARALLEL_DIAGONALS", "0") == "1"
+        and B == 1
+        and H == 32
+        and BT == 64
+        and A.dtype == torch.float32
+        and output_dtype == torch.bfloat16
+        and cu_seqlens is not None
+        and NT > 0
+        and not is_tma_supported
+        and FLA_TRIL_PRECISION == "ieee"
+    )
+    Ai = (torch.empty_like if parallel else torch.zeros_like)(A, dtype=output_dtype)
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel
     elif BT == 32:
@@ -500,6 +563,13 @@ def solve_tril(
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
 
+    launch_kwargs = {}
+    if parallel:
+        launch_kwargs.update(
+            PARALLEL_DIAGONALS=True,
+            FUSE_ZERO_OUTPUT=True,
+            N=cu_seqlens.numel() - 1,
+        )
     merge_fn[NT, B * H](
         A=A,
         Ai=Ai,
@@ -510,5 +580,6 @@ def solve_tril(
         BT=BT,
         USE_TMA=is_tma_supported,
         DOT_PRECISION=FLA_TRIL_PRECISION,
+        **launch_kwargs,
     )
     return Ai
