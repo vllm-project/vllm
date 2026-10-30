@@ -649,8 +649,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Override point: the ROCm layer preshuffles this weight in place, so
-        # it cannot go through fused_wqa_wkv directly.
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         return qr_kv

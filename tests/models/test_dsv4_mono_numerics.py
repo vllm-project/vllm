@@ -305,7 +305,7 @@ class _ExactMoE:
         self.lut = torch.tensor(self.FP4, device=e.w13_weight.device)
 
     def shared(self, sh) -> None:
-        """The shared expert's weights, after their scales' upcast."""
+        """The shared expert's weights as loaded."""
 
         def deq(lin):
             w, sc = lin.weight.float(), lin.weight_scale_inv.float()
@@ -448,7 +448,10 @@ def _check_layer(rank: int, tp: int, device) -> None:
     from vllm.model_executor.kernels.mhc.torch import mhc_pre_torch
     from vllm.model_executor.layers.mhc import MHCFusedPostPreOp, MHCPreOp
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
+    from vllm.models.deepseek_v4.amd.model import (
+        DeepseekV4MoE,
+        _request_aiter_bpreshuffle,
+    )
     from vllm.models.deepseek_v4.amd.mono.dims import INDEX_TOPK
     from vllm.models.deepseek_v4.amd.mono.layer import scratch_layout
     from vllm.models.deepseek_v4.amd.mono.runner import (
@@ -500,10 +503,10 @@ def _check_layer(rank: int, tp: int, device) -> None:
             cfg.vocab_size,
         )
         exact = _ExactMoE(moe)  # the weights as loaded, before processing
-        process_weights_after_loading(moe, vc.model_config, device)
         exact.shared(moe.shared_experts)
-        moe.shared_experts.prepare_gateup_preshuffle()
-        assert moe.shared_experts._gateup_scale is not None
+        _request_aiter_bpreshuffle(moe)
+        process_weights_after_loading(moe, vc.model_config, device)
+        assert moe.shared_experts.gate_up_proj.aiter_bpreshuffled
         return moe, exact
 
     moes = {layer: random_moe(layer) for layer in (3, 0)}
@@ -596,8 +599,8 @@ def _check_layer(rank: int, tp: int, device) -> None:
             gate_w=moe.gate.weight, bias=moe.gate.e_score_correction_bias,
             w13=e.w13_weight, w13_s=e.w13_weight_scale, w2=e.w2_weight,
             w2_s=e.w2_weight_scale, sgu=sh.gate_up_proj.weight,
-            sgu_s=_mx_scales(sh._gateup_scale), sw2=sh.down_proj.weight,
-            sw2_s=_mx_scales(sh.down_proj.weight_scale_inv),
+            sgu_s=_mx_scales(sh.gate_up_proj.weight_scale_inv),
+            sw2=sh.down_proj.weight, sw2_s=_mx_scales(sh.down_proj.weight_scale_inv),
         )  # fmt: skip
         mw.attn.check(runner.d)
         mw.check(runner.d)
