@@ -482,7 +482,7 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
                 **extra_weight_attrs,
             )
             layer.quant_method = legacy_method
-            logger.warning_once("Falling back to legacy AutoAWQ kernels: %s", exc)
+            logger.warning_once("Falling back to legacy AutoAWQ kernels: %s", str(exc))
             return
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
