@@ -28,6 +28,9 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
+from vllm.model_executor.models.qwen3_next_mtp import (
+    should_torch_compile_mtp_drafter,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
@@ -59,7 +62,8 @@ logger = init_logger(__name__)
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen3_5MultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper
@@ -209,7 +213,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
@@ -283,10 +288,15 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
+        spec_step_idx: int = 0,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
@@ -296,6 +306,14 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # One lm_head is shared by all MTP modules, as in compute_logits.
+        return super().get_top_tokens(hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return not name.startswith("mtp.") and not any(
