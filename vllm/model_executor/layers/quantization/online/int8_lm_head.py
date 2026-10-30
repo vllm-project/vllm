@@ -6,8 +6,8 @@ Decode reads the whole lm_head every step, so on bandwidth-bound RDNA GPUs an
 fp16/bf16 head is one of the largest per-token costs even when the checkpoint
 quantizes every other linear layer. ``Int8LMHeadMethod`` quantizes the loaded
 weight to symmetric int8 with one scale per output channel and runs it on the
-RDNA W8A16 op (HIP skinny GEMM for decode, Triton for prefill). It halves the
-head's traffic, versus ~3.4x for int4, but flips far fewer top-1 tokens.
+RDNA W8A16 op (HIP skinny GEMM for decode, Triton for prefill). It cuts the
+head's traffic 2x (int4: ~3.4x) but flips ~7x fewer top-1 tokens.
 """
 
 import torch

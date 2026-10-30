@@ -16,7 +16,10 @@ import pytest
 import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.kernels.linear.mixed_precision import rdna_hybrid_w4a16
+from vllm.model_executor.kernels.linear.mixed_precision import (
+    rdna_hybrid_w4a16,
+    rdna_w8a16,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online import rdna_lm_head
 from vllm.model_executor.layers.quantization.online.int4_lm_head import (
@@ -228,7 +231,8 @@ def test_quantized_head_does_not_reuse_loaded_weight(scheme, tie, monkeypatch):
     monkeypatch.setattr(rdna_lm_head, "_on_gfx1x", lambda: True)
     # Without the gfx1151 row padding the quantized weight is contiguous, the
     # case where reusing the loaded storage would overwrite it.
-    monkeypatch.setattr(rdna_hybrid_w4a16, "_on_gfx1151", lambda: False)
+    for module in (rdna_hybrid_w4a16, rdna_w8a16):
+        monkeypatch.setattr(module, "_on_gfx1151", lambda: False)
     head, embed = _loaded_head(scheme, torch.bfloat16, tie=tie, device="cpu")
     loaded = head.weight
     embed_weight = embed.weight.detach().clone()

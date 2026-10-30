@@ -9,8 +9,6 @@ not fit in LDS) runs on a Triton kernel that reads the same int8 buffer, so no
 fp16/bf16 copy of the weight is kept or materialised per call.
 """
 
-from contextlib import nullcontext
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -20,6 +18,7 @@ from .rdna_hybrid_w4a16 import (
     LDS_CAPACITY_ELEMENTS,
     MAX_SKINNY_BATCH_SIZE,
     _on_gfx1151,
+    _profile_scope,
     _weight_pad_bytes,
 )
 
@@ -217,16 +216,16 @@ def _rdna_w8a16_apply_impl(
 ) -> torch.Tensor:
     M, K = x_2d.shape
     N = w_q.shape[0]
-    # wvSplitK_int8 stages every activation row in LDS.
-    use_skinny = M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS
-    name = "wvsplitk_int8" if use_skinny else "triton_w8a16"
-    # record_function is not traceable by torch.compile.
-    ctx = (
-        nullcontext()
-        if torch.compiler.is_compiling()
-        else torch.profiler.record_function(f"{name} {M}x{N}x{K}")
+    # wvSplitK_int8 stages every activation row in LDS and reads the weight
+    # in 16-byte chunks.
+    use_skinny = (
+        M <= MAX_SKINNY_BATCH_SIZE
+        and K * M <= LDS_CAPACITY_ELEMENTS
+        and K % 16 == 0
+        and w_q.stride(0) % 16 == 0
     )
-    with ctx:
+    name = "wvsplitk_int8" if use_skinny else "triton_w8a16"
+    with _profile_scope(f"{name} {M}x{N}x{K}"):
         if use_skinny:
             import vllm._custom_ops as ops
 

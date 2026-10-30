@@ -5,8 +5,6 @@
 Run `pytest tests/kernels/quantization/test_rdna_w8a16.py`.
 """
 
-import importlib
-
 import pytest
 import torch
 
@@ -18,11 +16,11 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
+from vllm.model_executor.kernels.linear.mixed_precision import (  # noqa: E402
+    rdna_w8a16 as w8a16,
+)
 from vllm.platforms.rocm import on_gfx1x  # noqa: E402
 
-w8a16 = importlib.import_module(
-    "vllm.model_executor.kernels.linear.mixed_precision.rdna_w8a16"
-)
 MAX_SKINNY_BATCH_SIZE = w8a16.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = w8a16.LDS_CAPACITY_ELEMENTS
 
@@ -203,7 +201,7 @@ def test_empty_int8_weight_layout(K, M):
     q, scale = _quantize(512, K, torch.bfloat16)
     x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
 
-    laid_out = w8a16.empty_int8_weight(*q.shape, device=q.device).copy_(q)
+    laid_out = w8a16.empty_int8_weight(q.shape[0], q.shape[1], q.device).copy_(q)
 
     assert laid_out.shape == q.shape and torch.equal(laid_out, q)
     expect_pad = on_gfx1151() and K % 1024 == 0
@@ -223,8 +221,9 @@ def test_empty_int8_weight_layout(K, M):
         (MAX_SKINNY_BATCH_SIZE + 1, 1024, "triton"),
         (4, 8192, "hip"),
         (4, 8192 + 16, "triton"),
+        (1, 2056, "triton"),
     ],
-    ids=["max_batch", "batch_too_large", "lds_limit", "above_lds"],
+    ids=["max_batch", "batch_too_large", "lds_limit", "above_lds", "ragged_k"],
 )
 def test_rdna_w8a16_dispatch_boundaries(M, K, expected_path, monkeypatch):
     import vllm._custom_ops as ops
