@@ -975,13 +975,8 @@ inline void scatter_add_local_expert_outputs(
     int64_t K) {
   at::parallel_for(0, M, 0, [&](int64_t begin, int64_t end) {
     for (int64_t m = begin; m < end; ++m) {
-      scalar_t* __restrict__ out_row = output + m * K;
-      for (int64_t s = token_starts[m]; s < token_starts[m + 1]; ++s) {
-        const scalar_t* __restrict__ selected_row = selected_output + s * K;
-        for (int64_t h = 0; h < K; ++h) {
-          out_row[h] += selected_row[h];
-        }
-      }
+      const int64_t start = token_starts[m];
+      sum_stub(output + m * K, selected_output + start * K, token_starts[m + 1] - start, K);
     }
   });
 }

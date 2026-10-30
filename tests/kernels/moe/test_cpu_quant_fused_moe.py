@@ -1331,6 +1331,88 @@ def test_mxfp4_cpu_fused_moe_expert_parallel_apply(
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize(
+    "quant_method",
+    [ops.CPUQuantMethod.FP8_W8A16, ops.CPUQuantMethod.MXFP4],
+    ids=["fp8", "mxfp4"],
+)
+def test_quantized_cpu_fused_moe_ep_accumulates_local_routes_in_fp32(
+    quant_method, dtype
+):
+    """Three local routes must survive cancellation; all-remote routes stay zero."""
+    E, N, K = 8, 128, 128
+    hidden = torch.zeros((1, K), dtype=dtype)
+    if quant_method == ops.CPUQuantMethod.FP8_W8A16:
+        w1 = _prepack_experts(torch.zeros((E, 2 * N, K), dtype=torch.float8_e4m3fn))
+        w2 = _prepack_experts(torch.zeros((E, K, N), dtype=torch.float8_e4m3fn))
+        w1_scale = torch.ones((E, 2 * N // BLOCK_SIZE[0], K // BLOCK_SIZE[1]))
+        w2_scale = torch.ones((E, K // BLOCK_SIZE[0], N // BLOCK_SIZE[1]))
+        block_size = BLOCK_SIZE
+    else:
+        w1, w1_scale = _prepack_mxfp4_experts(
+            torch.zeros((E, 2 * N, K // 2), dtype=torch.uint8),
+            torch.full((E, 2 * N, K // 32), 127, dtype=torch.uint8),
+        )
+        w2, w2_scale = _prepack_mxfp4_experts(
+            torch.zeros((E, K, N // 2), dtype=torch.uint8),
+            torch.full((E, K, N // 32), 127, dtype=torch.uint8),
+        )
+        block_size = None
+    w1_bias = torch.zeros((E, 2 * N), dtype=torch.float32)
+    w2_bias = torch.zeros((E, K), dtype=torch.float32)
+    large_bias = 1024 if dtype == torch.bfloat16 else 8192
+    w2_bias[0], w2_bias[1], w2_bias[2] = large_bias, 4, -large_bias // 2
+    weights = torch.tensor([[0.25, 0.25, 0.5]], dtype=torch.float32)
+    ids = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+    reference = torch.empty_like(hidden)
+    ops.fused_experts_cpu(
+        reference,
+        hidden,
+        w1,
+        w2,
+        weights,
+        ids,
+        quant_method,
+        w1_scale,
+        w2_scale,
+        None,
+        None,
+        block_size,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+    )
+    torch.testing.assert_close(reference, torch.ones_like(hidden), atol=0, rtol=0)
+
+    summed = torch.zeros_like(hidden)
+    for rank in range(2):
+        local_count, expert_map, _ = determine_expert_map(2, rank, E)
+        assert expert_map is not None
+        local = _get_local_expert_slice(expert_map, local_count)
+        output = torch.full_like(hidden, float("nan"))
+        ops.fused_experts_cpu_local_skip(
+            output,
+            hidden,
+            w1[local].contiguous(),
+            w2[local].contiguous(),
+            weights,
+            ids,
+            expert_map,
+            quant_method,
+            w1_scale[local].contiguous(),
+            w2_scale[local].contiguous(),
+            None,
+            None,
+            block_size,
+            w1_bias=w1_bias[local].contiguous(),
+            w2_bias=w2_bias[local].contiguous(),
+        )
+        expected = reference if rank == 0 else torch.zeros_like(hidden)
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        summed += output
+    torch.testing.assert_close(summed, reference, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("M", [1, 32])
 @pytest.mark.parametrize("N,K,E,topk", [(128, 128, 4, 2), (64, 64, 4, 2)])
 @pytest.mark.parametrize("seed", [0])
