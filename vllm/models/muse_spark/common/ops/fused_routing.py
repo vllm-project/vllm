@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel for MuseSpark1x's top-k router, one program per token."""
+"""Fused CUDA and Triton kernels for MuseSpark1x's top-k router."""
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -68,8 +69,12 @@ def _routing_kernel(
     NORMALIZATION_MODE: tl.constexpr,
     HAS_MULTIPLIER: tl.constexpr,
     HAS_EPS: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ) -> None:
     """One program per token; constexpr ``TOPK`` keeps the selection in registers."""
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+
     token_id = tl.program_id(0)
     if token_id >= num_tokens:
         return
@@ -182,6 +187,25 @@ def fused_musespark1x_routing(
     weights_view = topk_weights[:num_tokens, :topk]
     ids_view = topk_ids[:num_tokens, :topk]
 
+    if (
+        current_platform.is_cuda()
+        and num_experts == 256
+        and topk == 8
+        and normalization_mode == 0
+    ):
+        ops.muse_spark_routing(
+            weights_view,
+            ids_view,
+            gating_output,
+            bias,
+            router_output_multiplier if router_output_multiplier is not None else 1.0,
+            route_scale,
+            router_score_division_eps if router_score_division_eps is not None else 0.0,
+            is_padding,
+        )
+        return weights_view, ids_view
+
+    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _routing_kernel[(num_tokens,)](
         gating_output,
         bias if bias.dtype == torch.float32 else bias.float(),
@@ -206,7 +230,9 @@ def fused_musespark1x_routing(
         NORMALIZATION_MODE=normalization_mode,
         HAS_MULTIPLIER=router_output_multiplier is not None,
         HAS_EPS=router_score_division_eps is not None,
+        USE_PDL=enable_pdl,
         # Keep Muse's repeated 256-expert selections within one warp.
         num_warps=1 if num_experts == 256 or current_platform.is_rocm() else 4,
+        **({"launch_pdl": True} if enable_pdl else {}),
     )
     return weights_view, ids_view

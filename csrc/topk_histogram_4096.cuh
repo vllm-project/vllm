@@ -69,7 +69,11 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 // converts the float32 score to a 32-bit ordered unsigned integer — the full
 // precision key for radix sorting
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
-  uint32_t bits = __float_as_uint(x);
+  // Read the bits through an opaque move: otherwise nvcc lowers
+  // `bits | 0x80000000u` to the FP op -|x|, which canonicalizes NaN to
+  // 0x7FFFFFFF (the key of -0.0) while the FP16 coarse bin puts NaN on top.
+  uint32_t bits;
+  asm("mov.b32 %0, %1;" : "=r"(bits) : "f"(x));
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
@@ -334,12 +338,26 @@ __device__ __noinline__ void exact_topk_rescan_cold(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem);
 
-enum class OverflowRecovery { kDisabled, kFp32Rescan };
+// kRegisterValues refines from the values already held in registers and
+// falls back to the FP32 rescan when the coarse bin cannot bound them.
+enum class OverflowRecovery { kFp32Rescan, kRegisterValues };
+
+// Defined in topk_histogram_4096_overflow.cuh, like exact_topk_rescan_cold.
+template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
+__device__ __forceinline__ bool exact_topk_refine_registers(
+    const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
+    uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem);
+
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
+          uint32_t StartRound, uint32_t FinalCandidateCapacity>
+__device__ void exact_topk_rescan(const float* __restrict__ scores,
+                                  int32_t* __restrict__ output, uint32_t length,
+                                  void* _smem, uint32_t initial_prefix,
+                                  uint32_t initial_remaining);
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          bool UsePredicatedLoads = false,
-          OverflowRecovery Recovery = OverflowRecovery::kDisabled>
+          bool UsePredicatedLoads = false, OverflowRecovery Recovery>
 __device__ void histogram_4096_topk(const float* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
@@ -464,6 +482,16 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
       return;
     }
   }
+  if constexpr (Recovery == OverflowRecovery::kRegisterValues) {
+    if (need_tie && num_equal > TopK) {
+      if (!exact_topk_refine_registers<TopK, HIST_BITS, VECS_PER_THREAD>(
+              vecs, output, length, thr_bin, num_above, _smem)) {
+        exact_topk_rescan<TopK, kBlockSize, UsePredicatedLoads ? 1 : 4, 0, 0>(
+            scores, output, length, _smem, 0, TopK);
+      }
+      return;
+    }
+  }
 
   done = false;
 #pragma unroll
@@ -567,12 +595,13 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
 }
 
 template <uint32_t TopK, uint32_t HIST_BITS,
-          uint32_t VECS_PER_THREAD = kHist4096VecsPerThread>
+          uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
+          OverflowRecovery Recovery>
 __device__ __noinline__ void histogram_4096_topk_predicated(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* _smem) {
-  histogram_4096_topk<TopK, HIST_BITS, VECS_PER_THREAD, true>(scores, output,
-                                                              length, _smem);
+  histogram_4096_topk<TopK, HIST_BITS, VECS_PER_THREAD, true, Recovery>(
+      scores, output, length, _smem);
 }
 
 }  // namespace topk_histogram_4096

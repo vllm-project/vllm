@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    MLACommonPrefillMetadata,
     QueryLenSupport,
     accumulate_mla_context_chunk,
     init_mla_context_partial,
@@ -485,13 +486,40 @@ def _aiter_mla_small_head_mode() -> str:
     return mode
 
 
+def _adaptive_dcp_verify_unsupported_reason(vllm_config: VllmConfig) -> str | None:
+    parallel_config = vllm_config.parallel_config
+    dcp_world_size = parallel_config.decode_context_parallel_size
+    if dcp_world_size == 1:
+        return None
+    cp_interleave = parallel_config.cp_kv_cache_interleave_size
+    if cp_interleave != 1:
+        return (
+            "adaptive verification with decode context parallelism requires "
+            f"cp_kv_cache_interleave_size 1, got {cp_interleave}"
+        )
+    asm_selected = (
+        _asm_dcp_verify_configured(dcp_world_size, cp_interleave, True)
+        and max_decode_query_len(vllm_config) >= _MIN_CPRR_QLEN
+    )
+    if not (
+        asm_selected
+        or _segmented_dcp_verify_supported(dcp_world_size, cp_interleave)
+        or _triton_dcp_verify_supported(dcp_world_size, cp_interleave)
+    ):
+        return (
+            "adaptive verification with decode context parallelism needs the "
+            "round-robin asm decode, segmented MLA or the gfx942 Triton verify"
+        )
+    return None
+
+
 def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
     speculative_config = vllm_config.speculative_config
     return (
         speculative_config is not None
         and bool(getattr(speculative_config, "enable_adaptive_verification", False))
-        and vllm_config.parallel_config.decode_context_parallel_size == 1
         and max_decode_query_len(vllm_config) > 1
+        and _adaptive_dcp_verify_unsupported_reason(vllm_config) is None
     )
 
 
@@ -586,6 +614,20 @@ class AiterMLABackend(MLACommonBackend):
             and kv_cache_dtype in (None, "auto", "float16")
         ):
             invalid_reasons.append("non-causal fp16 MLA decode not supported")
+        if use_adaptive_verification and use_dcp:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            reason = (
+                _adaptive_dcp_verify_unsupported_reason(vllm_config)
+                if vllm_config is not None
+                else None
+            )
+            if reason is not None:
+                raise ValueError(
+                    f"{reason}. Disable enable_adaptive_verification in the "
+                    "speculative config or set decode_context_parallel_size=1."
+                )
         return invalid_reasons
 
     @staticmethod
@@ -687,6 +729,9 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     fp8_prefill_max_q_len: int | None = None
     fp8_prefill_num_partial_tiles: int | None = None
 
+    # Per-token flat KV indices for each chunked-context chunk
+    context_chunk_kv_indices: list[torch.Tensor] | None = None
+
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
@@ -760,6 +805,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return uniform_qo_len
 
+    @property
+    def _varlen_right_align(self) -> bool:
+        return self.dcp_world_size > 1
+
     @classmethod
     def get_varlen_cudagraph_max_query_len(
         cls: type["AiterMLAMetadataBuilder"],
@@ -791,14 +840,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
-        verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
-        asm_dcp_verify_config = (
-            _asm_dcp_verify_configured(
-                parallel_config.decode_context_parallel_size,
-                parallel_config.cp_kv_cache_interleave_size,
-                multi_token_decode=vllm_config.speculative_config is not None,
-            )
-            and verify_route != "segmented"
+        asm_dcp_verify_config = _asm_dcp_verify_configured(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+            multi_token_decode=vllm_config.speculative_config is not None,
         )
         super().__init__(
             kv_cache_spec,
@@ -822,17 +867,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             if self._asm_dcp_verify_heads:
                 self._asm_dcp_verify = True
-            elif verify_route == "asm" or not supports_segmented_dcp_verify:
+            elif not supports_segmented_dcp_verify:
                 raise ValueError(
-                    f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={verify_route}, but the "
-                    "round-robin asm decode has no kernel for "
-                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads "
-                    f"(native counts: {_NATIVE_CPRR_HEADS}). "
-                    + (
-                        "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
-                        if supports_segmented_dcp_verify
-                        else "This AITER build also lacks segmented MLA decode."
-                    )
+                    "ROCM_AITER_MLA DCP multi-token verify has no kernel for "
+                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads: "
+                    "the round-robin asm decode only has native counts "
+                    f"{_NATIVE_CPRR_HEADS}, and this AITER build lacks segmented "
+                    "MLA decode."
                 )
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
@@ -926,7 +967,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
-        if _adaptive_varlen_verify_enabled(vllm_config):
+        if _adaptive_varlen_verify_enabled(vllm_config) and not (
+            self._varlen_right_align
+        ):
             assert speculative_config is not None
             max_num_pages += max_num_reqs * (
                 speculative_config.num_speculative_tokens or 0
@@ -984,6 +1027,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if num_gpu_blocks is None
             else num_gpu_blocks * kv_cache_spec.page_size_bytes
         )
+        from vllm.platforms.rocm import on_gfx950
+
+        self._supports_fused_gather = (
+            self._kv_cache_dtype_str != "fp8_ds_mla" and on_gfx950()
+        )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
@@ -1040,12 +1088,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
-        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
-        # is the same head-count predicate the decode path uses.
+        # are replicate-padded up to one in _mla_fp8_prefill_attn.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1564,8 +1611,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 )
 
         varlen_q_rows = varlen_o_rows = None
-        if varlen_decode:
+        varlen_left_align = varlen_decode and not self._varlen_right_align
+        if varlen_left_align:
             seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
+        if varlen_decode:
             varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
                 query_start_loc_device, qo_lens_device, num_reqs
             )
@@ -1630,7 +1679,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # device synchronisation. Programs whose chunk lies past
             # num_tokens mask out entirely.
             max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
-            if varlen_decode:
+            if varlen_left_align:
                 max_tokens_per_req += max_qo_len - 1
             num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
             _expand_page_indices_kernel[(num_reqs, num_chunks)](
@@ -1642,7 +1691,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 seq_lens_device,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
-                CLAMP_TAIL=varlen_decode,
+                CLAMP_TAIL=varlen_left_align,
             )
             paged_kv_indices = self.paged_kv_indices
 
@@ -1843,6 +1892,37 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return attn_metadata
 
+    def _build_context_chunk_kv_indices(self, prefill) -> list[torch.Tensor]:
+        """Flatten each context chunk's block table into per-token KV indices.
+
+        Built here so the expansion runs once per step instead of once per
+        MLA layer.
+        """
+        indices = []
+        for chunk in prefill.chunked_context.chunks:
+            block_table = prefill.block_table[chunk.request_slice]
+            cu_seq_lens = chunk.cu_seq_lens
+            kv_indices = torch.empty(
+                chunk.num_context_tokens,
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+            num_chunks = max(1, cdiv(chunk.max_seq_len, 1024))
+            _expand_page_indices_kernel[(cu_seq_lens.shape[0] - 1, num_chunks)](
+                kv_indices,
+                block_table,
+                block_table.stride(0),
+                block_table.stride(1),
+                cu_seq_lens,
+                None,
+                KERNEL_BLOCK_SIZE=self.kernel_block_size,
+                BLOCK_SIZE=1024,
+                HAS_START_OFFSETS=True,
+                start_offsets=chunk.starts,
+            )
+            indices.append(kv_indices)
+        return indices
+
     def _fill_varlen_rows(
         self,
         query_start_loc_device: torch.Tensor,
@@ -1855,7 +1935,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         row_pos = self._varlen_row_pos[:num_rows]
         row_qlen = qo_lens_device.to(torch.int64).index_select(0, row_req)
         row_start = query_start_loc_device.to(torch.int64).index_select(0, row_req)
-        is_real = row_pos < row_qlen
+        if self._varlen_right_align:
+            row_pos = row_pos - (width - row_qlen)
+        is_real = (row_pos >= 0) & (row_pos < row_qlen)
         packed_row = row_start + row_pos
         q_rows = self._varlen_q_rows[:num_rows]
         q_rows.copy_(torch.where(is_real, packed_row, 0))
@@ -1884,6 +1966,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             common_prefix_len, common_attn_metadata, fast_build
         )
         prefill = attn_metadata.prefill
+        if (
+            prefill is not None
+            and prefill.chunked_context is not None
+            and self.dcp_world_size == 1
+            and self._supports_fused_gather
+        ):
+            attn_metadata.context_chunk_kv_indices = (
+                self._build_context_chunk_kv_indices(prefill)
+            )
         if (
             prefill is not None
             and prefill.chunked_context is not None
@@ -1924,6 +2015,8 @@ def _expand_page_indices_kernel(
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     CLAMP_TAIL: tl.constexpr = False,
+    HAS_START_OFFSETS: tl.constexpr = False,
+    start_offsets=None,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -1941,6 +2034,10 @@ def _expand_page_indices_kernel(
     With CLAMP_TAIL, entries past num_real_tokens[req] (padding a request's
     page list out to its kernel length) repeat the request's first page, so
     they never index past its block-table row.
+
+    With HAS_START_OFFSETS the request's rows begin start_offsets[req] tokens
+    into its sequence rather than at 0, which is what a chunked-context prefill
+    needs.
     """
     # One program per (request, token-chunk). Parallelising over requests
     # alone degenerates at low concurrency: with num_reqs == 1 a single
@@ -1952,6 +2049,8 @@ def _expand_page_indices_kernel(
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
     if CLAMP_TAIL:
         real_tokens = tl.load(num_real_tokens + req_idx)
+
+    start = tl.load(start_offsets + req_idx) if HAS_START_OFFSETS else 0
 
     # The grid is sized from the block table width, an upper bound over all
     # requests, so a ragged batch launches chunks past a short request's end.
@@ -1966,11 +2065,12 @@ def _expand_page_indices_kernel(
     source_offsets = token_offsets
     if CLAMP_TAIL:
         source_offsets = tl.where(token_offsets < real_tokens, token_offsets, 0)
+    seq_positions = source_offsets + start
 
     # Which block in the block table does this token belong to?
-    block_idx = source_offsets // KERNEL_BLOCK_SIZE
+    block_idx = seq_positions // KERNEL_BLOCK_SIZE
     # Offset within that block
-    offset_in_block = source_offsets % KERNEL_BLOCK_SIZE
+    offset_in_block = seq_positions % KERNEL_BLOCK_SIZE
 
     # Load the block ID from the block table
     # Both strides are taken from the caller: the block table is a view owned
@@ -2043,6 +2143,19 @@ class AiterMLAHelper:
                 or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
             )
         )
+
+    @staticmethod
+    def is_valid_fp8_prefill_num_heads(num_heads: int) -> bool:
+        """Whether the FP8 PS asm prefill should run at ``num_heads`` per rank.
+
+        Rejects counts that padding to the kernel width would at least double
+        (1-8 heads). At 8 heads (Kimi-K2.x at TP8) the doubled kernel plus its
+        reduce is slower than bf16 flash attention, so those counts keep the
+        bf16 prefill.
+        """
+        return AiterMLAHelper.is_valid_num_heads(
+            num_heads
+        ) and 2 * num_heads > AiterMLAHelper.get_fp8_prefill_num_heads(num_heads)
 
     @staticmethod
     def has_fp8_non_causal_qlen2_kernel(num_heads: int) -> bool:
@@ -2299,7 +2412,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         self._fused_prefill_qkv = False
         if self._fp8_prefill_enabled:
@@ -2314,6 +2427,157 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 and _fused_mla_prefill_qkv_supported()
                 and not any(d & (d - 1) for d in head_dims)
             )
+
+        self._use_fused_mla_kv_concat = (
+            hasattr(torch.ops._C, "fused_kimi_k3_mla_kv_concat")
+            and self.qk_nope_head_dim == 128
+            and self.qk_rope_head_dim == 64
+        )
+
+    def _concat_k_nope_k_pe(
+        self, k_nope: torch.Tensor, k_pe: torch.Tensor
+    ) -> torch.Tensor:
+        """Build [k_nope | k_pe] with one kernel, fall back to the base copies."""
+        if not (
+            self._use_fused_mla_kv_concat
+            and k_nope.dim() == 3
+            and k_nope.dtype in (torch.bfloat16, torch.float16)
+            and k_pe.dtype == k_nope.dtype
+        ):
+            return super()._concat_k_nope_k_pe(k_nope, k_pe)
+        k = torch.empty(
+            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+            dtype=k_nope.dtype,
+            device=k_nope.device,
+        )
+        torch.ops._C.fused_kimi_k3_mla_kv_concat(
+            k_nope, k_pe.reshape(k_pe.shape[0], k_pe.shape[-1]), k
+        )
+        return k
+
+    def _can_fuse_context_gather(
+        self,
+        q: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
+    ) -> bool:
+        from vllm.platforms import current_platform
+
+        weight = getattr(self.kv_b_proj, "weight", None)
+        return (
+            self.kv_cache_dtype != "fp8_ds_mla"
+            and self.kv_lora_rank == 512
+            and prefill_metadata.q_data_type != current_platform.fp8_dtype()
+            and q.dtype in (torch.bfloat16, torch.float16)
+            and kv_c_and_k_pe_cache.is_contiguous()
+            and weight is not None
+            and weight.dtype in (torch.bfloat16, torch.float16)
+            and weight.is_contiguous()
+            and getattr(self.kv_b_proj, "weight_scale", None) is None
+        )
+
+    def _gather_context_chunk(
+        self,
+        chunk,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_indices: torch.Tensor,
+        k_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather one context chunk and expand it into (k, v)."""
+        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
+        num_blocks, block_size, cache_width = kv_c_and_k_pe_cache.shape
+        rope_dim = cache_width - self.kv_lora_rank
+        num_rows = chunk.num_context_tokens
+        k = torch.empty(
+            (num_rows, self.num_heads, self.qk_nope_head_dim + rope_dim),
+            dtype=out_dtype,
+            device=kv_c_and_k_pe_cache.device,
+        )
+        v = torch.empty(
+            (num_rows, self.num_heads, self.v_head_dim),
+            dtype=out_dtype,
+            device=kv_c_and_k_pe_cache.device,
+        )
+        if num_rows == 0:
+            return k, v
+
+        gather_kv_b_proj(
+            kv_c_and_k_pe_cache.view(num_blocks * block_size, 1, cache_width),
+            k_scale,
+            chunk.cu_seq_lens,
+            kv_indices,
+            chunk.cu_seq_lens,
+            self.kv_b_proj.weight,
+            None,
+            k,
+            v,
+        )
+        return k, v
+
+    def _compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
+    ):
+        """Attend the cached prefix, gathering and expanding it in one kernel"""
+        assert isinstance(attn_metadata, AiterMLAMetadata)
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
+
+        if not self._can_fuse_context_gather(q, prefill_metadata, kv_c_and_k_pe_cache):
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+        kv_indices = attn_metadata.context_chunk_kv_indices
+        if kv_indices is None:
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+
+        assert prefill_metadata.prefill_backend is not None
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
+
+        output = None
+        output_lse = None
+        for chunk in chunked_context.chunks:
+            k, v = self._gather_context_chunk(
+                chunk,
+                kv_c_and_k_pe_cache,
+                kv_indices[chunk.index],
+                k_scale,
+                q.dtype,
+            )
+
+            attn_output, attn_softmax_lse = (
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(
+                    chunk=chunk,
+                    q=q[chunk.token_slice],
+                    k=k,
+                    v=v,
+                )
+            )
+
+            if output is None:
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
+                    return attn_output, attn_softmax_lse
+                output, output_lse = init_mla_context_partial(
+                    chunked_context,
+                    attn_output,
+                    attn_softmax_lse,
+                    num_tokens=q.shape[0],
+                )
+            accumulate_mla_context_chunk(
+                chunk, attn_output, attn_softmax_lse, output, output_lse
+            )
+        return output, output_lse
 
     def _context_parallel_compute_prefill_context(
         self,
@@ -2781,8 +3045,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             num_tokens = q.shape[0]
             q = q.index_select(0, q_rows)
         o, lse = self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-        assert lse is None
-        return o.index_select(0, decode.varlen_o_rows[:num_tokens]), None
+        o_rows = decode.varlen_o_rows[:num_tokens]
+        assert lse is None or self.dcp_world_size > 1
+        if lse is not None:
+            lse = lse.index_select(0, o_rows)
+        return o.index_select(0, o_rows), lse
 
     def _forward_mqa(
         self,

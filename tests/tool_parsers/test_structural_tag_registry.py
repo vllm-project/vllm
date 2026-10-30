@@ -48,7 +48,9 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
-from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.tool_parsers.llama_json_engine_tool_parser import (
+    LlamaJsonEngineToolParser,
+)
 from vllm.tool_parsers.longcat_tool_parser import LongcatFlashToolParser
 from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
@@ -811,7 +813,7 @@ def test_glm_4_7_forced_custom_tool_uses_function_shim():
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
-        (Llama3JsonToolParser, "llama"),
+        (LlamaJsonEngineToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
         (Qwen3EngineToolParser, "qwen_3_coder"),
         (Step3p5ToolParser, "qwen_3_coder"),
@@ -1610,6 +1612,65 @@ def test_glm47_non_strict_auto_accepts_valid_tool_calls(body: str):
 def test_glm47_non_strict_auto_rejects_invalid(body: str):
     grammar = _glm47_shallow_grammar("auto", auto=True)
     assert not _is_grammar_accept_string(grammar, body)
+
+
+def _glm47_container_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_files",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        },
+                        "options": {"type": "object"},
+                        "limit": {"type": ["integer", "null"]},
+                    },
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # a Windows path copied with bare backslashes is not valid JSON
+        ("files", r'[{"path": "D:\SVILUPPO\docs\PLAN.md"}]'),
+        # an over-escaped quote leaves a JSON string open; </arg_value> still ends it
+        ("files", r'[{"path\": "docs/PLAN.md"}]'),
+        ("files", '[{"path": "docs/PLAN.md"}]'),
+        ("options", '{"recursive": true}'),
+        ("limit", "20"),
+        ("limit", "null"),
+    ],
+)
+def test_glm47_non_strict_container_values_accept_model_text(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("limit", "twenty"),
+        ("files", "[<arg_key>x</arg_key>]"),
+    ],
+)
+def test_glm47_non_strict_container_tools_reject_invalid(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert not _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
 
 
 def test_glm47_non_strict_required_requires_at_least_one_call():
