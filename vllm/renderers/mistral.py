@@ -22,12 +22,34 @@ from .params import ChatParams
 logger = init_logger(__name__)
 
 
+def _convert_developer_to_system(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    converted: list[ChatCompletionMessageParam] = []
+    for msg in messages:
+        if msg["role"] == "developer":
+            new_msg = dict(msg)
+            new_msg["role"] = "system"
+            new_msg.pop("tools", None)
+            converted.append(new_msg)  # type: ignore[arg-type]
+        else:
+            converted.append(msg)
+    return converted
+
+
 def safe_apply_chat_template(
     tokenizer: MistralTokenizer,
     messages: list[ChatCompletionMessageParam],
     **kwargs,
 ) -> str | list[int]:
     from mistral_common.exceptions import MistralCommonException
+
+    if any(msg["role"] == "developer" for msg in messages):
+        messages = _convert_developer_to_system(messages)
+        logger.info_once(
+            "Mistral chat templates do not support the 'developer' role. "
+            "Converting developer messages to 'system' role.",
+        )
 
     try:
         return tokenizer.apply_chat_template(messages, **kwargs)
