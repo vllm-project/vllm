@@ -1236,6 +1236,129 @@ presets:
 
       Make the same target checkpoint available at the same local path on every node, and make `Inferact/Kimi-K3-DSpark` available through the mounted Hugging Face cache. Run the preset's commands inside the nightly image on every allocated node, with four visible GPUs, host networking, sufficient shared memory, and the devices and network access required by your NVLink/RDMA deployment. Use the reachable address of rank 0 for `MASTER_ADDR` on every node and a distinct `NODE_RANK` from `0` through `NODES - 1`. The lane served the checkpoint from a local path with `--served-model-name moonshotai/Kimi-K3` and `--device-ids 0,1,2,3`; the builder serves the Hugging Face id.
 
+  b300_agentx_agg:
+    label: "AgentX aggregated (Mooncake)"
+    hardware: b300
+    strategy: single_node_tp
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 + DCP8 on one B300 node with the Inferact DSpark draft (K7 at concurrency 1, K5 at 4-8, K3 at 12-28) and an embedded RDMA Mooncake DRAM store."
+    source: { label: "InferenceX #4381", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4381", key: "kimik3-fp4-b300-vllm-agentic-dspark", revision: 809f7045172ea5effde45cef7cbe02918f25f968 }
+    image: "vllm/vllm-openai@sha256:8c1434bfee7d7626eef78ef70600434ffba4a1b8813cb1d1c8707ad25f47035e"
+    # vLLM's own Python frontend. The draft is in args (TOKENSPEED_MLA attention,
+    # Inferact checkpoint), so the generic Spec decoding toggle stays off.
+    select:
+      frontend: python
+      kv_offload: kv_store_distributed_mooncake
+      features: { spec_decoding: false, text_only: true, tool_calling: true, reasoning: true }
+    # Lane settings that hold at every concurrency. The Blackwell baseline already
+    # supplies fastsafetensors, 1M context, fp8 KV, prefix caching, TOKENSPEED_MLA
+    # decode and --prefix-match-unit 128. The recipe has no DCP selector, so the
+    # lane's DCP8 pairing (a2a, TRTLLM_RAGGED prefill) is written out here.
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-flashinfer-autotune"
+      - "--enable-cumem-allocator"
+      - "--mamba-ssm-cache-dtype"
+      - "bfloat16"
+      - "--stream-interval"
+      - "10"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--moe-backend"
+      - "auto"
+      - "--speculative-config"
+      - '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+    remove_args:
+      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+      VLLM_RPC_TIMEOUT: "600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
+      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+      TORCH_CUDA_ARCH_LIST: "10.0"
+      PYTHONHASHSEED: "42"
+      MC_STORE_MEMCPY: "1"
+      MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+      MC_SLICE_SIZE: "1048576"
+      MC_WORKERS_PER_CTX: "4"
+    json_args:
+      "--attention-config": { mla_prefill_backend: "TRTLLM_RAGGED", use_prefill_query_quantization: true }
+      "--compilation-config": { cudagraph_mode: "FULL_AND_PIECEWISE" }
+      "--kv-transfer-config": { kv_load_failure_policy: "recompute", kv_connector_extra_config: { load_async: true, lookup_async: true, enable_offload: false } }
+    # One point per measured concurrency. S is --max-num-seqs (2x concurrency); the
+    # graphs capture (1 + K) x 1..S tokens, then the shared 256..8192 tail.
+    points:
+      c1:
+        label: "1"
+        concurrency: 1
+        args: ["--max-num-seqs", "2"]
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 7 }
+          "--compilation-config": { cudagraph_capture_sizes: [8, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c4:
+        label: "4"
+        concurrency: 4
+        args: ["--max-num-seqs", "8"]
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 5 }
+          "--compilation-config": { cudagraph_capture_sizes: [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90, 96, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c8:
+        label: "8"
+        concurrency: 8
+        args: ["--max-num-seqs", "16"]
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 5 }
+          "--compilation-config": { cudagraph_capture_sizes: [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90, 96, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c12:
+        label: "12"
+        concurrency: 12
+        args: ["--max-num-seqs", "24"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c14:
+        label: "14"
+        concurrency: 14
+        args: ["--max-num-seqs", "28"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c16:
+        label: "16"
+        concurrency: 16
+        default: true
+        args: ["--max-num-seqs", "32"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 256, 512, 1024, 2048, 4096, 8192] }
+      c24:
+        label: "24"
+        concurrency: 24
+        args: ["--max-num-seqs", "48"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 512, 1024, 2048, 4096, 8192] }
+      c28:
+        label: "28"
+        concurrency: 28
+        args: ["--max-num-seqs", "56"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 512, 1024, 2048, 4096, 8192] }
+    runbook: |
+      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4381](https://github.com/SemiAnalysisAI/InferenceX/pull/4381), pinned to [`809f704`](https://github.com/SemiAnalysisAI/InferenceX/tree/809f7045172ea5effde45cef7cbe02918f25f968/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/kimik3/vllm/b300-fp4-mtp)) serves the default `moonshotai/Kimi-K3` checkpoint (MXFP4 weights) on one 8-GPU B300 node with DSpark speculative decoding and an embedded Mooncake DRAM tier. It is a benchmark configuration; the settings in this preset are its production-useful parts. Draft length falls with concurrency (K7 at 1, K5 at 4-8, K3 at 12-28), and each point sets `--max-num-seqs` to twice the concurrency with CUDA graphs covering `(1 + K) x 1..max-num-seqs` tokens. Throughput runs use InferenceX's golden acceptance lengths for DSpark (3.84, 3.62 and 3.00 for K7, K5 and K3).
+
+      **Mooncake store.** The builder's **Mooncake** option renders the master and store config with a 100GB segment, which is the default. The lane gives each of the 8 TP ranks a 256GB `global_segment_size` and a 4GB `local_buffer_size`, 2,080 GiB of DRAM across the node in total, so raise the segment above the default only when the node has that much pinned memory to spare. The lane's master sets `--eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, matching the builder, and leaves the lease TTL at the Mooncake default. The store runs embedded over RDMA with `P2PHANDSHAKE` metadata. Pin `device_name` to one ACTIVE InfiniBand port driven by `mlx5_core`: this lane's ranks use a single rail because the rails are isolated from each other, so a port that is down or an EFA `rdmap*` device (no RC queue pairs) fails registration. An InfiniBand port addresses peers with GID index 0 (`MC_GID_INDEX=0`).
+
+      **Kept out of the preset.** `--disable-uvicorn-access-log`, `PYTHONNOUSERSITE=1` and the benchmark client variables are InferenceX harness or logging controls with no serving effect. `--moe-backend auto` is vLLM's default selection and is stated only to match the lane. The lane's `RDMAV_DRIVERS` and `WITH_NVIDIA_PEERMEM=0` are specific to the DSXE cluster (a host-library mount for its `libmlx5` verbs provider, and peermem not loaded) and apply only on nodes with the same setup.
+
   mi355x_agentx:
     label: "AgentX TP8"
     hardware: mi355x
