@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     validate_peer_dcp_layout,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import indexer_k_cache_byte_ranges
 from vllm.v1.kv_cache_interface import MLAAttentionSpec, SparseCacheRole
 
 from .utils import make_moriio_writer
@@ -57,11 +56,10 @@ def _spec(head_size: int, **kwargs) -> MLAAttentionSpec:
     )
 
 
-# The fp8 caches of DeepSeek-V3.2 and GLM-5: the MLA latent (kv_lora_rank 512 +
-# qk_rope_head_dim 64) and the indexer K cache (128 fp8 values, one fp32 scale).
+# The fp8 MLA latent of DeepSeek-V3.2 and GLM-5 (kv_lora_rank 512 +
+# qk_rope_head_dim 64).
 SPECS = {
     "latent": _spec(576),
-    "indexer": _spec(132, cache_role=SparseCacheRole.INDEXER),
 }
 
 
@@ -86,30 +84,7 @@ def _token_bytes(spec: MLAAttentionSpec, slot: int) -> torch.Tensor:
     """Offsets of one token's bytes in a block, as the cache writers lay them
     out."""
     entry = spec.state_content_size_bytes
-    if spec.cache_role is not SparseCacheRole.INDEXER:
-        return slot * entry + torch.arange(entry)
-    # indexer_k_quant_and_cache_triton and the fused DeepSeek-V3.2 / GLM-5
-    # writer: fp8 values in tiles of 16 tokens x 16 bytes, then the scales.
-    head_dim = entry - 4
-    dim = torch.arange(head_dim)
-    values = slot // 16 * 16 * head_dim + slot % 16 * 16 + dim // 16 * 256 + dim % 16
-    scales = BLOCK_SIZE * head_dim + slot * 4 + torch.arange(4)
-    return torch.cat([values, scales])
-
-
-def test_indexer_byte_ranges_follow_the_tiled_layout():
-    # One token: eight 16-byte pieces, 256 bytes apart, and its scale.
-    assert indexer_k_cache_byte_ranges(64, 132, 3, 1) == [
-        *((48 + 256 * piece, 16) for piece in range(8)),
-        (64 * 128 + 12, 4),
-    ]
-    # Whole aligned tiles collapse to one values range and one scales range.
-    assert indexer_k_cache_byte_ranges(64, 132, 16, 32) == [
-        (16 * 128, 32 * 128),
-        (64 * 128 + 16 * 4, 32 * 4),
-    ]
-    # Block size 1 is not tiled.
-    assert indexer_k_cache_byte_ranges(1, 132, 0, 1) == [(0, 132)]
+    return slot * entry + torch.arange(entry)
 
 
 def _validate(local_dcp, local_interleave, peer_dcp, peer_interleave, **kwargs):
@@ -203,15 +178,18 @@ def _worker(
     ("specs", "whole_block_layer"),
     [
         (SPECS, None),
-        ({**SPECS, "indexer": _spec(132)}, "indexer"),
+        (
+            {**SPECS, "indexer": _spec(132, cache_role=SparseCacheRole.INDEXER)},
+            "indexer",
+        ),
         ({"latent": _spec(576, tokens_per_state=4)}, "latent"),
     ],
-    ids=["latent-and-indexer", "indexer-without-indexer-role", "compressed-states"],
+    ids=["latent", "indexer", "compressed-states"],
 )
 def test_only_known_token_layouts_are_written_in_runs(specs, whole_block_layer):
     """Runs of tokens are written only for an MLA latent of the model's latent
-    width and for the indexer K cache; any other layer, such as DeepSeek-V4's
-    indexer cache with the default cache role, needs whole blocks."""
+    width; any other layer, such as the indexer K cache of DeepSeek-V3.2 and
+    GLM-5, needs whole blocks, i.e. an interleave equal to the block size."""
     worker = _worker(0, 1, specs)
     for interleave in (1, 16):
         assert worker._whole_block_dcp_layer(interleave) == whole_block_layer
@@ -375,9 +353,9 @@ def _expected_decode_cache(
 def test_write_lands_each_token_on_its_dcp_rank(
     monkeypatch, producer_tp, consumer_tp, dcp_size, num_prefill_blocks, interleave
 ):
-    """A sparse MLA model writes its latent and indexer caches token by token
-    at any interleave, from one prefill rank into several decode ranks and
-    from several prefill ranks into one."""
+    """An MLA model writes its latent cache token by token at any interleave,
+    from one prefill rank into several decode ranks and from several prefill
+    ranks into one."""
     monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
     # One spare decode block, as when decode reserves lookahead slots.
     num_decode_blocks = cdiv(num_prefill_blocks, dcp_size) + 1

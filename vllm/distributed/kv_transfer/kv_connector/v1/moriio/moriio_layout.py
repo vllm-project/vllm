@@ -18,7 +18,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
-    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 
@@ -496,23 +495,13 @@ def compute_block_transfer_offsets(
 
 @cache
 def _token_run_table(
-    is_indexer: bool, block_size: int, entry_bytes: int, run_tokens: int
+    block_size: int, entry_bytes: int, run_tokens: int
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    if is_indexer:
-        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-            indexer_k_cache_byte_ranges,
-        )
-
-        runs = [
-            indexer_k_cache_byte_ranges(block_size, entry_bytes, slot, run_tokens)
-            for slot in range(0, block_size, run_tokens)
-        ]
-    else:
-        # MLA latents are stored token by token.
-        runs = [
-            [(slot * entry_bytes, run_tokens * entry_bytes)]
-            for slot in range(0, block_size, run_tokens)
-        ]
+    # MLA latents are stored token by token.
+    runs = [
+        [(slot * entry_bytes, run_tokens * entry_bytes)]
+        for slot in range(0, block_size, run_tokens)
+    ]
     sizes = [size for _, size in runs[0]]
     if any([size for _, size in run] != sizes for run in runs):
         return None
@@ -532,8 +521,8 @@ def get_token_run_table(
     Returns ``(offsets, sizes)``: ``offsets[i]`` are the ranges, relative to
     the block, of the run that starts at slot ``i * run_tokens``, and every run
     has ranges of the same ``sizes``. Only an MLA latent of ``latent_size``
-    elements per token and the indexer K cache qualify; any other layer
-    returns None and can only be copied in whole blocks.
+    elements per token qualifies; any other layer returns None and can only be
+    copied in whole blocks.
     """
     spec = layer_to_spec[layer_name]
     if (
@@ -549,15 +538,9 @@ def get_token_run_table(
     )
     if geometry.block_len != geometry.block_size * geometry.slot_size_bytes:
         return None
-    is_indexer = spec.cache_role is SparseCacheRole.INDEXER
-    # The indexer cache holds 128 fp8 values and one fp32 scale per token.
-    if is_indexer and geometry.slot_size_bytes != 132:
+    if spec.head_size != latent_size:
         return None
-    if not is_indexer and spec.head_size != latent_size:
-        return None
-    return _token_run_table(
-        is_indexer, geometry.block_size, geometry.slot_size_bytes, run_tokens
-    )
+    return _token_run_table(geometry.block_size, geometry.slot_size_bytes, run_tokens)
 
 
 def compute_token_run_offsets(

@@ -215,55 +215,6 @@ def indexer_k_quant_and_cache_triton(
     )
 
 
-def indexer_k_cache_byte_ranges(
-    block_size: int,
-    entry_bytes: int,
-    first_slot: int,
-    num_slots: int,
-    block_tile_size: int = 16,
-    head_tile_size: int = 16,
-) -> list[tuple[int, int]]:
-    """(offset in block, size) of the bytes that tokens ``[first_slot,
-    first_slot + num_slots)`` occupy in one block of the indexer K cache
-    written by ``indexer_k_quant_and_cache_triton``.
-
-    A block holds the fp8 K values of all its tokens, then one fp32 scale per
-    token. Above block size 1 the values are shuffled in tiles of
-    ``block_tile_size`` tokens: a token's ``head_tile_size``-byte pieces lie
-    ``block_tile_size * head_tile_size`` bytes apart.
-    """
-    head_dim = entry_bytes - 4
-    end = first_slot + num_slots
-    ranges = []
-    if block_size == 1:
-        ranges.append((first_slot * head_dim, num_slots * head_dim))
-    else:
-        tile_bytes = block_tile_size * head_dim
-        for tile in range(
-            first_slot // block_tile_size, (end - 1) // block_tile_size + 1
-        ):
-            tile_start = tile * block_tile_size
-            lo = max(first_slot, tile_start) - tile_start
-            hi = min(end, tile_start + block_tile_size) - tile_start
-            ranges += [
-                (
-                    tile * tile_bytes
-                    + piece * block_tile_size * head_tile_size
-                    + lo * head_tile_size,
-                    (hi - lo) * head_tile_size,
-                )
-                for piece in range(head_dim // head_tile_size)
-            ]
-    ranges.append((block_size * head_dim + first_slot * 4, num_slots * 4))
-    merged: list[tuple[int, int]] = []
-    for offset, size in ranges:
-        if merged and sum(merged[-1]) == offset:
-            merged[-1] = (merged[-1][0], merged[-1][1] + size)
-        else:
-            merged.append((offset, size))
-    return merged
-
-
 @triton.jit
 def _cp_gather_indexer_quant_cache_kernel(
     kv_cache_ptr,  # [n_blks,blk_size//tile_blk,head_dim//16B,tile_blk,16B]
