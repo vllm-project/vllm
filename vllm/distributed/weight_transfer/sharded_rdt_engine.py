@@ -864,7 +864,14 @@ class ShardedRDTWeightTransferEngine(
             # the single load pass runs the loaders on meta and records via the
             # fake's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
-            model.load_weights(self._build_fake_weights(names, recorder, self.device))
+            try:
+                model.load_weights(
+                    self._build_fake_weights(names, recorder, self.device)
+                )
+            except BaseException:
+                # a refused bake must not leave the model on meta
+                self._restore_after_dry_run(model)
+                raise
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
             # regions that finalize would init, so baking it scatters garbage.
@@ -1352,6 +1359,7 @@ class ShardedRDTWeightTransferEngine(
                             "update_weights)."
                         )
                     materialize_layer(layer, info)
+                    _reset_fp8_rows(layer)
                     _apply_fills(layer, self._layer_fills.get(layer, ()))
                 for sc in chunk.scatters:
                     param = getattr(sc.layer, sc.param_name)
@@ -1472,6 +1480,16 @@ class ShardedRDTWeightTransferEngine(
         # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
+
+
+def _reset_fp8_rows(layer: Any) -> None:
+    """The replay writes no FP8 rows into a BF16 layer loaded from block-FP8
+    (Fp8DequantLinearMethod refuses FP8 at bake): clear rows an earlier,
+    aborted load may have marked, so post-load processing keeps the bytes."""
+    for param in layer.parameters(recurse=False):
+        fp8_rows = getattr(param, "fp8_rows", None)
+        if fp8_rows is not None:
+            fp8_rows.zero_()
 
 
 def _apply_fills(layer: Any, fills: "Iterable[_Scatter]") -> None:

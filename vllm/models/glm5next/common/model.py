@@ -1368,6 +1368,8 @@ def _mla_proj_checkpoint_tensor(
         return name, tensor
     prefix = name.rsplit(suffix, 1)[0]
     scale_name = f"{prefix}.{_FP8_ATTN_PROJS[suffix]}.weight_scale_inv"
+    if scale_name not in params_dict:  # no q_lora_rank: kv_a is not fused
+        scale_name = f"{prefix}{suffix}weight_scale_inv"
     is_fp8_proj = scale_name in params_dict  # see `Fp8DequantConfig`
     if is_fp8_proj and name.endswith(".weight_scale"):
         name = f"{name}_inv"

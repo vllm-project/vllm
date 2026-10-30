@@ -26,6 +26,7 @@ import torch
 
 from vllm.model_executor.layers.linear import (
     LinearBase,
+    ReplicatedLinear,
     UnquantizedLinearMethod,
     register_weight_loader_v2_supported_method,
 )
@@ -135,6 +136,9 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._load(super().load_column_parallel_weight, loaded_weight, slice(None))
 
+    def load_replicated_weight(self, loaded_weight: torch.Tensor):
+        self._load(self._assert_and_load, loaded_weight, slice(None))
+
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         self._load(super().load_row_parallel_weight, loaded_weight, slice(None))
 
@@ -188,11 +192,7 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     (per-tensor, per-channel, ``[n, k]`` blocks, MXFP8 E8M0), as one float32
     scale per row and ``_ANY_LAYOUT_BLOCK[1]`` columns."""
     group = _ANY_LAYOUT_BLOCK[1]
-    if (
-        scale.dtype == torch.float32
-        and cols % group == 0
-        and tuple(scale.shape) == (rows, cols // group)
-    ):
+    if scale.dtype == torch.float32 and tuple(scale.shape) == (rows, cdiv(cols, group)):
         return scale  # in this layout already (no ops: a sharded RDT bake)
     if scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
         scale = scale.view(torch.float8_e8m0fnu)
@@ -222,10 +222,23 @@ class Fp8DequantScaleParameter(BlockQuantScaleParameter):
         loaded_weight = _scale_groups(loaded_weight, self.data.shape[0], self.cols)
         super().load_column_parallel_weight(loaded_weight)
 
+    def load_replicated_weight(self, loaded_weight: torch.Tensor):
+        loaded_weight = _scale_groups(loaded_weight, self.data.shape[0], self.cols)
+        self._assert_and_load(loaded_weight)
+
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         rows = kwargs["shard_size"]  # weight rows: one scale row per row
         loaded_weight = _scale_groups(loaded_weight, rows, self.cols)
         super().load_merged_column_weight(loaded_weight, **kwargs)
+
+
+def _load_replicated(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+    """weight_loader of a ReplicatedLinear's parameters: its own loader copies
+    into ``data`` and would bypass the FP8 view (and the scale expansion)."""
+    if hasattr(param, "load_replicated_weight"):
+        param.load_replicated_weight(loaded_weight)
+    else:
+        param._assert_and_load(loaded_weight)
 
 
 def load_unneeded_scale(
@@ -281,6 +294,8 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         **extra_weight_attrs,
     ):
         weight_loader = extra_weight_attrs.pop("weight_loader")
+        if isinstance(layer, ReplicatedLinear):
+            weight_loader = _load_replicated
         layer.weight_block_size = self.weight_block_size
         validate_fp8_block_shape(
             layer,
