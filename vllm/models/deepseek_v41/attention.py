@@ -63,6 +63,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -550,13 +551,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
-        if swa_bounded_replay and current_platform.is_rocm():
+        if (
+            swa_bounded_replay
+            and current_platform.is_rocm()
+            and get_cdna_version() != 4
+        ):
             logger.warning_once(
-                "Prefix-cache SWA replay is off on ROCm (the sparse SWA "
-                "metadata builders forward replay_start, but the window clamp "
-                "it relies on lives in the FlashInfer and FlashMLA prefill "
-                "kernels, so the padded slots fault); the sliding-window cache "
-                "takes part in prefix caching instead."
+                "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
+                "sliding-window cache takes part in prefix caching instead."
             )
             swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
